@@ -1,0 +1,13 @@
+[package]
+name = "junctur-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "junctur"
+path = "src/main.rs"
+
+[dependencies]
+junctur-core = { path = "../junctur-core" }
+serde_json.workspace = true

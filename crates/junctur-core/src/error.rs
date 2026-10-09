@@ -1,0 +1,51 @@
+//! One error type for the library, so the CLI can print any failure the same way.
+
+use std::fmt;
+
+#[derive(Debug)]
+pub enum Error {
+    /// ffmpeg/ffprobe could not be started (usually: not on PATH).
+    Spawn {
+        program: &'static str,
+        source: std::io::Error,
+    },
+    /// ffmpeg/ffprobe ran but failed; `stderr` is its own message.
+    Tool {
+        program: &'static str,
+        stderr: String,
+    },
+    /// ffprobe output we could not understand.
+    Probe(String),
+    Io(std::io::Error),
+    Json(serde_json::Error),
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::Spawn { program, source } => {
+                write!(f, "could not start {program} (is it on PATH?): {source}")
+            }
+            Error::Tool { program, stderr } => write!(f, "{program} failed: {}", stderr.trim()),
+            Error::Probe(msg) => write!(f, "unexpected ffprobe output: {msg}"),
+            Error::Io(e) => write!(f, "{e}"),
+            Error::Json(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Error::Io(e)
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(e: serde_json::Error) -> Self {
+        Error::Json(e)
+    }
+}
