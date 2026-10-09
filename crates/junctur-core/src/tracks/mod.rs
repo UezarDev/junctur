@@ -3,6 +3,7 @@
 
 mod classify;
 mod render;
+pub mod roles;
 mod window;
 
 use std::path::{Path, PathBuf};
@@ -11,9 +12,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::ffmpeg::{self, AudioStream};
 use crate::signal::Activity;
-use crate::{cache, Result};
+use crate::vad::{self, Vad};
+use crate::{cache, models, Result};
+use roles::Speech;
 
-pub use classify::{classify, FAINT_MEAN_DB, MIX_RESIDUAL, NEAR_DUPLICATE_CORR, NEAR_DUPLICATE_DB};
+pub use classify::{
+    classify, classify_with, FAINT_MEAN_DB, MIX_RESIDUAL, NEAR_DUPLICATE_CORR, NEAR_DUPLICATE_DB,
+};
 pub use window::window_starts;
 
 #[derive(Debug, Clone)]
@@ -25,6 +30,8 @@ pub struct AnalyzeOptions {
     pub cache_dir: Option<PathBuf>,
     /// Read and write the cache.
     pub use_cache: bool,
+    /// Run speech detection to decide roles (downloads the VAD model on first use).
+    pub speech: bool,
 }
 
 impl Default for AnalyzeOptions {
@@ -34,13 +41,14 @@ impl Default for AnalyzeOptions {
             window_seconds: 10.0,
             cache_dir: None,
             use_cache: true,
+            speech: true,
         }
     }
 }
 
 impl AnalyzeOptions {
     fn settings_key(&self) -> String {
-        format!("w{}x{}", self.windows, self.window_seconds)
+        format!("w{}x{}s{}", self.windows, self.window_seconds, self.speech)
     }
 }
 
@@ -76,6 +84,9 @@ pub struct LogicalTrack {
     pub members: Vec<usize>,
     pub sameness: Sameness,
     pub activity: Activity,
+    /// None when speech detection was off, unavailable, or the track is silent.
+    #[serde(default)]
+    pub speech: Option<Speech>,
     pub role: Role,
     pub confidence: f64,
     pub reasons: Vec<String>,
@@ -90,6 +101,9 @@ pub struct TrackReport {
     pub window_seconds: f64,
     pub tracks: Vec<AudioStream>,
     pub logical: Vec<LogicalTrack>,
+    /// Why speech detection did not run, when it was asked for and failed (e.g. offline).
+    #[serde(default)]
+    pub speech_error: Option<String>,
     /// True when this report came from the cache rather than a fresh analysis.
     #[serde(skip)]
     pub from_cache: bool,
@@ -119,7 +133,28 @@ pub fn analyze(file: &Path, opts: &AnalyzeOptions) -> Result<TrackReport> {
         );
     }
     let samples = window::align(per_track, starts.len());
-    let logical = classify(&samples);
+    let dir_for_models = dir.clone();
+    let (logical, speech_error) = if opts.speech {
+        match models::ensure(&models::SILERO_VAD, &dir_for_models).and_then(|m| Vad::open(&m)) {
+            Ok(mut vad) => {
+                let mut failed = None;
+                let l = classify_with(&samples, &mut |s| {
+                    vad.reset();
+                    match vad.probs(&vad::normalize(s)) {
+                        Ok(p) => Some(roles::measure(&p, s)),
+                        Err(e) => {
+                            failed = Some(e.to_string());
+                            None
+                        }
+                    }
+                });
+                (l, failed)
+            }
+            Err(e) => (classify(&samples), Some(e.to_string())),
+        }
+    } else {
+        (classify(&samples), None)
+    };
 
     let report = TrackReport {
         file: file.to_path_buf(),
@@ -128,6 +163,7 @@ pub fn analyze(file: &Path, opts: &AnalyzeOptions) -> Result<TrackReport> {
         window_seconds: len,
         tracks: probe.audio,
         logical,
+        speech_error,
         from_cache: false,
     };
     if opts.use_cache {

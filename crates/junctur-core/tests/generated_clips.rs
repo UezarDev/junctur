@@ -29,6 +29,8 @@ fn opts(dir: &Path) -> AnalyzeOptions {
         window_seconds: 3.0,
         cache_dir: Some(dir.join("cache")),
         use_cache: false,
+        // Tones carry no speech; these pin the loudness rules. Speech is covered in `models.rs`.
+        speech: false,
     }
 }
 

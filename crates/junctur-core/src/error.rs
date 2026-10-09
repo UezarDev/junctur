@@ -16,6 +16,10 @@ pub enum Error {
     },
     /// ffprobe output we could not understand.
     Probe(String),
+    /// A model could not be fetched or failed its checksum.
+    Download(String),
+    /// ONNX Runtime refused to load or run a model.
+    Model(String),
     Io(std::io::Error),
     Json(serde_json::Error),
 }
@@ -30,6 +34,8 @@ impl fmt::Display for Error {
             }
             Error::Tool { program, stderr } => write!(f, "{program} failed: {}", stderr.trim()),
             Error::Probe(msg) => write!(f, "unexpected ffprobe output: {msg}"),
+            Error::Download(msg) => write!(f, "model download failed: {msg}"),
+            Error::Model(msg) => write!(f, "model error: {msg}"),
             Error::Io(e) => write!(f, "{e}"),
             Error::Json(e) => write!(f, "{e}"),
         }
@@ -47,5 +53,11 @@ impl From<std::io::Error> for Error {
 impl From<serde_json::Error> for Error {
     fn from(e: serde_json::Error) -> Self {
         Error::Json(e)
+    }
+}
+
+impl<T> From<ort::Error<T>> for Error {
+    fn from(e: ort::Error<T>) -> Self {
+        Error::Model(e.to_string())
     }
 }

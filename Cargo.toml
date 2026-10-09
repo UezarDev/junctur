@@ -10,3 +10,6 @@ license = "GPL-3.0-or-later"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "tracing", "download-binaries", "tls-native", "copy-dylibs", "api-27"] }
+rustfft = "6.4"
+sha2 = "0.11"

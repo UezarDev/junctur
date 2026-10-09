@@ -32,6 +32,12 @@ impl TrackReport {
                 t.sample_rate
             );
         }
+        if let Some(e) = &self.speech_error {
+            let _ = writeln!(
+                s,
+                "speech detection unavailable, roles from loudness only: {e}"
+            );
+        }
         let _ = writeln!(s, "logical tracks:");
         for l in &self.logical {
             let names: Vec<String> = l.members.iter().map(|m| (m + 1).to_string()).collect();

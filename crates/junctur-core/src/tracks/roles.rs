@@ -1,0 +1,260 @@
+//! Role decision for one distinct track, from its loudness profile and, when available, speech.
+//!
+//! Without speech this is Phase 1's loudness heuristic. With it, the questions become "does it carry
+//! speech" and "what is under the speech": a voice track goes near-silent between phrases, a mix
+//! keeps game or music going.
+
+use serde::{Deserialize, Serialize};
+
+use super::Role;
+use crate::signal::{Activity, NEAR_SILENT_DB};
+use crate::vad;
+
+/// Per-track speech measurements over the sampled windows.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Speech {
+    /// Share of sampled time inside speech regions.
+    pub share: f64,
+    /// Share of the non-speech time that is near-silent: high for a voice track, low for a mix.
+    pub quiet_gaps: f64,
+}
+
+/// A track with less speech than this is treated as carrying none (VAD false positives on music
+/// and game sound stay under a few percent).
+pub const SPEECH_MIN: f64 = 0.05;
+/// A faint track needs more: amplified noise trips the VAD more easily.
+pub const FAINT_SPEECH_MIN: f64 = 0.1;
+/// Non-speech time at least this quiet means nothing else plays under the voice.
+pub const QUIET_GAPS: f64 = 0.6;
+
+/// Speech stats from VAD probabilities and the un-normalised samples they came from.
+pub fn measure(probs: &[f32], samples: &[f32]) -> Speech {
+    let regions = vad::regions(probs, 0.0);
+    let total = probs.len() as f64 * vad::FRAME_SECONDS;
+    let in_speech = |i: usize| {
+        let t = (i as f64 + 0.5) * vad::FRAME_SECONDS;
+        regions.iter().any(|r| t >= r.start && t < r.end)
+    };
+    let (mut gaps, mut quiet) = (0usize, 0usize);
+    for (i, c) in samples.chunks(vad::FRAME).enumerate() {
+        if in_speech(i) {
+            continue;
+        }
+        gaps += 1;
+        let p = c.iter().map(|&x| (x as f64).powi(2)).sum::<f64>() / c.len() as f64;
+        if p <= 0.0 || 10.0 * p.log10() < NEAR_SILENT_DB {
+            quiet += 1;
+        }
+    }
+    Speech {
+        share: vad::share(&regions, total),
+        quiet_gaps: if gaps == 0 {
+            1.0
+        } else {
+            quiet as f64 / gaps as f64
+        },
+    }
+}
+
+/// What the caller already knows about the track's place among the others.
+pub struct Context {
+    pub sum_of_others: Option<f64>,
+    pub faint: bool,
+    /// Non-silent, non-faint tracks in the recording.
+    pub substantial: usize,
+}
+
+pub fn decide(a: &Activity, speech: Option<Speech>, cx: &Context) -> (Role, f64, String) {
+    if a.silent {
+        return (
+            Role::Silent,
+            0.99,
+            format!("silent: loudest frame {:.0} dB", a.peak_db),
+        );
+    }
+    let pct = |x: f64| x * 100.0;
+    if let Some(r) = cx.sum_of_others {
+        let mut why = format!(
+            "is the sum of the other tracks (residual {:.1} dB)",
+            10.0 * r.max(1e-12).log10()
+        );
+        if let Some(s) = speech {
+            why += &format!(", speech {:.0}%", pct(s.share));
+        }
+        return (Role::Mix, 0.8, why);
+    }
+    match (speech, cx.faint) {
+        (None, true) => (
+            Role::Unknown,
+            0.3,
+            format!(
+                "faint: mean {:.0} dB, near-silent {:.0}% of the time; a low-level source \
+                 (PC or Discord audio turned down, or bleed), not enough to tell which",
+                a.mean_db,
+                pct(a.near_silent_share)
+            ),
+        ),
+        (Some(s), true) if s.share >= FAINT_SPEECH_MIN => (
+            Role::Voice,
+            0.6,
+            format!(
+                "faint (mean {:.0} dB) but carries speech {:.0}% of the time: likely Discord \
+                 turned down, or mic bleed",
+                a.mean_db,
+                pct(s.share)
+            ),
+        ),
+        (Some(s), true) => (
+            Role::GamePc,
+            0.5,
+            format!(
+                "faint (mean {:.0} dB) with no speech ({:.0}%): likely PC or game audio turned down",
+                a.mean_db,
+                pct(s.share)
+            ),
+        ),
+        (None, false) => loudness_only(a, cx.substantial),
+        (Some(s), false) if s.share < SPEECH_MIN => (
+            Role::GamePc,
+            0.6,
+            format!(
+                "no speech ({:.0}%): game, PC or music audio (music is not told apart yet)",
+                pct(s.share)
+            ),
+        ),
+        (Some(s), false) if s.quiet_gaps >= QUIET_GAPS => (
+            Role::Voice,
+            0.75,
+            format!(
+                "speech {:.0}% of the time, near-silent between phrases ({:.0}% of the gaps)",
+                pct(s.share),
+                pct(s.quiet_gaps)
+            ),
+        ),
+        (Some(s), false) if cx.substantial == 1 => (
+            Role::Mix,
+            0.8,
+            format!(
+                "the only substantial track: speech {:.0}% of the time over a background that keeps \
+                 playing (only {:.0}% of the gaps near-silent)",
+                pct(s.share),
+                pct(s.quiet_gaps)
+            ),
+        ),
+        (Some(s), false) => (
+            Role::Voice,
+            0.5,
+            format!(
+                "speech {:.0}% of the time over continuous sound: a noisy voice track, or game \
+                 audio with voices in it",
+                pct(s.share)
+            ),
+        ),
+    }
+}
+
+/// Phase 1's guess, used when speech detection is off or unavailable.
+fn loudness_only(a: &Activity, substantial: usize) -> (Role, f64, String) {
+    if substantial == 1 {
+        (
+            Role::Mix,
+            0.6,
+            "the only track with substantial sound; other tracks are silent or faint".into(),
+        )
+    } else if a.near_silent_share >= 0.3 {
+        (
+            Role::Voice,
+            0.5,
+            format!(
+                "intermittent like speech: near-silent {:.0}% of the time",
+                a.near_silent_share * 100.0
+            ),
+        )
+    } else {
+        (
+            Role::GamePc,
+            0.4,
+            format!(
+                "continuous sound: near-silent only {:.0}% of the time",
+                a.near_silent_share * 100.0
+            ),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn act(mean_db: f64) -> Activity {
+        Activity {
+            mean_db,
+            peak_db: mean_db + 15.0,
+            near_silent_share: 0.2,
+            silent: false,
+        }
+    }
+
+    fn cx(faint: bool, substantial: usize) -> Context {
+        Context {
+            sum_of_others: None,
+            faint,
+            substantial,
+        }
+    }
+
+    fn sp(share: f64, quiet_gaps: f64) -> Option<Speech> {
+        Some(Speech { share, quiet_gaps })
+    }
+
+    #[test]
+    fn faint_track_is_named_by_speech() {
+        assert_eq!(
+            decide(&act(-70.0), sp(0.3, 0.9), &cx(true, 1)).0,
+            Role::Voice
+        );
+        assert_eq!(
+            decide(&act(-70.0), sp(0.02, 0.9), &cx(true, 1)).0,
+            Role::GamePc
+        );
+        assert_eq!(decide(&act(-70.0), None, &cx(true, 1)).0, Role::Unknown);
+    }
+
+    #[test]
+    fn single_track_mix_versus_voice_only() {
+        assert_eq!(
+            decide(&act(-25.0), sp(0.4, 0.1), &cx(false, 1)).0,
+            Role::Mix
+        );
+        assert_eq!(
+            decide(&act(-25.0), sp(0.4, 0.9), &cx(false, 1)).0,
+            Role::Voice
+        );
+        assert_eq!(
+            decide(&act(-25.0), sp(0.0, 0.0), &cx(false, 1)).0,
+            Role::GamePc
+        );
+    }
+
+    #[test]
+    fn sum_and_silence_win_over_speech() {
+        let mut c = cx(false, 3);
+        c.sum_of_others = Some(1e-4);
+        assert_eq!(decide(&act(-20.0), sp(0.0, 0.0), &c).0, Role::Mix);
+        let mut s = act(-120.0);
+        s.silent = true;
+        assert_eq!(decide(&s, sp(0.5, 0.5), &cx(false, 1)).0, Role::Silent);
+    }
+
+    #[test]
+    fn measure_counts_quiet_gaps() {
+        // 20 frames of speech probability then 20 of none; the gap samples are silent.
+        let mut probs = vec![0.9f32; 20];
+        probs.extend([0.0; 20]);
+        let mut samples = vec![0.3f32; 20 * vad::FRAME];
+        samples.extend(vec![0.0; 20 * vad::FRAME]);
+        let s = measure(&probs, &samples);
+        assert!((s.share - 0.5).abs() < 1e-9);
+        assert_eq!(s.quiet_gaps, 1.0);
+    }
+}

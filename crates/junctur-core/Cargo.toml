@@ -4,6 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# CUDA execution provider. Off by default so a machine without the CUDA toolkit builds;
+# at runtime a CUDA session that cannot start falls back to CPU.
+cuda = ["ort/cuda"]
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+ort.workspace = true
+rustfft.workspace = true
+sha2.workspace = true

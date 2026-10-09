@@ -8,6 +8,10 @@ license.workspace = true
 name = "junctur"
 path = "src/main.rs"
 
+[features]
+cuda = ["junctur-core/cuda"]
+
 [dependencies]
 junctur-core = { path = "../junctur-core" }
+serde.workspace = true
 serde_json.workspace = true

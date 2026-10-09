@@ -1,6 +1,7 @@
 //! Grouping duplicate tracks and guessing roles. Pure, so it is testable without ffmpeg.
 
-use super::{LogicalTrack, Role, Sameness};
+use super::roles::{decide, Context, Speech};
+use super::{LogicalTrack, Sameness};
 use crate::ffmpeg::ANALYSIS_RATE;
 use crate::signal::{self, Activity};
 
@@ -16,8 +17,17 @@ pub const NEAR_DUPLICATE_DB: f64 = 1.0;
 /// Residual energy share under which a track counts as a mix of the other tracks (-13 dB).
 pub const MIX_RESIDUAL: f64 = 0.05;
 
-/// Group, measure and label aligned per-track samples.
+/// Group, measure and label aligned per-track samples, by loudness alone.
 pub fn classify(samples: &[Vec<f32>]) -> Vec<LogicalTrack> {
+    classify_with(samples, &mut |_| None)
+}
+
+/// As [`classify`], with `speech_of` measuring speech on each distinct audible track (once per
+/// group, on its first member).
+pub fn classify_with(
+    samples: &[Vec<f32>],
+    speech_of: &mut dyn FnMut(&[f32]) -> Option<Speech>,
+) -> Vec<LogicalTrack> {
     let acts: Vec<Activity> = samples
         .iter()
         .map(|s| signal::activity(s, ANALYSIS_RATE))
@@ -79,46 +89,27 @@ pub fn classify(samples: &[Vec<f32>]) -> Vec<LogicalTrack> {
                     members.len()
                 ));
             }
-            let (role, confidence) = if a.silent {
-                reasons.push(format!("silent: loudest frame {:.0} dB", a.peak_db));
-                (Role::Silent, 0.99)
-            } else if let Some(r) = mix_of_others(g, rep, &groups, &audible, samples) {
-                reasons.push(format!(
-                    "is the sum of the other tracks (residual {:.1} dB)",
-                    10.0 * r.max(1e-12).log10()
-                ));
-                (Role::Mix, 0.8)
-            } else if a.mean_db < FAINT_MEAN_DB {
-                reasons.push(format!(
-                    "faint: mean {:.0} dB, near-silent {:.0}% of the time; a low-level source \
-                     (PC or Discord audio turned down, or bleed), not enough to tell which",
-                    a.mean_db,
-                    a.near_silent_share * 100.0
-                ));
-                (Role::Unknown, 0.3)
-            } else if substantial == 1 {
-                reasons.push(
-                    "the only track with substantial sound; other tracks are silent or faint"
-                        .to_string(),
-                );
-                (Role::Mix, 0.6)
-            } else if a.near_silent_share >= 0.3 {
-                reasons.push(format!(
-                    "intermittent like speech: near-silent {:.0}% of the time",
-                    a.near_silent_share * 100.0
-                ));
-                (Role::Voice, 0.5)
+            let speech = if a.silent {
+                None
             } else {
-                reasons.push(format!(
-                    "continuous sound: near-silent only {:.0}% of the time",
-                    a.near_silent_share * 100.0
-                ));
-                (Role::GamePc, 0.4)
+                speech_of(&samples[rep])
             };
+            let cx = Context {
+                sum_of_others: if a.silent {
+                    None
+                } else {
+                    mix_of_others(g, rep, &groups, &audible, samples)
+                },
+                faint: a.mean_db < FAINT_MEAN_DB,
+                substantial,
+            };
+            let (role, confidence, why) = decide(&a, speech, &cx);
+            reasons.push(why);
             LogicalTrack {
                 members: members.clone(),
                 sameness: *sameness,
                 activity: a,
+                speech,
                 role,
                 confidence,
                 reasons,
@@ -152,6 +143,7 @@ fn mix_of_others(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tracks::Role;
 
     fn tone(freq: f32, amp: f32) -> Vec<f32> {
         (0..16_000)

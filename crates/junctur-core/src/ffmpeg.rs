@@ -3,8 +3,9 @@
 //! They are external programs found on PATH (a DECISIONS-level choice for now), so every call goes
 //! through here: one spot to swap for bundled binaries or a native decoder later.
 
+use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 
@@ -115,6 +116,153 @@ pub fn decode_window(file: &Path, track: usize, start: f64, len: f64) -> Result<
         .chunks_exact(4)
         .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect())
+}
+
+/// A section of a file to read: `start` seconds in, `len` seconds long (None = to the end).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Span {
+    pub start: f64,
+    pub len: Option<f64>,
+}
+
+/// Streaming decode of one audio track as interleaved f32, so a 30h track never sits in memory.
+pub struct PcmReader {
+    child: Child,
+    out: ChildStdout,
+    pub rate: u32,
+    pub channels: u32,
+}
+
+impl PcmReader {
+    pub fn open(file: &Path, track: usize, rate: u32, channels: u32, span: Span) -> Result<Self> {
+        let mut cmd = Command::new("ffmpeg");
+        cmd.args([
+            "-v",
+            "error",
+            "-nostdin",
+            "-ss",
+            &format!("{:.3}", span.start),
+        ]);
+        if let Some(len) = span.len {
+            cmd.args(["-t", &format!("{len:.3}")]);
+        }
+        cmd.arg("-i").arg(file).args([
+            "-map",
+            &format!("0:a:{track}"),
+            "-ac",
+            &channels.to_string(),
+            "-ar",
+            &rate.to_string(),
+            "-f",
+            "f32le",
+            "-",
+        ]);
+        let mut child = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|source| Error::Spawn {
+                program: "ffmpeg",
+                source,
+            })?;
+        let out = child.stdout.take().expect("piped stdout");
+        Ok(Self {
+            child,
+            out,
+            rate,
+            channels,
+        })
+    }
+
+    /// Up to `n` interleaved samples; fewer only at the end of the stream, empty when done.
+    pub fn read(&mut self, n: usize) -> Result<Vec<f32>> {
+        let mut bytes = vec![0u8; n * 4];
+        let mut got = 0;
+        while got < bytes.len() {
+            match self.out.read(&mut bytes[got..])? {
+                0 => break,
+                k => got += k,
+            }
+        }
+        bytes.truncate(got - got % 4);
+        Ok(bytes
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect())
+    }
+
+    pub fn finish(mut self) -> Result<()> {
+        let status = self.child.wait()?;
+        if !status.success() {
+            return Err(Error::Tool {
+                program: "ffmpeg",
+                stderr: format!("decode exited with {status}"),
+            });
+        }
+        Ok(())
+    }
+}
+
+// An abandoned stream (an error mid-way) must not leave ffmpeg running.
+impl Drop for PcmReader {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for PcmWriter {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Streaming encode of interleaved f32 into an audio file; the format follows the extension.
+pub struct PcmWriter {
+    child: Child,
+    input: Option<ChildStdin>,
+}
+
+impl PcmWriter {
+    pub fn create(path: &Path, rate: u32, channels: u32) -> Result<Self> {
+        let mut child = Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "f32le", "-ar", &rate.to_string()])
+            .args(["-ac", &channels.to_string(), "-i", "-"])
+            .arg(path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|source| Error::Spawn {
+                program: "ffmpeg",
+                source,
+            })?;
+        let input = child.stdin.take();
+        Ok(Self { child, input })
+    }
+
+    pub fn write(&mut self, samples: &[f32]) -> Result<()> {
+        let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        self.input
+            .as_mut()
+            .expect("open until finish")
+            .write_all(&bytes)?;
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> Result<()> {
+        drop(self.input.take());
+        let status = self.child.wait()?;
+        if !status.success() {
+            return Err(Error::Tool {
+                program: "ffmpeg",
+                stderr: format!("encode exited with {status}"),
+            });
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

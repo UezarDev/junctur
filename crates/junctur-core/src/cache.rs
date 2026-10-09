@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use crate::Result;
 
 /// Bump when the analysis or the report shape changes, so old entries stop matching.
-pub const CACHE_VERSION: u32 = 1;
+pub const CACHE_VERSION: u32 = 2;
 
 pub fn default_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("JUNCTUR_CACHE_DIR") {
