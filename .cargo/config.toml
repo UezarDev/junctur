@@ -1,0 +1,5 @@
+# CUDA 13's headers need MSVC's standard-conforming preprocessor when whisper.cpp builds its CUDA
+# kernels (`--features cuda`). whisper-rs-sys passes CMAKE_* variables on to CMake; CPU builds
+# never compile CUDA code, so it does nothing there.
+[env]
+CMAKE_CUDA_FLAGS = "-Xcompiler=/Zc:preprocessor"

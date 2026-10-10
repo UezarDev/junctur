@@ -20,6 +20,8 @@ pub enum Error {
     Download(String),
     /// ONNX Runtime refused to load or run a model.
     Model(String),
+    /// An edit list that cannot be read, or a stage asked for before its inputs exist.
+    Edit(String),
     Io(std::io::Error),
     Json(serde_json::Error),
 }
@@ -36,6 +38,7 @@ impl fmt::Display for Error {
             Error::Probe(msg) => write!(f, "unexpected ffprobe output: {msg}"),
             Error::Download(msg) => write!(f, "model download failed: {msg}"),
             Error::Model(msg) => write!(f, "model error: {msg}"),
+            Error::Edit(msg) => write!(f, "{msg}"),
             Error::Io(e) => write!(f, "{e}"),
             Error::Json(e) => write!(f, "{e}"),
         }

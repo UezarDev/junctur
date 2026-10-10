@@ -3,11 +3,12 @@ name = "junctur-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+build = "build.rs"
 
 [features]
 # CUDA execution provider. Off by default so a machine without the CUDA toolkit builds;
 # at runtime a CUDA session that cannot start falls back to CPU.
-cuda = ["ort/cuda"]
+cuda = ["ort/cuda", "whisper-rs/cuda"]
 
 [dependencies]
 serde.workspace = true
@@ -15,3 +16,4 @@ serde_json.workspace = true
 ort.workspace = true
 rustfft.workspace = true
 sha2.workspace = true
+whisper-rs.workspace = true

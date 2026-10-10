@@ -1,0 +1,89 @@
+//! The edit list: which ranges of the source to keep, as a readable text file the user can diff,
+//! commit and hand-edit, plus a score per short time window for the later Review/Swipe modes.
+//!
+//! It is the one piece of state a project owns; everything else in the project folder is a cache
+//! that can be rebuilt. The source itself is never touched.
+
+mod format;
+mod reduce;
+mod scores;
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+pub use format::{parse, FORMAT_VERSION};
+pub use reduce::{keep_ranges, Envelope, ENVELOPE_HOP};
+pub use scores::windows;
+
+/// A kept stretch of the source, in seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Range {
+    pub start: f64,
+    pub end: f64,
+}
+
+impl Range {
+    pub fn len(&self) -> f64 {
+        self.end - self.start
+    }
+}
+
+/// How the first automatic reduction is made. Stored in the file so a result can be reproduced.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CutSettings {
+    /// Kept before each speech region, and after it.
+    pub pad_before: f64,
+    pub pad_after: f64,
+    /// Pauses shorter than this stay in: cutting every breath makes speech sound chopped.
+    pub merge_gap: f64,
+    /// How far a boundary may move to land on the quietest point.
+    pub snap: f64,
+    /// Crossfade at each cut, applied by the renderer.
+    pub crossfade: f64,
+    /// Length of a score window.
+    pub window: f64,
+}
+
+impl Default for CutSettings {
+    fn default() -> Self {
+        Self {
+            pad_before: 0.25,
+            pad_after: 0.35,
+            merge_gap: 1.0,
+            snap: 0.15,
+            crossfade: 0.03,
+            window: 5.0,
+        }
+    }
+}
+
+/// One score window. `score` is what Review/Swipe will rank by; today it is the speech share, the
+/// only signal so far. Highlight signals (laughter, game volume, chat) become more columns.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Window {
+    pub start: f64,
+    pub score: f64,
+    pub speech: f64,
+    pub words: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EditList {
+    pub source: PathBuf,
+    pub duration: f64,
+    pub settings: CutSettings,
+    pub keep: Vec<Range>,
+    pub windows: Vec<Window>,
+}
+
+impl EditList {
+    pub fn kept(&self) -> f64 {
+        // `0.0 +`: an empty float sum is -0.0, which prints as "-0".
+        0.0 + self.keep.iter().map(Range::len).sum::<f64>()
+    }
+
+    pub fn to_text(&self) -> String {
+        format::write(self)
+    }
+}

@@ -19,8 +19,7 @@ impl Backend for Cuda {
     }
 
     fn open(&self, model: &Path, threads: usize) -> Result<Option<Session>> {
-        static PATH: Once = Once::new();
-        PATH.call_once(extend_path);
+        prepare();
         let ep = CUDA::default();
         if !ep.is_available().unwrap_or(false) {
             return Ok(None);
@@ -32,6 +31,12 @@ impl Backend for Cuda {
         }
         Ok(Some(b.commit_from_file(model)?))
     }
+}
+
+/// Extend PATH once per process.
+pub fn prepare() {
+    static PATH: Once = Once::new();
+    PATH.call_once(extend_path);
 }
 
 fn extend_path() {

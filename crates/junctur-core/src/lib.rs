@@ -3,17 +3,24 @@
 //! Track analysis comes first: what is on each audio track of a recording, which tracks are copies,
 //! and each distinct track's role (speech detection refines Phase 1's loudness guess). Mix-only
 //! tracks can then be split into a vocal stem and the rest ([`separate`]), with speech regions and
-//! speakers found on the vocal stem. Later stages consume [`tracks::TrackReport`] and [`Stems`].
+//! speakers found on the vocal stem (opt-in: the main pipeline reads tracks as they are).
+//!
+//! [`pipeline`] runs the stages for a recording in order (tracks, speech, [`transcribe`], [`edit`]),
+//! each cached and resumable, and [`export`] turns the resulting edit list into an FCPXML timeline.
 
 pub mod cache;
 pub mod diarize;
+pub mod edit;
 pub mod error;
+pub mod export;
 pub mod ffmpeg;
 pub mod models;
+pub mod pipeline;
 pub mod runtime;
 pub mod separate;
 pub mod signal;
 pub mod tracks;
+pub mod transcribe;
 pub mod vad;
 
 pub use error::{Error, Result};

@@ -94,6 +94,53 @@ fn parse_probe(json: &[u8]) -> Result<Probe> {
     Ok(Probe { duration, audio })
 }
 
+/// The first video stream: size and frame rate (as a fraction, e.g. 30000/1001).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct VideoStream {
+    pub width: u32,
+    pub height: u32,
+    pub fps_num: u64,
+    pub fps_den: u64,
+}
+
+/// None for an audio-only file.
+pub fn probe_video(file: &Path) -> Result<Option<VideoStream>> {
+    let path = file.to_string_lossy();
+    let out = run(
+        "ffprobe",
+        &[
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_streams",
+            "-select_streams",
+            "v:0",
+            &path,
+        ],
+    )?;
+    parse_video(&out)
+}
+
+fn parse_video(json: &[u8]) -> Result<Option<VideoStream>> {
+    let v: serde_json::Value = serde_json::from_slice(json)?;
+    let Some(s) = v["streams"].as_array().and_then(|a| a.first()) else {
+        return Ok(None);
+    };
+    let rate = s["r_frame_rate"].as_str().unwrap_or("");
+    let (n, d) = rate
+        .split_once('/')
+        .and_then(|(n, d)| Some((n.parse().ok()?, d.parse().ok()?)))
+        .filter(|&(n, d): &(u64, u64)| n > 0 && d > 0)
+        .ok_or_else(|| Error::Probe(format!("frame rate {rate:?}")))?;
+    Ok(Some(VideoStream {
+        width: s["width"].as_u64().unwrap_or(0) as u32,
+        height: s["height"].as_u64().unwrap_or(0) as u32,
+        fps_num: n,
+        fps_den: d,
+    }))
+}
+
 /// Decode `len` seconds of audio track `track` starting at `start`, as mono f32 at
 /// [`ANALYSIS_RATE`]. `-ss` before `-i` seeks the demuxer, so a window deep into a 30h file costs
 /// about the same as one at the start.
@@ -268,6 +315,15 @@ impl PcmWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_video_stream() {
+        let j = br#"{"streams":[{"width":1920,"height":1080,"r_frame_rate":"30000/1001"}]}"#;
+        let v = parse_video(j).unwrap().unwrap();
+        assert_eq!((v.width, v.fps_num, v.fps_den), (1920, 30000, 1001));
+        assert_eq!(parse_video(br#"{"streams":[]}"#).unwrap(), None);
+        assert!(parse_video(br#"{"streams":[{"r_frame_rate":"0/0"}]}"#).is_err());
+    }
 
     #[test]
     fn parses_ffprobe_json_without_titles() {

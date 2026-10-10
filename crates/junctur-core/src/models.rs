@@ -42,6 +42,22 @@ pub const SPEAKER_EMBEDDING: Model = Model {
     license: "Apache-2.0",
 };
 
+/// Whisper large-v3 for whisper.cpp (ggml, MIT), f16. ~3.1 GB; wants ~4.5 GB of free VRAM.
+pub const WHISPER_LARGE_V3: Model = Model {
+    file: "ggml-large-v3.bin",
+    url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3.bin",
+    sha256: "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2",
+    license: "MIT",
+};
+
+/// The same large-v3 weights quantised to 5 bits (1.1 GB): fits beside another app on a 12 GB card.
+pub const WHISPER_LARGE_V3_Q5: Model = Model {
+    file: "ggml-large-v3-q5_0.bin",
+    url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-q5_0.bin",
+    sha256: "d75795ecff3f83b5faa89d1900604ad8c780abd5739fae406de19f23ecd98ad1",
+    license: "MIT",
+};
+
 pub fn dir(cache_dir: &Path) -> PathBuf {
     cache_dir.join("models")
 }
@@ -69,7 +85,7 @@ pub fn ensure(model: &Model, cache_dir: &Path) -> Result<PathBuf> {
         let _ = std::fs::remove_file(&part);
         return Err(Error::Download(format!("{} ({status})", model.url)));
     }
-    let got = sha256_hex(&std::fs::read(&part)?);
+    let got = sha256_file(&part)?;
     if got != model.sha256 {
         let _ = std::fs::remove_file(&part);
         return Err(Error::Download(format!(
@@ -81,11 +97,28 @@ pub fn ensure(model: &Model, cache_dir: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Streamed: the Whisper models are gigabytes, too large to read whole.
+fn sha256_file(path: &Path) -> Result<String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        match f.read(&mut buf)? {
+            0 => break,
+            n => h.update(&buf[..n]),
+        }
+    }
+    Ok(hex(&h.finalize()))
+}
+
+#[cfg(test)]
 fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    hex(&Sha256::digest(bytes))
+}
+
+fn hex(digest: &[u8]) -> String {
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]

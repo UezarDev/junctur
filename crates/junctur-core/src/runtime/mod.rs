@@ -5,6 +5,7 @@
 
 #[cfg(feature = "cuda")]
 mod cuda;
+pub mod vram;
 
 use std::path::Path;
 
@@ -47,6 +48,13 @@ impl Backend for Cpu {
             .commit_from_file(model)?;
         Ok(Some(s))
     }
+}
+
+/// Put the CUDA and cuDNN DLL folders on PATH. Needed before anything loads a CUDA DLL lazily
+/// (ort sessions, and whisper.cpp, whose CUDA DLLs are delay-loaded); a no-op without `cuda`.
+pub fn prepare_cuda() {
+    #[cfg(feature = "cuda")]
+    cuda::prepare();
 }
 
 fn backends(pref: DevicePref) -> Vec<Box<dyn Backend>> {
