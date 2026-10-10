@@ -9,7 +9,7 @@
 use std::fmt::Write;
 use std::path::Path;
 
-use crate::edit::{EditList, Range};
+use crate::edit::{frame_ranges, frames_ceil, EditList};
 use crate::ffmpeg::VideoStream;
 
 /// Used for the timeline when the source has no video.
@@ -96,31 +96,6 @@ pub fn write(edit: &EditList, media: &Media, name: &str) -> String {
     x
 }
 
-fn frames_ceil(s: f64, num: u64, den: u64) -> u64 {
-    (s * num as f64 / den as f64 - 1e-6).ceil().max(0.0) as u64
-}
-
-fn frames_floor(s: f64, num: u64, den: u64) -> u64 {
-    (s * num as f64 / den as f64 + 1e-6).floor().max(0.0) as u64
-}
-
-/// Kept ranges as `[start, end)` frames within `[0, total]`, merged where rounding made them touch.
-fn frame_ranges(keep: &[Range], num: u64, den: u64, total: u64) -> Vec<(u64, u64)> {
-    let mut out: Vec<(u64, u64)> = Vec::new();
-    for r in keep {
-        let a = frames_floor(r.start, num, den).min(total);
-        let b = frames_ceil(r.end, num, den).min(total);
-        if b <= a {
-            continue;
-        }
-        match out.last_mut() {
-            Some(last) if a <= last.1 => last.1 = last.1.max(b),
-            _ => out.push((a, b)),
-        }
-    }
-    out
-}
-
 /// `file:///C:/Videos/my%20stream.mp4`: forward slashes, everything but unreserved bytes escaped.
 fn file_url(path: &Path) -> String {
     let p = path.to_string_lossy().replace('\\', "/");
@@ -149,7 +124,7 @@ fn xml_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::edit::CutSettings;
+    use crate::edit::{CutSettings, Range};
     use std::path::PathBuf;
 
     fn edit(keep: Vec<Range>) -> EditList {
@@ -164,19 +139,6 @@ mod tests {
 
     fn r(start: f64, end: f64) -> Range {
         Range { start, end }
-    }
-
-    #[test]
-    fn frames_round_outward_and_merge() {
-        // 29.97 fps: 1.0 s is frame 29.97 -> 29, 2.0 s -> 60, and 2.01 s floors to 60, so the
-        // first two touch and merge; the last starts past the end and is dropped.
-        let f = frame_ranges(
-            &[r(1.0, 2.0), r(2.01, 3.0), r(20.0, 30.0)],
-            30000,
-            1001,
-            299,
-        );
-        assert_eq!(f, vec![(29, 90)]);
     }
 
     #[test]

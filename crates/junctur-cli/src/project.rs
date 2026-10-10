@@ -1,9 +1,10 @@
-//! The pipeline commands: `analyze`, `status`, `cut`, `export`. They share one project per
+//! The pipeline commands: `analyze`, `status`, `cut`, `export`, `render`. They share one project per
 //! recording (`--project <dir>` to keep it somewhere git can track it).
 
 use junctur_core::edit::{CutSettings, EditList};
 use junctur_core::export;
 use junctur_core::pipeline::{self, PipelineOptions, Project, StageState, STAGES};
+use junctur_core::render::{self, RenderOptions};
 use junctur_core::runtime::DevicePref;
 use junctur_core::transcribe::ModelPref;
 
@@ -134,6 +135,38 @@ pub fn export(a: Args) -> Result<(), String> {
     let e = p.edit().map_err(|e| e.to_string())?;
     export::write_fcpxml(&e, &out).map_err(|e| e.to_string())?;
     println!("{} ({} clips)", out.display(), e.keep.len());
+    Ok(())
+}
+
+pub fn render(a: Args) -> Result<(), String> {
+    a.reject_unknown(&known(&["--out", "--full", "--force", "--jobs"]))?;
+    let out = a.path("--out").ok_or("render needs --out <out.mp4>")?;
+    let p = project(&a)?;
+    let e = p.edit().map_err(|e| e.to_string())?;
+    let opts = RenderOptions {
+        full: a.has("--full"),
+        overwrite: a.has("--force"),
+        jobs: a.num("--jobs")?.unwrap_or(RenderOptions::default().jobs),
+    };
+    let r = render::render(&e, &out, &opts, &mut |line| eprintln!("junctur: {line}"))
+        .map_err(|e| e.to_string())?;
+    let total = (r.frames_copied + r.frames_encoded).max(1);
+    match &r.full_reason {
+        Some(why) => println!("full re-encode ({why})"),
+        None => println!(
+            "smart render: {:.0}% of frames copied, {} encoded, in {} pieces",
+            r.frames_copied as f64 / total as f64 * 100.0,
+            r.frames_encoded,
+            r.pieces
+        ),
+    }
+    println!(
+        "{} ({:.1} s, {} audio tracks) in {:.1} s",
+        out.display(),
+        r.duration,
+        r.audio_tracks,
+        r.seconds
+    );
     Ok(())
 }
 

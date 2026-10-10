@@ -7,6 +7,7 @@
 //!
 //! [`pipeline`] runs the stages for a recording in order (tracks, speech, [`transcribe`], [`edit`]),
 //! each cached and resumable, and [`export`] turns the resulting edit list into an FCPXML timeline.
+//! [`render`] turns it into a video, re-encoding only around the cuts.
 
 pub mod cache;
 pub mod diarize;
@@ -16,6 +17,7 @@ pub mod export;
 pub mod ffmpeg;
 pub mod models;
 pub mod pipeline;
+pub mod render;
 pub mod runtime;
 pub mod separate;
 pub mod signal;

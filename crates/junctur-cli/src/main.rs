@@ -10,6 +10,8 @@
 //! junctur status <file> [--project <dir>] [--cache-dir <dir>]
 //! junctur cut <file> [--project <dir>] [--cache-dir <dir>] [cut flags]
 //! junctur export <file> --fcpxml <out.fcpxml> [--project <dir>] [--cache-dir <dir>]
+//! junctur render <file> --out <out.mp4> [--project <dir>] [--cache-dir <dir>] [--full] [--force]
+//!                       [--jobs <n>]
 //! ```
 //!
 //! Arguments are parsed by hand: a few commands with a handful of flags do not justify a parser dependency.
@@ -30,6 +32,8 @@ const USAGE: &str = "usage:
   junctur status <file> [--project <dir>] [--cache-dir <dir>]
   junctur cut <file> [--project <dir>] [--cache-dir <dir>] [cut flags]
   junctur export <file> --fcpxml <out.fcpxml> [--project <dir>] [--cache-dir <dir>]
+  junctur render <file> --out <out.mp4> [--project <dir>] [--cache-dir <dir>] [--full] [--force]
+                        [--jobs <n>]
 cut flags: [--pad-before <s>] [--pad-after <s>] [--merge-gap <s>] [--crossfade <ms>]";
 
 fn main() -> ExitCode {
@@ -53,6 +57,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         Some("status") => project::status(a),
         Some("cut") => project::cut(a),
         Some("export") => project::export(a),
+        Some("render") => project::render(a),
         _ => Err(USAGE.into()),
     }
 }

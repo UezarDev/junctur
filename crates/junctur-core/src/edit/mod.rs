@@ -5,6 +5,7 @@
 //! that can be rebuilt. The source itself is never touched.
 
 mod format;
+mod frames;
 mod reduce;
 mod scores;
 
@@ -13,6 +14,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 pub use format::{parse, FORMAT_VERSION};
+pub use frames::{frame_ranges, frames_ceil, frames_floor};
 pub use reduce::{keep_ranges, Envelope, ENVELOPE_HOP};
 pub use scores::windows;
 

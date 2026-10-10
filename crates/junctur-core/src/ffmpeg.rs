@@ -48,6 +48,101 @@ fn run(program: &'static str, args: &[&str]) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
+/// Run ffmpeg to completion; its stderr becomes the error.
+pub fn ffmpeg(args: &[String]) -> Result<()> {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    run("ffmpeg", &args).map(drop)
+}
+
+/// Raw ffprobe output, for callers that parse a query of their own.
+pub fn ffprobe(args: &[&str]) -> Result<Vec<u8>> {
+    run("ffprobe", args)
+}
+
+/// Whether this ffmpeg build has an encoder (e.g. `h264_nvenc`; the build may lack it, or the
+/// driver may be missing, which shows only when encoding starts).
+pub fn has_encoder(name: &str) -> Result<bool> {
+    let out = run("ffmpeg", &["-hide_banner", "-encoders"])?;
+    Ok(String::from_utf8_lossy(&out)
+        .lines()
+        .any(|l| l.split_whitespace().nth(1) == Some(name)))
+}
+
+/// An ffmpeg fed through stdin (e.g. a muxer reading a byte stream), with its stderr kept for errors.
+pub struct Feed {
+    child: Child,
+    input: Option<ChildStdin>,
+    stderr: Option<std::thread::JoinHandle<String>>,
+}
+
+impl Feed {
+    pub fn spawn(args: &[String]) -> Result<Self> {
+        let mut child = Command::new("ffmpeg")
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|source| Error::Spawn {
+                program: "ffmpeg",
+                source,
+            })?;
+        let input = child.stdin.take();
+        // Drained on a thread: a full stderr pipe would block ffmpeg while we block on its stdin.
+        let mut err = child.stderr.take().expect("piped stderr");
+        let stderr = std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = err.read_to_string(&mut s);
+            s
+        });
+        Ok(Self {
+            child,
+            input,
+            stderr: Some(stderr),
+        })
+    }
+
+    pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        let r = self
+            .input
+            .as_mut()
+            .expect("open until finish")
+            .write_all(bytes);
+        r.map_err(|e| self.fail(e.to_string()))
+    }
+
+    fn fail(&mut self, fallback: String) -> Error {
+        drop(self.input.take());
+        let _ = self.child.wait();
+        let stderr = self
+            .stderr
+            .take()
+            .and_then(|h| h.join().ok())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(fallback);
+        Error::Tool {
+            program: "ffmpeg",
+            stderr,
+        }
+    }
+
+    pub fn finish(mut self) -> Result<()> {
+        drop(self.input.take());
+        let status = self.child.wait()?;
+        if !status.success() {
+            return Err(self.fail(format!("exited with {status}")));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Feed {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 pub fn probe(file: &Path) -> Result<Probe> {
     let path = file.to_string_lossy();
     let out = run(
@@ -274,9 +369,15 @@ pub struct PcmWriter {
 
 impl PcmWriter {
     pub fn create(path: &Path, rate: u32, channels: u32) -> Result<Self> {
+        Self::create_with(path, rate, channels, &[])
+    }
+
+    /// As [`create`](Self::create), with output options (codec, bitrate) before the path.
+    pub fn create_with(path: &Path, rate: u32, channels: u32, opts: &[String]) -> Result<Self> {
         let mut child = Command::new("ffmpeg")
             .args(["-v", "error", "-y", "-f", "f32le", "-ar", &rate.to_string()])
             .args(["-ac", &channels.to_string(), "-i", "-"])
+            .args(opts)
             .arg(path)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
