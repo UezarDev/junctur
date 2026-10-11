@@ -26,7 +26,7 @@ pub struct Activity {
     pub silent: bool,
 }
 
-fn db(power: f64) -> f64 {
+pub fn db(power: f64) -> f64 {
     if power <= 0.0 {
         FLOOR_DB
     } else {
@@ -34,12 +34,17 @@ fn db(power: f64) -> f64 {
     }
 }
 
+/// Mean power of one frame of samples.
+pub fn power(frame: &[f32]) -> f64 {
+    if frame.is_empty() {
+        return 0.0;
+    }
+    frame.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>() / frame.len() as f64
+}
+
 pub fn activity(samples: &[f32], rate: u32) -> Activity {
     let frame = ((rate as f64 * FRAME_SECONDS) as usize).max(1);
-    let powers: Vec<f64> = samples
-        .chunks(frame)
-        .map(|c| c.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>() / c.len() as f64)
-        .collect();
+    let powers: Vec<f64> = samples.chunks(frame).map(power).collect();
     if powers.is_empty() {
         return Activity {
             mean_db: FLOOR_DB,

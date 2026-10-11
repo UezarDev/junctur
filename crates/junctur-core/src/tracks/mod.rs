@@ -97,13 +97,11 @@ pub struct TrackReport {
 
 pub fn analyze(file: &Path, opts: &AnalyzeOptions) -> Result<TrackReport> {
     let dir = opts.cache_dir.clone().unwrap_or_else(cache::default_dir);
-    let entry = cache::entry_path(&dir, &cache::key(file, &opts.settings_key())?);
+    let entry = cache::entry_path(&dir, "tracks", &cache::key(file, &opts.settings_key())?);
     if opts.use_cache {
-        if let Ok(bytes) = std::fs::read(&entry) {
-            if let Ok(mut report) = serde_json::from_slice::<TrackReport>(&bytes) {
-                report.from_cache = true;
-                return Ok(report);
-            }
+        if let Some(mut report) = cache::read::<TrackReport>(&entry) {
+            report.from_cache = true;
+            return Ok(report);
         }
     }
 
@@ -131,11 +129,7 @@ pub fn analyze(file: &Path, opts: &AnalyzeOptions) -> Result<TrackReport> {
         from_cache: false,
     };
     if opts.use_cache {
-        // A cache that cannot be written is not a failed analysis.
-        if let Some(parent) = entry.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(&entry, serde_json::to_vec_pretty(&report)?);
+        cache::write(&entry, &report)?;
     }
     Ok(report)
 }

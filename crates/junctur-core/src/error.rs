@@ -1,21 +1,29 @@
 //! One error type for the library, so the CLI can print any failure the same way.
 
 use std::fmt;
+use std::path::PathBuf;
 
 #[derive(Debug)]
 pub enum Error {
-    /// ffmpeg/ffprobe could not be started (usually: not on PATH).
+    /// An external program (ffmpeg, ffprobe, whisper-cli) could not be started, usually because it
+    /// is not on PATH.
     Spawn {
         program: &'static str,
         source: std::io::Error,
     },
-    /// ffmpeg/ffprobe ran but failed; `stderr` is its own message.
+    /// An external program ran but failed; `stderr` is its own message.
     Tool {
         program: &'static str,
         stderr: String,
     },
     /// ffprobe output we could not understand.
     Probe(String),
+    /// The Whisper model file is not where it should be.
+    Model(PathBuf),
+    /// whisper-cli ran but its output was missing or unreadable.
+    Whisper(String),
+    /// The config file could not be read.
+    Config(String),
     Io(std::io::Error),
     Json(serde_json::Error),
 }
@@ -30,6 +38,17 @@ impl fmt::Display for Error {
             }
             Error::Tool { program, stderr } => write!(f, "{program} failed: {}", stderr.trim()),
             Error::Probe(msg) => write!(f, "unexpected ffprobe output: {msg}"),
+            Error::Model(path) => {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                write!(
+                    f,
+                    "Whisper model not found at {}; download it from \
+                     https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{name}",
+                    path.display()
+                )
+            }
+            Error::Whisper(msg) => write!(f, "unexpected whisper-cli output: {msg}"),
+            Error::Config(msg) => write!(f, "bad config file {msg}"),
             Error::Io(e) => write!(f, "{e}"),
             Error::Json(e) => write!(f, "{e}"),
         }

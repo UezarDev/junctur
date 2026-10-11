@@ -13,6 +13,7 @@ name = "junctur-cli"
 version = "0.1.0"
 dependencies = [
  "junctur-core",
+ "serde",
  "serde_json",
 ]
 

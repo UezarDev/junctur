@@ -5,6 +5,9 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+
 use crate::Result;
 
 /// Bump when the analysis or the report shape changes, so old entries stop matching.
@@ -54,8 +57,23 @@ pub fn key(file: &Path, settings: &str) -> Result<String> {
     ))
 }
 
-pub fn entry_path(dir: &Path, key: &str) -> PathBuf {
-    dir.join("tracks").join(format!("{key}.json"))
+/// `kind` keeps each stage's entries in its own folder.
+pub fn entry_path(dir: &Path, kind: &str, key: &str) -> PathBuf {
+    dir.join(kind).join(format!("{key}.json"))
+}
+
+/// A cached value, or None when it is missing or no longer parses.
+pub fn read<T: DeserializeOwned>(entry: &Path) -> Option<T> {
+    serde_json::from_slice(&std::fs::read(entry).ok()?).ok()
+}
+
+/// Store a value. A cache that cannot be written is not a failed run, so only encoding fails.
+pub fn write<T: Serialize>(entry: &Path, value: &T) -> Result<()> {
+    if let Some(parent) = entry.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(entry, serde_json::to_vec_pretty(value)?);
+    Ok(())
 }
 
 #[cfg(test)]
