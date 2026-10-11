@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/junctur-core", "crates/junctur-cli"]
+members = ["crates/junctur-core", "crates/junctur-cli", "crates/junctur-app"]
 
 [workspace.package]
 version = "0.1.0"

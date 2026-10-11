@@ -4,3 +4,6 @@ graft/
 .env
 target/
 node_modules/
+vendor/
+crates/junctur-app/dist/
+crates/junctur-app/gen/
