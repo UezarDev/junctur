@@ -3,11 +3,13 @@
 //! They are external programs found on PATH (a DECISIONS-level choice for now), so every call goes
 //! through here: one spot to swap for bundled binaries or a native decoder later.
 
+use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 
+use crate::tool::run;
 use crate::{Error, Result};
 
 /// Sample rate the analysis decodes at. 16 kHz mono keeps eight windows of four tracks small while
@@ -30,21 +32,6 @@ pub struct AudioStream {
 pub struct Probe {
     pub duration: f64,
     pub audio: Vec<AudioStream>,
-}
-
-fn run(program: &'static str, args: &[&str]) -> Result<Vec<u8>> {
-    let out = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|source| Error::Spawn { program, source })?;
-    if !out.status.success() {
-        return Err(Error::Tool {
-            program,
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        });
-    }
-    Ok(out.stdout)
 }
 
 pub fn probe(file: &Path) -> Result<Probe> {
@@ -115,6 +102,102 @@ pub fn decode_window(file: &Path, track: usize, start: f64, len: f64) -> Result<
         .chunks_exact(4)
         .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect())
+}
+
+/// Decode all of audio track `track` as mono f32 at [`ANALYSIS_RATE`], handing it to `sink` in
+/// blocks of whole `block` samples (the last may be shorter). Streams, because a 30h track would be
+/// about 7 GB of samples held at once.
+pub fn stream_track(
+    file: &Path,
+    track: usize,
+    block: usize,
+    mut sink: impl FnMut(&[f32]),
+) -> Result<()> {
+    let program = "ffmpeg";
+    let (map, rate) = (format!("0:a:{track}"), ANALYSIS_RATE.to_string());
+    let mut child = Command::new(program)
+        .args(["-v", "error", "-nostdin", "-i"])
+        .arg(file)
+        .args(["-map", &map, "-ac", "1", "-ar", &rate, "-f", "f32le", "-"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|source| Error::Spawn { program, source })?;
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    // Drain stderr on a thread so a chatty ffmpeg cannot block on a full pipe.
+    let mut stderr = child.stderr.take().expect("stderr is piped");
+    let errs = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stderr.read_to_string(&mut s);
+        s
+    });
+
+    let mut bytes = vec![0u8; block.max(1) * 4];
+    let mut samples = Vec::with_capacity(block.max(1));
+    let mut filled = 0;
+    loop {
+        let n = stdout.read(&mut bytes[filled..])?;
+        filled += n;
+        if filled == bytes.len() || (n == 0 && filled >= 4) {
+            let whole = filled / 4 * 4;
+            samples.clear();
+            samples.extend(
+                bytes[..whole]
+                    .chunks_exact(4)
+                    .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+            );
+            sink(&samples);
+            bytes.copy_within(whole..filled, 0);
+            filled -= whole;
+        }
+        if n == 0 {
+            break;
+        }
+    }
+    let status = child.wait()?;
+    let stderr = errs.join().unwrap_or_default();
+    if !status.success() {
+        return Err(Error::Tool { program, stderr });
+    }
+    Ok(())
+}
+
+/// Write `len` seconds of audio track `track` from `start` to `out` as 16 kHz mono 16-bit WAV, the
+/// input whisper.cpp reads.
+pub fn extract_wav(file: &Path, track: usize, start: f64, len: f64, out: &Path) -> Result<()> {
+    let (path, out) = (file.to_string_lossy(), out.to_string_lossy());
+    let (ss, t, map, rate) = (
+        format!("{start:.3}"),
+        format!("{len:.3}"),
+        format!("0:a:{track}"),
+        ANALYSIS_RATE.to_string(),
+    );
+    run(
+        "ffmpeg",
+        &[
+            "-v",
+            "error",
+            "-nostdin",
+            "-y",
+            "-ss",
+            &ss,
+            "-t",
+            &t,
+            "-i",
+            &path,
+            "-map",
+            &map,
+            "-ac",
+            "1",
+            "-ar",
+            &rate,
+            "-c:a",
+            "pcm_s16le",
+            &out,
+        ],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

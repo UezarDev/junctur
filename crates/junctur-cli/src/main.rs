@@ -1,19 +1,26 @@
-//! `junctur` command line. Phase 1 has one command:
+//! `junctur` command line:
 //!
 //! ```text
 //! junctur tracks <file> [--json <out.json>] [--cache-dir <dir>] [--no-cache]
 //!                       [--windows <n>] [--window-seconds <s>]
+//! junctur transcribe <file> [--model large-v3-turbo|large-v3] [--language <code>]
+//!                           [--json <out.json>] [--cache-dir <dir>] [--no-cache]
 //! ```
 //!
-//! Arguments are parsed by hand: one command with five flags does not justify a parser dependency.
+//! Arguments are parsed by hand: two commands with a handful of flags do not justify a parser
+//! dependency.
 
-use std::path::PathBuf;
+mod tracks;
+mod transcribe;
+
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use junctur_core::{analyze, AnalyzeOptions};
-
-const USAGE: &str = "usage: junctur tracks <file> [--json <out.json>] [--cache-dir <dir>] \
-[--no-cache] [--windows <n>] [--window-seconds <s>]";
+const USAGE: &str = "usage:
+  junctur tracks <file> [--json <out.json>] [--cache-dir <dir>] [--no-cache] [--windows <n>] \
+[--window-seconds <s>]
+  junctur transcribe <file> [--model large-v3-turbo|large-v3] [--language <code>] \
+[--json <out.json>] [--cache-dir <dir>] [--no-cache]";
 
 fn main() -> ExitCode {
     match run(std::env::args().skip(1).collect()) {
@@ -28,38 +35,22 @@ fn main() -> ExitCode {
 fn run(args: Vec<String>) -> Result<(), String> {
     let mut it = args.into_iter();
     match it.next().as_deref() {
-        Some("tracks") => {}
-        _ => return Err(USAGE.into()),
+        Some("tracks") => tracks::run(it),
+        Some("transcribe") => transcribe::run(it),
+        _ => Err(USAGE.into()),
     }
-    let mut file = None;
-    let mut json = None;
-    let mut opts = AnalyzeOptions::default();
-    while let Some(a) = it.next() {
-        let mut val = |name: &str| it.next().ok_or(format!("{name} needs a value\n{USAGE}"));
-        match a.as_str() {
-            "--json" => json = Some(PathBuf::from(val("--json")?)),
-            "--cache-dir" => opts.cache_dir = Some(PathBuf::from(val("--cache-dir")?)),
-            "--no-cache" => opts.use_cache = false,
-            "--windows" => {
-                opts.windows = val("--windows")?
-                    .parse()
-                    .map_err(|_| "--windows must be a whole number")?
-            }
-            "--window-seconds" => {
-                opts.window_seconds = val("--window-seconds")?
-                    .parse()
-                    .map_err(|_| "--window-seconds must be a number")?
-            }
-            _ if file.is_none() && !a.starts_with("--") => file = Some(PathBuf::from(a)),
-            _ => return Err(format!("unexpected argument {a}\n{USAGE}")),
-        }
-    }
-    let file = file.ok_or(USAGE)?;
-    let report = analyze(&file, &opts).map_err(|e| e.to_string())?;
-    print!("{}", report.render());
-    if let Some(out) = json {
-        let body = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
-        std::fs::write(&out, body).map_err(|e| format!("{}: {e}", out.display()))?;
-    }
-    Ok(())
+}
+
+/// The value after flag `name`.
+fn value(it: &mut impl Iterator<Item = String>, name: &str) -> Result<String, String> {
+    it.next().ok_or(format!("{name} needs a value\n{USAGE}"))
+}
+
+fn write_json(out: &Path, value: &impl serde::Serialize) -> Result<(), String> {
+    let body = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
+    std::fs::write(out, body).map_err(|e| format!("{}: {e}", out.display()))
+}
+
+fn input(file: Option<PathBuf>) -> Result<PathBuf, String> {
+    file.ok_or_else(|| USAGE.into())
 }
