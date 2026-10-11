@@ -72,7 +72,6 @@ pub fn decide(a: &Activity, speech: Option<Speech>, cx: &Context) -> (Role, f64,
             format!("silent: loudest frame {:.0} dB", a.peak_db),
         );
     }
-    let pct = |x: f64| x * 100.0;
     if let Some(r) = cx.sum_of_others {
         let mut why = format!(
             "is the sum of the other tracks (residual {:.1} dB)",
@@ -84,27 +83,38 @@ pub fn decide(a: &Activity, speech: Option<Speech>, cx: &Context) -> (Role, f64,
         return (Role::Mix, 0.8, why);
     }
     match (speech, cx.faint) {
-        (None, true) => (
+        (s, true) => faint(a, s),
+        (None, false) => loudness_only(a, cx.substantial),
+        (Some(s), false) => with_speech(s, cx.substantial),
+    }
+}
+
+fn pct(x: f64) -> f64 {
+    x * 100.0
+}
+
+/// A faint track: named by its speech, if speech detection ran.
+fn faint(a: &Activity, speech: Option<Speech>) -> (Role, f64, String) {
+    match speech {
+        None => (
             Role::Unknown,
             0.3,
             format!(
-                "faint: mean {:.0} dB, near-silent {:.0}% of the time; a low-level source \
-                 (PC or Discord audio turned down, or bleed), not enough to tell which",
+                "faint: mean {:.0} dB, near-silent {:.0}% of the time; a low-level source                  (PC or Discord audio turned down, or bleed), not enough to tell which",
                 a.mean_db,
                 pct(a.near_silent_share)
             ),
         ),
-        (Some(s), true) if s.share >= FAINT_SPEECH_MIN => (
+        Some(s) if s.share >= FAINT_SPEECH_MIN => (
             Role::Voice,
             0.6,
             format!(
-                "faint (mean {:.0} dB) but carries speech {:.0}% of the time: likely Discord \
-                 turned down, or mic bleed",
+                "faint (mean {:.0} dB) but carries speech {:.0}% of the time: likely Discord                  turned down, or mic bleed",
                 a.mean_db,
                 pct(s.share)
             ),
         ),
-        (Some(s), true) => (
+        Some(s) => (
             Role::GamePc,
             0.5,
             format!(
@@ -113,16 +123,22 @@ pub fn decide(a: &Activity, speech: Option<Speech>, cx: &Context) -> (Role, f64,
                 pct(s.share)
             ),
         ),
-        (None, false) => loudness_only(a, cx.substantial),
-        (Some(s), false) if s.share < SPEECH_MIN => (
+    }
+}
+
+/// A substantial track with speech measured: does it carry speech, and what plays under it.
+fn with_speech(s: Speech, substantial: usize) -> (Role, f64, String) {
+    if s.share < SPEECH_MIN {
+        (
             Role::GamePc,
             0.6,
             format!(
                 "no speech ({:.0}%): game, PC or music audio (music is not told apart yet)",
                 pct(s.share)
             ),
-        ),
-        (Some(s), false) if s.quiet_gaps >= QUIET_GAPS => (
+        )
+    } else if s.quiet_gaps >= QUIET_GAPS {
+        (
             Role::Voice,
             0.75,
             format!(
@@ -130,26 +146,26 @@ pub fn decide(a: &Activity, speech: Option<Speech>, cx: &Context) -> (Role, f64,
                 pct(s.share),
                 pct(s.quiet_gaps)
             ),
-        ),
-        (Some(s), false) if cx.substantial == 1 => (
+        )
+    } else if substantial == 1 {
+        (
             Role::Mix,
             0.8,
             format!(
-                "the only substantial track: speech {:.0}% of the time over a background that keeps \
-                 playing (only {:.0}% of the gaps near-silent)",
+                "the only substantial track: speech {:.0}% of the time over a background that keeps                  playing (only {:.0}% of the gaps near-silent)",
                 pct(s.share),
                 pct(s.quiet_gaps)
             ),
-        ),
-        (Some(s), false) => (
+        )
+    } else {
+        (
             Role::Voice,
             0.5,
             format!(
-                "speech {:.0}% of the time over continuous sound: a noisy voice track, or game \
-                 audio with voices in it",
+                "speech {:.0}% of the time over continuous sound: a noisy voice track, or game                  audio with voices in it",
                 pct(s.share)
             ),
-        ),
+        )
     }
 }
 

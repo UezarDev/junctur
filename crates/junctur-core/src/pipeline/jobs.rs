@@ -78,18 +78,19 @@ impl Jobs {
         Ok(())
     }
 
-    /// Run one stage, recording it as running, then done (with its time) or failed.
+    /// Run one stage, recording it as running, then done (with its time) or failed. The stage
+    /// logs through the same `log`.
     pub fn stage<T>(
         &mut self,
         dir: &Path,
         name: &str,
         log: &mut dyn FnMut(&str),
-        f: impl FnOnce() -> Result<T>,
+        f: impl FnOnce(&mut dyn FnMut(&str)) -> Result<T>,
     ) -> Result<T> {
         log(&format!("stage {name} ..."));
         self.set(dir, name, StageState::Running, None, None)?;
         let t0 = Instant::now();
-        match f() {
+        match f(log) {
             Ok(v) => {
                 let secs = t0.elapsed().as_secs_f64();
                 self.set(dir, name, StageState::Done, Some(secs), None)?;
@@ -123,7 +124,7 @@ mod tests {
         assert!(j.stages.iter().all(|s| s.state == StageState::Pending));
         let mut log = |_: &str| {};
         let v = j
-            .stage(&dir, "tracks", &mut log, || {
+            .stage(&dir, "tracks", &mut log, |_| {
                 // Mid-stage, the file on disk says running.
                 assert_eq!(
                     Jobs::load(&dir).get("tracks").unwrap().state,
@@ -133,7 +134,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(v, 7);
-        let r: Result<()> = j.stage(&dir, "speech", &mut log, || {
+        let r: Result<()> = j.stage(&dir, "speech", &mut log, |_| {
             Err(crate::Error::Edit("boom".into()))
         });
         assert!(r.is_err());

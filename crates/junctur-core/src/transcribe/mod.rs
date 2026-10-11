@@ -111,6 +111,8 @@ pub fn load(project: &Path) -> Option<Transcript> {
     serde_json::from_slice(&std::fs::read(path(project)).ok()?).ok()
 }
 
+/// Transcribe the speech regions of `sources`, resuming an interrupted run and reusing a finished
+/// one that answers `opts`. `log` gets the model note and progress every 5%.
 pub fn transcribe(
     file: &Path,
     sources: &[Source],
@@ -118,7 +120,7 @@ pub fn transcribe(
     project: &Path,
     cache_dir: &Path,
     opts: &TranscribeOptions,
-    progress: &mut dyn FnMut(usize, usize),
+    log: &mut dyn FnMut(&str),
 ) -> Result<Transcript> {
     let partial = project.join("transcript.partial.jsonl");
     if opts.force {
@@ -130,28 +132,12 @@ pub fn transcribe(
     } else if let Some(t) = load(project).filter(|t| reusable(t, opts)) {
         return Ok(t);
     }
-    let prior = read_partial(&partial);
-    // `Auto` resumes an interrupted run with the model it was started with, rather than restarting.
-    let pref = match &prior {
-        Some((h, _))
-            if opts.model == ModelPref::Auto
-                && h.version == VERSION
-                && h.languages == opts.languages.key() =>
-        {
-            h.model.parse().unwrap_or(ModelPref::Auto)
-        }
-        _ => opts.model,
-    };
-    let want = Header {
-        version: VERSION,
-        languages: opts.languages.key(),
-        model: pref.name(),
-        device: Device::Cpu,
-    };
-    let (started, mut done) = match prior {
-        Some((h, segs)) if h.same_run(&want) => (Some(h), segs),
-        _ => (None, Vec::new()),
-    };
+    let Resume {
+        pref,
+        want,
+        started,
+        mut done,
+    } = resume_point(&partial, opts);
     let resumed_chunks = done.len();
 
     let work: Vec<(usize, Chunk)> = sources
@@ -178,7 +164,7 @@ pub fn transcribe(
         let model;
         (choice, model) = choose(pref, opts.device);
         if let Some(note) = &choice.note {
-            eprintln!("junctur: {note}");
+            log(note);
         }
         let header = started.clone().unwrap_or(Header {
             device: choice.device,
@@ -186,31 +172,24 @@ pub fn transcribe(
         });
         let mut w = Whisper::open(&models::ensure(model, cache_dir)?, choice.device)?;
         let mut out = open_partial(&partial, &header, &done)?;
+        let mut progress = Progress::new(work.len(), log);
+        progress.at(resumed_chunks);
         for (i, (track, c)) in todo.iter().enumerate() {
-            progress(resumed_chunks + i, work.len());
             let samples = read_span(file, *track, c)?;
-            let (lang, words) = w.run(&samples, &opts.languages)?;
-            let seg = Segment {
-                track: *track,
-                start: c.start,
-                end: c.end,
-                lang,
-                model: choice.model.clone(),
-                words: words
-                    .into_iter()
-                    .map(|x| Word {
-                        start: c.start + x.start,
-                        end: c.start + x.end,
-                        ..x
-                    })
-                    .collect(),
-            };
+            let seg = segment(&mut w, &samples, *track, c, &choice.model, &opts.languages)?;
             // One write for the line and its newline, so a kill tears at most this line.
-            out.write_all(format!("{}\n", serde_json::to_string(&seg)?).as_bytes())?;
+            out.write_all(
+                format!(
+                    "{}
+",
+                    serde_json::to_string(&seg)?
+                )
+                .as_bytes(),
+            )?;
             out.flush()?;
             done.push(seg);
+            progress.at(resumed_chunks + i + 1);
         }
-        progress(work.len(), work.len());
     }
     done.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.track.cmp(&b.track)));
     let t = Transcript {
@@ -225,6 +204,101 @@ pub fn transcribe(
     std::fs::write(project.join("transcript.txt"), t.render())?;
     let _ = std::fs::remove_file(&partial);
     Ok(t)
+}
+
+/// Where a run starts: the model to use, the header it writes, and the chunks an interrupted run
+/// already finished (`started` is that run's header, when it is resumed).
+struct Resume {
+    pref: ModelPref,
+    want: Header,
+    started: Option<Header>,
+    done: Vec<Segment>,
+}
+
+fn resume_point(partial: &Path, opts: &TranscribeOptions) -> Resume {
+    let prior = read_partial(partial);
+    // `Auto` resumes an interrupted run with the model it was started with, rather than restarting.
+    let pref = match &prior {
+        Some((h, _))
+            if opts.model == ModelPref::Auto
+                && h.version == VERSION
+                && h.languages == opts.languages.key() =>
+        {
+            h.model.parse().unwrap_or(ModelPref::Auto)
+        }
+        _ => opts.model,
+    };
+    let want = Header {
+        version: VERSION,
+        languages: opts.languages.key(),
+        model: pref.name(),
+        device: Device::Cpu,
+    };
+    let (started, done) = match prior {
+        Some((h, segs)) if h.same_run(&want) => (Some(h), segs),
+        _ => (None, Vec::new()),
+    };
+    Resume {
+        pref,
+        want,
+        started,
+        done,
+    }
+}
+
+/// Whisper on one chunk's samples, with word times moved onto the recording's timeline.
+fn segment(
+    w: &mut Whisper,
+    samples: &[f32],
+    track: usize,
+    c: &Chunk,
+    model: &str,
+    languages: &Languages,
+) -> Result<Segment> {
+    let (lang, words) = w.run(samples, languages)?;
+    Ok(Segment {
+        track,
+        start: c.start,
+        end: c.end,
+        lang,
+        model: model.to_string(),
+        words: words
+            .into_iter()
+            .map(|x| Word {
+                start: c.start + x.start,
+                end: c.start + x.end,
+                ..x
+            })
+            .collect(),
+    })
+}
+
+/// "transcribing n/total chunks (p%)" through `log`, every 5% and at the end.
+struct Progress<'a> {
+    total: usize,
+    last: usize,
+    log: &'a mut dyn FnMut(&str),
+}
+
+impl<'a> Progress<'a> {
+    fn new(total: usize, log: &'a mut dyn FnMut(&str)) -> Self {
+        Self {
+            total,
+            last: 0,
+            log,
+        }
+    }
+
+    fn at(&mut self, done: usize) {
+        let pct = done * 100 / self.total.max(1);
+        if pct >= self.last + 5 || done == self.total {
+            self.last = pct;
+            (self.log)(&format!(
+                "transcribing {done}/{} chunks ({pct}%)",
+                self.total
+            ));
+        }
+    }
 }
 
 /// An earlier run's header and the chunks it finished, or None when there is no readable partial

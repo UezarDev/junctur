@@ -8,7 +8,8 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::{ffmpeg, Error, Result};
+use crate::ffmpeg::probe::{self, num, rate, PacketTime};
+use crate::{Error, Result};
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct VideoInfo {
@@ -93,29 +94,8 @@ pub fn nvenc_profile(profile: &str) -> Option<&'static str> {
 }
 
 pub fn inspect(file: &Path) -> Result<Source> {
-    let path = file.to_string_lossy();
-    let streams = ffmpeg::ffprobe(&[
-        "-v",
-        "error",
-        "-print_format",
-        "json",
-        "-show_streams",
-        &path,
-    ])?;
-    let (video, audio) = parse_streams(&streams)?;
-    // One pass over the packet index: pts and flags in decode order (~7 s for 1h45 of 1080p30).
-    let packets = ffmpeg::ffprobe(&[
-        "-v",
-        "error",
-        "-select_streams",
-        "v:0",
-        "-show_entries",
-        "packet=pts_time,flags",
-        "-of",
-        "csv=p=0",
-        &path,
-    ])?;
-    let packets = parse_packets(&packets, video.fps_num, video.fps_den);
+    let (video, audio) = parse_streams(&probe::streams(file)?)?;
+    let packets = on_grid(&probe::video_packets(file)?, video.fps_num, video.fps_den);
     let (frames, grid_problem) = check_grid(&packets);
     Ok(Source {
         keyframes: usable_keyframes(&packets),
@@ -126,27 +106,13 @@ pub fn inspect(file: &Path) -> Result<Source> {
     })
 }
 
-fn rate(s: &Value) -> Option<(u64, u64)> {
-    let (n, d) = s.as_str()?.split_once('/')?;
-    let (n, d) = (n.parse().ok()?, d.parse().ok()?);
-    (n > 0 && d > 0).then_some((n, d))
-}
-
-fn num(x: &Value) -> Option<u64> {
-    x.as_str()
-        .and_then(|s| s.parse().ok())
-        .or_else(|| x.as_u64())
-}
-
 fn tag(x: &Value) -> Option<String> {
     x.as_str()
         .filter(|s| !s.is_empty() && *s != "unknown")
         .map(str::to_string)
 }
 
-fn parse_streams(json: &[u8]) -> Result<(VideoInfo, Vec<AudioTrack>)> {
-    let v: Value = serde_json::from_slice(json)?;
-    let streams = v["streams"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+fn parse_streams(streams: &[Value]) -> Result<(VideoInfo, Vec<AudioTrack>)> {
     let s = streams
         .iter()
         .find(|s| s["codec_type"] == "video")
@@ -176,7 +142,7 @@ fn parse_streams(json: &[u8]) -> Result<(VideoInfo, Vec<AudioTrack>)> {
         .iter()
         .filter(|s| s["codec_type"] == "audio")
         .map(|s| AudioTrack {
-            rate: num(&s["sample_rate"]).unwrap_or(48_000) as u32,
+            rate: num(&s["sample_rate"]).unwrap_or(48_000),
             channels: s["channels"].as_u64().unwrap_or(2) as u32,
             bit_rate: num(&s["bit_rate"]),
         })
@@ -191,16 +157,13 @@ pub struct Packet {
     pub key: bool,
 }
 
-fn parse_packets(csv: &[u8], fps_num: u64, fps_den: u64) -> Vec<Packet> {
-    String::from_utf8_lossy(csv)
-        .lines()
-        .filter_map(|l| {
-            let (pts, flags) = l.trim().split_once(',')?;
-            let t: f64 = pts.parse().ok()?;
-            Some(Packet {
-                frame: (t * fps_num as f64 / fps_den as f64).round() as i64,
-                key: flags.starts_with('K'),
-            })
+/// Packet times as frame numbers on the stream's rate grid.
+fn on_grid(packets: &[PacketTime], fps_num: u64, fps_den: u64) -> Vec<Packet> {
+    packets
+        .iter()
+        .map(|p| Packet {
+            frame: (p.pts * fps_num as f64 / fps_den as f64).round() as i64,
+            key: p.key,
         })
         .collect()
 }
@@ -270,12 +233,9 @@ mod tests {
     }
 
     #[test]
-    fn grid_and_packet_parsing() {
-        let p = parse_packets(
-            b"0.000000,K__\n0.100000,___\n0.033333,___\nN/A,___\n",
-            30,
-            1,
-        );
+    fn grid_and_packet_times() {
+        let t = |pts: f64, key: bool| PacketTime { pts, key };
+        let p = on_grid(&[t(0.0, true), t(0.1, false), t(0.033333, false)], 30, 1);
         assert_eq!(p.iter().map(|p| p.frame).collect::<Vec<_>>(), vec![0, 3, 1]);
         assert!(p[0].key && !p[1].key);
         assert_eq!(check_grid(&p).0, 3);
@@ -292,7 +252,9 @@ mod tests {
              "field_order":"progressive","color_range":"tv","color_space":"bt709","r_frame_rate":"30/1",
              "avg_frame_rate":"30/1","bit_rate":"5000000","has_b_frames":1},
             {"codec_type":"audio","sample_rate":"48000","channels":2,"bit_rate":"160000"}]}"#;
-        let (video, audio) = parse_streams(json).unwrap();
+        let streams = |j: &[u8]| serde_json::from_slice::<Value>(j).unwrap()["streams"].clone();
+        let all = streams(json);
+        let (video, audio) = parse_streams(all.as_array().unwrap()).unwrap();
         assert_eq!(audio[0].bit_rate, Some(160_000));
         assert_eq!(video.color_transfer, None);
         let mut s = Source {
@@ -310,6 +272,6 @@ mod tests {
         assert!(s.mismatch().unwrap().contains("High 10"));
         s.video.codec = "hevc".into();
         assert!(s.mismatch().unwrap().contains("hevc"));
-        assert!(parse_streams(br#"{"streams":[]}"#).is_err());
+        assert!(parse_streams(&[]).is_err());
     }
 }

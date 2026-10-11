@@ -97,7 +97,7 @@ pub fn run(p: &Project, opts: &PipelineOptions, log: &mut dyn FnMut(&str)) -> Re
     let mut jobs = p.jobs();
     jobs.file = p.file.clone();
 
-    let report = jobs.stage(&p.dir, "tracks", log, || {
+    let report = jobs.stage(&p.dir, "tracks", log, |_| {
         let a = tracks::AnalyzeOptions {
             cache_dir: Some(p.cache_dir.clone()),
             use_cache: !opts.force,
@@ -105,17 +105,41 @@ pub fn run(p: &Project, opts: &PipelineOptions, log: &mut dyn FnMut(&str)) -> Re
         };
         tracks::analyze(&p.file, &a)
     })?;
-    let sources = speech_tracks(&report);
+    let speech = speech_stage(p, &mut jobs, &report, opts.force, log)?;
+    let transcript = if opts.no_transcript {
+        None
+    } else {
+        Some(transcribe_stage(p, &mut jobs, &report, &speech, opts, log)?)
+    };
+    let edit = jobs.stage(&p.dir, "edit", log, |_| {
+        cut(p, &report, &speech, transcript.as_ref(), &opts.cut)
+    })?;
+    Ok(Outcome {
+        report,
+        speech,
+        transcript,
+        edit,
+    })
+}
+
+/// Speech regions and the cut envelope on every speech track, reused unless `force`.
+fn speech_stage(
+    p: &Project,
+    jobs: &mut Jobs,
+    report: &TrackReport,
+    force: bool,
+    log: &mut dyn FnMut(&str),
+) -> Result<Speech> {
+    let sources = speech_tracks(report);
     if sources.is_empty() {
         log("no track carries speech: the edit list will be empty");
     }
-
-    let speech = match p.speech().filter(|_| !opts.force) {
+    let speech = match p.speech().filter(|_| !force) {
         Some(s) if p.envelope_path().is_file() => {
             jobs.skip(&p.dir, "speech", log)?;
             s
         }
-        _ => jobs.stage(&p.dir, "speech", log, || {
+        _ => jobs.stage(&p.dir, "speech", log, |_| {
             let (s, env) = speech::detect(&p.file, &sources, &p.cache_dir)?;
             speech::save_envelope(&p.envelope_path(), &env)?;
             std::fs::write(p.speech_path(), serde_json::to_vec_pretty(&s)?)?;
@@ -130,54 +154,42 @@ pub fn run(p: &Project, opts: &PipelineOptions, log: &mut dyn FnMut(&str)) -> Re
             t.regions.len()
         ));
     }
+    Ok(speech)
+}
 
-    let transcript = if opts.no_transcript {
-        None
-    } else {
-        let t_opts = TranscribeOptions {
-            model: opts.model,
-            device: opts.device,
-            languages: opts.languages.clone(),
-            force: opts.force,
-        };
-        let src: Vec<Source> = speech
-            .tracks
-            .iter()
-            .map(|t| Source {
-                track: t.track,
-                regions: t.regions.clone(),
-            })
-            .collect();
-        let mut last = 0;
-        let t = jobs.stage(&p.dir, "transcribe", log, || {
-            transcribe::transcribe(
-                &p.file,
-                &src,
-                report.duration,
-                &p.dir,
-                &p.cache_dir,
-                &t_opts,
-                &mut |done, total| {
-                    // Progress every 5%, to stderr: stdout is the report.
-                    let pct = done * 100 / total.max(1);
-                    if pct >= last + 5 || done == total {
-                        last = pct;
-                        eprintln!("junctur: transcribing {done}/{total} chunks ({pct}%)");
-                    }
-                },
-            )
-        })?;
-        Some(t)
+/// Whisper over the speech regions, resumed or reused when it can be.
+fn transcribe_stage(
+    p: &Project,
+    jobs: &mut Jobs,
+    report: &TrackReport,
+    speech: &Speech,
+    opts: &PipelineOptions,
+    log: &mut dyn FnMut(&str),
+) -> Result<Transcript> {
+    let t_opts = TranscribeOptions {
+        model: opts.model,
+        device: opts.device,
+        languages: opts.languages.clone(),
+        force: opts.force,
     };
-
-    let edit = jobs.stage(&p.dir, "edit", log, || {
-        cut(p, &report, &speech, transcript.as_ref(), &opts.cut)
-    })?;
-    Ok(Outcome {
-        report,
-        speech,
-        transcript,
-        edit,
+    let src: Vec<Source> = speech
+        .tracks
+        .iter()
+        .map(|t| Source {
+            track: t.track,
+            regions: t.regions.clone(),
+        })
+        .collect();
+    jobs.stage(&p.dir, "transcribe", log, |log| {
+        transcribe::transcribe(
+            &p.file,
+            &src,
+            report.duration,
+            &p.dir,
+            &p.cache_dir,
+            &t_opts,
+            log,
+        )
     })
 }
 

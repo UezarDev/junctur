@@ -75,13 +75,8 @@ pub fn separate(file: &Path, track: usize, opts: &SeparateOptions) -> Result<Ste
         "stems.json"
     });
     if !opts.force {
-        if let Ok(bytes) = std::fs::read(&done) {
-            if let Ok(mut s) = serde_json::from_slice::<Stems>(&bytes) {
-                if s.vocals.is_file() && s.background.is_file() {
-                    s.from_cache = true;
-                    return Ok(s);
-                }
-            }
+        if let Some(s) = finished(&done) {
+            return Ok(s);
         }
     }
     std::fs::create_dir_all(&dir)?;
@@ -101,12 +96,7 @@ pub fn separate(file: &Path, track: usize, opts: &SeparateOptions) -> Result<Ste
     let speakers = if opts.no_speakers {
         None
     } else {
-        let model = models::ensure(&models::SPEAKER_EMBEDDING, &cache_dir)?;
-        let mut emb = Embedder::open(&model, opts.device)?;
-        let mut r = PcmReader::open(&vocals, 0, vad::RATE, 1, Span::default())?;
-        let d = diarize::diarize(&mut r, &speech, &mut emb)?;
-        drop(r);
-        Some(d)
+        Some(speakers(&vocals, &speech, &cache_dir, opts.device)?)
     };
     let diarize_s = t2.elapsed().as_secs_f64();
 
@@ -130,6 +120,29 @@ pub fn separate(file: &Path, track: usize, opts: &SeparateOptions) -> Result<Ste
     };
     std::fs::write(&done, serde_json::to_vec_pretty(&stems)?)?;
     Ok(stems)
+}
+
+/// A finished earlier run whose stems are still there.
+fn finished(done: &Path) -> Option<Stems> {
+    let mut s: Stems = serde_json::from_slice(&std::fs::read(done).ok()?).ok()?;
+    if !(s.vocals.is_file() && s.background.is_file()) {
+        return None;
+    }
+    s.from_cache = true;
+    Some(s)
+}
+
+/// Who speaks when, over the vocal stem's speech regions.
+fn speakers(
+    vocals: &Path,
+    speech: &[Region],
+    cache_dir: &Path,
+    device: DevicePref,
+) -> Result<Diarization> {
+    let model = models::ensure(&models::SPEAKER_EMBEDDING, cache_dir)?;
+    let mut emb = Embedder::open(&model, device)?;
+    let mut r = PcmReader::open(vocals, 0, vad::RATE, 1, Span::default())?;
+    diarize::diarize(&mut r, speech, &mut emb)
 }
 
 /// What the model pass produced; saved on its own so a changed analysis does not re-separate.

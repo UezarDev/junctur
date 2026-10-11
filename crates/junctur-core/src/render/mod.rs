@@ -3,7 +3,7 @@
 //!
 //! [`source`] reads the encoding and the real keyframes, [`plan`] splits the kept frames into copy
 //! and encode pieces, [`video`] writes each piece, [`audio`] rebuilds every audio track with
-//! crossfades, and the pieces are joined by one muxing ffmpeg. When the source cannot be matched
+//! crossfades, and [`mux`] joins them in one ffmpeg. When the source cannot be matched
 //! the same machinery encodes every frame instead (a full re-encode) and says why.
 //!
 //! Scratch files go in a folder beside the output (same disk; a 30 h render does not fit in a
@@ -12,6 +12,7 @@
 //! failed `--force` keeps the previous render. The source is only read.
 
 mod audio;
+mod mux;
 mod plan;
 mod source;
 mod splice;
@@ -109,17 +110,15 @@ pub fn render(
     let work = scratch_dir(out);
     std::fs::create_dir_all(&work)?;
     let partial = work.join(out.file_name().unwrap_or_default());
-    let built = build(
+    let job = Job {
         edit,
-        &src,
-        &ranges,
-        &pieces,
-        full_reason.is_none(),
-        &work,
-        &partial,
-        opts,
-        log,
-    );
+        src: &src,
+        ranges: &ranges,
+        pieces: &pieces,
+        matched: full_reason.is_none(),
+        work: &work,
+    };
+    let built = job.build(&partial, opts.jobs, log);
     let finished = built.is_ok();
     let result = built.and_then(|()| install(&partial, out));
     // A finished render that could be moved nowhere stays in the folder, which the error names.
@@ -216,136 +215,119 @@ enum Progress {
     Track(usize),
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build(
-    edit: &EditList,
-    src: &Source,
-    ranges: &[(u64, u64)],
-    pieces: &[Piece],
+/// One render's inputs, shared by the threads that write its pieces and tracks.
+struct Job<'a> {
+    edit: &'a EditList,
+    src: &'a Source,
+    /// Kept frame ranges.
+    ranges: &'a [(u64, u64)],
+    pieces: &'a [Piece],
+    /// Encodes match the source (smart render) rather than a full re-encode.
     matched: bool,
-    work: &Path,
-    partial: &Path,
-    opts: &RenderOptions,
-    log: &mut dyn FnMut(&str),
-) -> Result<()> {
-    let piece_path = |i: usize| work.join(format!("{i:06}.ts"));
-    let track_path = |i: usize| work.join(format!("audio{i}.m4a"));
-    let (tx, rx) = mpsc::channel();
-    let next = AtomicUsize::new(0);
-    // Set by the first thread that fails; every other thread stops at its next step.
-    let failed = AtomicBool::new(false);
-    let v = &src.video;
-    // Only the first failure is reported: the rest are threads stopping because of it.
-    let first = |r: Result<()>| match r {
-        Err(e) if !failed.swap(true, Ordering::Relaxed) => Err(e),
-        _ => Ok(()),
-    };
-
-    std::thread::scope(|scope| -> Result<()> {
-        let mut handles = Vec::new();
-        for (i, track) in src.audio.iter().enumerate() {
-            let (tx, failed, first) = (tx.clone(), &failed, &first);
-            let segs = sample_ranges(ranges, track.rate, v.fps_num, v.fps_den);
-            let fade = (edit.settings.crossfade.max(0.0) / 2.0 * track.rate as f64).round() as u64;
-            let path = track_path(i);
-            handles.push(scope.spawn(move || {
-                let _stop = StopOnPanic(failed);
-                let r = audio::render_track(&edit.source, i, track, &segs, fade, &path, failed);
-                if r.is_ok() {
-                    let _ = tx.send(Progress::Track(i));
-                }
-                first(r)
-            }));
-        }
-        for _ in 0..opts.jobs.max(1) {
-            let (tx, next, failed, first) = (tx.clone(), &next, &failed, &first);
-            handles.push(scope.spawn(move || {
-                let _stop = StopOnPanic(failed);
-                while !failed.load(Ordering::Relaxed) {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(p) = pieces.get(i) else { break };
-                    let args = video::args(&edit.source, p, v, matched, &piece_path(i));
-                    first(ffmpeg::ffmpeg(&args))?;
-                    let _ = tx.send(Progress::Piece);
-                }
-                Ok(())
-            }));
-        }
-        drop(tx);
-        let (mut done, step) = (0, pieces.len().div_ceil(10).max(1));
-        for msg in rx {
-            match msg {
-                Progress::Piece => {
-                    done += 1;
-                    if done % step == 0 || done == pieces.len() {
-                        log(&format!("video pieces {done}/{}", pieces.len()));
-                    }
-                }
-                Progress::Track(i) => log(&format!("audio track {} done", i + 1)),
-            }
-        }
-        // Join every thread, so a panic is an error (and cleanup runs) rather than an unwind
-        // out of `render` that leaves the parts folder behind.
-        let mut result = Ok(());
-        for h in handles {
-            let r = h
-                .join()
-                .unwrap_or_else(|_| Err(Error::Render("a render thread panicked".into())));
-            if result.is_ok() {
-                result = r;
-            }
-        }
-        result
-    })?;
-
-    log("muxing");
-    mux(edit, src, pieces.len(), &piece_path, &track_path, partial)
+    /// The scratch folder.
+    work: &'a Path,
 }
 
-/// Join the pieces (fed in order through stdin) with the audio tracks into the output MP4, by copy.
-fn mux(
-    edit: &EditList,
-    src: &Source,
-    pieces: usize,
-    piece_path: &dyn Fn(usize) -> PathBuf,
-    track_path: &dyn Fn(usize) -> PathBuf,
-    out: &Path,
-) -> Result<()> {
-    let n = src.audio.len();
-    let mut a: Vec<String> = ["-v", "error", "-y", "-f", "mpegts", "-i", "-"]
-        .map(String::from)
-        .to_vec();
-    for i in 0..n {
-        a.push("-i".into());
-        a.push(track_path(i).to_string_lossy().into_owned());
+impl Job<'_> {
+    fn piece_path(&self, i: usize) -> PathBuf {
+        self.work.join(format!("{i:06}.ts"))
     }
-    // The source again, unread, only for its metadata (track titles, languages).
-    a.push("-i".into());
-    a.push(edit.source.to_string_lossy().into_owned());
-    a.extend(["-map".into(), "0:v:0".into()]);
-    for i in 0..n {
-        a.extend(["-map".into(), format!("{}:a:0", i + 1)]);
-        a.extend([
-            format!("-map_metadata:s:a:{i}"),
-            format!("{}:s:a:{i}", n + 1),
-        ]);
+
+    fn track_path(&self, i: usize) -> PathBuf {
+        self.work.join(format!("audio{i}.m4a"))
     }
-    a.extend([
-        "-map_metadata".into(),
-        (n + 1).to_string(),
-        "-c".into(),
-        "copy".into(),
-    ]);
-    a.push(out.to_string_lossy().into_owned());
-    let mut feed = ffmpeg::Feed::spawn(&a)?;
-    for i in 0..pieces {
-        let path = piece_path(i);
-        // Streamed: a copy piece can be a whole kept range, gigabytes long.
-        feed.copy_from(&mut std::fs::File::open(&path)?)?;
-        // Free the scratch space as the mux goes.
-        let _ = std::fs::remove_file(path);
+
+    /// Write every piece (`jobs` at once) and audio track, then mux them into `partial`.
+    fn build(&self, partial: &Path, jobs: usize, log: &mut dyn FnMut(&str)) -> Result<()> {
+        let (tx, rx) = mpsc::channel();
+        let next = AtomicUsize::new(0);
+        // Set by the first thread that fails; every other thread stops at its next step.
+        let failed = AtomicBool::new(false);
+        let (edit, v, pieces) = (self.edit, &self.src.video, self.pieces);
+        // Only the first failure is reported: the rest are threads stopping because of it.
+        let first = |r: Result<()>| match r {
+            Err(e) if !failed.swap(true, Ordering::Relaxed) => Err(e),
+            _ => Ok(()),
+        };
+
+        std::thread::scope(|scope| -> Result<()> {
+            let mut handles = Vec::new();
+            for (i, track) in self.src.audio.iter().enumerate() {
+                let (tx, failed, first) = (tx.clone(), &failed, &first);
+                let segs = sample_ranges(self.ranges, track.rate, v.fps_num, v.fps_den);
+                let fade =
+                    (edit.settings.crossfade.max(0.0) / 2.0 * track.rate as f64).round() as u64;
+                let path = self.track_path(i);
+                handles.push(scope.spawn(move || {
+                    let _stop = StopOnPanic(failed);
+                    let r = audio::render_track(&edit.source, i, track, &segs, fade, &path, failed);
+                    if r.is_ok() {
+                        let _ = tx.send(Progress::Track(i));
+                    }
+                    first(r)
+                }));
+            }
+            for _ in 0..jobs.max(1) {
+                let (tx, next, failed, first) = (tx.clone(), &next, &failed, &first);
+                handles.push(scope.spawn(move || {
+                    let _stop = StopOnPanic(failed);
+                    while !failed.load(Ordering::Relaxed) {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(p) = pieces.get(i) else { break };
+                        let args =
+                            video::args(&edit.source, p, v, self.matched, &self.piece_path(i));
+                        first(ffmpeg::ffmpeg(&args))?;
+                        let _ = tx.send(Progress::Piece);
+                    }
+                    Ok(())
+                }));
+            }
+            drop(tx);
+            let (mut done, step) = (0, pieces.len().div_ceil(10).max(1));
+            for msg in rx {
+                match msg {
+                    Progress::Piece => {
+                        done += 1;
+                        if done % step == 0 || done == pieces.len() {
+                            log(&format!("video pieces {done}/{}", pieces.len()));
+                        }
+                    }
+                    Progress::Track(i) => log(&format!("audio track {} done", i + 1)),
+                }
+            }
+            // Join every thread, so a panic is an error (and cleanup runs) rather than an unwind
+            // out of `render` that leaves the parts folder behind.
+            let mut result = Ok(());
+            for h in handles {
+                let r = h
+                    .join()
+                    .unwrap_or_else(|_| Err(Error::Render("a render thread panicked".into())));
+                if result.is_ok() {
+                    result = r;
+                }
+            }
+            result
+        })?;
+
+        log("muxing");
+        self.mux(partial)
     }
-    feed.finish()
+
+    /// Join the pieces (fed in order through stdin) with the audio tracks into `out`, by copy.
+    fn mux(&self, out: &Path) -> Result<()> {
+        let tracks: Vec<PathBuf> = (0..self.src.audio.len())
+            .map(|i| self.track_path(i))
+            .collect();
+        let mut feed = ffmpeg::Feed::spawn(&mux::args(&self.edit.source, &tracks, out))?;
+        for i in 0..self.pieces.len() {
+            let path = self.piece_path(i);
+            // Streamed: a copy piece can be a whole kept range, gigabytes long.
+            feed.copy_from(&mut std::fs::File::open(&path)?)?;
+            // Free the scratch space as the mux goes.
+            let _ = std::fs::remove_file(path);
+        }
+        feed.finish()
+    }
 }
 
 #[cfg(test)]
