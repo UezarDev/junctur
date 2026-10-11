@@ -21,7 +21,7 @@ pub use whisper::{choose, Choice, ModelPref, Whisper};
 pub use words::Word;
 
 use crate::ffmpeg::{PcmReader, Span};
-use crate::runtime::DevicePref;
+use crate::runtime::{Device, DevicePref};
 use crate::vad::{self, Region};
 use crate::{models, Result};
 
@@ -73,14 +73,34 @@ pub struct TranscribeOptions {
     pub force: bool,
 }
 
-/// First line of the partial file: a partial made with other languages is not resumed.
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+/// First line of the partial file. A partial made with other languages or another model is not
+/// resumed, so one transcript never mixes models.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct Header {
     version: u32,
     languages: String,
+    model: String,
+    /// Where the run that started the partial ran; reported when a resume finds nothing left to do.
+    device: Device,
 }
 
-const VERSION: u32 = 1;
+impl Header {
+    fn same_run(&self, other: &Header) -> bool {
+        (self.version, &self.languages, &self.model)
+            == (other.version, &other.languages, &other.model)
+    }
+}
+
+/// 2: the header names the model (1f). A version-1 partial has no model, so it is not resumed.
+const VERSION: u32 = 2;
+
+/// Whether a finished transcript answers `opts`. `Auto` takes whatever model made it (rerunning
+/// hours of Whisper because the default moved is `--force`'s job); an explicit model must match, so
+/// `--model large-v3` is never silently ignored. The languages must match either way.
+fn reusable(t: &Transcript, opts: &TranscribeOptions) -> bool {
+    t.languages == opts.languages.allowed
+        && (opts.model == ModelPref::Auto || t.choice.model == opts.model.name())
+}
 
 /// Where a project keeps the transcript.
 pub fn path(project: &Path) -> std::path::PathBuf {
@@ -103,17 +123,35 @@ pub fn transcribe(
     let partial = project.join("transcript.partial.jsonl");
     if opts.force {
         let _ = std::fs::remove_file(&partial);
-    } else if let Some(t) = load(project) {
+        let _ = std::fs::remove_file(path(project));
+    } else if partial.is_file() {
+        // A newer run was interrupted after this transcript was written: resume that run below
+        // rather than hand back what it was replacing.
+    } else if let Some(t) = load(project).filter(|t| reusable(t, opts)) {
         return Ok(t);
     }
-    let header = Header {
+    let prior = read_partial(&partial);
+    // `Auto` resumes an interrupted run with the model it was started with, rather than restarting.
+    let pref = match &prior {
+        Some((h, _))
+            if opts.model == ModelPref::Auto
+                && h.version == VERSION
+                && h.languages == opts.languages.key() =>
+        {
+            h.model.parse().unwrap_or(ModelPref::Auto)
+        }
+        _ => opts.model,
+    };
+    let want = Header {
         version: VERSION,
         languages: opts.languages.key(),
+        model: pref.name(),
+        device: Device::Cpu,
     };
-    let mut done = read_partial(&partial, &header);
-    if done.is_empty() {
-        std::fs::write(&partial, format!("{}\n", serde_json::to_string(&header)?))?;
-    }
+    let (started, mut done) = match prior {
+        Some((h, segs)) if h.same_run(&want) => (Some(h), segs),
+        _ => (None, Vec::new()),
+    };
     let resumed_chunks = done.len();
 
     let work: Vec<(usize, Chunk)> = sources
@@ -125,15 +163,29 @@ pub fn transcribe(
         })
         .collect();
     let audio_s = 0.0 + work.iter().map(|(_, c)| c.end - c.start).sum::<f64>();
-    let (choice, model) = choose(opts.model, opts.device);
     let t0 = Instant::now();
     let todo: Vec<_> = work
         .iter()
         .filter(|(t, c)| !done.iter().any(|s| s.track == *t && s.start == c.start))
         .collect();
+    // Nothing left to hear: no GPU query, no model load. The choice is the one that did the work.
+    let mut choice = Choice {
+        model: want.model.clone(),
+        device: started.as_ref().map_or(Device::Cpu, |h| h.device),
+        note: None,
+    };
     if !todo.is_empty() {
+        let model;
+        (choice, model) = choose(pref, opts.device);
         if let Some(note) = &choice.note {
             eprintln!("junctur: {note}");
+        }
+        if started.is_none() {
+            let h = Header {
+                device: choice.device,
+                ..want.clone()
+            };
+            std::fs::write(&partial, format!("{}\n", serde_json::to_string(&h)?))?;
         }
         let mut w = Whisper::open(&models::ensure(model, cache_dir)?, choice.device)?;
         let mut out = std::fs::OpenOptions::new().append(true).open(&partial)?;
@@ -177,19 +229,16 @@ pub fn transcribe(
     Ok(t)
 }
 
-/// Chunks already finished by an earlier run. A torn last line (killed mid-write) is dropped.
-fn read_partial(path: &Path, header: &Header) -> Vec<Segment> {
-    let Ok(body) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
+/// An earlier run's header and the chunks it finished, or None when there is no readable partial
+/// (missing, or a header this version cannot read). A torn last line (killed mid-write) is dropped.
+fn read_partial(path: &Path) -> Option<(Header, Vec<Segment>)> {
+    let body = std::fs::read_to_string(path).ok()?;
     let mut lines = body.lines();
-    match lines
-        .next()
-        .and_then(|l| serde_json::from_str::<Header>(l).ok())
-    {
-        Some(h) if h == *header => lines.filter_map(|l| serde_json::from_str(l).ok()).collect(),
-        _ => Vec::new(),
-    }
+    let h = serde_json::from_str::<Header>(lines.next()?).ok()?;
+    Some((
+        h,
+        lines.filter_map(|l| serde_json::from_str(l).ok()).collect(),
+    ))
 }
 
 fn read_span(file: &Path, track: usize, c: &Chunk) -> Result<Vec<f32>> {
@@ -240,21 +289,27 @@ impl Transcript {
 mod tests {
     use super::*;
 
+    fn header(languages: &str, model: &str) -> Header {
+        Header {
+            version: VERSION,
+            languages: languages.into(),
+            model: model.into(),
+            device: Device::Cuda,
+        }
+    }
+
     #[test]
     fn partial_resume_drops_torn_line_and_foreign_header() {
         let dir = std::env::temp_dir().join(format!("junctur-partial-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("p.jsonl");
-        let h = Header {
-            version: VERSION,
-            languages: "es+en".into(),
-        };
+        let h = header("es+en", "large-v3-turbo");
         let seg = Segment {
             track: 0,
             start: 1.0,
             end: 2.0,
             lang: "es".into(),
-            model: "m".into(),
+            model: "large-v3-turbo".into(),
             words: vec![],
         };
         let body = format!(
@@ -263,12 +318,52 @@ mod tests {
             serde_json::to_string(&seg).unwrap()
         );
         std::fs::write(&p, body).unwrap();
-        assert_eq!(read_partial(&p, &h), vec![seg]);
-        let other = Header {
-            version: VERSION,
-            languages: "en".into(),
-        };
-        assert!(read_partial(&p, &other).is_empty());
+        let (got, segs) = read_partial(&p).unwrap();
+        assert_eq!((got.clone(), segs), (h.clone(), vec![seg]));
+        assert!(got.same_run(&Header {
+            device: Device::Cpu,
+            ..h.clone()
+        }));
+        assert!(!got.same_run(&header("en", "large-v3-turbo")));
+        assert!(!got.same_run(&header("es+en", "large-v3")));
+        // A 1b partial (version 1, no model) is not resumed.
+        std::fs::write(&p, "{\"version\":1,\"languages\":\"es+en\"}\n").unwrap();
+        assert!(read_partial(&p).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn finished_transcript_reuse_follows_the_model_and_languages() {
+        let t = |model: &str| Transcript {
+            choice: Choice {
+                model: model.into(),
+                device: Device::Cuda,
+                note: None,
+            },
+            languages: Languages::default().allowed,
+            segments: vec![],
+            audio_s: 0.0,
+            elapsed_s: 0.0,
+            resumed_chunks: 0,
+        };
+        let opts = |model: ModelPref| TranscribeOptions {
+            model,
+            ..Default::default()
+        };
+        // Auto keeps whatever made it, a 1b q5_0 transcript included.
+        assert!(reusable(&t("large-v3-q5_0"), &opts(ModelPref::Auto)));
+        assert!(reusable(
+            &t("large-v3-turbo"),
+            &opts(ModelPref::LargeV3Turbo)
+        ));
+        // An explicit model that differs re-transcribes.
+        assert!(!reusable(&t("large-v3-turbo"), &opts(ModelPref::LargeV3)));
+        assert!(!reusable(
+            &t("large-v3-q5_0"),
+            &opts(ModelPref::LargeV3Turbo)
+        ));
+        let mut other = t("large-v3-turbo");
+        other.languages = vec!["en".into()];
+        assert!(!reusable(&other, &opts(ModelPref::Auto)));
     }
 }

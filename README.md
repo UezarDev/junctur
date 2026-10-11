@@ -83,7 +83,7 @@ Downloaded on first use into `<cache>/models/`, checked against pinned SHA-256 d
 | `auto` (default) | large-v3-turbo, on the GPU when 2.1 GB of VRAM is free, else on CPU |
 | `large-v3-turbo` (alias `turbo`) | the fastest; close to large-v3, weaker at telling Spanish from English on short lines |
 | `large-v3` (alias `best`) | best quality, opt in; f16, wants about 4.8 GB of free VRAM |
-| `large-v3-q5_0` | large-v3 quantised to 5 bits (2.2 GB of VRAM): large-v3's decoder at turbo's footprint |
+| `large-v3-q5_0` | large-v3 quantised to 5 bits: large-v3's decoder in about 2.2 GB of VRAM, a little more than turbo |
 
 To change the default, create `junctur/config.json` in the OS config folder (`%APPDATA%` on Windows,
 `~/.config` elsewhere), or point `JUNCTUR_CONFIG` at a file:
@@ -92,8 +92,13 @@ To change the default, create `junctur/config.json` in the OS config folder (`%A
 { "whisper_model": "large-v3" }
 ```
 
-`--model` on the command line wins over the config file. A config file that does not parse, or names an
-unknown model or key, is an error rather than a silent fallback.
+`--model` on the command line wins over the config file. A config file that does not parse, names an
+unknown model or key, or is named by `JUNCTUR_CONFIG` but missing, is an error rather than a silent
+fallback.
+
+A finished transcript is reused when you rerun `analyze`, whichever model made it, unless `--model` names a
+different one (then it is redone with that model) or `--force` is given. An interrupted run resumes with the
+model it started with; asking for another model starts over.
 
 Results are cached in the OS user cache folder under `junctur/`; override it with `--cache-dir` or the
 `JUNCTUR_CACHE_DIR` environment variable.

@@ -14,12 +14,13 @@
 //!                       [--jobs <n>]
 //! ```
 //!
-//! `--model` defaults to the config file's `whisper_model` ([`junctur_core::config`]), else `auto`.
+//! `--model` defaults to the config file's `whisper_model` ([`config`]), else `auto`.
 //!
 //! Arguments are parsed by hand: a few commands with a handful of flags do not justify a parser dependency.
 
 mod args;
 mod commands;
+mod config;
 mod project;
 
 use std::process::ExitCode;

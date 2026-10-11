@@ -7,11 +7,9 @@
 //!
 //! [`pipeline`] runs the stages for a recording in order (tracks, speech, [`transcribe`], [`edit`]),
 //! each cached and resumable, and [`export`] turns the resulting edit list into an FCPXML timeline.
-//! [`render`] turns it into a video, re-encoding only around the cuts. [`config`] is the optional user
-//! file the CLI reads (the default Whisper model).
+//! [`render`] turns it into a video, re-encoding only around the cuts.
 
 pub mod cache;
-pub mod config;
 pub mod diarize;
 pub mod edit;
 pub mod error;

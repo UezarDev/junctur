@@ -24,8 +24,6 @@ pub enum Error {
     Edit(String),
     /// The renderer cannot produce the requested output (e.g. it would overwrite the source).
     Render(String),
-    /// The config file could not be read; the message names the file.
-    Config(String),
     Io(std::io::Error),
     Json(serde_json::Error),
 }
@@ -44,7 +42,6 @@ impl fmt::Display for Error {
             Error::Model(msg) => write!(f, "model error: {msg}"),
             Error::Edit(msg) => write!(f, "{msg}"),
             Error::Render(msg) => write!(f, "render: {msg}"),
-            Error::Config(msg) => write!(f, "bad config file {msg}"),
             Error::Io(e) => write!(f, "{e}"),
             Error::Json(e) => write!(f, "{e}"),
         }

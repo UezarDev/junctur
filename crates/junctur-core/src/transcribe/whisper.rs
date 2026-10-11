@@ -44,6 +44,28 @@ impl ModelPref {
         ("best", ModelPref::LargeV3),
         ("large-v3-q5_0", ModelPref::LargeV3Q5),
     ];
+
+    /// The model this preference loads. Known without asking the GPU: `Auto` only picks the device,
+    /// so a run that has nothing left to transcribe never needs `nvidia-smi`.
+    pub fn model(self) -> &'static Model {
+        match self {
+            ModelPref::Auto | ModelPref::LargeV3Turbo => &models::WHISPER_LARGE_V3_TURBO,
+            ModelPref::LargeV3 => &models::WHISPER_LARGE_V3,
+            ModelPref::LargeV3Q5 => &models::WHISPER_LARGE_V3_Q5,
+        }
+    }
+
+    /// The model's name as [`Choice::model`] and the transcript record it (`large-v3-turbo`, ...).
+    pub fn name(self) -> String {
+        model_name(self.model())
+    }
+}
+
+fn model_name(m: &Model) -> String {
+    m.file
+        .trim_start_matches("ggml-")
+        .trim_end_matches(".bin")
+        .into()
 }
 
 impl FromStr for ModelPref {
@@ -96,46 +118,28 @@ pub fn choose(pref: ModelPref, device: DevicePref) -> (Choice, &'static Model) {
 /// `Auto` without room on the card runs turbo on CPU rather than 1b's 5-bit large-v3: the 5-bit model
 /// would not fit either (see [`TURBO_MIB`]), and on CPU turbo's 4 decoder layers make it the faster.
 fn pick(pref: ModelPref, free: Option<u64>, gpu: bool) -> (Choice, &'static Model) {
-    let choice = |m: &'static Model, d: Device, note: Option<String>| {
-        (
-            Choice {
-                model: m
-                    .file
-                    .trim_start_matches("ggml-")
-                    .trim_end_matches(".bin")
-                    .into(),
-                device: d,
-                note,
-            },
-            m,
-        )
-    };
-    let turbo = &models::WHISPER_LARGE_V3_TURBO;
-    let q5 = &models::WHISPER_LARGE_V3_Q5;
-    let f16 = &models::WHISPER_LARGE_V3;
-    let on = if free.is_some() {
-        Device::Cuda
-    } else {
-        Device::Cpu
-    };
-    match (pref, free) {
-        (ModelPref::LargeV3Turbo, _) => choice(turbo, on, None),
-        (ModelPref::LargeV3, _) => choice(f16, on, None),
-        (ModelPref::LargeV3Q5, _) => choice(q5, on, None),
-        (ModelPref::Auto, Some(f)) if f >= TURBO_MIB => choice(turbo, Device::Cuda, None),
-        (ModelPref::Auto, Some(f)) => choice(
-            turbo,
+    let m = pref.model();
+    let (device, note) = match (pref, free) {
+        (ModelPref::Auto, Some(f)) if f < TURBO_MIB => (
             Device::Cpu,
             Some(format!(
                 "only {f} MiB of VRAM free, under the {TURBO_MIB} MiB Whisper needs: running on CPU (slow)"
             )),
         ),
-        (ModelPref::Auto, None) => choice(
-            turbo,
+        (ModelPref::Auto, None) => (
             Device::Cpu,
             gpu.then(|| "no usable NVIDIA GPU found: running on CPU (slow)".to_string()),
         ),
-    }
+        // Explicit models, and `Auto` with room: the GPU whenever one answers.
+        (_, Some(_)) => (Device::Cuda, None),
+        (_, None) => (Device::Cpu, None),
+    };
+    let choice = Choice {
+        model: model_name(m),
+        device,
+        note,
+    };
+    (choice, m)
 }
 
 pub struct Whisper {
@@ -294,8 +298,9 @@ mod tests {
     }
 
     #[test]
-    fn every_model_name_is_its_file() {
-        // `Choice::model` is what the transcript and `junctur status` show; it must parse back.
+    fn recorded_model_names_parse_back() {
+        // `Choice::model` is what the transcript and `junctur status` show; it must parse back, and
+        // `name` (used to decide whether a transcript can be reused) must agree with `pick`.
         for pref in [
             ModelPref::LargeV3Turbo,
             ModelPref::LargeV3,
@@ -303,6 +308,8 @@ mod tests {
         ] {
             let (c, _) = pick(pref, None, false);
             assert_eq!(c.model.parse::<ModelPref>(), Ok(pref));
+            assert_eq!(c.model, pref.name());
         }
+        assert_eq!(ModelPref::Auto.name(), "large-v3-turbo");
     }
 }

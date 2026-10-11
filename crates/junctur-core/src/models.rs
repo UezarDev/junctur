@@ -42,7 +42,7 @@ pub const SPEAKER_EMBEDDING: Model = Model {
     license: "Apache-2.0",
 };
 
-/// Whisper large-v3 for whisper.cpp (ggml, MIT), f16. ~3.1 GB; wants ~4.5 GB of free VRAM.
+/// Whisper large-v3 for whisper.cpp (ggml, MIT), f16. ~3.1 GB; wants ~4.8 GB of free VRAM (measured in 1b).
 pub const WHISPER_LARGE_V3: Model = Model {
     file: "ggml-large-v3.bin",
     url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3.bin",

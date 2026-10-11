@@ -1,7 +1,6 @@
 //! The pipeline commands: `analyze`, `status`, `cut`, `export`, `render`. They share one project per
 //! recording (`--project <dir>` to keep it somewhere git can track it).
 
-use junctur_core::config;
 use junctur_core::edit::{CutSettings, EditList};
 use junctur_core::export;
 use junctur_core::pipeline::{self, PipelineOptions, Project, StageState, STAGES};
@@ -10,6 +9,7 @@ use junctur_core::runtime::DevicePref;
 use junctur_core::transcribe::ModelPref;
 
 use crate::args::Args;
+use crate::config::{self, Config};
 
 const PROJECT_FLAGS: &[&str] = &["--project", "--cache-dir"];
 const CUT_FLAGS: &[&str] = &["--pad-before", "--pad-after", "--merge-gap", "--crossfade"];
@@ -39,18 +39,17 @@ fn known(extra: &[&'static str]) -> Vec<&'static str> {
     PROJECT_FLAGS.iter().chain(extra).copied().collect()
 }
 
-/// `--model`, else the config file's `whisper_model`, else `auto` (large-v3-turbo with fallbacks).
+/// `--model`, else the config file's `whisper_model`, else `auto` (large-v3-turbo on the GPU or CPU).
 /// The config file is read only when `--model` is absent, so a broken one cannot block an explicit
 /// choice.
-fn model(a: &Args) -> Result<ModelPref, String> {
-    if let Some(m) = a.path("--model") {
-        return m
-            .to_string_lossy()
-            .parse()
-            .map_err(|e| format!("--model: {e}"));
+fn model(
+    flag: Option<&str>,
+    cfg: impl FnOnce() -> Result<Config, String>,
+) -> Result<ModelPref, String> {
+    match flag {
+        Some(m) => m.parse().map_err(|e| format!("--model: {e}")),
+        None => Ok(cfg()?.whisper_model.unwrap_or_default()),
     }
-    let cfg = config::load(&config::default_path()).map_err(|e| e.to_string())?;
-    Ok(cfg.whisper_model.unwrap_or_default())
 }
 
 pub fn analyze(a: Args) -> Result<(), String> {
@@ -58,16 +57,24 @@ pub fn analyze(a: Args) -> Result<(), String> {
     k.extend(CUT_FLAGS);
     a.reject_unknown(&k)?;
     let p = project(&a)?;
+    let no_transcript = a.has("--no-transcript");
+    // Without a transcript no model is loaded, so the config file is not read either.
+    let model = if no_transcript {
+        ModelPref::Auto
+    } else {
+        let flag = a.path("--model").map(|m| m.to_string_lossy().into_owned());
+        model(flag.as_deref(), config::load)?
+    };
     let opts = PipelineOptions {
         device: if a.has("--cpu") {
             DevicePref::Cpu
         } else {
             DevicePref::Auto
         },
-        model: model(&a)?,
+        model,
         cut: cut_settings(&a)?,
         force: a.has("--force"),
-        no_transcript: a.has("--no-transcript"),
+        no_transcript,
         ..Default::default()
     };
     let out = pipeline::run(&p, &opts, &mut |line| eprintln!("junctur: {line}"))
@@ -189,4 +196,28 @@ fn print_edit(p: &Project, e: &EditList) {
         e.keep.len()
     );
     println!("  {}", p.edit_path().display());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_flag_beats_config_beats_auto() {
+        let cfg = |m: Option<ModelPref>| move || Ok(Config { whisper_model: m });
+        let broken = || Err("bad config".to_string());
+        assert_eq!(
+            model(Some("turbo"), cfg(Some(ModelPref::LargeV3))),
+            Ok(ModelPref::LargeV3Turbo)
+        );
+        // An explicit choice never reads the config, so a broken one cannot block it.
+        assert_eq!(model(Some("best"), broken), Ok(ModelPref::LargeV3));
+        assert_eq!(
+            model(None, cfg(Some(ModelPref::LargeV3Q5))),
+            Ok(ModelPref::LargeV3Q5)
+        );
+        assert_eq!(model(None, cfg(None)), Ok(ModelPref::Auto));
+        assert!(model(None, broken).is_err());
+        assert!(model(Some("large-v4"), cfg(None)).is_err());
+    }
 }
