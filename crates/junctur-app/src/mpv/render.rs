@@ -13,17 +13,21 @@ type UpdateFn = Box<dyn Fn() + Send + Sync>;
 pub struct RenderContext {
     mpv: Arc<Mpv>,
     ctx: *mut ffi::RenderContext,
-    // Boxed twice so the pointer handed to mpv stays put; dropped only after the callback is unset.
-    update: Option<Box<UpdateFn>>,
+    // Boxed twice so the pointer handed to mpv stays put; freed only after the callback is unset.
+    _update: Box<UpdateFn>,
 }
 
 impl RenderContext {
     /// Must be called with the GL context current on this thread, and before any file is loaded
-    /// (with `vo=libmpv`, video output needs a render context to exist).
+    /// (with `vo=libmpv`, video output needs a render context to exist). `on_update` runs on an
+    /// mpv thread whenever a new frame (or a redraw) is wanted; it must not call into mpv, only
+    /// wake the render thread. It is set once here, so it can never be swapped out while mpv may
+    /// be calling it.
     pub fn opengl(
         mpv: Arc<Mpv>,
         get_proc_address: ffi::GetProcAddress,
         proc_ctx: *mut c_void,
+        on_update: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self, String> {
         let api_type = CString::new("opengl").expect("no NUL");
         let mut init = ffi::OpenGlInitParams {
@@ -38,34 +42,30 @@ impl RenderContext {
             ),
             param(ffi::RENDER_PARAM_INVALID, std::ptr::null_mut()),
         ];
+        let (api, handle) = mpv.raw();
         let mut ctx = std::ptr::null_mut();
         // SAFETY: params are terminated by INVALID and live through the call.
-        let r =
-            unsafe { (mpv.api.render_context_create)(&mut ctx, mpv.handle, params.as_mut_ptr()) };
+        let r = unsafe { (api.render_context_create)(&mut ctx, handle, params.as_mut_ptr()) };
         mpv.check(r, "mpv render context")?;
+        let update: Box<UpdateFn> = Box::new(Box::new(on_update));
+        let ptr = &*update as *const UpdateFn as *mut c_void;
+        // SAFETY: `ptr` stays valid until Drop unsets the callback before freeing it.
+        unsafe { (api.render_context_set_update_callback)(ctx, Some(trampoline), ptr) };
         Ok(Self {
             mpv,
             ctx,
-            update: None,
+            _update: update,
         })
     }
 
-    /// `f` runs on an mpv thread whenever a new frame (or a redraw) is wanted. It must not call
-    /// into mpv; it should only wake the render thread.
-    pub fn on_update(&mut self, f: impl Fn() + Send + Sync + 'static) {
-        let boxed: Box<UpdateFn> = Box::new(Box::new(f));
-        let ptr = &*boxed as *const UpdateFn as *mut c_void;
-        // SAFETY: `ptr` stays valid until Drop unsets the callback before freeing it.
-        unsafe {
-            (self.mpv.api.render_context_set_update_callback)(self.ctx, Some(trampoline), ptr)
-        };
-        self.update = Some(boxed);
+    fn api(&self) -> &ffi::Api {
+        self.mpv.raw().0
     }
 
     /// Whether mpv has a new frame to draw. Call after every update callback.
     pub fn needs_frame(&self) -> bool {
         // SAFETY: live context, on the render thread.
-        unsafe { (self.mpv.api.render_context_update)(self.ctx) & ffi::RENDER_UPDATE_FRAME != 0 }
+        unsafe { (self.api().render_context_update)(self.ctx) & ffi::RENDER_UPDATE_FRAME != 0 }
     }
 
     /// Draws the current frame into framebuffer `fbo` (0 = the window) of `w`x`h` pixels.
@@ -84,14 +84,14 @@ impl RenderContext {
             param(ffi::RENDER_PARAM_INVALID, std::ptr::null_mut()),
         ];
         // SAFETY: live context with its GL context current; params terminated and alive.
-        let r = unsafe { (self.mpv.api.render_context_render)(self.ctx, params.as_mut_ptr()) };
+        let r = unsafe { (self.api().render_context_render)(self.ctx, params.as_mut_ptr()) };
         self.mpv.check(r, "mpv render")
     }
 
     /// Tells mpv a frame reached the screen, for its frame timing.
     pub fn report_swap(&self) {
         // SAFETY: live context.
-        unsafe { (self.mpv.api.render_context_report_swap)(self.ctx) }
+        unsafe { (self.api().render_context_report_swap)(self.ctx) }
     }
 }
 
@@ -100,7 +100,7 @@ fn param(kind: i32, data: *mut c_void) -> ffi::RenderParam {
 }
 
 unsafe extern "C" fn trampoline(ctx: *mut c_void) {
-    // SAFETY: ctx is the `UpdateFn` registered in `on_update`, alive while registered.
+    // SAFETY: ctx is the `UpdateFn` registered in `opengl`, alive while registered.
     let f = unsafe { &*(ctx as *const UpdateFn) };
     f();
 }
@@ -110,9 +110,8 @@ impl Drop for RenderContext {
         // SAFETY: the owner drops this on the render thread with the GL context current; unsetting
         // the callback first means mpv never calls into freed memory.
         unsafe {
-            (self.mpv.api.render_context_set_update_callback)(self.ctx, None, std::ptr::null_mut());
-            (self.mpv.api.render_context_free)(self.ctx);
+            (self.api().render_context_set_update_callback)(self.ctx, None, std::ptr::null_mut());
+            (self.api().render_context_free)(self.ctx);
         }
-        self.update = None;
     }
 }

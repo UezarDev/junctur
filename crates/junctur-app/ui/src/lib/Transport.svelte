@@ -12,8 +12,14 @@
     onError: (message: string) => void;
   } = $props();
 
-  // While the bar is dragged it shows the drag position, not mpv's (which lags behind seeks).
+  // While the bar is dragged, and until mpv's position catches up with the seek, the bar shows
+  // the drag position: mpv's own lags behind seeks, and showing it would make the thumb jump back.
   let scrub = $state<number | null>(null);
+  // Keyframe seeks while dragging, at most one per animation frame (input fires far more often).
+  let queued: number | null = null;
+  let frame = 0;
+  // When to give up waiting for mpv's position to reach the target (a seek that lands far off).
+  let scrubUntil = 0;
   const loaded = $derived(!!player?.path);
   const duration = $derived(player?.duration ?? 0);
   const shown = $derived(scrub ?? player?.position ?? 0);
@@ -26,6 +32,44 @@
       onError(String(e));
     }
   }
+
+  function dragTo(to: number) {
+    scrub = to;
+    queued = to;
+    if (!frame) {
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        const t = queued;
+        queued = null;
+        if (t != null) call(() => api.seek(t, false));
+      });
+    }
+  }
+
+  function release(to: number) {
+    if (frame) cancelAnimationFrame(frame);
+    frame = 0;
+    queued = null;
+    scrub = to;
+    scrubUntil = performance.now() + 1500;
+    call(() => api.seek(to, true));
+    // If no position update comes at all, let go of the drag position anyway.
+    setTimeout(() => {
+      if (scrubUntil !== 0 && performance.now() >= scrubUntil) {
+        scrub = null;
+        scrubUntil = 0;
+      }
+    }, 1600);
+  }
+
+  $effect(() => {
+    const pos = player?.position;
+    if (scrub == null || queued != null || frame || scrubUntil === 0) return;
+    if ((pos != null && Math.abs(pos - scrub) < 0.5) || performance.now() > scrubUntil) {
+      scrub = null;
+      scrubUntil = 0;
+    }
+  });
 
   function trackLabel(t: api.AudioTrack): string {
     const parts = [t.title, t.lang, t.channels ? `${t.channels}ch` : null].filter(Boolean);
@@ -51,15 +95,8 @@
     step="0.01"
     value={shown}
     disabled={!loaded || !duration}
-    oninput={(e) => {
-      const to = e.currentTarget.valueAsNumber;
-      scrub = to;
-      call(() => api.seek(to, false));
-    }}
-    onchange={(e) => {
-      const to = e.currentTarget.valueAsNumber;
-      call(() => api.seek(to, true)).then(() => (scrub = null));
-    }}
+    oninput={(e) => dragTo(e.currentTarget.valueAsNumber)}
+    onchange={(e) => release(e.currentTarget.valueAsNumber)}
   />
   <span class="mono">{clock(player?.duration)}</span>
   <select

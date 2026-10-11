@@ -171,8 +171,7 @@ mod tests {
 
     #[test]
     fn observed_ids_are_distinct() {
-        let mut ids: Vec<u64> = OBSERVED.iter().map(|o| o.0).collect();
-        ids.dedup();
+        let ids: std::collections::HashSet<u64> = OBSERVED.iter().map(|o| o.0).collect();
         assert_eq!(ids.len(), OBSERVED.len());
     }
 }

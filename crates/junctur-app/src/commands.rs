@@ -1,4 +1,7 @@
 //! The commands the frontend invokes. Thin: each forwards to the player or the project.
+//!
+//! The player's commands are `async` so Tauri runs them on its async runtime rather than the main
+//! thread: an mpv command blocks until mpv takes it, and a dragged seek bar sends many.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -6,6 +9,7 @@ use std::sync::Mutex;
 use serde::Serialize;
 use tauri::State;
 
+use crate::lock::lock;
 use crate::player::Player;
 use crate::project::{self, ProjectStatus};
 use crate::state::PlayerState;
@@ -18,7 +22,7 @@ pub struct App {
 
 impl App {
     fn with<T>(&self, f: impl FnOnce(&Player) -> Result<T, String>) -> Result<T, String> {
-        let guard = self.player.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = lock(&self.player);
         match &*guard {
             Ok(p) => f(p),
             Err(e) => Err(e.clone()),
@@ -42,12 +46,12 @@ pub fn startup_file() -> Option<String> {
 }
 
 #[tauri::command]
-pub fn player_state(app: State<App>) -> Result<PlayerState, String> {
+pub async fn player_state(app: State<'_, App>) -> Result<PlayerState, String> {
     app.with(|p| Ok(p.state()))
 }
 
 #[tauri::command]
-pub fn open_file(app: State<App>, path: String) -> Result<Opened, String> {
+pub async fn open_file(app: State<'_, App>, path: String) -> Result<Opened, String> {
     app.with(|p| p.open(&path))?;
     Ok(match project::status(Path::new(&path), None) {
         Ok(s) => Opened {
@@ -62,16 +66,16 @@ pub fn open_file(app: State<App>, path: String) -> Result<Opened, String> {
 }
 
 #[tauri::command]
-pub fn toggle_pause(app: State<App>) -> Result<(), String> {
+pub async fn toggle_pause(app: State<'_, App>) -> Result<(), String> {
     app.with(Player::toggle_pause)
 }
 
 #[tauri::command]
-pub fn seek(app: State<App>, seconds: f64, exact: bool) -> Result<(), String> {
+pub async fn seek(app: State<'_, App>, seconds: f64, exact: bool) -> Result<(), String> {
     app.with(|p| p.seek(seconds, exact))
 }
 
 #[tauri::command]
-pub fn set_audio_track(app: State<App>, id: i64) -> Result<(), String> {
+pub async fn set_audio_track(app: State<'_, App>, id: i64) -> Result<(), String> {
     app.with(|p| p.set_audio_track(id))
 }

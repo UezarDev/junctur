@@ -24,8 +24,12 @@
   }
 
   async function pick() {
-    const path = await open({ multiple: false, filters: [{ name: "Video", extensions: VIDEO }] });
-    if (typeof path === "string") await load(path);
+    try {
+      const path = await open({ multiple: false, filters: [{ name: "Video", extensions: VIDEO }] });
+      if (typeof path === "string") await load(path);
+    } catch (e) {
+      failure = String(e);
+    }
   }
 
   async function run(f: () => Promise<void>) {

@@ -11,7 +11,9 @@ mod surface;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
+use crate::lock::lock;
 use crate::mpv::{Mpv, RenderContext};
 use surface::Surface;
 
@@ -19,7 +21,9 @@ use surface::Surface;
 struct Wake {
     /// mpv asked for an update (maybe a new frame).
     update: bool,
-    /// The surface changed size: draw even if mpv has no new frame.
+    /// The surface changed size or needs repainting: draw even if mpv has no new frame. Pokes
+    /// that arrive while a frame is being drawn merge into one flag, so a resize drag costs one
+    /// redraw per render-loop turn, not one per resize event.
     redraw: bool,
     size: (i32, i32),
     quit: bool,
@@ -29,13 +33,13 @@ struct Wake {
 struct Shared {
     wake: Mutex<Wake>,
     cv: Condvar,
-    /// Frames swapped onto the surface, for test mode.
+    /// New mpv frames swapped onto the surface (not redraws), for test mode.
     frames: AtomicU64,
 }
 
 impl Shared {
     fn poke(&self, f: impl FnOnce(&mut Wake)) {
-        f(&mut self.wake.lock().unwrap_or_else(|e| e.into_inner()));
+        f(&mut lock(&self.wake));
         self.cv.notify_one();
     }
 }
@@ -118,9 +122,10 @@ fn render_thread(
 ) {
     let setup = || -> Result<(gl::Gl, RenderContext), String> {
         let gl = gl::Gl::new(hwnd)?;
-        let mut rc = RenderContext::opengl(mpv, gl::get_proc_address, gl.proc_ctx())?;
         let sh = shared.clone();
-        rc.on_update(move || sh.poke(|s| s.update = true));
+        let rc = RenderContext::opengl(mpv, gl::get_proc_address, gl.proc_ctx(), move || {
+            sh.poke(|s| s.update = true)
+        })?;
         Ok((gl, rc))
     };
     let (gl, rc) = match setup() {
@@ -133,9 +138,10 @@ fn render_thread(
             return;
         }
     };
+    let mut errors = ErrorLog::default();
     loop {
         let (update, redraw, (w, h)) = {
-            let mut s = shared.wake.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = lock(&shared.wake);
             while !s.update && !s.redraw && !s.quit {
                 s = shared.cv.wait(s).unwrap_or_else(|e| e.into_inner());
             }
@@ -151,15 +157,42 @@ fn render_thread(
         let frame = update && rc.needs_frame();
         if (frame || redraw) && w > 0 && h > 0 {
             if let Err(e) = rc.render(0, w, h) {
-                eprintln!("junctur-app: {e}");
+                errors.report(&e);
                 continue;
             }
             gl.swap();
             rc.report_swap();
-            shared.frames.fetch_add(1, Ordering::Relaxed);
+            if frame {
+                shared.frames.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
     // The render context goes first, while its GL context is still current.
     drop(rc);
     drop(gl);
+}
+
+/// Render errors repeat on every update while they last; log the first, then at most one line
+/// (with the count) per interval.
+#[derive(Default)]
+struct ErrorLog {
+    last: Option<Instant>,
+    skipped: u64,
+}
+
+impl ErrorLog {
+    const EVERY: Duration = Duration::from_secs(5);
+
+    fn report(&mut self, e: &str) {
+        if self.last.is_some_and(|t| t.elapsed() < Self::EVERY) {
+            self.skipped += 1;
+            return;
+        }
+        match self.skipped {
+            0 => eprintln!("junctur-app: {e}"),
+            n => eprintln!("junctur-app: {e} ({n} more since the last report)"),
+        }
+        self.last = Some(Instant::now());
+        self.skipped = 0;
+    }
 }

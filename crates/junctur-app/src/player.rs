@@ -7,13 +7,17 @@ use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter};
 
-use crate::mpv::{self, Event, Mpv};
+use crate::lock::lock;
+use crate::mpv::{self, Event, Events, Mpv};
 use crate::state::{Change, PlayerState, OBSERVED};
 
 pub const STATE_EVENT: &str = "player-state";
 
 /// Position updates arrive every frame; the frontend needs a few a second.
 const POSITION_EVERY: Duration = Duration::from_millis(100);
+
+/// How long shutdown waits for mpv's event thread before letting the app exit anyway.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
 
 /// mpv options, set before it starts. `config=no` keeps a user's own mpv.conf from changing how
 /// the app plays; `hwdec` tries NVDEC (CUDA-GL interop on the render API) and else whatever is
@@ -71,10 +75,11 @@ impl Player {
         }
         let state = Arc::new(Mutex::new(PlayerState::default()));
         let events = {
-            let (mpv, state) = (mpv.clone(), state.clone());
+            let mut reader = mpv.events().ok_or("mpv's event reader is already taken")?;
+            let state = state.clone();
             std::thread::Builder::new()
                 .name("mpv-events".into())
-                .spawn(move || event_loop(&mpv, &state, &app))
+                .spawn(move || event_loop(&mut reader, &state, &app))
                 .map_err(|e| e.to_string())?
         };
         Ok(Self {
@@ -87,10 +92,10 @@ impl Player {
     }
 
     pub fn state(&self) -> PlayerState {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        lock(&self.state).clone()
     }
 
-    /// Frames drawn onto the surface so far.
+    /// New mpv frames drawn onto the surface so far (redraws of the same frame not counted).
     pub fn frames(&self) -> u64 {
         #[cfg(windows)]
         if let Some(v) = &self.video {
@@ -139,10 +144,24 @@ impl Player {
         if let Some(mut v) = self.video.take() {
             v.stop();
         }
-        // `quit` makes mpv send its shutdown event, which ends the event thread.
-        let _ = self.mpv.command(&["quit"]);
-        if let Some(t) = self.events.take() {
+        // `quit` makes mpv send its shutdown event, which ends the event thread. The wait is
+        // bounded so a wedged mpv cannot hang the app's exit; the thread is then left behind
+        // (it holds the last `Arc<Mpv>`, and the process is ending).
+        let Some(t) = self.events.take() else {
+            return;
+        };
+        if let Err(e) = self.mpv.command(&["quit"]) {
+            eprintln!("junctur-app: mpv quit: {e}");
+            return;
+        }
+        let deadline = Instant::now() + SHUTDOWN_WAIT;
+        while !t.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if t.is_finished() {
             let _ = t.join();
+        } else {
+            eprintln!("junctur-app: mpv did not shut down in time; exiting without it");
         }
     }
 }
@@ -153,14 +172,14 @@ impl Drop for Player {
     }
 }
 
-fn event_loop(mpv: &Mpv, state: &Mutex<PlayerState>, app: &AppHandle) {
+fn event_loop(events: &mut Events, state: &Mutex<PlayerState>, app: &AppHandle) {
     let mut last_sent = Instant::now() - POSITION_EVERY;
     // A held-back position is sent once its interval is up, so the last one (a seek while
     // paused) is never lost.
     let mut held = false;
     let send = |last_sent: &mut Instant| {
         *last_sent = Instant::now();
-        let snapshot = state.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let snapshot = lock(state).clone();
         let _ = app.emit(STATE_EVENT, snapshot);
     };
     loop {
@@ -171,7 +190,7 @@ fn event_loop(mpv: &Mpv, state: &Mutex<PlayerState>, app: &AppHandle) {
         } else {
             -1.0
         };
-        let Some(event) = mpv.wait_event(timeout) else {
+        let Some(event) = events.wait(timeout) else {
             if held && last_sent.elapsed() >= POSITION_EVERY {
                 held = false;
                 send(&mut last_sent);
@@ -188,7 +207,7 @@ fn event_loop(mpv: &Mpv, state: &Mutex<PlayerState>, app: &AppHandle) {
                 eprintln!("mpv [{prefix}] {level}: {text}");
                 continue;
             }
-            e => state.lock().unwrap_or_else(|p| p.into_inner()).apply(e),
+            e => lock(state).apply(e),
         };
         let due = match change {
             Change::None => false,

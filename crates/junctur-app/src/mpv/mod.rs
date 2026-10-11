@@ -9,7 +9,7 @@ mod render;
 mod tracks;
 
 pub use event::{EndReason, Event, Value};
-pub use handle::{Format, Mpv};
+pub use handle::{Events, Format, Mpv};
 pub use render::RenderContext;
 pub use tracks::{audio_tracks, AudioTrack};
 
@@ -43,7 +43,9 @@ mod tests {
     #[ignore = "needs libmpv (scripts/fetch-libmpv.ps1)"]
     fn plays_a_generated_source_headless() {
         let opts = [("vo", "null"), ("ao", "null"), ("config", "no")];
-        let mpv = Mpv::new(load().unwrap(), &opts).unwrap();
+        let mpv = Arc::new(Mpv::new(load().unwrap(), &opts).unwrap());
+        let mut events = mpv.events().unwrap();
+        assert!(mpv.events().is_none(), "only one event reader");
         mpv.observe(1, "duration", Format::Double).unwrap();
         mpv.command(&["loadfile", "av://lavfi:testsrc=d=2"])
             .unwrap();
@@ -51,7 +53,7 @@ mod tests {
         let (mut loaded, mut duration) = (false, None);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while (!loaded || duration.is_none()) && std::time::Instant::now() < deadline {
-            match mpv.wait_event(1.0) {
+            match events.wait(1.0) {
                 Some(Event::FileLoaded) => loaded = true,
                 Some(Event::Property {
                     id: 1,

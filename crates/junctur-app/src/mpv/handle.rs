@@ -1,7 +1,10 @@
 //! A safe handle over one mpv instance. mpv's client API is thread-safe, so one `Mpv` is shared
 //! (in an `Arc`) by the command handlers, the event thread and the render thread.
 
+use std::cell::Cell;
 use std::ffi::{c_char, c_void, CString};
+use std::marker::PhantomData;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use super::event::{self, Event};
@@ -26,8 +29,10 @@ impl Format {
 }
 
 pub struct Mpv {
-    pub(super) api: Arc<ffi::Api>,
-    pub(super) handle: *mut ffi::Handle,
+    api: Arc<ffi::Api>,
+    handle: *mut ffi::Handle,
+    /// Whether the one [`Events`] reader has been handed out.
+    events_taken: AtomicBool,
 }
 
 // SAFETY: every mpv_* client function may be called from any thread (client.h, "Thread safety").
@@ -46,7 +51,11 @@ impl Mpv {
         if handle.is_null() {
             return Err("mpv_create failed".into());
         }
-        let mpv = Self { api, handle };
+        let mpv = Self {
+            api,
+            handle,
+            events_taken: AtomicBool::new(false),
+        };
         for (k, v) in options {
             let (kc, vc) = (cstr(k)?, cstr(v)?);
             // SAFETY: live handle, NUL-terminated strings.
@@ -110,13 +119,35 @@ impl Mpv {
         self.check(r, "log level")
     }
 
-    /// Blocks up to `timeout` seconds (negative: forever) for the next event. Only one thread may
-    /// wait at a time, so the player's event thread is the only caller.
-    pub fn wait_event(&self, timeout: f64) -> Option<Event> {
-        // SAFETY: mpv returns a pointer valid until the next call, which decode copies out of.
+    /// The library and raw handle, for the render context (the other half of the mpv API).
+    pub(super) fn raw(&self) -> (&ffi::Api, *mut ffi::Handle) {
+        (&self.api, self.handle)
+    }
+
+    /// The event reader. mpv allows one thread at a time in `mpv_wait_event`, so there is only
+    /// ever one, and it cannot be shared between threads (it is `Send`, not `Sync`).
+    pub fn events(self: &Arc<Self>) -> Option<Events> {
+        (!self.events_taken.swap(true, Ordering::SeqCst)).then(|| Events {
+            mpv: self.clone(),
+            _not_sync: PhantomData,
+        })
+    }
+}
+
+pub struct Events {
+    mpv: Arc<Mpv>,
+    _not_sync: PhantomData<Cell<()>>,
+}
+
+impl Events {
+    /// Blocks up to `timeout` seconds (negative: forever) for the next event.
+    pub fn wait(&mut self, timeout: f64) -> Option<Event> {
+        let (api, handle) = self.mpv.raw();
+        // SAFETY: this is the only reader (`Mpv::events`), and `&mut self` keeps it on one thread
+        // at a time; mpv's pointer is valid until the next call, and decode copies out of it.
         unsafe {
-            let e = (self.api.wait_event)(self.handle, timeout);
-            e.as_ref().and_then(|e| event::decode(&self.api, e))
+            let e = (api.wait_event)(handle, timeout);
+            e.as_ref().and_then(|e| event::decode(api, e))
         }
     }
 }

@@ -5,6 +5,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod lock;
 mod mpv;
 mod player;
 mod project;
@@ -19,6 +20,7 @@ use tauri::window::Color;
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 use commands::App;
+use lock::lock;
 use player::Player;
 
 /// The app's dark background (`--panel-solid` in app.css), shown wherever no video is drawn.
@@ -70,7 +72,7 @@ fn main() {
                 let Some(app) = window.try_state::<App>() else {
                     return;
                 };
-                let guard = app.player.lock().unwrap_or_else(|e| e.into_inner());
+                let guard = lock(&app.player);
                 if let Ok(p) = &*guard {
                     p.resize(size.width, size.height);
                 }
@@ -91,7 +93,7 @@ fn main() {
                 let Some(state) = app.try_state::<App>() else {
                     return;
                 };
-                let mut guard = state.player.lock().unwrap_or_else(|e| e.into_inner());
+                let mut guard = lock(&state.player);
                 if let Ok(p) = &mut *guard {
                     p.shutdown();
                 }

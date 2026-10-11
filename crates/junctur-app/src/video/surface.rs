@@ -65,7 +65,9 @@ impl Surface {
                 };
                 RegisterClassW(&wc);
             });
-            // tao's window lacks WS_CLIPCHILDREN (see the module comment).
+            // tao's window lacks WS_CLIPCHILDREN (see the module comment). No SWP_FRAMECHANGED:
+            // that is for frame styles, and WS_CLIPCHILDREN only changes how the client area is
+            // clipped, which Windows reads at the next paint.
             let style = GetWindowLongPtrW(parent as HWND, GWL_STYLE);
             SetWindowLongPtrW(parent as HWND, GWL_STYLE, style | WS_CLIPCHILDREN as isize);
             let hwnd = CreateWindowExW(
