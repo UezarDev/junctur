@@ -7,9 +7,9 @@
 //! the same machinery encodes every frame instead (a full re-encode) and says why.
 //!
 //! Scratch files go in a folder beside the output (same disk; a 30 h render does not fit in a
-//! small temp drive) and are deleted at the end. The output is muxed in there too and renamed
-//! into place only once it is complete, so a failed `--force` keeps the previous render. The
-//! source is only read.
+//! small temp drive) and are deleted when the render ends, failed or not (a killed process leaves
+//! them). The output is muxed in there too and renamed into place only once it is complete, so a
+//! failed `--force` keeps the previous render. The source is only read.
 
 mod audio;
 mod plan;
@@ -108,19 +108,27 @@ pub fn render(
 
     let work = scratch_dir(out);
     std::fs::create_dir_all(&work)?;
-    let result = build(
+    let partial = work.join(out.file_name().unwrap_or_default());
+    let built = build(
         edit,
         &src,
         &ranges,
         &pieces,
         full_reason.is_none(),
         &work,
-        out,
+        &partial,
         opts,
         log,
     );
-    // On failure the partial output goes with the folder; `out` was never touched.
-    let _ = std::fs::remove_dir_all(&work);
+    let finished = built.is_ok();
+    let result = built.and_then(|()| install(&partial, out));
+    // A finished render that could be moved nowhere stays in the folder, which the error names.
+    // Otherwise the folder goes, a failed render's partial output with it; `out` was never touched.
+    if !(finished && partial.exists()) {
+        if let Err(e) = std::fs::remove_dir_all(&work) {
+            log(&format!("could not remove {}: {e}", work.display()));
+        }
+    }
     result?;
     Ok(RenderReport {
         full_reason,
@@ -133,12 +141,10 @@ pub fn render(
     })
 }
 
-/// Refuse to write over the source, or over anything else unless asked.
+/// Refuse to write over the source (by file identity: hard links included), or over anything else
+/// unless asked.
 fn check_output(source: &Path, out: &Path, overwrite: bool) -> Result<()> {
-    // By file identity: the user's recordings include hard links, which canonical paths miss.
-    if output::same_file(source, out) {
-        return Err(Error::Render("the output is the source file".into()));
-    }
+    output::refuse_source(source, out)?;
     if out.exists() && !overwrite {
         return Err(Error::Render(format!(
             "{} exists (--force replaces it)",
@@ -146,6 +152,36 @@ fn check_output(source: &Path, out: &Path, overwrite: bool) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Move the finished render onto `out`. When `out` cannot be replaced (on Windows: open in a
+/// player, read-only, held by a virus scan) the render is not thrown away: it goes beside `out` as
+/// `<name>.junctur-new.<ext>`, or else stays where it is, and the error says where it is.
+fn install(partial: &Path, out: &Path) -> Result<()> {
+    let Err(e) = std::fs::rename(partial, out) else {
+        return Ok(());
+    };
+    let beside = beside_name(out);
+    let at = if !beside.exists() && std::fs::rename(partial, &beside).is_ok() {
+        beside
+    } else {
+        partial.to_path_buf()
+    };
+    Err(Error::Render(format!(
+        "could not replace {} ({e}); the finished render is at {}",
+        out.display(),
+        at.display()
+    )))
+}
+
+fn beside_name(out: &Path) -> PathBuf {
+    let mut name = out.file_stem().unwrap_or_default().to_os_string();
+    name.push(".junctur-new");
+    if let Some(ext) = out.extension() {
+        name.push(".");
+        name.push(ext);
+    }
+    out.with_file_name(name)
 }
 
 fn scratch_dir(out: &Path) -> PathBuf {
@@ -188,7 +224,7 @@ fn build(
     pieces: &[Piece],
     matched: bool,
     work: &Path,
-    out: &Path,
+    partial: &Path,
     opts: &RenderOptions,
     log: &mut dyn FnMut(&str),
 ) -> Result<()> {
@@ -263,10 +299,7 @@ fn build(
     })?;
 
     log("muxing");
-    let partial = work.join(out.file_name().unwrap_or_default());
-    mux(edit, src, pieces.len(), &piece_path, &track_path, &partial)?;
-    std::fs::rename(&partial, out)?;
-    Ok(())
+    mux(edit, src, pieces.len(), &piece_path, &track_path, partial)
 }
 
 /// Join the pieces (fed in order through stdin) with the audio tracks into the output MP4, by copy.
@@ -356,5 +389,32 @@ mod tests {
             scratch_dir(Path::new("x/out.mp4")),
             PathBuf::from("x/out.mp4.junctur-parts")
         );
+    }
+
+    #[test]
+    fn a_finished_render_that_cannot_replace_the_output_is_kept() {
+        let dir = std::env::temp_dir().join(format!("junctur-install-{}", std::process::id()));
+        let work = dir.join("out.mp4.junctur-parts");
+        std::fs::create_dir_all(&work).unwrap();
+        let partial = work.join("out.mp4");
+        // A folder where the output goes: no rename replaces it, on any system.
+        let out = dir.join("out.mp4");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(&partial, b"render").unwrap();
+        let e = install(&partial, &out).unwrap_err().to_string();
+        let beside = dir.join("out.junctur-new.mp4");
+        assert!(e.contains("out.junctur-new.mp4"), "{e}");
+        assert_eq!(std::fs::read(&beside).unwrap(), b"render");
+        // The name beside is taken too: the render stays in the parts folder.
+        std::fs::write(&partial, b"render 2").unwrap();
+        let e = install(&partial, &out).unwrap_err().to_string();
+        assert!(e.contains("junctur-parts"), "{e}");
+        assert_eq!(std::fs::read(&partial).unwrap(), b"render 2");
+        // The usual case replaces the output.
+        std::fs::remove_dir_all(&out).unwrap();
+        std::fs::write(&out, b"old").unwrap();
+        install(&partial, &out).unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"render 2");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

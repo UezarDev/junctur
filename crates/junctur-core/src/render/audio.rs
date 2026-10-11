@@ -132,12 +132,19 @@ pub fn render_track(
         writer.write(s)
     })?;
     writer.finish()?;
-    // A decoder that died early would otherwise pass as silence (a normal track ends a few ms short).
+    // A decoder that died early would otherwise pass as silence. A normal track ends a few ms
+    // short of the video; the margin is a second because no real recording has measured how short
+    // one can end, and failing a long render on a healthy file costs more than a second of silence.
     let read_to = cursor.base + (cursor.buf.len() / ch as usize) as u64;
     let last = segs.last().map_or(0, |s| s.1);
     if cursor.eof && read_to + u64::from(track.rate) < last {
+        // The decoder has exited; its own message says why it stopped.
+        let why = match cursor.reader.finish() {
+            Err(e) => format!(" ({e})"),
+            Ok(()) => String::new(),
+        };
         return Err(Error::Render(format!(
-            "audio track {} ended at {:.1} s, before the last kept range",
+            "audio track {} ended at {:.1} s, before the last kept range{why}",
             index + 1,
             read_to as f64 / f64::from(track.rate)
         )));

@@ -136,23 +136,21 @@ impl Feed {
         })
     }
 
-    pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
-        let r = self
-            .input
-            .as_mut()
-            .expect("open until finish")
-            .write_all(bytes);
-        r.map_err(|e| self.fail(e.to_string()))
-    }
-
     /// Everything `from` holds, streamed: a muxed piece can be gigabytes and never sits in memory.
+    /// A failed read is our error; any failed write is ffmpeg having stopped, reported with its stderr.
     pub fn copy_from(&mut self, from: &mut dyn Read) -> Result<()> {
-        let input = self.input.as_mut().expect("open until finish");
-        match std::io::copy(from, input) {
-            Ok(_) => Ok(()),
-            // A failed write is ffmpeg having stopped; a failed read of `from` is ours.
-            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Err(self.fail(e.to_string())),
-            Err(e) => Err(e.into()),
+        let mut block = vec![0u8; 1 << 16];
+        loop {
+            let n = match from.read(&mut block) {
+                Ok(0) => return Ok(()),
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+            };
+            let input = self.input.as_mut().expect("open until finish");
+            if let Err(e) = input.write_all(&block[..n]) {
+                return Err(self.fail(e.to_string()));
+            }
         }
     }
 
