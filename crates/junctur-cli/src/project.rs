@@ -1,6 +1,7 @@
 //! The pipeline commands: `analyze`, `status`, `cut`, `export`, `render`. They share one project per
 //! recording (`--project <dir>` to keep it somewhere git can track it).
 
+use junctur_core::config;
 use junctur_core::edit::{CutSettings, EditList};
 use junctur_core::export;
 use junctur_core::pipeline::{self, PipelineOptions, Project, StageState, STAGES};
@@ -38,6 +39,20 @@ fn known(extra: &[&'static str]) -> Vec<&'static str> {
     PROJECT_FLAGS.iter().chain(extra).copied().collect()
 }
 
+/// `--model`, else the config file's `whisper_model`, else `auto` (large-v3-turbo with fallbacks).
+/// The config file is read only when `--model` is absent, so a broken one cannot block an explicit
+/// choice.
+fn model(a: &Args) -> Result<ModelPref, String> {
+    if let Some(m) = a.path("--model") {
+        return m
+            .to_string_lossy()
+            .parse()
+            .map_err(|e| format!("--model: {e}"));
+    }
+    let cfg = config::load(&config::default_path()).map_err(|e| e.to_string())?;
+    Ok(cfg.whisper_model.unwrap_or_default())
+}
+
 pub fn analyze(a: Args) -> Result<(), String> {
     let mut k = known(&["--cpu", "--model", "--force", "--no-transcript"]);
     k.extend(CUT_FLAGS);
@@ -49,16 +64,7 @@ pub fn analyze(a: Args) -> Result<(), String> {
         } else {
             DevicePref::Auto
         },
-        model: match a.path("--model").as_deref().and_then(|m| m.to_str()) {
-            None | Some("auto") => ModelPref::Auto,
-            Some("large-v3") => ModelPref::LargeV3,
-            Some("large-v3-q5_0") => ModelPref::LargeV3Q5,
-            Some(m) => {
-                return Err(format!(
-                    "--model: unknown model {m} (auto, large-v3, large-v3-q5_0)"
-                ))
-            }
-        },
+        model: model(&a)?,
         cut: cut_settings(&a)?,
         force: a.has("--force"),
         no_transcript: a.has("--no-transcript"),

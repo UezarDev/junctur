@@ -12,7 +12,7 @@ Early. These pieces work:
   regions and speakers (CAM++ embeddings) on the vocal stem. Stems go to the cache, never beside the input.
   It is opt-in: nothing else depends on it.
 - `junctur analyze` runs the pipeline on a recording: track roles, speech regions (VAD) on every track that
-  carries speech, read as-is, a Whisper large-v3 transcript of only those regions (Spanish with English;
+  carries speech, read as-is, a Whisper transcript of only those regions (large-v3-turbo by default) (Spanish with English;
   word timestamps), and a first automatic cut. Every stage is cached and an interrupted run resumes.
   The result is an edit list: a plain text file of ranges to keep plus a score per 5 s window, meant to be
   read, diffed and hand-edited. `junctur cut` re-cuts with other padding, `junctur status` shows the
@@ -32,8 +32,8 @@ Early. These pieces work:
   `pip install libclang`): whisper.cpp is built from source by `whisper-rs`.
 - For `render`: an NVIDIA GPU and an ffmpeg build with NVENC/NVDEC (`h264_nvenc`, `-hwaccel cuda`).
 - Optional, for GPU: an NVIDIA GPU with CUDA 13 and cuDNN 9 installed, and a build with `--features cuda`.
-  Without it, or when the GPU cannot start, everything runs on CPU. Whisper picks its model from the free
-  VRAM: large-v3 (f16) from 4.8 GB free, the 5-bit large-v3 from 2.2 GB, CPU below that, and says so.
+  Without it, or when the GPU cannot start, everything runs on CPU. Whisper runs large-v3-turbo on the
+  GPU when 2.1 GB of VRAM is free, else on CPU, and says so.
   Building whisper.cpp's CUDA kernels: with several CUDA versions installed set `CUDAToolkit_ROOT` to the
   CUDA 13 folder; CMake 4.0 does not know Visual Studio 2026, so set `CMAKE_GENERATOR` to an older
   installed one (e.g. `Visual Studio 16 2019`) if it picks that.
@@ -48,7 +48,7 @@ junctur tracks <file> [--json <out.json>] [--cache-dir <dir>] [--no-cache] [--no
 junctur separate <file> [--track <n>] [--start <s>] [--duration <s>] [--cpu] [--force]
                         [--no-speakers] [--json <out.json>] [--cache-dir <dir>]
 junctur analyze <file> [--project <dir>] [--cpu] [--force] [--no-transcript]
-                       [--model auto|large-v3|large-v3-q5_0] [cut flags]
+                       [--model auto|large-v3-turbo|large-v3|large-v3-q5_0] [cut flags]
 junctur status <file> [--project <dir>]
 junctur cut <file> [--project <dir>] [cut flags]
 junctur export <file> --fcpxml <out.fcpxml> [--project <dir>]
@@ -74,7 +74,26 @@ Downloaded on first use into `<cache>/models/`, checked against pinned SHA-256 d
 | Silero VAD v5 | speech detection | MIT |
 | UVR MDX-Net Kim Vocal 2 | voice isolation | no explicit license on the weights |
 | 3D-Speaker CAM++ (VoxCeleb) | speaker embeddings | Apache-2.0 |
-| Whisper large-v3, ggml f16 or 5-bit (whisper.cpp) | transcription | MIT |
+| Whisper large-v3-turbo, large-v3 f16 or 5-bit large-v3, ggml (whisper.cpp) | transcription | MIT |
+
+## Whisper models
+
+| `--model` | Use |
+|---|---|
+| `auto` (default) | large-v3-turbo, on the GPU when 2.1 GB of VRAM is free, else on CPU |
+| `large-v3-turbo` (alias `turbo`) | the fastest; close to large-v3, weaker at telling Spanish from English on short lines |
+| `large-v3` (alias `best`) | best quality, opt in; f16, wants about 4.8 GB of free VRAM |
+| `large-v3-q5_0` | large-v3 quantised to 5 bits (2.2 GB of VRAM): large-v3's decoder at turbo's footprint |
+
+To change the default, create `junctur/config.json` in the OS config folder (`%APPDATA%` on Windows,
+`~/.config` elsewhere), or point `JUNCTUR_CONFIG` at a file:
+
+```json
+{ "whisper_model": "large-v3" }
+```
+
+`--model` on the command line wins over the config file. A config file that does not parse, or names an
+unknown model or key, is an error rather than a silent fallback.
 
 Results are cached in the OS user cache folder under `junctur/`; override it with `--cache-dir` or the
 `JUNCTUR_CACHE_DIR` environment variable.

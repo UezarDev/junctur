@@ -50,6 +50,15 @@ pub const WHISPER_LARGE_V3: Model = Model {
     license: "MIT",
 };
 
+/// Whisper large-v3-turbo (ggml, MIT), f16, 1.6 GB: large-v3's encoder with 4 decoder layers instead of
+/// 32. The default model: faster and lighter on VRAM than even the 5-bit large-v3 (measured in 1f).
+pub const WHISPER_LARGE_V3_TURBO: Model = Model {
+    file: "ggml-large-v3-turbo.bin",
+    url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo.bin",
+    sha256: "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
+    license: "MIT",
+};
+
 /// The same large-v3 weights quantised to 5 bits (1.1 GB): fits beside another app on a 12 GB card.
 pub const WHISPER_LARGE_V3_Q5: Model = Model {
     file: "ggml-large-v3-q5_0.bin",

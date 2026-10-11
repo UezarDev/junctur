@@ -14,6 +14,8 @@
 //!                       [--jobs <n>]
 //! ```
 //!
+//! `--model` defaults to the config file's `whisper_model` ([`junctur_core::config`]), else `auto`.
+//!
 //! Arguments are parsed by hand: a few commands with a handful of flags do not justify a parser dependency.
 
 mod args;
@@ -28,7 +30,7 @@ const USAGE: &str = "usage:
   junctur separate <file> [--track <n>] [--start <s>] [--duration <s>] [--cpu] [--force]
                           [--no-speakers] [--json <out.json>] [--cache-dir <dir>]
   junctur analyze <file> [--project <dir>] [--cache-dir <dir>] [--cpu] [--force] [--no-transcript]
-                         [--model auto|large-v3|large-v3-q5_0] [cut flags]
+                         [--model auto|large-v3-turbo|large-v3|large-v3-q5_0] [cut flags]
   junctur status <file> [--project <dir>] [--cache-dir <dir>]
   junctur cut <file> [--project <dir>] [--cache-dir <dir>] [cut flags]
   junctur export <file> --fcpxml <out.fcpxml> [--project <dir>] [--cache-dir <dir>]

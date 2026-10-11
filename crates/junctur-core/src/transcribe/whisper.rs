@@ -1,9 +1,11 @@
-//! whisper.cpp through `whisper-rs`: model choice for the free VRAM, then one chunk at a time.
+//! whisper.cpp through `whisper-rs`: model choice (large-v3-turbo, or a fallback for the free VRAM),
+//! then one chunk at a time.
 //!
 //! whisper.cpp rather than an ONNX export: its CUDA build runs large-v3 with quantised weights and
 //! gives token timestamps directly, and the ONNX large-v3 exports need a hand-written decoder loop.
 
 use std::path::Path;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 use whisper_rs::{
@@ -16,18 +18,62 @@ use crate::models::{self, Model};
 use crate::runtime::{self, vram, Device, DevicePref};
 use crate::{Error, Result};
 
-/// Which model to load. `Auto` picks from the free VRAM.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Which model to load. `Auto` (the default) means large-v3-turbo, on the GPU when it fits in the free
+/// VRAM, else on CPU; the others are what the user asked for, by `--model` or the config file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(try_from = "String")]
 pub enum ModelPref {
     #[default]
     Auto,
+    LargeV3Turbo,
+    /// Best quality, opt-in: f16 large-v3 is slower than turbo and wants about 4.8 GB of free VRAM.
     LargeV3,
+    /// 1b's fallback, kept as an explicit choice: it needs more VRAM than turbo (below), so `Auto`
+    /// never falls back to it, but it is large-v3's decoder for anyone who prefers it.
     LargeV3Q5,
 }
 
-/// Free MiB needed for each model on the GPU (weights + compute buffers, measured on large-v3).
-const F16_MIB: u64 = 4800;
-const Q5_MIB: u64 = 2200;
+impl ModelPref {
+    /// Every accepted name, aliases after the canonical one. The CLI and the config file both read
+    /// this, so they accept the same words.
+    pub const NAMES: &[(&str, ModelPref)] = &[
+        ("auto", ModelPref::Auto),
+        ("large-v3-turbo", ModelPref::LargeV3Turbo),
+        ("turbo", ModelPref::LargeV3Turbo),
+        ("large-v3", ModelPref::LargeV3),
+        ("best", ModelPref::LargeV3),
+        ("large-v3-q5_0", ModelPref::LargeV3Q5),
+    ];
+}
+
+impl FromStr for ModelPref {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, String> {
+        Self::NAMES
+            .iter()
+            .find(|(n, _)| *n == s)
+            .map(|&(_, m)| m)
+            .ok_or_else(|| {
+                let names: Vec<&str> = Self::NAMES.iter().map(|(n, _)| *n).collect();
+                format!("unknown model {s} ({})", names.join(", "))
+            })
+    }
+}
+
+impl TryFrom<String> for ModelPref {
+    type Error = String;
+
+    fn try_from(s: String) -> std::result::Result<Self, String> {
+        s.parse()
+    }
+}
+
+/// Free MiB turbo needs on the GPU (weights + compute buffers), measured in 1f: a 2025 MiB peak over
+/// a 10-minute recording with beam search 5. The 5-bit large-v3 peaked at 2211 MiB on the same audio
+/// (its 32 decoder layers hold more KV cache than turbo's 4 save in weights), so there is no free-VRAM
+/// band where it fits and turbo does not.
+const TURBO_MIB: u64 = 2100;
 
 /// What will run, and why, decided before anything is loaded.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -41,7 +87,16 @@ pub struct Choice {
 pub fn choose(pref: ModelPref, device: DevicePref) -> (Choice, &'static Model) {
     let gpu = cfg!(feature = "cuda") && device == DevicePref::Auto;
     let free = if gpu { vram::free_mib() } else { None };
-    let pick = |m: &'static Model, d: Device, note: Option<String>| {
+    pick(pref, free, gpu)
+}
+
+/// The choice for `free` MiB of VRAM (None: no GPU answered). `gpu` says one was looked for, so its
+/// absence is worth a note. Pure, so the fallback table is testable without a GPU.
+///
+/// `Auto` without room on the card runs turbo on CPU rather than 1b's 5-bit large-v3: the 5-bit model
+/// would not fit either (see [`TURBO_MIB`]), and on CPU turbo's 4 decoder layers make it the faster.
+fn pick(pref: ModelPref, free: Option<u64>, gpu: bool) -> (Choice, &'static Model) {
+    let choice = |m: &'static Model, d: Device, note: Option<String>| {
         (
             Choice {
                 model: m
@@ -55,30 +110,28 @@ pub fn choose(pref: ModelPref, device: DevicePref) -> (Choice, &'static Model) {
             m,
         )
     };
+    let turbo = &models::WHISPER_LARGE_V3_TURBO;
     let q5 = &models::WHISPER_LARGE_V3_Q5;
     let f16 = &models::WHISPER_LARGE_V3;
+    let on = if free.is_some() {
+        Device::Cuda
+    } else {
+        Device::Cpu
+    };
     match (pref, free) {
-        (ModelPref::LargeV3, Some(_)) => pick(f16, Device::Cuda, None),
-        (ModelPref::LargeV3Q5, Some(_)) => pick(q5, Device::Cuda, None),
-        (ModelPref::LargeV3, None) => pick(f16, Device::Cpu, None),
-        (ModelPref::LargeV3Q5, None) => pick(q5, Device::Cpu, None),
-        (ModelPref::Auto, Some(f)) if f >= F16_MIB => pick(f16, Device::Cuda, None),
-        (ModelPref::Auto, Some(f)) if f >= Q5_MIB => pick(
-            q5,
-            Device::Cuda,
-            Some(format!(
-                "{f} MiB of VRAM free (another app holds the rest): using the 5-bit large-v3"
-            )),
-        ),
-        (ModelPref::Auto, Some(f)) => pick(
-            q5,
+        (ModelPref::LargeV3Turbo, _) => choice(turbo, on, None),
+        (ModelPref::LargeV3, _) => choice(f16, on, None),
+        (ModelPref::LargeV3Q5, _) => choice(q5, on, None),
+        (ModelPref::Auto, Some(f)) if f >= TURBO_MIB => choice(turbo, Device::Cuda, None),
+        (ModelPref::Auto, Some(f)) => choice(
+            turbo,
             Device::Cpu,
             Some(format!(
-                "only {f} MiB of VRAM free, under the {Q5_MIB} MiB Whisper needs: running on CPU (slow)"
+                "only {f} MiB of VRAM free, under the {TURBO_MIB} MiB Whisper needs: running on CPU (slow)"
             )),
         ),
-        (ModelPref::Auto, None) => pick(
-            q5,
+        (ModelPref::Auto, None) => choice(
+            turbo,
             Device::Cpu,
             gpu.then(|| "no usable NVIDIA GPU found: running on CPU (slow)".to_string()),
         ),
@@ -173,5 +226,83 @@ impl Whisper {
             }
         }
         Ok((lang, words::group(&tokens)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn picked(pref: ModelPref, free: Option<u64>, gpu: bool) -> (String, Device, bool) {
+        let (c, _) = pick(pref, free, gpu);
+        (c.model, c.device, c.note.is_some())
+    }
+
+    #[test]
+    fn auto_is_turbo_on_gpu_else_cpu() {
+        let turbo = || "large-v3-turbo".to_string();
+        assert_eq!(ModelPref::default(), ModelPref::Auto);
+        assert_eq!(
+            picked(ModelPref::Auto, Some(TURBO_MIB), true),
+            (turbo(), Device::Cuda, false)
+        );
+        assert_eq!(
+            picked(ModelPref::Auto, Some(TURBO_MIB - 1), true),
+            (turbo(), Device::Cpu, true)
+        );
+        assert_eq!(
+            picked(ModelPref::Auto, None, true),
+            (turbo(), Device::Cpu, true)
+        );
+        // A CPU-only build or `--cpu`: nothing to warn about.
+        assert_eq!(
+            picked(ModelPref::Auto, None, false),
+            (turbo(), Device::Cpu, false)
+        );
+    }
+
+    #[test]
+    fn explicit_models_ignore_free_vram() {
+        assert_eq!(
+            picked(ModelPref::LargeV3, Some(100), true),
+            ("large-v3".into(), Device::Cuda, false)
+        );
+        assert_eq!(
+            picked(ModelPref::LargeV3Q5, None, true),
+            ("large-v3-q5_0".into(), Device::Cpu, false)
+        );
+        assert_eq!(
+            picked(ModelPref::LargeV3Turbo, Some(100), true),
+            ("large-v3-turbo".into(), Device::Cuda, false)
+        );
+    }
+
+    #[test]
+    fn names_and_aliases_parse() {
+        for &(name, m) in ModelPref::NAMES {
+            assert_eq!(name.parse::<ModelPref>().unwrap(), m);
+        }
+        assert_eq!("best".parse::<ModelPref>(), Ok(ModelPref::LargeV3));
+        assert_eq!("turbo".parse::<ModelPref>(), Ok(ModelPref::LargeV3Turbo));
+        let err = "large-v4".parse::<ModelPref>().unwrap_err();
+        assert!(err.contains("large-v3-turbo"), "{err}");
+        assert_eq!(
+            serde_json::from_str::<ModelPref>("\"large-v3-q5_0\"").unwrap(),
+            ModelPref::LargeV3Q5
+        );
+        assert!(serde_json::from_str::<ModelPref>("\"large\"").is_err());
+    }
+
+    #[test]
+    fn every_model_name_is_its_file() {
+        // `Choice::model` is what the transcript and `junctur status` show; it must parse back.
+        for pref in [
+            ModelPref::LargeV3Turbo,
+            ModelPref::LargeV3,
+            ModelPref::LargeV3Q5,
+        ] {
+            let (c, _) = pick(pref, None, false);
+            assert_eq!(c.model.parse::<ModelPref>(), Ok(pref));
+        }
     }
 }
