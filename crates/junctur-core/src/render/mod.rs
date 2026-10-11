@@ -7,7 +7,9 @@
 //! the same machinery encodes every frame instead (a full re-encode) and says why.
 //!
 //! Scratch files go in a folder beside the output (same disk; a 30 h render does not fit in a
-//! small temp drive) and are deleted at the end. The source is only read.
+//! small temp drive) and are deleted at the end. The output is muxed in there too and renamed
+//! into place only once it is complete, so a failed `--force` keeps the previous render. The
+//! source is only read.
 
 mod audio;
 mod plan;
@@ -21,7 +23,7 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use crate::edit::{frame_ranges, EditList};
-use crate::{ffmpeg, Error, Result};
+use crate::{ffmpeg, output, Error, Result};
 
 pub use plan::{pieces, Piece};
 pub use source::{inspect, Source};
@@ -117,10 +119,8 @@ pub fn render(
         opts,
         log,
     );
+    // On failure the partial output goes with the folder; `out` was never touched.
     let _ = std::fs::remove_dir_all(&work);
-    if result.is_err() {
-        let _ = std::fs::remove_file(out);
-    }
     result?;
     Ok(RenderReport {
         full_reason,
@@ -135,11 +135,8 @@ pub fn render(
 
 /// Refuse to write over the source, or over anything else unless asked.
 fn check_output(source: &Path, out: &Path, overwrite: bool) -> Result<()> {
-    let same = match (source.canonicalize(), out.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
-    };
-    if same {
+    // By file identity: the user's recordings include hard links, which canonical paths miss.
+    if output::same_file(source, out) {
         return Err(Error::Render("the output is the source file".into()));
     }
     if out.exists() && !overwrite {
@@ -167,6 +164,17 @@ fn sample_ranges(ranges: &[(u64, u64)], rate: u32, fps_num: u64, fps_den: u64) -
     ranges.iter().map(|&(a, b)| (at(a), at(b))).collect()
 }
 
+/// Stops the other render threads when this one panics, as a failure would.
+struct StopOnPanic<'a>(&'a AtomicBool);
+
+impl Drop for StopOnPanic<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 enum Progress {
     Piece,
     Track(usize),
@@ -188,33 +196,40 @@ fn build(
     let track_path = |i: usize| work.join(format!("audio{i}.m4a"));
     let (tx, rx) = mpsc::channel();
     let next = AtomicUsize::new(0);
+    // Set by the first thread that fails; every other thread stops at its next step.
     let failed = AtomicBool::new(false);
     let v = &src.video;
+    // Only the first failure is reported: the rest are threads stopping because of it.
+    let first = |r: Result<()>| match r {
+        Err(e) if !failed.swap(true, Ordering::Relaxed) => Err(e),
+        _ => Ok(()),
+    };
 
     std::thread::scope(|scope| -> Result<()> {
         let mut handles = Vec::new();
         for (i, track) in src.audio.iter().enumerate() {
-            let tx = tx.clone();
+            let (tx, failed, first) = (tx.clone(), &failed, &first);
             let segs = sample_ranges(ranges, track.rate, v.fps_num, v.fps_den);
             let fade = (edit.settings.crossfade.max(0.0) / 2.0 * track.rate as f64).round() as u64;
             let path = track_path(i);
             handles.push(scope.spawn(move || {
-                let r = audio::render_track(&edit.source, i, track, &segs, fade, &path);
-                let _ = tx.send(Progress::Track(i));
-                r
+                let _stop = StopOnPanic(failed);
+                let r = audio::render_track(&edit.source, i, track, &segs, fade, &path, failed);
+                if r.is_ok() {
+                    let _ = tx.send(Progress::Track(i));
+                }
+                first(r)
             }));
         }
         for _ in 0..opts.jobs.max(1) {
-            let (tx, next, failed) = (tx.clone(), &next, &failed);
+            let (tx, next, failed, first) = (tx.clone(), &next, &failed, &first);
             handles.push(scope.spawn(move || {
+                let _stop = StopOnPanic(failed);
                 while !failed.load(Ordering::Relaxed) {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(p) = pieces.get(i) else { break };
                     let args = video::args(&edit.source, p, v, matched, &piece_path(i));
-                    if let Err(e) = ffmpeg::ffmpeg(&args) {
-                        failed.store(true, Ordering::Relaxed);
-                        return Err(e);
-                    }
+                    first(ffmpeg::ffmpeg(&args))?;
                     let _ = tx.send(Progress::Piece);
                 }
                 Ok(())
@@ -233,14 +248,25 @@ fn build(
                 Progress::Track(i) => log(&format!("audio track {} done", i + 1)),
             }
         }
+        // Join every thread, so a panic is an error (and cleanup runs) rather than an unwind
+        // out of `render` that leaves the parts folder behind.
+        let mut result = Ok(());
         for h in handles {
-            h.join().expect("render thread panicked")?;
+            let r = h
+                .join()
+                .unwrap_or_else(|_| Err(Error::Render("a render thread panicked".into())));
+            if result.is_ok() {
+                result = r;
+            }
         }
-        Ok(())
+        result
     })?;
 
     log("muxing");
-    mux(edit, src, pieces.len(), &piece_path, &track_path, out)
+    let partial = work.join(out.file_name().unwrap_or_default());
+    mux(edit, src, pieces.len(), &piece_path, &track_path, &partial)?;
+    std::fs::rename(&partial, out)?;
+    Ok(())
 }
 
 /// Join the pieces (fed in order through stdin) with the audio tracks into the output MP4, by copy.
@@ -281,7 +307,8 @@ fn mux(
     let mut feed = ffmpeg::Feed::spawn(&a)?;
     for i in 0..pieces {
         let path = piece_path(i);
-        feed.write(&std::fs::read(&path)?)?;
+        // Streamed: a copy piece can be a whole kept range, gigabytes long.
+        feed.copy_from(&mut std::fs::File::open(&path)?)?;
         // Free the scratch space as the mux goes.
         let _ = std::fs::remove_file(path);
     }
@@ -314,6 +341,12 @@ mod tests {
         std::fs::write(&src, b"x").unwrap();
         assert!(check_output(&src, &src, true).is_err(), "never the source");
         assert!(check_output(&src, &dir.join("./in.mp4"), true).is_err());
+        let link = dir.join("link.mp4");
+        std::fs::hard_link(&src, &link).unwrap();
+        assert!(
+            check_output(&src, &link, true).is_err(),
+            "a hard link is the source"
+        );
         assert!(check_output(&src, &src.with_file_name("out.mp4"), false).is_ok());
         std::fs::write(dir.join("out.mp4"), b"y").unwrap();
         assert!(check_output(&src, &dir.join("out.mp4"), false).is_err());

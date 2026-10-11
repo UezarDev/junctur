@@ -193,8 +193,8 @@ pub fn speech_tracks(report: &TrackReport) -> Vec<usize> {
         .collect()
 }
 
-/// (Re)write the edit list from cached analysis. A hand-edited list is kept as `edit.junctur.bak`
-/// before being replaced.
+/// (Re)write the edit list from cached analysis. A hand-edited list is kept as a backup before
+/// being replaced ([`back_up_hand_edit`]).
 pub fn cut(
     p: &Project,
     report: &TrackReport,
@@ -207,22 +207,49 @@ pub fn cut(
     let starts: Vec<f64> = transcript
         .map(|t| t.words().map(|w| w.start).collect())
         .unwrap_or_default();
-    let e = EditList {
+    let make = |settings: &CutSettings| EditList {
         source: p.file.clone(),
         duration: report.duration,
         settings: *settings,
         keep: edit::keep_ranges(&regions, &env, report.duration, settings),
         windows: edit::windows(&regions, &starts, report.duration, settings.window),
     };
+    let e = make(settings);
     let text = e.to_text();
     let path = p.edit_path();
     if let Ok(old) = std::fs::read_to_string(&path) {
         if old != text {
-            std::fs::write(p.dir.join("edit.junctur.bak"), old)?;
+            back_up_hand_edit(&p.dir, &old, |s| make(s).to_text())?;
         }
     }
     std::fs::write(&path, text)?;
     Ok(e)
+}
+
+/// Keep `old`, the edit list about to be replaced, unless Junctur wrote it: `regenerate` remakes a
+/// list from the current analysis, and a list it reproduces from its own recorded settings has
+/// nothing of the user's in it. Anything else (a hand edit, a list that no longer parses, one made
+/// from older analysis) goes to the first free `edit.junctur.bak`, `edit.junctur.bak2`, ...
+/// Backups are never overwritten: a single `.bak` rewritten on every re-cut lost the hand edit to
+/// the next generated list (1d).
+fn back_up_hand_edit(
+    dir: &Path,
+    old: &str,
+    regenerate: impl Fn(&CutSettings) -> String,
+) -> Result<()> {
+    let generated = edit::parse(old).is_ok_and(|e| regenerate(&e.settings) == old);
+    if generated {
+        return Ok(());
+    }
+    let free = (1..)
+        .map(|n| match n {
+            1 => dir.join("edit.junctur.bak"),
+            n => dir.join(format!("edit.junctur.bak{n}")),
+        })
+        .find(|p| !p.exists())
+        .expect("some name is free");
+    std::fs::write(free, old)?;
+    Ok(())
 }
 
 /// Re-cut from what earlier stages left, without running them.
@@ -247,4 +274,53 @@ pub fn recut(p: &Project, settings: &CutSettings) -> Result<EditList> {
         None,
     )?;
     Ok(e)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn list(settings: CutSettings, keep_end: f64) -> String {
+        EditList {
+            source: PathBuf::from("in.mp4"),
+            duration: 10.0,
+            settings,
+            keep: vec![edit::Range {
+                start: 0.0,
+                end: keep_end,
+            }],
+            windows: vec![],
+        }
+        .to_text()
+    }
+
+    #[test]
+    fn only_hand_edits_are_backed_up_and_never_over_each_other() {
+        let dir = std::env::temp_dir().join(format!("junctur-bak-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // What the analysis makes: the kept end follows the padding.
+        let regenerate = |s: &CutSettings| list(*s, 5.0 + s.pad_after);
+        let wide = CutSettings {
+            pad_after: 1.0,
+            ..Default::default()
+        };
+        let bak = |name: &str| std::fs::read_to_string(dir.join(name)).ok();
+
+        // A generated list replaced by a re-cut: nothing to keep.
+        back_up_hand_edit(&dir, &regenerate(&CutSettings::default()), regenerate).unwrap();
+        assert_eq!(bak("edit.junctur.bak"), None);
+        // Two hand edits, each replaced by a re-cut: both kept.
+        let hand1 = list(CutSettings::default(), 2.0);
+        back_up_hand_edit(&dir, &hand1, regenerate).unwrap();
+        back_up_hand_edit(&dir, &regenerate(&wide), regenerate).unwrap();
+        let hand2 = list(wide, 3.0);
+        back_up_hand_edit(&dir, &hand2, regenerate).unwrap();
+        assert_eq!(bak("edit.junctur.bak"), Some(hand1));
+        assert_eq!(bak("edit.junctur.bak2"), Some(hand2));
+        assert_eq!(bak("edit.junctur.bak3"), None);
+        // A list that does not parse is the user's too.
+        back_up_hand_edit(&dir, "junctur-edit 1\nkeep x\n", regenerate).unwrap();
+        assert!(bak("edit.junctur.bak3").is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

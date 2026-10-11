@@ -91,6 +91,26 @@ fn h264_is_smart_rendered_frame_exact() {
     // Never over the source; not over an existing file without asking.
     assert!(render::render(&edit(&src), &src, &RenderOptions::default(), &mut |_| {}).is_err());
     assert!(render::render(&edit(&src), &out, &RenderOptions::default(), &mut |_| {}).is_err());
+    let force = RenderOptions {
+        overwrite: true,
+        ..Default::default()
+    };
+    let link = d.join("link.mp4");
+    std::fs::hard_link(&src, &link).unwrap();
+    assert!(
+        render::render(&edit(&src), &link, &force, &mut |_| {}).is_err(),
+        "a hard link is the source"
+    );
+    // A `--force` render that fails (no muxer for this extension) keeps the file it would replace,
+    // and its parts folder.
+    let old = d.join("old.xyz");
+    std::fs::write(&old, b"previous render").unwrap();
+    assert!(render::render(&edit(&src), &old, &force, &mut |_| {}).is_err());
+    assert_eq!(std::fs::read(&old).unwrap(), b"previous render");
+    assert!(!d.join("old.xyz.junctur-parts").exists());
+    // `--force` over a finished render replaces it.
+    render::render(&edit(&src), &out, &force, &mut |_| {}).unwrap();
+    assert_eq!(count(&out, "v:0", "stream=nb_read_packets"), "353");
     std::fs::remove_dir_all(&d).unwrap();
 }
 

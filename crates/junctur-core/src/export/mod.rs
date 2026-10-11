@@ -6,10 +6,12 @@ pub mod fcpxml;
 use std::path::Path;
 
 use crate::edit::EditList;
-use crate::{ffmpeg, Result};
+use crate::{ffmpeg, output, Result};
 
-/// Write `edit` as an FCPXML timeline to `out`, probing the source for its frame rate.
+/// Write `edit` as an FCPXML timeline to `out`, probing the source for its frame rate. Any `out`
+/// but the source itself is replaced.
 pub fn write_fcpxml(edit: &EditList, out: &Path) -> Result<()> {
+    output::refuse_source(&edit.source, out)?;
     let probe = ffmpeg::probe(&edit.source)?;
     let media = fcpxml::Media {
         video: ffmpeg::probe_video(&edit.source)?,

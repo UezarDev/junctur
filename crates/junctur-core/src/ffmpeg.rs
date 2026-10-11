@@ -5,7 +5,8 @@
 
 use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::thread::JoinHandle;
 
 use serde::{Deserialize, Serialize};
 
@@ -68,11 +69,50 @@ pub fn has_encoder(name: &str) -> Result<bool> {
         .any(|l| l.split_whitespace().nth(1) == Some(name)))
 }
 
+/// The end of a running ffmpeg's stderr, drained on a thread: a full stderr pipe would block
+/// ffmpeg while we block on its stdin or stdout. Only the tail is kept, so 30 h of decode warnings
+/// cannot grow without bound; the error that ended the run is at the end.
+struct StderrTail(Option<JoinHandle<String>>);
+
+/// Bytes of stderr kept.
+const STDERR_TAIL: usize = 4096;
+
+impl StderrTail {
+    fn drain(mut err: ChildStderr) -> Self {
+        Self(Some(std::thread::spawn(move || {
+            let mut tail = Vec::new();
+            let mut block = [0u8; 1024];
+            while let Ok(n @ 1..) = err.read(&mut block) {
+                tail.extend_from_slice(&block[..n]);
+                if tail.len() > 2 * STDERR_TAIL {
+                    tail.drain(..tail.len() - STDERR_TAIL);
+                }
+            }
+            let start = tail.len().saturating_sub(STDERR_TAIL);
+            String::from_utf8_lossy(&tail[start..]).into_owned()
+        })))
+    }
+
+    /// The process failed: its stderr, or `fallback` when it said nothing. Call after it exited.
+    fn error(&mut self, fallback: String) -> Error {
+        let stderr = self
+            .0
+            .take()
+            .and_then(|h| h.join().ok())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(fallback);
+        Error::Tool {
+            program: "ffmpeg",
+            stderr,
+        }
+    }
+}
+
 /// An ffmpeg fed through stdin (e.g. a muxer reading a byte stream), with its stderr kept for errors.
 pub struct Feed {
     child: Child,
     input: Option<ChildStdin>,
-    stderr: Option<std::thread::JoinHandle<String>>,
+    stderr: StderrTail,
 }
 
 impl Feed {
@@ -88,17 +128,11 @@ impl Feed {
                 source,
             })?;
         let input = child.stdin.take();
-        // Drained on a thread: a full stderr pipe would block ffmpeg while we block on its stdin.
-        let mut err = child.stderr.take().expect("piped stderr");
-        let stderr = std::thread::spawn(move || {
-            let mut s = String::new();
-            let _ = err.read_to_string(&mut s);
-            s
-        });
+        let stderr = StderrTail::drain(child.stderr.take().expect("piped stderr"));
         Ok(Self {
             child,
             input,
-            stderr: Some(stderr),
+            stderr,
         })
     }
 
@@ -111,19 +145,21 @@ impl Feed {
         r.map_err(|e| self.fail(e.to_string()))
     }
 
+    /// Everything `from` holds, streamed: a muxed piece can be gigabytes and never sits in memory.
+    pub fn copy_from(&mut self, from: &mut dyn Read) -> Result<()> {
+        let input = self.input.as_mut().expect("open until finish");
+        match std::io::copy(from, input) {
+            Ok(_) => Ok(()),
+            // A failed write is ffmpeg having stopped; a failed read of `from` is ours.
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Err(self.fail(e.to_string())),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     fn fail(&mut self, fallback: String) -> Error {
         drop(self.input.take());
         let _ = self.child.wait();
-        let stderr = self
-            .stderr
-            .take()
-            .and_then(|h| h.join().ok())
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or(fallback);
-        Error::Tool {
-            program: "ffmpeg",
-            stderr,
-        }
+        self.stderr.error(fallback)
     }
 
     pub fn finish(mut self) -> Result<()> {
@@ -271,6 +307,7 @@ pub struct Span {
 pub struct PcmReader {
     child: Child,
     out: ChildStdout,
+    stderr: StderrTail,
     pub rate: u32,
     pub channels: u32,
 }
@@ -302,16 +339,18 @@ impl PcmReader {
         let mut child = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|source| Error::Spawn {
                 program: "ffmpeg",
                 source,
             })?;
         let out = child.stdout.take().expect("piped stdout");
+        let stderr = StderrTail::drain(child.stderr.take().expect("piped stderr"));
         Ok(Self {
             child,
             out,
+            stderr,
             rate,
             channels,
         })
@@ -337,10 +376,7 @@ impl PcmReader {
     pub fn finish(mut self) -> Result<()> {
         let status = self.child.wait()?;
         if !status.success() {
-            return Err(Error::Tool {
-                program: "ffmpeg",
-                stderr: format!("decode exited with {status}"),
-            });
+            return Err(self.stderr.error(format!("decode exited with {status}")));
         }
         Ok(())
     }
@@ -365,6 +401,7 @@ impl Drop for PcmWriter {
 pub struct PcmWriter {
     child: Child,
     input: Option<ChildStdin>,
+    stderr: StderrTail,
 }
 
 impl PcmWriter {
@@ -381,33 +418,41 @@ impl PcmWriter {
             .arg(path)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|source| Error::Spawn {
                 program: "ffmpeg",
                 source,
             })?;
         let input = child.stdin.take();
-        Ok(Self { child, input })
+        let stderr = StderrTail::drain(child.stderr.take().expect("piped stderr"));
+        Ok(Self {
+            child,
+            input,
+            stderr,
+        })
     }
 
     pub fn write(&mut self, samples: &[f32]) -> Result<()> {
         let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-        self.input
+        let r = self
+            .input
             .as_mut()
             .expect("open until finish")
-            .write_all(&bytes)?;
-        Ok(())
+            .write_all(&bytes);
+        // A write fails when ffmpeg stopped reading, i.e. died: say why it did.
+        r.map_err(|e| {
+            drop(self.input.take());
+            let _ = self.child.wait();
+            self.stderr.error(e.to_string())
+        })
     }
 
     pub fn finish(mut self) -> Result<()> {
         drop(self.input.take());
         let status = self.child.wait()?;
         if !status.success() {
-            return Err(Error::Tool {
-                program: "ffmpeg",
-                stderr: format!("encode exited with {status}"),
-            });
+            return Err(self.stderr.error(format!("encode exited with {status}")));
         }
         Ok(())
     }
@@ -438,6 +483,15 @@ mod tests {
         assert_eq!(p.audio[0].title, None);
         assert_eq!(p.audio[1].title.as_deref(), Some("Mic"));
         assert_eq!(p.audio[1].index, 1);
+    }
+
+    #[test]
+    fn decode_failure_carries_the_ffmpeg_message() {
+        let missing = std::env::temp_dir().join("junctur-no-such-file.mp4");
+        let mut r = PcmReader::open(&missing, 0, 16_000, 1, Span::default()).unwrap();
+        assert!(r.read(1024).unwrap().is_empty());
+        let e = r.finish().unwrap_err().to_string();
+        assert!(e.contains("junctur-no-such-file"), "{e}");
     }
 
     #[test]

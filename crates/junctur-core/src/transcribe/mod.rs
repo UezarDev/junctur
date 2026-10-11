@@ -180,15 +180,12 @@ pub fn transcribe(
         if let Some(note) = &choice.note {
             eprintln!("junctur: {note}");
         }
-        if started.is_none() {
-            let h = Header {
-                device: choice.device,
-                ..want.clone()
-            };
-            std::fs::write(&partial, format!("{}\n", serde_json::to_string(&h)?))?;
-        }
+        let header = started.clone().unwrap_or(Header {
+            device: choice.device,
+            ..want.clone()
+        });
         let mut w = Whisper::open(&models::ensure(model, cache_dir)?, choice.device)?;
-        let mut out = std::fs::OpenOptions::new().append(true).open(&partial)?;
+        let mut out = open_partial(&partial, &header, &done)?;
         for (i, (track, c)) in todo.iter().enumerate() {
             progress(resumed_chunks + i, work.len());
             let samples = read_span(file, *track, c)?;
@@ -208,7 +205,8 @@ pub fn transcribe(
                     })
                     .collect(),
             };
-            writeln!(out, "{}", serde_json::to_string(&seg)?)?;
+            // One write for the line and its newline, so a kill tears at most this line.
+            out.write_all(format!("{}\n", serde_json::to_string(&seg)?).as_bytes())?;
             out.flush()?;
             done.push(seg);
         }
@@ -239,6 +237,22 @@ fn read_partial(path: &Path) -> Option<(Header, Vec<Segment>)> {
         h,
         lines.filter_map(|l| serde_json::from_str(l).ok()).collect(),
     ))
+}
+
+/// Write the partial file afresh (`header`, then the chunks already done) and open it for
+/// appending. Rewritten rather than appended to: a killed run leaves a torn last line, and the next
+/// chunk appended to it shared its line, so both were lost at the next resume (1d).
+fn open_partial(path: &Path, header: &Header, done: &[Segment]) -> Result<std::fs::File> {
+    let mut body = serde_json::to_string(header)? + "\n";
+    for seg in done {
+        body += &serde_json::to_string(seg)?;
+        body.push('\n');
+    }
+    // Through a temp file, so a kill now still leaves the old partial to resume from.
+    let tmp = path.with_extension("jsonl.tmp");
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(std::fs::OpenOptions::new().append(true).open(path)?)
 }
 
 fn read_span(file: &Path, track: usize, c: &Chunk) -> Result<Vec<f32>> {
@@ -319,13 +333,37 @@ mod tests {
         );
         std::fs::write(&p, body).unwrap();
         let (got, segs) = read_partial(&p).unwrap();
-        assert_eq!((got.clone(), segs), (h.clone(), vec![seg]));
+        assert_eq!((got.clone(), segs), (h.clone(), vec![seg.clone()]));
         assert!(got.same_run(&Header {
             device: Device::Cpu,
             ..h.clone()
         }));
         assert!(!got.same_run(&header("en", "large-v3-turbo")));
         assert!(!got.same_run(&header("es+en", "large-v3")));
+        // Resuming rewrites the torn partial, so the next chunk gets a line of its own; so does a
+        // last line that is whole but lost its newline.
+        let next = Segment {
+            start: 3.0,
+            end: 4.0,
+            ..seg.clone()
+        };
+        let append = |segs: &[Segment]| {
+            let mut out = open_partial(&p, &h, segs).unwrap();
+            out.write_all(format!("{}\n", serde_json::to_string(&next).unwrap()).as_bytes())
+                .unwrap();
+        };
+        append(std::slice::from_ref(&seg));
+        let (_, segs) = read_partial(&p).unwrap();
+        assert_eq!(segs, vec![seg.clone(), next.clone()]);
+        let unterminated = format!(
+            "{}\n{}",
+            serde_json::to_string(&h).unwrap(),
+            serde_json::to_string(&seg).unwrap()
+        );
+        std::fs::write(&p, unterminated).unwrap();
+        let (_, segs) = read_partial(&p).unwrap();
+        append(&segs);
+        assert_eq!(read_partial(&p).unwrap().1, vec![seg.clone(), next]);
         // A 1b partial (version 1, no model) is not resumed.
         std::fs::write(&p, "{\"version\":1,\"languages\":\"es+en\"}\n").unwrap();
         assert!(read_partial(&p).is_none());

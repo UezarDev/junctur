@@ -16,6 +16,7 @@ pub mod error;
 pub mod export;
 pub mod ffmpeg;
 pub mod models;
+pub mod output;
 pub mod pipeline;
 pub mod render;
 pub mod runtime;

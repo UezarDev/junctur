@@ -24,6 +24,8 @@ pub enum Error {
     Edit(String),
     /// The renderer cannot produce the requested output (e.g. it would overwrite the source).
     Render(String),
+    /// An output path that must not be written (e.g. it is the source recording).
+    Output(String),
     Io(std::io::Error),
     Json(serde_json::Error),
 }
@@ -42,6 +44,7 @@ impl fmt::Display for Error {
             Error::Model(msg) => write!(f, "model error: {msg}"),
             Error::Edit(msg) => write!(f, "{msg}"),
             Error::Render(msg) => write!(f, "render: {msg}"),
+            Error::Output(msg) => write!(f, "{msg}"),
             Error::Io(e) => write!(f, "{e}"),
             Error::Json(e) => write!(f, "{e}"),
         }
