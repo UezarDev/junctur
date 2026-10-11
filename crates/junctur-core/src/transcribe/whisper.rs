@@ -1,5 +1,5 @@
 //! whisper.cpp through `whisper-rs`: model choice (large-v3-turbo, or a fallback for the free VRAM),
-//! then one chunk at a time.
+//! then the language of a group of chunks, then one chunk at a time.
 //!
 //! whisper.cpp rather than an ONNX export: its CUDA build runs large-v3 with quantised weights and
 //! gives token timestamps directly, and the ONNX large-v3 exports need a hand-written decoder loop.
@@ -170,10 +170,8 @@ impl Whisper {
         })
     }
 
-    /// Detect the language among `langs`, then transcribe. `samples` is 16 kHz mono; word times
-    /// are seconds from the start of `samples`.
-    pub fn run(&mut self, samples: &[f32], langs: &Languages) -> Result<(String, Vec<Word>)> {
-        let err = |e: whisper_rs::WhisperError| Error::Model(format!("whisper: {e}"));
+    /// The language of `samples` (16 kHz mono, Whisper looks at the first 30 s) among `langs`.
+    pub fn detect(&mut self, samples: &[f32], langs: &Languages) -> Result<String> {
         self.state
             .pcm_to_mel(samples, self.threads as usize)
             .map_err(err)?;
@@ -189,13 +187,16 @@ impl Whisper {
                 Some((c.clone(), *probs.get(id as usize)?))
             })
             .collect();
-        let lang = langs.choose(&probs);
+        Ok(langs.choose(&probs))
+    }
 
+    /// Transcribe `samples` (16 kHz mono) as `lang`; word times are seconds from their start.
+    pub fn transcribe(&mut self, samples: &[f32], lang: &str) -> Result<Vec<Word>> {
         let mut params = FullParams::new(SamplingStrategy::BeamSearch {
             beam_size: 5,
             patience: -1.0,
         });
-        params.set_language(Some(&lang));
+        params.set_language(Some(lang));
         params.set_n_threads(self.threads);
         params.set_token_timestamps(true);
         // Each chunk stands alone: carrying text across chunks is how Whisper loops on a phrase.
@@ -229,8 +230,12 @@ impl Whisper {
                 });
             }
         }
-        Ok((lang, words::group(&tokens)))
+        Ok(words::group(&tokens))
     }
+}
+
+fn err(e: whisper_rs::WhisperError) -> Error {
+    Error::Model(format!("whisper: {e}"))
 }
 
 #[cfg(test)]

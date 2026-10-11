@@ -4,6 +4,7 @@
 //! [`splice`](super::splice), and encoded once, so priming exists only at the start of the file,
 //! where the MP4 edit list hides it.
 
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -21,22 +22,25 @@ const BLOCK: usize = 48_000;
 
 /// Where a [`Cursor`] gets its samples: the decoder, or a stand-in in tests.
 trait Decode {
-    /// Up to `n` interleaved samples, empty at the end.
-    fn read(&mut self, n: usize) -> Result<Vec<f32>>;
+    /// Up to `n` interleaved samples into `buf` (replacing its contents), empty at the end.
+    fn read_into(&mut self, buf: &mut Vec<f32>, n: usize) -> Result<()>;
 }
 
 impl Decode for PcmReader {
-    fn read(&mut self, n: usize) -> Result<Vec<f32>> {
-        PcmReader::read(self, n)
+    fn read_into(&mut self, buf: &mut Vec<f32>, n: usize) -> Result<()> {
+        PcmReader::read_into(self, buf, n)
     }
 }
 
 /// A forward-only reader that keeps a little history, because a crossfade reads a few ms before
-/// the point it last read up to.
+/// the point it last read up to. The history is a ring buffer: forgetting the oldest samples does
+/// not move the rest, as draining the front of a vector did on every read.
 struct Cursor<D> {
     reader: D,
     channels: usize,
-    buf: Vec<f32>,
+    buf: VecDeque<f32>,
+    /// The decoder's last block, reused.
+    block: Vec<f32>,
     /// Sample frame number of `buf[0]`.
     base: u64,
     eof: bool,
@@ -51,7 +55,8 @@ impl<D> Cursor<D> {
         Self {
             reader,
             channels,
-            buf: Vec::new(),
+            buf: VecDeque::new(),
+            block: Vec::new(),
             base: 0,
             eof: false,
             keep,
@@ -78,9 +83,9 @@ impl<D: Decode> Samples for Cursor<D> {
         let dead = from.min(to.saturating_sub(self.keep));
         while !self.eof && self.base + ((self.buf.len() / ch) as u64) < to {
             self.forget(dead);
-            let got = self.reader.read(ch * BLOCK)?;
-            self.eof = got.is_empty();
-            self.buf.extend_from_slice(&got);
+            self.reader.read_into(&mut self.block, ch * BLOCK)?;
+            self.eof = self.block.is_empty();
+            self.buf.extend(&self.block);
             #[cfg(test)]
             {
                 self.peak = self.peak.max(self.buf.len());
@@ -95,8 +100,10 @@ impl<D: Decode> Samples for Cursor<D> {
         let have = self.buf.len() as u64 / ch as u64;
         let (lo, hi) = (from - self.base, (to - self.base).min(have));
         if hi > lo {
-            out[..((hi - lo) as usize * ch)]
-                .copy_from_slice(&self.buf[lo as usize * ch..hi as usize * ch]);
+            let have = self.buf.range(lo as usize * ch..hi as usize * ch);
+            for (o, &x) in out.iter_mut().zip(have) {
+                *o = x;
+            }
         }
         self.forget(to.saturating_sub(self.keep));
         Ok(out)
@@ -164,11 +171,12 @@ mod tests {
     }
 
     impl Decode for Counter {
-        fn read(&mut self, n: usize) -> Result<Vec<f32>> {
+        fn read_into(&mut self, buf: &mut Vec<f32>, n: usize) -> Result<()> {
             let end = (self.next + n as u64).min(self.len);
-            let out = (self.next..end).map(|x| x as f32).collect();
+            buf.clear();
+            buf.extend((self.next..end).map(|x| x as f32));
             self.next = end;
-            Ok(out)
+            Ok(())
         }
     }
 

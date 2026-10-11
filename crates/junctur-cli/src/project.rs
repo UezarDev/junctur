@@ -160,6 +160,7 @@ pub fn render(a: Args) -> Result<(), String> {
         full: a.has("--full"),
         overwrite: a.has("--force"),
         jobs: a.num("--jobs")?.unwrap_or(RenderOptions::default().jobs),
+        cache_dir: Some(p.cache_dir.clone()),
     };
     let r = render::render(&e, &out, &opts, &mut |line| eprintln!("junctur: {line}"))
         .map_err(|e| e.to_string())?;

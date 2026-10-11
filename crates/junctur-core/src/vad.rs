@@ -33,45 +33,49 @@ pub struct Region {
 pub struct Vad {
     session: Session,
     pub device: Device,
-    state: Vec<f32>,
-    context: Vec<f32>,
+    /// The model's inputs, made once and written in place frame by frame: a 30 h track is 3.4
+    /// million frames, and building three tensors for each was most of the allocation in VAD.
+    input: Tensor<f32>,
+    state: Tensor<f32>,
+    sr: Tensor<i64>,
 }
 
 impl Vad {
-    /// The model is tiny and runs frame by frame, so GPU transfer costs more than it saves: CPU always.
+    /// The model is tiny and runs frame by frame, so GPU transfer costs more than it saves: CPU
+    /// always, and one thread: a frame is too small to split, and tracks run side by side.
     pub fn open(model: &Path) -> Result<Self> {
-        let (session, device) = runtime::open(model, DevicePref::Cpu)?;
+        let (session, device) = runtime::open_with_threads(model, DevicePref::Cpu, 1)?;
         Ok(Self {
             session,
             device,
-            state: vec![0.0; 2 * 128],
-            context: vec![0.0; CONTEXT],
+            input: Tensor::from_array(([1usize, CONTEXT + FRAME], vec![0.0; CONTEXT + FRAME]))?,
+            state: Tensor::from_array(([2usize, 1, 128], vec![0.0; 2 * 128]))?,
+            sr: Tensor::from_array((Vec::<usize>::new(), vec![RATE as i64]))?,
         })
     }
 
     pub fn reset(&mut self) {
-        self.state.fill(0.0);
-        self.context.fill(0.0);
+        self.input.extract_tensor_mut().1.fill(0.0);
+        self.state.extract_tensor_mut().1.fill(0.0);
     }
 
     /// Speech probability per 512-sample frame of 16 kHz mono; a short tail is zero-padded.
     pub fn probs(&mut self, samples: &[f32]) -> Result<Vec<f32>> {
         let mut out = Vec::with_capacity(samples.len() / FRAME + 1);
         for chunk in samples.chunks(FRAME) {
-            let mut x = Vec::with_capacity(CONTEXT + FRAME);
-            x.extend_from_slice(&self.context);
-            x.extend_from_slice(chunk);
-            x.resize(CONTEXT + FRAME, 0.0);
-            self.context.copy_from_slice(&x[FRAME..]);
-            let input = Tensor::from_array(([1usize, CONTEXT + FRAME], x))?;
-            let state = Tensor::from_array(([2usize, 1, 128], self.state.clone()))?;
-            let sr = Tensor::from_array((Vec::<usize>::new(), vec![RATE as i64]))?;
-            let res = self
-                .session
-                .run(ort::inputs!["input" => input, "state" => state, "sr" => sr])?;
+            // The input is the previous frame's last CONTEXT samples, then this frame.
+            let x = self.input.extract_tensor_mut().1;
+            x.copy_within(FRAME.., 0);
+            x[CONTEXT..CONTEXT + chunk.len()].copy_from_slice(chunk);
+            x[CONTEXT + chunk.len()..].fill(0.0);
+            let res = self.session.run(ort::inputs![
+                "input" => &self.input,
+                "state" => &self.state,
+                "sr" => &self.sr
+            ])?;
             out.push(res["output"].try_extract_tensor::<f32>()?.1[0]);
-            self.state
-                .copy_from_slice(res["stateN"].try_extract_tensor::<f32>()?.1);
+            let next = res["stateN"].try_extract_tensor::<f32>()?.1;
+            self.state.extract_tensor_mut().1.copy_from_slice(next);
         }
         Ok(out)
     }

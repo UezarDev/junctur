@@ -4,6 +4,7 @@
 //! next starts, so an interrupted run (a 30h stream is hours of Whisper) loses one chunk at most.
 //! The finished transcript is `transcript.json`, plus a plain `transcript.txt` to read.
 
+mod audio;
 mod chunks;
 mod languages;
 mod whisper;
@@ -11,18 +12,19 @@ mod words;
 
 use std::io::Write;
 use std::path::Path;
+use std::sync::mpsc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
+use audio::{Group, Heard};
 pub use chunks::{plan, Chunk};
 pub use languages::Languages;
 pub use whisper::{choose, Choice, ModelPref, Whisper};
 pub use words::Word;
 
-use crate::ffmpeg::{PcmReader, Span};
 use crate::runtime::{Device, DevicePref};
-use crate::vad::{self, Region};
+use crate::vad::Region;
 use crate::{models, Result};
 
 /// One audio track to transcribe, with its speech regions.
@@ -150,17 +152,29 @@ pub fn transcribe(
         .collect();
     let audio_s = 0.0 + work.iter().map(|(_, c)| c.end - c.start).sum::<f64>();
     let t0 = Instant::now();
-    let todo: Vec<_> = work
+    let groups = audio::groups(&work);
+    // Per group, which of its chunks still need Whisper.
+    let todo: Vec<Vec<bool>> = groups
         .iter()
-        .filter(|(t, c)| !done.iter().any(|s| s.track == *t && s.start == c.start))
+        .map(|g| {
+            g.chunks
+                .iter()
+                .map(|c| {
+                    !done
+                        .iter()
+                        .any(|s| s.track == g.track && s.start == c.start)
+                })
+                .collect()
+        })
         .collect();
+    let left = todo.iter().flatten().filter(|&&t| t).count();
     // Nothing left to hear: no GPU query, no model load. The choice is the one that did the work.
     let mut choice = Choice {
         model: want.model.clone(),
         device: started.as_ref().map_or(Device::Cpu, |h| h.device),
         note: None,
     };
-    if !todo.is_empty() {
+    if left > 0 {
         let model;
         (choice, model) = choose(pref, opts.device);
         if let Some(note) = &choice.note {
@@ -174,22 +188,21 @@ pub fn transcribe(
         let mut out = open_partial(&partial, &header, &done)?;
         let mut progress = Progress::new(work.len(), log);
         progress.at(resumed_chunks);
-        for (i, (track, c)) in todo.iter().enumerate() {
-            let samples = read_span(file, *track, c)?;
-            let seg = segment(&mut w, &samples, *track, c, &choice.model, &opts.languages)?;
+        let mut finished = |seg: Segment| -> Result<()> {
             // One write for the line and its newline, so a kill tears at most this line.
-            out.write_all(
-                format!(
-                    "{}
-",
-                    serde_json::to_string(&seg)?
-                )
-                .as_bytes(),
-            )?;
+            out.write_all(format!("{}\n", serde_json::to_string(&seg)?).as_bytes())?;
             out.flush()?;
             done.push(seg);
-            progress.at(resumed_chunks + i + 1);
-        }
+            progress.at(done.len());
+            Ok(())
+        };
+        let run = Run {
+            groups: &groups,
+            todo: &todo,
+            model: &choice.model,
+            languages: &opts.languages,
+        };
+        run.chunks(file, &mut w, &mut finished)?;
     }
     done.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.track.cmp(&b.track)));
     let t = Transcript {
@@ -246,31 +259,85 @@ fn resume_point(partial: &Path, opts: &TranscribeOptions) -> Resume {
     }
 }
 
-/// Whisper on one chunk's samples, with word times moved onto the recording's timeline.
-fn segment(
-    w: &mut Whisper,
-    samples: &[f32],
-    track: usize,
-    c: &Chunk,
-    model: &str,
-    languages: &Languages,
-) -> Result<Segment> {
-    let (lang, words) = w.run(samples, languages)?;
-    Ok(Segment {
-        track,
-        start: c.start,
-        end: c.end,
-        lang,
-        model: model.to_string(),
-        words: words
-            .into_iter()
-            .map(|x| Word {
-                start: c.start + x.start,
-                end: c.start + x.end,
-                ..x
-            })
-            .collect(),
-    })
+/// The chunks still to transcribe, grouped for language detection.
+struct Run<'a> {
+    groups: &'a [Group],
+    todo: &'a [Vec<bool>],
+    model: &'a str,
+    languages: &'a Languages,
+}
+
+/// Groups decoded ahead of Whisper: enough to keep the GPU fed, little memory (30 s each).
+const AHEAD: usize = 4;
+
+impl Run<'_> {
+    /// Whisper over every group with a chunk to do, fed by one decoding thread; each finished
+    /// chunk goes to `finished` as it is done.
+    fn chunks(
+        &self,
+        file: &Path,
+        w: &mut Whisper,
+        finished: &mut dyn FnMut(Segment) -> Result<()>,
+    ) -> Result<()> {
+        let wanted = |k: usize| self.todo[k].iter().any(|&t| t);
+        std::thread::scope(|scope| {
+            let (tx, rx) = mpsc::sync_channel(AHEAD);
+            scope.spawn(move || audio::read(file, self.groups, &wanted, &tx));
+            // Returning early drops `rx`, which stops the reader at its next send.
+            for heard in rx {
+                let Heard { group, samples } = heard?;
+                let g = &self.groups[group];
+                let lang = self.language(w, &samples)?;
+                for ((c, s), &todo) in g.chunks.iter().zip(&samples).zip(&self.todo[group]) {
+                    if todo {
+                        finished(self.segment(w, s, g.track, c, &lang)?)?;
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// The language of a group, from all its audio at once (Whisper's 30 s window).
+    fn language(&self, w: &mut Whisper, samples: &[Vec<f32>]) -> Result<String> {
+        let joined = samples.concat();
+        if joined.is_empty() {
+            // Past the end of the track: nothing to hear, nothing to detect.
+            return Ok(self.languages.allowed[0].clone());
+        }
+        w.detect(&joined, self.languages)
+    }
+
+    /// Whisper on one chunk's samples, with word times moved onto the recording's timeline.
+    fn segment(
+        &self,
+        w: &mut Whisper,
+        samples: &[f32],
+        track: usize,
+        c: &Chunk,
+        lang: &str,
+    ) -> Result<Segment> {
+        let words = if samples.is_empty() {
+            Vec::new()
+        } else {
+            w.transcribe(samples, lang)?
+        };
+        Ok(Segment {
+            track,
+            start: c.start,
+            end: c.end,
+            lang: lang.to_string(),
+            model: self.model.to_string(),
+            words: words
+                .into_iter()
+                .map(|x| Word {
+                    start: c.start + x.start,
+                    end: c.start + x.end,
+                    ..x
+                })
+                .collect(),
+        })
+    }
 }
 
 /// "transcribing n/total chunks (p%)" through `log`, every 5% and at the end.
@@ -327,24 +394,6 @@ fn open_partial(path: &Path, header: &Header, done: &[Segment]) -> Result<std::f
     std::fs::write(&tmp, body)?;
     std::fs::rename(&tmp, path)?;
     Ok(std::fs::OpenOptions::new().append(true).open(path)?)
-}
-
-fn read_span(file: &Path, track: usize, c: &Chunk) -> Result<Vec<f32>> {
-    let span = Span {
-        start: c.start,
-        len: Some(c.end - c.start),
-    };
-    let mut r = PcmReader::open(file, track, vad::RATE, 1, span)?;
-    let mut out = Vec::new();
-    loop {
-        let x = r.read(1 << 16)?;
-        if x.is_empty() {
-            break;
-        }
-        out.extend(x);
-    }
-    r.finish()?;
-    Ok(out)
 }
 
 impl Transcript {

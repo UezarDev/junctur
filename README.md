@@ -12,14 +12,15 @@ Early. These pieces work:
   regions and speakers (CAM++ embeddings) on the vocal stem. Stems go to the cache, never beside the input.
   It is opt-in: nothing else depends on it.
 - `junctur analyze` runs the pipeline on a recording: track roles, speech regions (VAD) on every track that
-  carries speech, read as-is, a Whisper transcript of only those regions (large-v3-turbo by default) (Spanish with English;
-  word timestamps), and a first automatic cut. Every stage is cached and an interrupted run resumes.
+  carries speech, read as-is, a Whisper transcript of only those regions (large-v3-turbo by default) (Spanish with English,
+  the language detected once per ~30 s of speech; word timestamps), and a first automatic cut. Every stage is cached and an interrupted run resumes.
   The result is an edit list: a plain text file of ranges to keep plus a score per 5 s window, meant to be
   read, diffed and hand-edited. `junctur cut` re-cuts with other padding, `junctur status` shows the
   stages, and `junctur export --fcpxml` writes a timeline DaVinci Resolve imports.
 - `junctur render` turns the edit list into an MP4 by smart rendering: only the frames between each cut
   and the nearest keyframe are re-encoded (NVENC, matched to the source's profile, level and color tags);
-  everything between keyframes is copied untouched. Every audio track is kept, with a short crossfade at
+  everything between keyframes is copied untouched (a range with at most one GOP to copy is re-encoded
+  whole, and nearby re-encodes share one ffmpeg). Every audio track is kept, with a short crossfade at
   each cut. A source that cannot be matched (not 8-bit 4:2:0 H.264, variable frame rate) is re-encoded
   in full, and the command says why. The source is only read; the output goes where `--out` says.
 
@@ -60,7 +61,8 @@ A recording's project folder (transcript, speech regions, `edit.junctur`, `jobs.
 cache unless `--project <dir>` puts it somewhere else, for example a git repository.
 
 `render` writes scratch pieces in a `<out>.junctur-parts` folder beside the output and deletes them;
-`--full` re-encodes everything, `--force` replaces an existing output (never the source).
+`--full` re-encodes everything, `--force` replaces an existing output (never the source). The source's
+keyframe index is kept in the cache, so rendering the same recording again skips reading it.
 
 `separate` without `--track` picks the track `tracks` called the mix. Model tests download the models
 and are ignored by default: `cargo test -- --ignored`.

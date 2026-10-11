@@ -38,6 +38,9 @@ pub struct RenderOptions {
     /// Pieces written at once. Each piece is mostly ffmpeg start-up and opening the source, so
     /// several run side by side; consumer NVENC allows 8 sessions.
     pub jobs: usize,
+    /// Where the source's keyframe index is kept between renders (one ffprobe pass over the
+    /// packets, ~2 min for 30 h). None reads it every time.
+    pub cache_dir: Option<PathBuf>,
 }
 
 impl Default for RenderOptions {
@@ -46,6 +49,7 @@ impl Default for RenderOptions {
             full: false,
             overwrite: false,
             jobs: 6,
+            cache_dir: None,
         }
     }
 }
@@ -71,13 +75,18 @@ pub fn render(
 ) -> Result<RenderReport> {
     let started = Instant::now();
     check_output(&edit.source, out, opts.overwrite)?;
-    if !ffmpeg::has_encoder("h264_nvenc")? {
+    if !ffmpeg::has_encoder_cached("h264_nvenc")? {
         return Err(Error::Render(
             "this ffmpeg has no h264_nvenc encoder".into(),
         ));
     }
-    log("reading keyframes");
-    let src = source::inspect(&edit.source)?;
+    let src = match &opts.cache_dir {
+        Some(dir) => source::inspect_cached(&edit.source, dir, log)?,
+        None => {
+            log("reading keyframes");
+            source::inspect(&edit.source)?
+        }
+    };
     let v = &src.video;
     let ranges = frame_ranges(&edit.keep, v.fps_num, v.fps_den, src.frames);
     if ranges.is_empty() {
@@ -96,13 +105,16 @@ pub fn render(
     } else {
         &src.keyframes
     };
-    let pieces = plan::pieces(&ranges, keyframes);
+    let pieces = plan::pieces(&ranges, keyframes, plan::gop(keyframes));
+    let per_second = |s: f64| (s * v.fps_num as f64 / v.fps_den as f64) as u64;
+    let batches = plan::batches(&pieces, per_second(BATCH_GAP), per_second(BATCH_SPAN));
     let total: u64 = pieces.iter().map(Piece::frames).sum();
     let copied: u64 = pieces.iter().filter(|p| p.copy).map(Piece::frames).sum();
     log(&format!(
-        "{} ranges -> {} pieces; copying {:.0}% of {} frames",
+        "{} ranges -> {} pieces in {} ffmpeg runs; copying {:.0}% of {} frames",
         ranges.len(),
         pieces.len(),
+        batches.len(),
         copied as f64 / total as f64 * 100.0,
         total
     ));
@@ -115,6 +127,7 @@ pub fn render(
         src: &src,
         ranges: &ranges,
         pieces: &pieces,
+        batches: &batches,
         matched: full_reason.is_none(),
         work: &work,
     };
@@ -183,6 +196,12 @@ fn beside_name(out: &Path) -> PathBuf {
     out.with_file_name(name)
 }
 
+/// Encode pieces at most this far apart in the source (seconds) share one ffmpeg: decoding through
+/// the gap on NVDEC costs less than starting another process and NVENC session.
+const BATCH_GAP: f64 = 5.0;
+/// And one ffmpeg decodes at most this much of the source, so a batch stays a short job.
+const BATCH_SPAN: f64 = 30.0;
+
 fn scratch_dir(out: &Path) -> PathBuf {
     let mut name = out.file_name().unwrap_or_default().to_os_string();
     name.push(".junctur-parts");
@@ -222,6 +241,8 @@ struct Job<'a> {
     /// Kept frame ranges.
     ranges: &'a [(u64, u64)],
     pieces: &'a [Piece],
+    /// Pieces written by one ffmpeg each, in output order.
+    batches: &'a [std::ops::Range<usize>],
     /// Encodes match the source (smart render) rather than a full re-encode.
     matched: bool,
     /// The scratch folder.
@@ -237,13 +258,13 @@ impl Job<'_> {
         self.work.join(format!("audio{i}.m4a"))
     }
 
-    /// Write every piece (`jobs` at once) and audio track, then mux them into `partial`.
+    /// Write every batch of pieces (`jobs` at once) and audio track, then mux them into `partial`.
     fn build(&self, partial: &Path, jobs: usize, log: &mut dyn FnMut(&str)) -> Result<()> {
         let (tx, rx) = mpsc::channel();
         let next = AtomicUsize::new(0);
         // Set by the first thread that fails; every other thread stops at its next step.
         let failed = AtomicBool::new(false);
-        let (edit, v, pieces) = (self.edit, &self.src.video, self.pieces);
+        let (edit, v, batches) = (self.edit, &self.src.video, self.batches);
         // Only the first failure is reported: the rest are threads stopping because of it.
         let first = |r: Result<()>| match r {
             Err(e) if !failed.swap(true, Ordering::Relaxed) => Err(e),
@@ -273,9 +294,10 @@ impl Job<'_> {
                     let _stop = StopOnPanic(failed);
                     while !failed.load(Ordering::Relaxed) {
                         let i = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(p) = pieces.get(i) else { break };
+                        let Some(b) = batches.get(i) else { break };
+                        let batch = &self.pieces[b.clone()];
                         let args =
-                            video::args(&edit.source, p, v, self.matched, &self.piece_path(i));
+                            video::args(&edit.source, batch, v, self.matched, &self.piece_path(i));
                         first(ffmpeg::ffmpeg(&args))?;
                         let _ = tx.send(Progress::Piece);
                     }
@@ -283,13 +305,13 @@ impl Job<'_> {
                 }));
             }
             drop(tx);
-            let (mut done, step) = (0, pieces.len().div_ceil(10).max(1));
+            let (mut done, step) = (0, batches.len().div_ceil(10).max(1));
             for msg in rx {
                 match msg {
                     Progress::Piece => {
                         done += 1;
-                        if done % step == 0 || done == pieces.len() {
-                            log(&format!("video pieces {done}/{}", pieces.len()));
+                        if done % step == 0 || done == batches.len() {
+                            log(&format!("video pieces {done}/{}", batches.len()));
                         }
                     }
                     Progress::Track(i) => log(&format!("audio track {} done", i + 1)),
@@ -319,7 +341,7 @@ impl Job<'_> {
             .map(|i| self.track_path(i))
             .collect();
         let mut feed = ffmpeg::Feed::spawn(&mux::args(&self.edit.source, &tracks, out))?;
-        for i in 0..self.pieces.len() {
+        for i in 0..self.batches.len() {
             let path = self.piece_path(i);
             // Streamed: a copy piece can be a whole kept range, gigabytes long.
             feed.copy_from(&mut std::fs::File::open(&path)?)?;

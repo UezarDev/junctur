@@ -23,9 +23,11 @@ fn secs(frame: u64, v: &VideoInfo) -> f64 {
     frame as f64 * v.fps_den as f64 / v.fps_num as f64
 }
 
-/// The ffmpeg arguments that write piece `p` of `src` to `out`. `matched` = the encode must match
+/// The ffmpeg arguments that write `batch` of `src` to `out`: one piece, or several encode pieces
+/// back to back in the output (see [`super::plan::batches`]). `matched` = the encode must match
 /// the source's profile and level (smart render); without it (full re-encode) NVENC picks.
-pub fn args(src: &Path, p: &Piece, v: &VideoInfo, matched: bool, out: &Path) -> Vec<String> {
+pub fn args(src: &Path, batch: &[Piece], v: &VideoInfo, matched: bool, out: &Path) -> Vec<String> {
+    let p = &batch[0];
     let mut a: Vec<String> = vec!["-v".into(), "error".into(), "-nostdin".into(), "-y".into()];
     // Copy: seek straight to the keyframe. Encode: an accurate seek keeps the frame *showing* at
     // the seek time, so seeking a quarter frame into the first frame starts on it; at its exact
@@ -44,8 +46,25 @@ pub fn args(src: &Path, p: &Piece, v: &VideoInfo, matched: bool, out: &Path) -> 
     }
     a.extend(["-ss".into(), format!("{ss:.6}"), "-i".into()]);
     a.push(src.to_string_lossy().into_owned());
-    a.extend(["-map", "0:v:0", "-an", "-sn", "-dn", "-frames:v"].map(String::from));
-    a.push(p.frames().to_string());
+    a.extend(["-map", "0:v:0", "-an", "-sn", "-dn"].map(String::from));
+    if batch.len() > 1 {
+        // Frame `n` after the seek is source frame `p.start + n`: keep each piece's frames, then
+        // number them back to back. `select` and `setpts` only read timestamps, so CUDA frames
+        // pass through untouched.
+        let keep: Vec<String> = batch
+            .iter()
+            .map(|q| format!("between(n,{},{})", q.start - p.start, q.end - p.start - 1))
+            .collect();
+        a.push("-vf".into());
+        a.push(format!(
+            "select='{}',setpts=N*{}/{}/TB",
+            keep.join("+"),
+            v.fps_den,
+            v.fps_num
+        ));
+    }
+    a.push("-frames:v".into());
+    a.push(batch.iter().map(Piece::frames).sum::<u64>().to_string());
     if p.copy {
         a.extend(["-c:v", "copy"].map(String::from));
     } else {
@@ -142,7 +161,7 @@ mod tests {
             at: 20,
             copy: true,
         };
-        let a = args(Path::new("in.mp4"), &p, &info(), true, Path::new("o.ts"));
+        let a = args(Path::new("in.mp4"), &[p], &info(), true, Path::new("o.ts"));
         assert_eq!(after(&a, "-ss"), Some("4.000000"));
         assert_eq!(after(&a, "-frames:v"), Some("240"));
         assert_eq!(after(&a, "-c:v"), Some("copy"));
@@ -158,7 +177,7 @@ mod tests {
             at: 0,
             copy: false,
         };
-        let a = args(Path::new("in.mp4"), &p, &info(), true, Path::new("o.ts"));
+        let a = args(Path::new("in.mp4"), &[p], &info(), true, Path::new("o.ts"));
         assert_eq!(after(&a, "-ss"), Some("3.341667"));
         assert_eq!(after(&a, "-c:v"), Some("h264_nvenc"));
         assert_eq!(after(&a, "-profile:v"), Some("main"));
@@ -169,10 +188,44 @@ mod tests {
             None,
             "unknown tags are not invented"
         );
-        let full = args(Path::new("in.mp4"), &p, &info(), false, Path::new("o.ts"));
+        let full = args(Path::new("in.mp4"), &[p], &info(), false, Path::new("o.ts"));
         assert_eq!(after(&a, "-hwaccel"), Some("cuda"));
         assert_eq!(after(&full, "-level"), None);
         assert_eq!(after(&full, "-hwaccel"), None);
         assert_eq!(after(&full, "-pix_fmt"), Some("yuv420p"));
+    }
+
+    #[test]
+    fn a_batch_selects_its_frames_and_numbers_them_back_to_back() {
+        let ps = [
+            Piece {
+                start: 100,
+                end: 120,
+                at: 50,
+                copy: false,
+            },
+            Piece {
+                start: 150,
+                end: 160,
+                at: 70,
+                copy: false,
+            },
+        ];
+        let a = args(Path::new("in.mp4"), &ps, &info(), true, Path::new("o.ts"));
+        assert_eq!(after(&a, "-ss"), Some("3.341667"));
+        assert_eq!(
+            after(&a, "-vf"),
+            Some("select='between(n,0,19)+between(n,50,59)',setpts=N*1/30/TB")
+        );
+        assert_eq!(after(&a, "-frames:v"), Some("30"));
+        assert_eq!(after(&a, "-output_ts_offset"), Some("2.666667"));
+        // A single piece has no filter, as before batching.
+        assert_eq!(
+            after(
+                &args(Path::new("i"), &ps[..1], &info(), true, Path::new("o")),
+                "-vf"
+            ),
+            None
+        );
     }
 }

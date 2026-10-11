@@ -72,6 +72,16 @@ fn backends(pref: DevicePref) -> Vec<Box<dyn Backend>> {
 /// falls back to CPU, and the returned device says which one ran.
 pub fn open(model: &Path, pref: DevicePref) -> Result<(Session, Device)> {
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    open_with_threads(model, pref, threads)
+}
+
+/// [`open`] with `threads` CPU threads per operator, for a small model run on several threads of
+/// our own, where every session taking every core would only make them contend.
+pub fn open_with_threads(
+    model: &Path,
+    pref: DevicePref,
+    threads: usize,
+) -> Result<(Session, Device)> {
     let mut last = None;
     for b in backends(pref) {
         match b.open(model, threads) {

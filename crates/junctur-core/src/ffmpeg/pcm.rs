@@ -12,6 +12,10 @@ use crate::Result;
 /// keeping speech and most game audio energy; it is also what the VAD/Whisper stages will want.
 pub const ANALYSIS_RATE: u32 = 16_000;
 
+// ffmpeg writes `f32le`; the samples are read and written in place as native f32.
+#[cfg(not(target_endian = "little"))]
+compile_error!("PCM is exchanged with ffmpeg as native little-endian f32");
+
 /// Little-endian f32 bytes as samples; a trailing partial sample is dropped.
 fn samples(bytes: &[u8]) -> Vec<f32> {
     bytes
@@ -24,21 +28,57 @@ fn samples(bytes: &[u8]) -> Vec<f32> {
 /// [`ANALYSIS_RATE`]. `-ss` before `-i` seeks the demuxer, so a window deep into a 30h file costs
 /// about the same as one at the start.
 pub fn decode_window(file: &Path, track: usize, start: f64, len: f64) -> Result<Vec<f32>> {
+    Ok(decode_windows(file, &[track], start, len)?.remove(0))
+}
+
+/// [`decode_window`] for several tracks with one ffmpeg: each track is downmixed and resampled on
+/// its own (`aformat`, the same conversion `-ac 1 -ar` makes), `amerge` lays them side by side as
+/// channels, and they are split apart here. One process per window instead of one per track per
+/// window: each start opens the whole MP4. Every track comes back as long as the shortest.
+pub fn decode_windows(
+    file: &Path,
+    tracks: &[usize],
+    start: f64,
+    len: f64,
+) -> Result<Vec<Vec<f32>>> {
+    let n = tracks.len();
+    if n == 0 {
+        return Ok(Vec::new());
+    }
     let path = file.to_string_lossy();
-    let (ss, t, map, rate) = (
+    let (ss, t, rate) = (
         format!("{start:.3}"),
         format!("{len:.3}"),
-        format!("0:a:{track}"),
         ANALYSIS_RATE.to_string(),
     );
-    let out = run(
-        "ffmpeg",
-        &[
-            "-v", "error", "-nostdin", "-ss", &ss, "-t", &t, "-i", &path, "-map", &map, "-ac", "1",
-            "-ar", &rate, "-f", "f32le", "-",
-        ],
-    )?;
-    Ok(samples(&out))
+    let mut args = vec!["-v", "error", "-nostdin", "-ss", &ss, "-t", &t, "-i", &path];
+    let (map, graph);
+    if n == 1 {
+        map = format!("0:a:{}", tracks[0]);
+        args.extend(["-map", &map, "-ac", "1", "-ar", &rate]);
+    } else {
+        let mut g = String::new();
+        for (i, t) in tracks.iter().enumerate() {
+            g += &format!(
+                "[0:a:{t}]aformat=sample_fmts=flt:sample_rates={ANALYSIS_RATE}:channel_layouts=mono[a{i}];"
+            );
+        }
+        for i in 0..n {
+            g += &format!("[a{i}]");
+        }
+        g += &format!("amerge=inputs={n}[out]");
+        graph = g;
+        args.extend(["-filter_complex", &graph, "-map", "[out]"]);
+    }
+    args.extend(["-f", "f32le", "-"]);
+    let all = samples(&run("ffmpeg", &args)?);
+    let mut out = vec![Vec::with_capacity(all.len() / n); n];
+    for frame in all.chunks_exact(n) {
+        for (track, &x) in out.iter_mut().zip(frame) {
+            track.push(x);
+        }
+    }
+    Ok(out)
 }
 
 /// A section of a file to read: `start` seconds in, `len` seconds long (None = to the end).
@@ -92,20 +132,39 @@ impl PcmReader {
 
     /// Up to `n` interleaved samples; fewer only at the end of the stream, empty when done.
     pub fn read(&mut self, n: usize) -> Result<Vec<f32>> {
-        let mut bytes = vec![0u8; n * 4];
+        let mut buf = Vec::new();
+        self.read_into(&mut buf, n)?;
+        Ok(buf)
+    }
+
+    /// [`read`](Self::read) into `buf` (replacing what it held), reusing its memory: the pipe's
+    /// bytes land straight in the f32 storage, no byte vector in between.
+    pub fn read_into(&mut self, buf: &mut Vec<f32>, n: usize) -> Result<()> {
+        buf.clear();
+        buf.resize(n, 0.0);
+        let bytes: &mut [u8] = bytemuck::cast_slice_mut(buf.as_mut_slice());
         let mut got = 0;
         while got < bytes.len() {
-            match self.out.read(&mut bytes[got..])? {
-                0 => break,
-                k => got += k,
+            match self.out.read(&mut bytes[got..]) {
+                Ok(0) => break,
+                Ok(k) => got += k,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e.into()),
             }
         }
-        bytes.truncate(got - got % 4);
-        Ok(samples(&bytes))
+        // A sample split across the end (ffmpeg killed mid-write) is dropped.
+        buf.truncate(got / 4);
+        Ok(())
+    }
+
+    /// Wait for the decoder to exit: Err, with its message, when the decode failed. For a stream
+    /// read to its end.
+    pub fn wait(&mut self) -> Result<()> {
+        self.proc.wait("decode")
     }
 
     pub fn finish(mut self) -> Result<()> {
-        self.proc.wait("decode")
+        self.wait()
     }
 }
 
@@ -133,12 +192,11 @@ impl PcmWriter {
     }
 
     pub fn write(&mut self, samples: &[f32]) -> Result<()> {
-        let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
         let r = self
             .input
             .as_mut()
             .expect("open until finish")
-            .write_all(&bytes);
+            .write_all(bytemuck::cast_slice(samples));
         // A write fails when ffmpeg stopped reading, i.e. died: say why it did.
         r.map_err(|e| {
             drop(self.input.take());
@@ -163,5 +221,64 @@ mod tests {
         assert!(r.read(1024).unwrap().is_empty());
         let e = r.finish().unwrap_err().to_string();
         assert!(e.contains("junctur-no-such-file"), "{e}");
+    }
+
+    #[test]
+    fn pcm_round_trips_through_ffmpeg() {
+        let dir = std::env::temp_dir().join(format!("junctur-pcm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("ramp.wav");
+        let ramp: Vec<f32> = (0..32_000).map(|i| (i as f32 / 32_000.0) - 0.5).collect();
+        let mut w =
+            PcmWriter::create_with(&wav, 16_000, 1, &["-c:a".into(), "pcm_f32le".into()]).unwrap();
+        w.write(&ramp).unwrap();
+        w.finish().unwrap();
+        let mut r = PcmReader::open(&wav, 0, 16_000, 1, Span::default()).unwrap();
+        let mut buf = vec![9.0; 3];
+        r.read_into(&mut buf, 20_000).unwrap();
+        assert_eq!(buf, ramp[..20_000]);
+        r.read_into(&mut buf, 20_000).unwrap();
+        assert_eq!(buf, ramp[20_000..]);
+        r.read_into(&mut buf, 20_000).unwrap();
+        assert!(buf.is_empty());
+        r.finish().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn one_ffmpeg_decodes_every_track_as_separate_ones_did() {
+        let dir = std::env::temp_dir().join(format!("junctur-windows-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("three.mka");
+        // Stereo with different channels, mono, and stereo at another rate.
+        let ok = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=300:d=4"])
+            .args(["-f", "lavfi", "-i", "sine=f=500:d=4", "-f", "lavfi", "-i"])
+            .args(["sine=f=700:d=3.5:sample_rate=44100", "-filter_complex"])
+            .args(["[0:a][1:a]join=inputs=2:channel_layout=stereo[s];[2:a]asplit=2[m][x];[x]pan=stereo|c0=c0|c1=0.3*c0[t]"])
+            .args(["-map", "[s]", "-map", "[m]", "-map", "[t]", "-c:a", "flac"])
+            .arg(&f)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let together = decode_windows(&f, &[0, 1, 2], 1.0, 3.0).unwrap();
+        let alone: Vec<Vec<f32>> = (0..3)
+            .map(|i| decode_window(&f, i, 1.0, 3.0).unwrap())
+            .collect();
+        // Every track as long as the shortest (the 3.5 s one), as `window::align` cut them.
+        let shortest = alone.iter().map(Vec::len).min().unwrap();
+        for (i, got) in together.iter().enumerate() {
+            assert_eq!(got.len(), shortest, "track {i}");
+            // The same samples, but for the resampler's first millisecond, which settles from a
+            // different start (measured: 17 samples, at most 0.0024 apart).
+            let (head, rest) = got.split_at(32);
+            assert_eq!(rest, &alone[i][32..shortest], "track {i}");
+            assert!(head
+                .iter()
+                .zip(&alone[i])
+                .all(|(a, b)| (a - b).abs() < 0.01));
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

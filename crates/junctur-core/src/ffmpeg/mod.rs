@@ -10,12 +10,13 @@ pub mod probe;
 
 use std::io::Read;
 use std::process::{Child, ChildStderr, Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 
 use crate::{Error, Result};
 
 pub use feed::Feed;
-pub use pcm::{decode_window, PcmReader, PcmWriter, Span, ANALYSIS_RATE};
+pub use pcm::{decode_window, decode_windows, PcmReader, PcmWriter, Span, ANALYSIS_RATE};
 pub use probe::{probe, probe_video, AudioStream, Probe, VideoStream};
 
 fn run(program: &'static str, args: &[&str]) -> Result<Vec<u8>> {
@@ -46,6 +47,19 @@ pub fn has_encoder(name: &str) -> Result<bool> {
     Ok(String::from_utf8_lossy(&out)
         .lines()
         .any(|l| l.split_whitespace().nth(1) == Some(name)))
+}
+
+/// [`has_encoder`], asked once per process for each name: the answer cannot change while we run,
+/// and a GUI that renders again would otherwise start an ffmpeg just to ask.
+pub fn has_encoder_cached(name: &str) -> Result<bool> {
+    static KNOWN: OnceLock<Mutex<Vec<(String, bool)>>> = OnceLock::new();
+    let known = KNOWN.get_or_init(Mutex::default);
+    if let Some(&(_, yes)) = known.lock().unwrap().iter().find(|(n, _)| n == name) {
+        return Ok(yes);
+    }
+    let yes = has_encoder(name)?;
+    known.lock().unwrap().push((name.to_string(), yes));
+    Ok(yes)
 }
 
 /// The end of a running ffmpeg's stderr, drained on a thread: a full stderr pipe would block

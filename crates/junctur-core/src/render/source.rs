@@ -6,12 +6,13 @@
 
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::ffmpeg::probe::{self, num, rate, PacketTime};
-use crate::{Error, Result};
+use crate::{cache, Error, Result};
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct VideoInfo {
     pub codec: String,
     pub profile: String,
@@ -32,14 +33,14 @@ pub struct VideoInfo {
     pub b_frames: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioTrack {
     pub rate: u32,
     pub channels: u32,
     pub bit_rate: Option<u64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Source {
     pub video: VideoInfo,
     /// Frame count; frames sit at `k * fps_den / fps_num` s.
@@ -104,6 +105,33 @@ pub fn inspect(file: &Path) -> Result<Source> {
         grid_problem,
         audio,
     })
+}
+
+/// Bump when [`Source`] or how it is read changes, so old cache entries stop matching.
+const SOURCE_VERSION: u32 = 1;
+
+/// [`inspect`], kept in `cache_dir` under the file's identity (path, size, mtime): rendering the
+/// same recording again (another cut, `--force`) skips the packet pass. An unreadable or
+/// unwritable cache entry only costs the pass.
+pub fn inspect_cached(file: &Path, cache_dir: &Path, log: &mut dyn FnMut(&str)) -> Result<Source> {
+    let entry = cache_dir.join("render").join(format!(
+        "{}.json",
+        cache::key(file, &format!("source{SOURCE_VERSION}"))?
+    ));
+    if let Some(s) = std::fs::read(&entry)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+    {
+        log("keyframes: reusing the earlier read");
+        return Ok(s);
+    }
+    log("reading keyframes");
+    let s = inspect(file)?;
+    if let Some(dir) = entry.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&entry, serde_json::to_vec(&s)?);
+    Ok(s)
 }
 
 fn tag(x: &Value) -> Option<String> {

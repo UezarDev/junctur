@@ -123,14 +123,16 @@ pub fn analyze(file: &Path, opts: &AnalyzeOptions) -> Result<TrackReport> {
 
     let probe = ffmpeg::probe(file)?;
     let (starts, len) = window_starts(probe.duration, opts.windows, opts.window_seconds);
-    let mut per_track: Vec<Vec<Vec<f32>>> = Vec::with_capacity(probe.audio.len());
-    for t in &probe.audio {
-        per_track.push(
-            starts
-                .iter()
-                .map(|&s| ffmpeg::decode_window(file, t.index, s, len))
-                .collect::<Result<_>>()?,
-        );
+    // One ffmpeg per window decodes every track (it opens the whole MP4 each time).
+    let indices: Vec<usize> = probe.audio.iter().map(|t| t.index).collect();
+    let mut per_track: Vec<Vec<Vec<f32>>> = vec![Vec::with_capacity(starts.len()); indices.len()];
+    for &s in &starts {
+        for (t, w) in ffmpeg::decode_windows(file, &indices, s, len)?
+            .into_iter()
+            .enumerate()
+        {
+            per_track[t].push(w);
+        }
     }
     let samples = window::align(per_track, starts.len());
     let dir_for_models = dir.clone();
