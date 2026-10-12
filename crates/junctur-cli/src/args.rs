@@ -50,6 +50,10 @@ impl Args {
         self.switches.iter().any(|s| s == switch)
     }
 
+    pub fn value(&self, flag: &str) -> Option<&str> {
+        self.values.get(flag).map(String::as_str)
+    }
+
     pub fn path(&self, flag: &str) -> Option<PathBuf> {
         self.values.get(flag).map(PathBuf::from)
     }

@@ -42,6 +42,16 @@ pub const SPEAKER_EMBEDDING: Model = Model {
     license: "Apache-2.0",
 };
 
+/// pyannote segmentation-3.0 (MIT, CNRS), who talks and who talks at once per 17 ms of a 10 s window
+/// (5b). pyannote's own repository is gated behind a Hugging Face account; this is k2-fsa's ONNX
+/// export of the same weights, ungated, with pyannote's MIT license beside it, pinned to a commit.
+pub const SEGMENTATION: Model = Model {
+    file: "pyannote_segmentation_3_0.onnx",
+    url: "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/9403a6902bb58e3d5ae8c7e77c3422de279db2e0/model.onnx",
+    sha256: "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
+    license: "MIT",
+};
+
 /// Whisper large-v3 for whisper.cpp (ggml, MIT), f16. ~3.1 GB; wants ~4.8 GB of free VRAM (measured in 1b).
 pub const WHISPER_LARGE_V3: Model = Model {
     file: "ggml-large-v3.bin",

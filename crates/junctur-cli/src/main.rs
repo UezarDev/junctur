@@ -12,9 +12,11 @@
 //! junctur export <file> [--fcpxml <out.fcpxml>] [--srt <out.srt>] [--project <dir>] [--cache-dir <dir>]
 //! junctur render <file> --out <out.mp4> [--project <dir>] [--cache-dir <dir>] [--full] [--force]
 //!                       [--jobs <n>]
+//! junctur voices [<file> --add <name> --at <start>-<end>[,...]] [--forget <name>]
 //! ```
 //!
-//! `--model` defaults to the config file's `whisper_model` ([`config`]), else `auto`.
+//! `--model` defaults to the config file's `whisper_model` ([`config`]), else `auto`. Speakers are
+//! labelled with the remembered voices ([`voices`]), `junctur/voices.json` beside the config file.
 //!
 //! Arguments are parsed by hand: a few commands with a handful of flags do not justify a parser dependency.
 
@@ -22,6 +24,7 @@ mod args;
 mod commands;
 mod config;
 mod project;
+mod voices;
 
 use std::process::ExitCode;
 
@@ -38,6 +41,7 @@ const USAGE: &str = "usage:
                         [--cache-dir <dir>]
   junctur render <file> --out <out.mp4> [--project <dir>] [--cache-dir <dir>] [--full] [--force]
                         [--jobs <n>]
+  junctur voices [<file> --add <name> --at <start>-<end>[,...]] [--forget <name>]
 cut flags: [--pad-before <s>] [--pad-after <s>] [--merge-gap <s>] [--crossfade <ms>]";
 
 fn main() -> ExitCode {
@@ -62,6 +66,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         Some("cut") => project::cut(a),
         Some("export") => project::export(a),
         Some("render") => project::render(a),
+        Some("voices") => voices::run(a),
         _ => Err(USAGE.into()),
     }
 }

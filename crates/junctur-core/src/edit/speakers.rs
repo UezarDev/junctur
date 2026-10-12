@@ -38,6 +38,38 @@ pub struct Speakers {
     pub turns: Vec<Turn>,
 }
 
+/// A person a speaker was recognised as (5b): an enrolled voice's name and caption colour, which the
+/// speaker takes in every recording.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Person {
+    pub name: String,
+    pub color: String,
+}
+
+/// The longest speaker name: a name labels a transcript paragraph, a caption colour and a caption
+/// file; past this it is a sentence, not a name.
+pub const MAX_NAME: usize = 60;
+
+/// A speaker name as the edit file can keep it: trimmed, one line, not starting like the speaker
+/// line's own `track=` / `color=` fields, at most [`MAX_NAME`] characters. Shared by renames and
+/// enrolled voices, whose names become speaker names.
+pub fn check_name(name: &str) -> Result<&str, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("a speaker needs a name".into());
+    }
+    if name.contains(['\n', '\r']) {
+        return Err("a speaker's name is one line".into());
+    }
+    if name.starts_with("track=") || name.starts_with("color=") {
+        return Err("a speaker's name cannot start with \"track=\" or \"color=\"".into());
+    }
+    if name.chars().count() > MAX_NAME {
+        return Err(format!("a speaker's name is at most {MAX_NAME} characters"));
+    }
+    Ok(name)
+}
+
 /// A word further than this from every turn is left unlabelled: it is not near anyone's speech.
 const NEAREST_S: f64 = 10.0;
 
@@ -52,9 +84,17 @@ impl Speakers {
 
     /// "Speaker 1..N" for `turns` (speakers numbered from 1), with the names and colours of
     /// `previous` kept wherever an id is still there: a re-cut must not undo a rename.
-    pub fn new(
+    pub fn new(turns: Vec<Turn>, tracks: &[Option<usize>], previous: Option<&Speakers>) -> Self {
+        Self::found(turns, tracks, &[], previous)
+    }
+
+    /// [`Speakers::new`], where speaker `i + 1` recognised as `people[i]` (an enrolled voice, 5b)
+    /// takes that person's name and colour instead: they are the person's in every recording, and
+    /// an id can mean someone else after the voices change.
+    pub fn found(
         mut turns: Vec<Turn>,
         tracks: &[Option<usize>],
+        people: &[Option<Person>],
         previous: Option<&Speakers>,
     ) -> Self {
         turns.sort_by(|a, b| a.start.total_cmp(&b.start));
@@ -64,18 +104,33 @@ impl Speakers {
             .map(|(i, &track)| {
                 let id = i as u32 + 1;
                 let before = previous.and_then(|p| p.names.iter().find(|n| n.id == id));
+                let (name, color) = match people.get(i).and_then(Option::as_ref) {
+                    Some(p) => (p.name.clone(), p.color.clone()),
+                    None => (
+                        before.map_or_else(|| default_name(id), |n| n.name.clone()),
+                        before.map_or_else(|| default_color(id), |n| n.color.clone()),
+                    ),
+                };
                 SpeakerName {
                     id,
-                    name: before.map_or_else(|| default_name(id), |n| n.name.clone()),
+                    name,
                     track,
-                    color: before.map_or_else(|| default_color(id), |n| n.color.clone()),
+                    color,
                 }
             })
             .collect();
-        Self {
-            names,
-            turns: join(turns),
-        }
+        // To the millisecond, as the file writes them: the list held in memory (the app plays
+        // and compares it) is then the list the file reads back.
+        let ms = |x: f64| (x * 1000.0).round() / 1000.0;
+        let turns = join(turns)
+            .into_iter()
+            .map(|t| Turn {
+                start: ms(t.start),
+                end: ms(t.end),
+                ..t
+            })
+            .collect();
+        Self { names, turns }
     }
 
     pub fn name(&self, id: u32) -> Option<&str> {
@@ -185,19 +240,52 @@ impl Labeller<'_> {
     }
 }
 
+impl Labeller<'_> {
+    /// Everyone who says a word (5b): its speaker by [`Labeller::of_word`] first, then anyone else
+    /// whose turn holds the word's middle. Two people's turns overlap only where both talk at once,
+    /// and the transcript is one mixed stream there, so the word is both of theirs. Empty when nobody
+    /// is near.
+    pub fn speakers_of_word(&self, track: usize, start: f64, end: f64) -> Vec<u32> {
+        let Some(first) = self.of_word(track, start, end) else {
+            return Vec::new();
+        };
+        let mut out = vec![first];
+        if self.s.names.iter().any(|n| n.track == Some(track)) {
+            return out;
+        }
+        let mid = (start + end) / 2.0;
+        let turns = &self.s.turns;
+        let upto = turns.partition_point(|t| t.start <= mid);
+        for i in (0..upto).rev() {
+            if self.reach[i].0 < mid {
+                break;
+            }
+            let t = &turns[i];
+            if t.end >= mid && !out.contains(&t.speaker) {
+                out.push(t.speaker);
+            }
+        }
+        out
+    }
+}
+
 pub fn default_name(id: u32) -> String {
     format!("Speaker {id}")
 }
 
-/// Joins consecutive (by start) turns of one speaker less than [`JOIN_S`] apart.
+/// Joins turns (sorted by start) of one speaker less than [`JOIN_S`] apart. Per speaker, not only
+/// when consecutive: since 5b another speaker's overlap turn can sit between two of one person's.
 fn join(turns: Vec<Turn>) -> Vec<Turn> {
     let mut out: Vec<Turn> = Vec::with_capacity(turns.len());
+    // Index in `out` of each speaker's latest turn.
+    let mut last: std::collections::HashMap<u32, usize> = Default::default();
     for t in turns {
-        match out.last_mut() {
-            Some(last) if last.speaker == t.speaker && t.start - last.end < JOIN_S => {
-                last.end = last.end.max(t.end);
+        match last.get(&t.speaker) {
+            Some(&i) if t.start - out[i].end < JOIN_S => out[i].end = out[i].end.max(t.end),
+            _ => {
+                last.insert(t.speaker, out.len());
+                out.push(t);
             }
-            _ => out.push(t),
         }
     }
     out
@@ -272,6 +360,50 @@ mod tests {
         let long = Speakers::new(vec![t(0.0, 30.0, 1), t(5.0, 6.0, 2)], &[None, None], None);
         assert_eq!(long.labeller().of_word(0, 31.0, 31.5), Some(1));
         assert_eq!(Speakers::default().labeller().of_word(0, 1.0, 2.0), None);
+    }
+
+    #[test]
+    fn a_word_where_two_people_talk_at_once_is_both_of_theirs() {
+        // Speaker 1 talks 0-10, speaker 2 joins in 4-6 (an overlap turn) and talks 10-12.
+        let s = Speakers::new(
+            vec![t(0.0, 10.0, 1), t(4.0, 6.0, 2), t(10.0, 12.0, 2)],
+            &[None, None],
+            None,
+        );
+        let l = s.labeller();
+        assert_eq!(l.speakers_of_word(0, 1.0, 1.4), vec![1]);
+        assert_eq!(l.speakers_of_word(0, 4.5, 5.0), vec![2, 1]);
+        assert_eq!(l.speakers_of_word(0, 11.0, 11.5), vec![2]);
+        // A word straddling a change of speaker: its primary only (the middle is in one turn).
+        assert_eq!(l.speakers_of_word(0, 9.7, 10.1), vec![1]);
+        assert!(l.speakers_of_word(0, 40.0, 41.0).is_empty());
+        // Two of one person's turns around another's overlap turn are still joined.
+        let j = Speakers::new(
+            vec![t(0.0, 3.0, 1), t(2.5, 3.2, 2), t(3.5, 6.0, 1)],
+            &[None, None],
+            None,
+        );
+        assert_eq!(j.turns, vec![t(0.0, 6.0, 1), t(2.5, 3.2, 2)]);
+    }
+
+    #[test]
+    fn an_enrolled_person_names_their_speaker() {
+        let ana = Person {
+            name: "Ana".into(),
+            color: "#123456".into(),
+        };
+        let mut before = Speakers::new(vec![], &[None, None], None);
+        before.rename(1, "Old");
+        before.rename(2, "Kept");
+        let s = Speakers::found(vec![], &[None, None], &[Some(ana), None], Some(&before));
+        assert_eq!((s.name(1), s.color(1)), (Some("Ana"), Some("#123456")));
+        assert_eq!(s.name(2), Some("Kept"));
+        // Turns are held to the millisecond, as the file writes them.
+        let r = Speakers::new(vec![t(1.23456, 2.0004, 1)], &[None], None);
+        assert_eq!(r.turns, vec![t(1.235, 2.0, 1)]);
+        assert!(check_name(" Ana ").is_ok_and(|n| n == "Ana"));
+        assert!(check_name("").is_err() && check_name("a\nb").is_err());
+        assert!(check_name("track=1").is_err() && check_name(&"x".repeat(61)).is_err());
     }
 
     #[test]

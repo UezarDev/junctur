@@ -1,7 +1,9 @@
 <script lang="ts">
   // Editing controls: cut or keep the selection (transcript words or a timeline stretch), undo and
   // redo, and the stretch under the playhead with buttons that nudge either end by a frame (shift:
-  // ten). Every action is one edit the engine saves to edit.junctur at once.
+  // ten). Every action is one edit the engine saves to edit.junctur at once. With words selected,
+  // "Remember voice…" (5b) saves the voice of whoever says them under a name, for every recording,
+  // and names this recording's speakers with it.
   import * as api from "./api";
   import * as sel from "./selection";
   import { nudge, under } from "./nudge";
@@ -24,6 +26,32 @@
   // An unreadable edit list, an outside change, a backup made: said under the buttons.
   const message = $derived(edit?.error ?? edit?.notice ?? null);
   const stretch = $derived(edit && frame != null ? under(edit, frame) : null);
+
+  // Remembering a voice: the name field is open while `naming`; `said` is the engine's answer.
+  let naming = $state(false);
+  let name = $state("");
+  let said = $state<string | null>(null);
+  let known = $state<string[]>([]);
+  async function startNaming() {
+    naming = true;
+    said = null;
+    const fromVoices = await api.voices().then((v) => v.map((x) => x.name)).catch(() => [] as string[]);
+    known = [...new Set([...fromVoices, ...(edit?.speakers ?? []).map((s) => s.name)])];
+  }
+  function focus(el: HTMLInputElement) {
+    el.focus();
+  }
+  async function remember() {
+    const n = name.trim();
+    if (!n || selection?.kind !== "words") return;
+    const { first, last } = selection;
+    naming = false;
+    try {
+      said = await api.enrollVoice(first, last, n);
+    } catch (e) {
+      onError(String(e));
+    }
+  }
 
   async function call(f: () => Promise<void>) {
     try {
@@ -49,6 +77,34 @@
     <button disabled={!selection} onclick={() => selection && call(() => sel.apply(selection, true))} title="Keep the selection (K)"
       >Keep</button
     >
+    {#if naming}
+      <span class="naming">
+        <input
+          use:focus
+          list="junctur-voice-names"
+          placeholder="Whose voice is this?"
+          maxlength="60"
+          bind:value={name}
+          onkeydown={(e) => {
+            e.stopPropagation();
+            if (e.key === "Enter") remember();
+            if (e.key === "Escape") naming = false;
+          }}
+        />
+        <datalist id="junctur-voice-names">
+          {#each known as k (k)}<option value={k}></option>{/each}
+        </datalist>
+        <button disabled={!name.trim()} onclick={remember}>Remember</button>
+        <button onclick={() => (naming = false)}>Cancel</button>
+      </span>
+    {:else}
+      <button
+        disabled={selection?.kind !== "words"}
+        onclick={startNaming}
+        title="Select words only one person says (the more, the better), then name them: their voice is remembered for every recording"
+        >Remember voice…</button
+      >
+    {/if}
     <button disabled={!edit.canUndo} onclick={() => call(api.undo)} title="Undo (Ctrl+Z)">Undo</button>
     <button disabled={!edit.canRedo} onclick={() => call(api.redo)} title="Redo (Ctrl+Y)">Redo</button>
     {#if stretch && fps}
@@ -69,6 +125,9 @@
     {/if}
     {#if message}
       <span class="message" class:bad={!!edit.error}>{message}</span>
+    {/if}
+    {#if said}
+      <span class="message">{said}</span>
     {/if}
   </div>
 {/if}
@@ -111,6 +170,14 @@
   }
   .dash {
     color: var(--muted);
+  }
+  .naming {
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
+  }
+  .naming input {
+    width: 160px;
   }
   button {
     padding: 3px 9px;

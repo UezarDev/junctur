@@ -3,7 +3,9 @@
   // sample of how it reads, how cues are cut, and exporting the SRT. Everything is saved to
   // edit.junctur at once (the `captions` and `speaker` lines), so it is readable and survives a
   // re-cut. Only what an SRT carries into DaVinci Resolve is offered: text, timing and colour.
-  // Size, font and position are set in Resolve (an SRT import drops them).
+  // Size, font and position are set in Resolve (an SRT import drops them). Export writes one file per
+  // speaker beside the combined one (5b), since a Resolve subtitle track shows one caption at a time;
+  // the remembered voices are listed with Forget.
   import { save } from "@tauri-apps/plugin-dialog";
   import * as api from "./api";
 
@@ -20,8 +22,23 @@
   const captions = $derived(edit?.captions ?? null);
   const speakers = $derived(edit?.speakers ?? []);
   const usable = $derived(!!edit?.editable && !!captions);
-  let exported = $state<string | null>(null);
+  let exported = $state<string[] | null>(null);
   let busy = $state(false);
+
+  // The remembered voices, read again whenever the speakers change (an enrollment relabels them).
+  let voiceList = $state<api.Voice[]>([]);
+  $effect(() => {
+    void JSON.stringify(edit?.speakers ?? []);
+    api
+      .voices()
+      .then((v) => (voiceList = v))
+      .catch(() => (voiceList = []));
+  });
+
+  async function forget(name: string) {
+    await call(() => api.forgetVoice(name));
+    voiceList = await api.voices().catch(() => []);
+  }
 
   async function call(f: () => Promise<unknown>) {
     try {
@@ -77,8 +94,11 @@
       });
       if (!path) return;
       busy = true;
-      const n = await api.exportCaptions(path);
-      exported = `${n.toLocaleString()} captions written to ${path}`;
+      const r = await api.exportCaptions(path);
+      exported = [
+        `${r.cues.toLocaleString()} captions, everyone: ${path}`,
+        ...r.speakers.map((s) => `${s.cues.toLocaleString()} captions, ${s.name}: ${s.path}`),
+      ];
     } catch (e) {
       onError(String(e));
     } finally {
@@ -148,12 +168,32 @@
       <button class="export" onclick={exportSrt} disabled={busy || !source}>
         {busy ? "Writing…" : "Export captions (.srt)…"}
       </button>
-      {#if exported}<p class="done">{exported}</p>{/if}
+      {#if exported}
+        {#each exported as line (line)}<p class="done">{line}</p>{/each}
+      {/if}
       <p class="note">
-        Cues follow the edited timeline, like the render and the FCPXML. In DaVinci Resolve: File &gt; Import &gt;
-        Subtitle, then place it at the start of the timeline; the colours come through. An SRT carries no size
-        or position: set those in Resolve. Premiere Pro is untested and likely shows its default style.
+        Cues follow the edited timeline, like the render and the FCPXML. Each speaker also gets a file of their
+        own, "(name).srt", with everything they say, also while someone else talks: in DaVinci Resolve import
+        each one (File &gt; Import &gt; Subtitle) onto its own subtitle track at the start of the timeline, and
+        overlapping talk shows at once; the colours come through. An SRT carries no size or position: set those
+        in Resolve. Premiere Pro is untested and likely shows its default style.
       </p>
+
+      <h3>Remembered voices</h3>
+      {#if voiceList.length === 0}
+        <p class="note">
+          None yet. Select some words only one person says in the transcript and choose "Remember voice…": every
+          recording then names that person's speaker the same, in the same colour. Half a minute from a few
+          places works best; add more by remembering the same name again.
+        </p>
+      {/if}
+      {#each voiceList as v (v.name)}
+        <div class="speaker">
+          <span class="swatch" style:background={v.color}></span>
+          <span class="name">{v.name} <span class="note">({v.seconds.toFixed(0)} s)</span></span>
+          <button onclick={() => forget(v.name)} title="Forget {v.name}'s voice in every recording">Forget</button>
+        </div>
+      {/each}
     {/if}
   </div>
 </section>
@@ -237,6 +277,12 @@
   .export {
     margin-top: 16px;
     width: 100%;
+  }
+  .swatch {
+    width: 32px;
+    height: 18px;
+    border-radius: 3px;
+    border: 1px solid var(--line);
   }
   .done {
     color: var(--good);

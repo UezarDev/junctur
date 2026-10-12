@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use junctur_core::diarize::Embedder;
+use junctur_core::diarize::{segment, Embedder, Segmenter};
 use junctur_core::ffmpeg::{PcmReader, Span};
 use junctur_core::runtime::DevicePref;
 use junctur_core::tracks::Role;
@@ -54,6 +54,29 @@ fn vad_hears_no_speech_in_tones_or_silence() {
     assert!(vad::regions(&p, 0.0).is_empty());
     v.reset();
     assert!(v.probs(&[0.0; 16_000]).unwrap().iter().all(|&x| x < 0.5));
+}
+
+#[test]
+#[ignore = "downloads models"]
+fn segmentation_hears_nobody_in_silence_or_a_tone() {
+    let m = models::ensure(&models::SEGMENTATION, &cache::default_dir()).unwrap();
+    let mut s = Segmenter::open(&m, DevicePref::Cpu).unwrap();
+    let n = segment::window_samples();
+    let tone: Vec<f32> = (0..n)
+        .map(|i| 0.3 * (i as f32 * 440.0 * std::f32::consts::TAU / 16_000.0).sin())
+        .collect();
+    // A short clip is padded to the window.
+    let c = s.classes(&[vec![0.0; n], tone, vec![0.0; 100]]).unwrap();
+    assert_eq!(c.len(), 3);
+    assert!(
+        c.iter().all(|w| w.len() == 589),
+        "{:?}",
+        c.iter().map(Vec::len).collect::<Vec<_>>()
+    );
+    for w in &c {
+        assert!(segment::overlaps(1, w).is_empty());
+    }
+    assert!(c[0].iter().all(|&x| x == 0), "silence is nobody");
 }
 
 #[test]

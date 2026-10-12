@@ -16,6 +16,7 @@ mod testmode;
 mod trace;
 #[cfg(windows)]
 mod video;
+mod voices;
 
 use std::sync::Mutex;
 
@@ -98,6 +99,9 @@ fn main() {
             commands::recolor_speaker,
             commands::set_captions,
             commands::export_captions,
+            commands::voices,
+            commands::enroll_voice,
+            commands::forget_voice,
             commands::undo,
             commands::redo,
             commands::set_video_margin,

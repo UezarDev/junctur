@@ -16,6 +16,7 @@ use crate::lock::lock;
 use crate::player::{Core, Player};
 use crate::project::{self, ProjectStatus};
 use crate::state::PlayerState;
+use crate::voices::VoiceView;
 
 /// The player, or why it could not start (libmpv missing, no GL): the window still opens and
 /// says so instead of the app failing to launch.
@@ -153,10 +154,66 @@ pub async fn set_captions(app: State<'_, App>, captions: Captions) -> Result<(),
     app.core()?.set_captions(captions)
 }
 
-/// Writes the captions as an SRT to `path`; returns how many captions it holds.
+/// What an export wrote: the combined file's captions and each speaker's file (5b).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Exported {
+    pub cues: usize,
+    pub speakers: Vec<SpeakerFile>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeakerFile {
+    pub path: String,
+    pub name: String,
+    pub cues: usize,
+}
+
+/// Writes the captions as an SRT to `path`, and one per speaker beside it.
 #[tauri::command]
-pub async fn export_captions(app: State<'_, App>, path: String) -> Result<usize, String> {
-    app.core()?.export_captions(Path::new(&path))
+pub async fn export_captions(app: State<'_, App>, path: String) -> Result<Exported, String> {
+    let f = app.core()?.export_captions(Path::new(&path))?;
+    Ok(Exported {
+        cues: f.cues,
+        speakers: f
+            .speakers
+            .into_iter()
+            .map(|(p, name, cues)| SpeakerFile {
+                path: p.display().to_string(),
+                name,
+                cues,
+            })
+            .collect(),
+    })
+}
+
+/// The voices Junctur remembers (5b).
+#[tauri::command]
+pub async fn voices() -> Result<Vec<VoiceView>, String> {
+    crate::voices::list()
+}
+
+/// Remembers `name`'s voice from transcript words `first..=last` and labels the speakers again;
+/// returns a line for the user.
+#[tauri::command]
+pub async fn enroll_voice(
+    app: State<'_, App>,
+    first: usize,
+    last: usize,
+    name: String,
+) -> Result<String, String> {
+    app.core()?.enroll_voice(first, last, &name)
+}
+
+/// Forgets voice `name`, relabelling the open recording.
+#[tauri::command]
+pub async fn forget_voice(app: State<'_, App>, name: String) -> Result<(), String> {
+    match app.core() {
+        Ok(core) => core.forget_voice(&name),
+        // No player (libmpv missing): the voice can still be forgotten.
+        Err(_) => crate::voices::forget(None, &name).map(|_| ()),
+    }
 }
 
 #[tauri::command]

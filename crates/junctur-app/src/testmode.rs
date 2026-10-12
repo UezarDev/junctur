@@ -11,7 +11,9 @@
 //! Edit steps (2c) run the editor as the frontend does: `cutw=12-15` / `keepw=12-15` (transcript
 //! words, by index), `cutf=300-450` / `keepf=300-450` (source frames), `undo`, `redo`, and
 //! `rename=<id>:<name>` (5a: a speaker's name; no `;` in it), `color=<id>:#RRGGBB`,
-//! `captions=on|off` and `srt=<path>` (write the captions there). Each step's
+//! `captions=on|off` and `srt=<path>` (write the captions there), `enroll=<first>-<last>:<name>`
+//! (5b: remember a voice from transcript words) and `forget=<name>`. Set `JUNCTUR_VOICES` to a
+//! scratch file for these, or they change the user's own voices. Each step's
 //! report adds the edit state it left, and the final report re-reads `edit.junctur` from disk
 //! (`disk`: does it parse, and is it the list in play), counts the loads asked of mpv (a save must
 //! not come back as a second reload) and lists the frontend's log lines (`ui`).
@@ -73,6 +75,8 @@ enum Action {
     Recolor(u32, String),
     Captions(bool),
     Srt(String),
+    Enroll(usize, usize, String),
+    Forget(String),
 }
 
 /// The frontend's log lines (`ui_log`), kept for the report.
@@ -134,6 +138,12 @@ fn parse_steps(s: &str) -> Result<Vec<(f64, Action)>, String> {
             Some(("captions", "on")) => Action::Captions(true),
             Some(("captions", "off")) => Action::Captions(false),
             Some(("srt", path)) if !path.is_empty() => Action::Srt(path.to_string()),
+            Some(("enroll", v)) => {
+                let (words, name) = v.split_once(':').ok_or_else(bad)?;
+                let (a, b) = pair(words).ok_or_else(bad)?;
+                Action::Enroll(a as usize, b as usize, name.to_string())
+            }
+            Some(("forget", name)) if !name.is_empty() => Action::Forget(name.to_string()),
             None if action == "pause" => Action::Pause,
             None if action == "undo" => Action::Edit(Step::Undo),
             None if action == "redo" => Action::Edit(Step::Redo),
@@ -176,9 +186,19 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
             let c = p.edit_state().captions;
             p.set_captions(junctur_core::edit::Captions { on: *on, ..c })
         }
-        Action::Srt(path) => p
-            .export_captions(std::path::Path::new(path))
-            .map(|n| eprintln!("junctur-app test: wrote {n} captions to {path}")),
+        Action::Srt(path) => p.export_captions(std::path::Path::new(path)).map(|f| {
+            eprintln!("junctur-app test: wrote {} captions to {path}", f.cues);
+            for (file, name, n) in f.speakers {
+                eprintln!(
+                    "junctur-app test: wrote {n} captions for {name} to {}",
+                    file.display()
+                );
+            }
+        }),
+        Action::Enroll(first, last, name) => p
+            .enroll_voice(*first, *last, name)
+            .map(|line| eprintln!("junctur-app test: {line}")),
+        Action::Forget(name) => p.forget_voice(name),
     })?
 }
 
@@ -390,6 +410,15 @@ mod tests {
                 (3.0, Action::Srt("C:\\x\\out.srt".into())),
             ]
         );
+        assert_eq!(
+            parse_steps("1:enroll=10-40:Ana María;2:forget=Ana María").unwrap(),
+            vec![
+                (1.0, Action::Enroll(10, 40, "Ana María".into())),
+                (2.0, Action::Forget("Ana María".into())),
+            ]
+        );
+        assert!(parse_steps("1:enroll=10:Ana").is_err());
+        assert!(parse_steps("1:forget=").is_err());
         assert!(parse_steps("5:captions=maybe").is_err());
         assert!(parse_steps("5:rename=x:Ana").is_err());
         assert!(parse_steps("5:rename=2").is_err());

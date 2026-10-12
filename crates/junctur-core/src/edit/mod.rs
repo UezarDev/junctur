@@ -24,7 +24,9 @@ pub use frames::{frame_ranges, frame_span, frames_ceil, frames_floor};
 pub use reduce::{keep_ranges, snap_boundary, word_span, Envelope, ENVELOPE_HOP};
 pub use save::{backup_path, save, unstamped, Saved};
 pub use scores::windows;
-pub use speakers::{default_name, Labeller, SpeakerName, Speakers, Turn};
+pub use speakers::{
+    check_name, default_name, Labeller, Person, SpeakerName, Speakers, Turn, MAX_NAME,
+};
 pub use splice::{cut_span, keep_span};
 
 /// A kept stretch of the source, in seconds.

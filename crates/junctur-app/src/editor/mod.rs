@@ -9,36 +9,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use junctur_core::edit::{
-    self, frame_ranges, frames_ceil, Captions, EditList, Envelope, Range, Saved,
+    self, check_name, frame_ranges, frames_ceil, Captions, EditList, Envelope, Range, Saved,
 };
 
 use crate::cuts::Fps;
 pub use words::{TranscriptView, Words};
 
-/// A speaker name as the file can keep it: trimmed, one line, not starting like the speaker
-/// line's own `track=` / `color=` fields, at most [`MAX_NAME`] characters.
-fn check_name(name: &str) -> Result<&str, String> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err("a speaker needs a name".into());
-    }
-    if name.contains(['\n', '\r']) {
-        return Err("a speaker's name is one line".into());
-    }
-    if name.starts_with("track=") || name.starts_with("color=") {
-        return Err("a speaker's name cannot start with \"track=\" or \"color=\"".into());
-    }
-    if name.chars().count() > MAX_NAME {
-        return Err(format!("a speaker's name is at most {MAX_NAME} characters"));
-    }
-    Ok(name)
-}
-
 /// Undo steps kept. A 30 h list has ~10 000 ranges (160 kB a step); this caps memory near 30 MB.
 const HISTORY: usize = 200;
-/// The longest speaker name the app takes: a name labels a transcript paragraph and, later, a
-/// caption style; past this it is a sentence, not a name.
-pub const MAX_NAME: usize = 60;
 
 /// One change to the kept ranges.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -216,6 +194,19 @@ impl Editor {
         captions.check()?;
         self.restyle(list, |l| {
             l.captions = captions;
+            Ok(())
+        })
+    }
+
+    /// Puts `speakers` in place of the list's (5b: labelled again after a voice was enrolled or
+    /// forgotten) and saves. Like a rename, not an undo step.
+    pub fn respeak(
+        &mut self,
+        list: &EditList,
+        speakers: junctur_core::edit::Speakers,
+    ) -> Result<Option<Edited>, String> {
+        self.restyle(list, |l| {
+            l.speakers = speakers;
             Ok(())
         })
     }
@@ -541,7 +532,9 @@ mod tests {
         assert!(e.rename(&renamed, 1, "Ana María").unwrap().is_none());
         assert!(e.rename(&renamed, 1, "  ").is_err());
         assert!(e.rename(&renamed, 1, "a\nb").is_err());
-        assert!(e.rename(&renamed, 1, &"x".repeat(MAX_NAME + 1)).is_err());
+        assert!(e
+            .rename(&renamed, 1, &"x".repeat(edit::MAX_NAME + 1))
+            .is_err());
         assert!(e.rename(&renamed, 2, "Bea").is_err());
         assert!(e.rename(&renamed, 1, "track=2 Bob").is_err());
         assert!(e.rename(&renamed, 1, "color=#FF0000 Bob").is_err());

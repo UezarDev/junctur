@@ -81,6 +81,20 @@ export interface Captions {
   seconds: number;
 }
 
+/** A voice Junctur remembers (5b), used to name speakers in every recording. */
+export interface Voice {
+  name: string;
+  color: string;
+  /** Seconds of speech its voiceprint was made from. */
+  seconds: number;
+}
+
+/** What a caption export wrote: the combined file and one per speaker (5b). */
+export interface Exported {
+  cues: number;
+  speakers: { path: string; name: string; cues: number }[];
+}
+
 /** The transcript's words (src/editor/words.rs), sorted by start; times in ms. */
 export interface TranscriptView {
   text: string[];
@@ -129,8 +143,13 @@ export const renameSpeaker = (id: number, name: string) =>
 export const recolorSpeaker = (id: number, color: string) =>
   invoke<void>("recolor_speaker", { id, color });
 export const setCaptions = (captions: Captions) => invoke<void>("set_captions", { captions });
-/** Writes the captions as an SRT at `path`; resolves to how many captions it holds. */
-export const exportCaptions = (path: string) => invoke<number>("export_captions", { path });
+/** Writes the captions as an SRT at `path`, and one per speaker beside it (`<name> (<speaker>).srt`). */
+export const exportCaptions = (path: string) => invoke<Exported>("export_captions", { path });
+export const voices = () => invoke<Voice[]>("voices");
+/** Remembers `name`'s voice from words `first..=last` and relabels the speakers; resolves to a line for the user. */
+export const enrollVoice = (first: number, last: number, name: string) =>
+  invoke<string>("enroll_voice", { first, last, name });
+export const forgetVoice = (name: string) => invoke<void>("forget_voice", { name });
 export const undo = () => invoke<void>("undo");
 export const redo = () => invoke<void>("redo");
 /** The share of the window's width (0..1) on the right to keep free of video. */

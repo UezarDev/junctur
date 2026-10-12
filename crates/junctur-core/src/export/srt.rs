@@ -7,12 +7,20 @@
 //! colour. Each line gets its own `<font>` tag, since a tag spanning a line break is the case
 //! importers disagree on.
 //!
+//! One SRT holds one Resolve subtitle track, and a track shows one caption at a time: Uezar's
+//! import of 26 overlapping pairs in one file came in without overlaps (5b). So besides the
+//! combined file (5a's: everyone, one cue at a time, each word under one speaker), each speaker gets
+//! a file of their own ([`Pick::Speaker`]) holding every word they say, including the words of a
+//! stretch where they talk over someone else; on its own track in Resolve each shows at the same
+//! time as the others.
+//!
 //! Times are output times: a kept word is mapped through the kept ranges on the frame grid
 //! ([`frame_ranges`]), exactly as the renderer and the FCPXML lay the ranges end to end, so a cue
 //! lands on the same frames in the render and in Resolve's timeline. A range-by-range sum of
 //! seconds would drift by up to a frame per cut, seconds over a long edit.
 
 use std::fmt::Write;
+use std::path::{Path, PathBuf};
 
 use crate::edit::{frame_ranges, frames_ceil, Captions, EditList};
 use crate::transcribe::Word;
@@ -129,13 +137,35 @@ fn clean(text: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The cues for `edit`'s kept words. `words` is every transcript word with the track it was heard
-/// on, in any order; `num/den` is the frame rate the edit is rounded to (the source's).
+/// Whose words a caption file holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pick {
+    /// Everyone's, each word under its one speaker ([`crate::edit::Labeller::of_word`]).
+    All,
+    /// Every word this speaker says, alone or over someone else (5b).
+    Speaker(u32),
+}
+
+/// The cues for `edit`'s kept words (everyone's: [`Pick::All`]). `words` is every transcript word
+/// with the track it was heard on, in any order; `num/den` is the frame rate the edit is rounded
+/// to (the source's).
 pub fn cues<'a>(
     edit: &EditList,
     words: impl IntoIterator<Item = (usize, &'a Word)>,
     num: u64,
     den: u64,
+) -> Vec<Cue> {
+    cues_for(edit, words, num, den, Pick::All)
+}
+
+/// The cues of `pick`'s words; see [`cues`]. A speaker's cues are settled among themselves only:
+/// another speaker's cue never pushes one of theirs (each goes on a track of its own).
+pub fn cues_for<'a>(
+    edit: &EditList,
+    words: impl IntoIterator<Item = (usize, &'a Word)>,
+    num: u64,
+    den: u64,
+    pick: Pick,
 ) -> Vec<Cue> {
     let c: &Captions = &edit.captions;
     let tl = Timeline::new(edit, num, den);
@@ -175,7 +205,15 @@ pub fn cues<'a>(
             continue;
         };
         let (start, end) = (tl.map(i, w.start), tl.map(i, w.end));
-        let speaker = label.of_word(track, w.start, w.end).unwrap_or(0);
+        let speaker = match pick {
+            Pick::All => label.of_word(track, w.start, w.end).unwrap_or(0),
+            Pick::Speaker(id) => {
+                if !label.speakers_of_word(track, w.start, w.end).contains(&id) {
+                    continue;
+                }
+                id
+            }
+        };
         if let Some(o) = &mut open {
             let fits = lines_with(&o.lines, &text) <= c.lines as usize;
             if o.speaker == speaker && start - o.end < PAUSE_S && end - o.start <= c.seconds && fits
@@ -235,6 +273,36 @@ fn settle(cues: &mut Vec<Cue>, longest: f64, total: f64) {
         c.end = want.min(next).min(total);
     }
     cues.retain(|c| c.end > c.start);
+}
+
+/// Where speaker `name`'s (id `id`) own file goes beside the combined file `out`:
+/// `<stem> (<name>).srt`. Characters Windows forbids in a file name become `_`, and so does a
+/// trailing dot or space; `taken` holds the names already used, so two speakers called alike get
+/// their id added rather than one file.
+pub fn speaker_path(out: &Path, name: &str, id: u32, taken: &mut Vec<String>) -> PathBuf {
+    let mut safe: String = name
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+    while safe.ends_with(['.', ' ']) {
+        safe.pop();
+        safe.push('_');
+    }
+    if safe.is_empty() {
+        safe = format!("speaker {id}");
+    }
+    if taken.iter().any(|t| t.eq_ignore_ascii_case(&safe)) {
+        safe = format!("{safe} {id}");
+    }
+    taken.push(safe.clone());
+    let stem = out
+        .file_stem()
+        .map_or_else(|| "captions".into(), |s| s.to_string_lossy().into_owned());
+    out.with_file_name(format!("{stem} ({safe}).srt"))
 }
 
 /// `HH:MM:SS,mmm`.
@@ -453,6 +521,66 @@ mod tests {
         assert!(
             (c[2].end - 25.8).abs() < 1e-9,
             "a lone word is held to the minimum"
+        );
+    }
+
+    #[test]
+    fn each_speaker_gets_every_word_they_say_even_over_someone_else() {
+        // Speaker 1 talks 0-20 and speaker 2 20-40 (`edit`), and speaker 2 also 5-7 over speaker 1.
+        let mut e = edit(&[(0.0, 40.0)], Captions::default());
+        let mut turns = e.speakers.turns.clone();
+        turns.push(Turn {
+            start: 5.0,
+            end: 7.0,
+            speaker: 2,
+        });
+        e.speakers = Speakers::new(turns, &[None, None], None);
+        let w = [
+            word(1.0, 1.3, "hola"),
+            word(5.5, 5.8, "sí"),
+            word(5.6, 5.9, "claro"),
+            word(21.0, 21.3, "vale"),
+        ];
+        let words = || w.iter().map(|w| (0, w));
+        let text = |c: &[Cue]| c.iter().map(|c| c.lines.join(" ")).collect::<Vec<_>>();
+        let one = cues_for(&e, words(), 30, 1, Pick::Speaker(1));
+        let two = cues_for(&e, words(), 30, 1, Pick::Speaker(2));
+        assert_eq!(text(&one), vec!["hola", "sí claro"]);
+        assert_eq!(text(&two), vec!["sí claro", "vale"]);
+        assert!(one.iter().all(|c| c.speaker == 1) && two.iter().all(|c| c.speaker == 2));
+        // In the two files the shared words are on screen at the same time.
+        assert!((one[1].start - two[0].start).abs() < 1e-9);
+        // The combined file still has each word once.
+        let all = cues(&e, words(), 30, 1);
+        assert_eq!(
+            all.iter()
+                .map(|c| c.lines.join(" "))
+                .collect::<Vec<_>>()
+                .join(" "),
+            "hola sí claro vale"
+        );
+    }
+
+    #[test]
+    fn speaker_files_are_named_safely_and_never_twice() {
+        let out = Path::new("C:/v/rec (edited).srt");
+        let mut taken = Vec::new();
+        let p = |n: &str, id, t: &mut Vec<String>| speaker_path(out, n, id, t);
+        assert_eq!(
+            p("Ana", 1, &mut taken),
+            Path::new("C:/v/rec (edited) (Ana).srt")
+        );
+        assert_eq!(
+            p("ana", 2, &mut taken),
+            Path::new("C:/v/rec (edited) (ana 2).srt")
+        );
+        assert_eq!(
+            p("a/b:c?", 3, &mut taken),
+            Path::new("C:/v/rec (edited) (a_b_c_).srt")
+        );
+        assert_eq!(
+            p("Dr.", 4, &mut taken),
+            Path::new("C:/v/rec (edited) (Dr_).srt")
         );
     }
 

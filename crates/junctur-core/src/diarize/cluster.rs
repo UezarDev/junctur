@@ -152,31 +152,163 @@ fn two_pass_capped(
     if embeddings.is_empty() {
         return Vec::new();
     }
-    let (mut groups, _) = first_pass(embeddings, first, cap.max(1));
-    let alive = merge(&mut groups, merge_at);
-    let live: Vec<usize> = (0..groups.len()).filter(|&g| alive[g]).collect();
-    let big: Vec<usize> = live
+    let groups = merged(embeddings, first, merge_at, cap);
+    let big: Vec<&Group> = groups
         .iter()
-        .copied()
-        .filter(|&g| groups[g].count as f64 >= min_share * embeddings.len() as f64)
+        .filter(|g| g.count as f64 >= min_share * embeddings.len() as f64)
         .collect();
-    let kept = if big.is_empty() { live } else { big };
-    let mut dense: Vec<Option<usize>> = vec![None; groups.len()];
+    let kept = if big.is_empty() {
+        groups.iter().collect()
+    } else {
+        big
+    };
+    let mut dense: Vec<Option<usize>> = vec![None; kept.len()];
     let mut next = 0;
     embeddings
         .iter()
         .map(|e| {
-            let g = kept
-                .iter()
-                .copied()
-                .max_by(|&a, &b| dot(&groups[a].unit, e).total_cmp(&dot(&groups[b].unit, e)))
-                .expect("at least one group");
+            let g = nearest(kept.iter().map(|g| g.unit.as_slice()), e).expect("a group");
             *dense[g].get_or_insert_with(|| {
                 next += 1;
                 next - 1
             })
         })
         .collect()
+}
+
+/// Passes 1 and 2: the groups left after merging, each with its unit centroid and member count.
+fn merged(embeddings: &[Vec<f32>], first: f32, merge_at: f32, cap: usize) -> Vec<Group> {
+    let (mut groups, _) = first_pass(embeddings, first, cap.max(1));
+    let alive = merge(&mut groups, merge_at);
+    groups
+        .into_iter()
+        .zip(alive)
+        .filter_map(|(g, a)| a.then_some(g))
+        .collect()
+}
+
+/// Index of the candidate direction most similar to `e`.
+fn nearest<'a>(candidates: impl Iterator<Item = &'a [f32]>, e: &[f32]) -> Option<usize> {
+    candidates
+        .enumerate()
+        .map(|(i, c)| (i, dot(c, e)))
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(i, _)| i)
+}
+
+/// A window at least this similar to an enrolled voiceprint is that person's (5b), before any
+/// clustering. Measured on the 4-track sample against the PNGtuber avatars (5b's phase file): a
+/// person's own windows sit at 0.54-0.80 against their print (10th-90th percentile), other people's
+/// at 0.46-0.65 (median-90th); with everyone enrolled 0.5-0.7 gives the same labels, as windows
+/// under it still reach their nearest voice. 0.6 keeps most of a stranger's windows for clustering.
+pub const VOICE_MATCH: f32 = 0.6;
+/// A cluster of the remaining windows whose centroid is at least this similar to a voiceprint is
+/// that person. Higher than [`VOICE_MATCH`] because a centroid is an average and so much cleaner
+/// than one window: on the sample a person's own windows average to 0.97-0.98 against their print,
+/// while Uezar's brother, the nearest voice to his, averages 0.77 against Uezar's.
+pub const CENTROID_MATCH: f32 = 0.85;
+
+/// Speakers per window, with enrolled voices (5b).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Labels {
+    /// Speaker index per window, dense from 0: the enrolled voices heard, in the voices' order,
+    /// then the other speakers, most windows first.
+    pub windows: Vec<usize>,
+    /// Per speaker, the voice (an index into the voiceprints) it is; `None` for "Speaker N".
+    pub voices: Vec<Option<usize>>,
+}
+
+/// Labels windows by enrolled voiceprints first (5b), then 5a's two passes for the rest.
+///
+/// A window at least `threshold` similar to its nearest voice is that voice. The others are
+/// clustered in two passes; a cluster whose centroid is at least `centroid` similar to a voice is
+/// that voice too (a person's quieter windows, clustered together, are still them); clusters under
+/// `min_share` of all windows are dropped; then every one of these windows goes to its nearest kept
+/// cluster or voice, as in [`two_pass`]. With no voices this is exactly [`two_pass`] (the clusters
+/// ordered by size). Voiceprints must be unit length, like the embeddings.
+pub fn label(
+    embeddings: &[Vec<f32>],
+    voices: &[Vec<f32>],
+    threshold: f32,
+    centroid: f32,
+    min_share: f64,
+) -> Labels {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Who {
+        Voice(usize),
+        Cluster(usize),
+    }
+    let n = embeddings.len();
+    let close_voice = |e: &[f32], threshold: f32| {
+        nearest(voices.iter().map(Vec::as_slice), e).filter(|&v| dot(&voices[v], e) >= threshold)
+    };
+    // Windows like a voice are that voice; the rest (by index into `rest`) are clustered.
+    let mut who: Vec<Option<Who>> = Vec::with_capacity(n);
+    let mut rest: Vec<(usize, &Vec<f32>)> = Vec::new();
+    for (i, e) in embeddings.iter().enumerate() {
+        match close_voice(e, threshold) {
+            Some(v) => who.push(Some(Who::Voice(v))),
+            None => {
+                who.push(None);
+                rest.push((i, e));
+            }
+        }
+    }
+    let rest_e: Vec<Vec<f32>> = rest.iter().map(|(_, e)| (*e).clone()).collect();
+    if voices.is_empty() {
+        for ((i, _), c) in rest.iter().zip(two_pass(&rest_e, FIRST, MERGE, min_share)) {
+            who[*i] = Some(Who::Cluster(c));
+        }
+    } else if !rest.is_empty() {
+        let groups = merged(&rest_e, FIRST, MERGE, MAX_GROUPS);
+        let kept: Vec<&Group> = groups
+            .iter()
+            .filter(|g| close_voice(&g.unit, centroid).is_none())
+            .filter(|g| g.count as f64 >= min_share * n as f64)
+            .collect();
+        // Candidates: the kept clusters, then the voices.
+        let candidates: Vec<&[f32]> = kept
+            .iter()
+            .map(|g| g.unit.as_slice())
+            .chain(voices.iter().map(Vec::as_slice))
+            .collect();
+        for (i, e) in &rest {
+            let c = nearest(candidates.iter().copied(), e).expect("a voice at least");
+            who[*i] = Some(if c < kept.len() {
+                Who::Cluster(c)
+            } else {
+                Who::Voice(c - kept.len())
+            });
+        }
+    }
+    let who: Vec<Who> = who.into_iter().map(|w| w.expect("labelled")).collect();
+    // Dense speaker ids: the voices heard in their order, then clusters by size.
+    let mut counts: std::collections::HashMap<usize, usize> = Default::default();
+    for w in &who {
+        if let Who::Cluster(c) = w {
+            *counts.entry(*c).or_default() += 1;
+        }
+    }
+    let mut clusters: Vec<(usize, usize)> = counts.into_iter().collect();
+    clusters.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let order: Vec<Who> = (0..voices.len())
+        .map(Who::Voice)
+        .filter(|v| who.contains(v))
+        .chain(clusters.iter().map(|&(c, _)| Who::Cluster(c)))
+        .collect();
+    Labels {
+        windows: who
+            .iter()
+            .map(|w| order.iter().position(|o| o == w).expect("ordered"))
+            .collect(),
+        voices: order
+            .iter()
+            .map(|o| match o {
+                Who::Voice(v) => Some(*v),
+                Who::Cluster(_) => None,
+            })
+            .collect(),
+    }
 }
 
 #[cfg(test)]
@@ -264,5 +396,59 @@ mod tests {
         // Nothing reaches the share: every cluster is kept rather than none.
         let e = vec![unit(&[1.0, 0.0]), unit(&[0.0, 1.0])];
         assert_eq!(two_pass(&e, FIRST, MERGE, 0.9), vec![0, 1]);
+    }
+
+    fn axis(i: usize) -> Vec<f32> {
+        let mut v = vec![0.0; 8];
+        v[i] = 1.0;
+        v
+    }
+
+    #[test]
+    fn without_voices_labelling_is_two_pass_with_the_biggest_first() {
+        let mut e = voice(&axis(0), 10, 0.2);
+        e.extend(voice(&axis(1), 30, 0.2));
+        let l = label(&e, &[], VOICE_MATCH, CENTROID_MATCH, 0.03);
+        assert_eq!(l.voices, vec![None, None]);
+        // Speaker 0 is the bigger voice (the second one), like 5a's talk-time order.
+        assert!(l.windows[..10].iter().all(|&x| x == 1) && l.windows[10..].iter().all(|&x| x == 0));
+        assert!(label(&[], &[], VOICE_MATCH, CENTROID_MATCH, 0.03)
+            .windows
+            .is_empty());
+    }
+
+    #[test]
+    fn enrolled_voices_come_first_and_a_stranger_is_a_speaker_of_their_own() {
+        let ana = voice(&axis(0), 20, 0.3);
+        let bea = voice(&axis(1), 20, 0.3);
+        let stranger = voice(&axis(2), 20, 0.3);
+        let mut e: Vec<Vec<f32>> = stranger.clone();
+        e.extend(bea.clone());
+        e.extend(ana.clone());
+        // Voices: Ana, Bea, and Cleo who never talks here.
+        let prints = vec![unit(&axis(0)), unit(&axis(1)), unit(&axis(5))];
+        let l = label(&e, &prints, VOICE_MATCH, CENTROID_MATCH, 0.03);
+        // Ana and Bea in the voices' order, then the stranger; Cleo is not a speaker.
+        assert_eq!(l.voices, vec![Some(0), Some(1), None]);
+        assert!(l.windows[..20].iter().all(|&x| x == 2), "{:?}", l.windows);
+        assert!(l.windows[20..40].iter().all(|&x| x == 1));
+        assert!(l.windows[40..].iter().all(|&x| x == 0));
+    }
+
+    #[test]
+    fn a_voices_quieter_windows_clustered_together_are_still_that_voice() {
+        // Windows under the window threshold but whose average is the voice.
+        let print = unit(&axis(0));
+        let mut v = axis(0);
+        v[3] = 0.5; // cosine 0.89 to the print, under a window threshold of 0.95
+        let mut w = axis(0);
+        w[4] = 0.5;
+        let e: Vec<Vec<f32>> = (0..20)
+            .map(|i| unit(if i % 2 == 0 { &v } else { &w }))
+            .collect();
+        assert!(dot(&e[0], &print) < 0.95);
+        let l = label(&e, &[print], 0.95, CENTROID_MATCH, 0.03);
+        assert_eq!(l.voices, vec![Some(0)]);
+        assert!(l.windows.iter().all(|&x| x == 0));
     }
 }

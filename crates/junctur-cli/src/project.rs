@@ -10,6 +10,7 @@ use junctur_core::transcribe::{self, ModelPref};
 
 use crate::args::Args;
 use crate::config::{self, Config};
+use crate::voices;
 
 const PROJECT_FLAGS: &[&str] = &["--project", "--cache-dir"];
 const CUT_FLAGS: &[&str] = &["--pad-before", "--pad-after", "--merge-gap", "--crossfade"];
@@ -82,6 +83,12 @@ pub fn analyze(a: Args) -> Result<(), String> {
         force: a.has("--force"),
         no_transcript,
         no_speakers: a.has("--no-speakers"),
+        // Read only when speakers are told apart, so a broken voices file cannot block the rest.
+        voices: if a.has("--no-speakers") {
+            Vec::new()
+        } else {
+            voices::usable()?
+        },
         ..Default::default()
     };
     let out = pipeline::run(&p, &opts, &mut |line| eprintln!("junctur: {line}"))
@@ -141,6 +148,13 @@ pub fn cut(a: Args) -> Result<(), String> {
     k.extend(CUT_FLAGS);
     a.reject_unknown(&k)?;
     let p = project(&a)?;
+    // The voices may have changed since `analyze`: label the speakers again first (cheap). A
+    // project heard before 5b cannot be; its speakers stay as they were.
+    if p.speakers().is_some() {
+        if let Err(e) = pipeline::relabel(&p, &voices::usable()?) {
+            eprintln!("junctur: speakers not relabelled: {e}");
+        }
+    }
     let e = pipeline::recut(&p, &cut_settings(&a)?).map_err(|e| e.to_string())?;
     print_edit(&p, &e);
     Ok(())
@@ -164,13 +178,21 @@ pub fn export(a: Args) -> Result<(), String> {
     Ok(())
 }
 
-/// The caption file for `e` at `out`, from the project's transcript.
+/// The caption files for `e` at `out` (and one per speaker beside it), from the project's
+/// transcript.
 fn write_captions(p: &Project, e: &EditList, out: &std::path::Path) -> Result<(), String> {
     let t = transcribe::load(&p.dir)
         .ok_or("captions need a transcript: run `junctur analyze` on this file first")?;
-    let n = export::write_srt(e, &t, out).map_err(|e| e.to_string())?;
-    println!("{} ({n} captions)", out.display());
+    let files = export::write_srt(e, &t, out).map_err(|e| e.to_string())?;
+    print_captions(out, &files);
     Ok(())
+}
+
+fn print_captions(out: &std::path::Path, files: &export::CaptionFiles) {
+    println!("{} ({} captions, everyone)", out.display(), files.cues);
+    for (path, name, n) in &files.speakers {
+        println!("{} ({n} captions, {name})", path.display());
+    }
 }
 
 pub fn render(a: Args) -> Result<(), String> {
@@ -216,8 +238,8 @@ pub fn render(a: Args) -> Result<(), String> {
     );
     // Captions are an optional toggle in the edit list; on, they go beside the video.
     if let Some((srt, t)) = captions {
-        let n = export::write_srt(&e, &t, &srt).map_err(|e| e.to_string())?;
-        println!("{} ({n} captions)", srt.display());
+        let files = export::write_srt(&e, &t, &srt).map_err(|e| e.to_string())?;
+        print_captions(&srt, &files);
     }
     Ok(())
 }

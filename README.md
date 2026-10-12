@@ -54,6 +54,7 @@ junctur status <file> [--project <dir>]
 junctur cut <file> [--project <dir>] [cut flags]
 junctur export <file> [--fcpxml <out.fcpxml>] [--srt <out.srt>] [--project <dir>]
 junctur render <file> --out <out.mp4> [--project <dir>] [--full] [--force] [--jobs <n>]
+junctur voices [<file> --add <name> --at <start>-<end>[,...]] [--forget <name>]
 cut flags: [--pad-before <s>] [--pad-after <s>] [--merge-gap <s>] [--crossfade <ms>]
 ```
 
@@ -61,17 +62,30 @@ A recording's project folder (transcript, speech regions, speakers, `edit.junctu
 in the cache unless `--project <dir>` puts it somewhere else, for example a git repository.
 
 `analyze` also tells speakers apart (`--no-speakers` skips it): one speaker per speech track when OBS
-recorded the voices on their own tracks, otherwise by voice on the mix (CAM++ embeddings, two-pass
-clustering). They are written into `edit.junctur` as `speaker <id> <name>` lines, named "Speaker 1..N",
-and `turn <start> <end> <id>` lines; rename or recolour a speaker by editing its line (or in the app). A
-re-cut keeps the names.
+recorded the voices on their own tracks, otherwise by voice on the mix (CAM++ embeddings of 1.5 s
+windows, and pyannote's segmentation model for where two people talk at once). They are written into
+`edit.junctur` as `speaker <id> <name>` lines and `turn <start> <end> <id>` lines; turns of two people
+overlap where both talk. Rename or recolour a speaker by editing its line (or in the app). A re-cut keeps
+the names.
+
+Voices can be remembered once and recognised in every recording: in the app, select words only one
+person says and choose "Remember voice…", or `junctur voices <file> --add <name> --at 61-75,300-312`
+(source seconds). A person's speaker then gets their name and colour in every recording; voices nobody
+remembered are grouped automatically as "Speaker N". Remembering the same name again adds to the voice;
+half a minute from several places works best. The voices live in `junctur/voices.json` beside the config
+file (or the file `JUNCTUR_VOICES` names); `junctur voices` lists them, `--forget <name>` drops one.
+Enrolling relabels from what `analyze` kept (`windows.f32` in the project), without reading the
+recording again; `analyze` and `cut` relabel with the current voices.
 
 `export --srt <out.srt>` writes the captions: the transcript's kept words on the edited timeline (the
 same frames as the render and the FCPXML), each cue as `<font color>` in its speaker's colour, cut by the
 `captions` line (`chars=` per line, `lines=` per caption, `seconds=` longest; set in the app's Captions
-panel or by hand). Captions are optional: with `captions on`, `render` also writes `<out>.srt` beside the
-video. Checked in DaVinci Resolve (File > Import > Subtitle keeps the colours); Premiere Pro is
-unverified and likely shows its default caption style. SRT carries no size or position.
+panel or by hand). Beside `<out>.srt` (everyone, one caption at a time) it writes `<out> (<name>).srt`
+per speaker, holding everything that person says, also while someone else talks: a Resolve subtitle
+track shows one caption at a time, so put each speaker's file on its own track and overlapping talk
+shows at once. Captions are optional: with `captions on`, `render` also writes these beside the video.
+Checked in DaVinci Resolve (File > Import > Subtitle keeps the colours); Premiere Pro is unverified and
+likely shows its default caption style. SRT carries no size or position.
 
 `render` writes scratch pieces in a `<out>.junctur-parts` folder beside the output and deletes them;
 `--full` re-encodes everything, `--force` replaces an existing output (never the source). The source's
@@ -118,6 +132,7 @@ Downloaded on first use into `<cache>/models/`, checked against pinned SHA-256 d
 | Silero VAD v5 | speech detection | MIT |
 | UVR MDX-Net Kim Vocal 2 | voice isolation | no explicit license on the weights |
 | 3D-Speaker CAM++ (VoxCeleb) | speaker embeddings | Apache-2.0 |
+| pyannote segmentation-3.0 (k2-fsa's ONNX export) | overlapping speech | MIT |
 | Whisper large-v3-turbo, large-v3 f16 or 5-bit large-v3, ggml (whisper.cpp) | transcription | MIT |
 
 ## Whisper models

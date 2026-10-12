@@ -54,6 +54,13 @@ impl Words {
         }
     }
 
+    /// The source seconds words `first..=last` are said in: the first one's start to the latest
+    /// end up to the last (5b: a voice is enrolled from this). `None` for an index out of range.
+    pub fn stretch(&self, first: usize, last: usize) -> Option<(f64, f64)> {
+        let (first, last) = (first.min(last), first.max(last));
+        Some((self.list.get(first)?.start, *self.ends_by.get(last)?))
+    }
+
     /// The source span that cutting (`keep` false) or keeping words `first..=last` changes, placed
     /// by [`word_span`]: speech before the run ends at the latest end of any earlier word (any
     /// track), the run lasts until the latest end up to its last word, and speech after it starts
