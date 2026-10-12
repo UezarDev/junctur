@@ -26,8 +26,24 @@ pub fn normalize(v: &mut [f32]) {
     }
 }
 
+/// Eight running sums rather than one, so the compiler can keep them in one vector register: a
+/// single sum must add in order and stays scalar. Labelling a 30 h recording is millions of
+/// 512-number dot products, on every `analyze`, `cut`, enrollment and rename (5b repair pass).
 fn dot(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
+    let (ca, cb) = (a.chunks_exact(8), b.chunks_exact(8));
+    let tail: f32 = ca
+        .remainder()
+        .iter()
+        .zip(cb.remainder())
+        .map(|(x, y)| x * y)
+        .sum();
+    let mut acc = [0.0f32; 8];
+    for (x, y) in ca.zip(cb) {
+        for k in 0..8 {
+            acc[k] += x[k] * y[k];
+        }
+    }
+    acc.iter().sum::<f32>() + tail
 }
 
 /// `v` scaled to unit length (zero stays zero).
@@ -92,9 +108,11 @@ fn first_pass(embeddings: &[Vec<f32>], threshold: f32, cap: usize) -> (Vec<Group
 /// Pass 2: merges the closest pair of live groups while their centroids are at least `threshold`
 /// similar. Keeps the similarity matrix and recomputes only the merged group's row, so each merge
 /// is O(k^2) for k groups (at most [`MAX_GROUPS`]).
-fn merge(groups: &mut [Group], threshold: f32) -> Vec<bool> {
+fn merge(groups: &mut [Group], threshold: f32) -> (Vec<bool>, Vec<usize>) {
     let k = groups.len();
     let mut alive = vec![true; k];
+    // Which group each one was folded into (itself while alive).
+    let mut into: Vec<usize> = (0..k).collect();
     let mut sim = vec![f32::NEG_INFINITY; k * k];
     for i in 0..k {
         for j in 0..i {
@@ -115,9 +133,10 @@ fn merge(groups: &mut [Group], threshold: f32) -> Vec<bool> {
         }
         let (s, i, j) = best;
         if s < threshold {
-            return alive;
+            return (alive, into);
         }
         // Fold i into j (j < i).
+        into[i] = j;
         let add = std::mem::take(&mut groups[i].sum);
         let count = groups[i].count;
         groups[j].add(&add, count);
@@ -152,7 +171,7 @@ fn two_pass_capped(
     if embeddings.is_empty() {
         return Vec::new();
     }
-    let groups = merged(embeddings, first, merge_at, cap);
+    let (groups, _) = merged(embeddings, first, merge_at, cap);
     let big: Vec<&Group> = groups
         .iter()
         .filter(|g| g.count as f64 >= min_share * embeddings.len() as f64)
@@ -177,14 +196,32 @@ fn two_pass_capped(
 }
 
 /// Passes 1 and 2: the groups left after merging, each with its unit centroid and member count.
-fn merged(embeddings: &[Vec<f32>], first: f32, merge_at: f32, cap: usize) -> Vec<Group> {
-    let (mut groups, _) = first_pass(embeddings, first, cap.max(1));
-    let alive = merge(&mut groups, merge_at);
-    groups
-        .into_iter()
-        .zip(alive)
-        .filter_map(|(g, a)| a.then_some(g))
-        .collect()
+/// Passes 1 and 2: the groups left after merging, each with its unit centroid and member count,
+/// and the group (an index into them) each embedding ended up in.
+fn merged(
+    embeddings: &[Vec<f32>],
+    first: f32,
+    merge_at: f32,
+    cap: usize,
+) -> (Vec<Group>, Vec<usize>) {
+    let (mut groups, labels) = first_pass(embeddings, first, cap.max(1));
+    let (alive, into) = merge(&mut groups, merge_at);
+    let root = |mut g: usize| {
+        while into[g] != g {
+            g = into[g];
+        }
+        g
+    };
+    let mut index = vec![usize::MAX; groups.len()];
+    let mut live = Vec::new();
+    for (g, group) in groups.into_iter().enumerate() {
+        if alive[g] {
+            index[g] = live.len();
+            live.push(group);
+        }
+    }
+    let members = labels.into_iter().map(|l| index[root(l)]).collect();
+    (live, members)
 }
 
 /// Index of the candidate direction most similar to `e`.
@@ -260,19 +297,31 @@ pub fn label(
             who[*i] = Some(Who::Cluster(c));
         }
     } else if !rest.is_empty() {
-        let groups = merged(&rest_e, FIRST, MERGE, MAX_GROUPS);
+        let (groups, members) = merged(&rest_e, FIRST, MERGE, MAX_GROUPS);
+        // A cluster like a voice is that voice as a whole: sending its windows one by one to
+        // their nearest candidate split a person between their voice and someone else's
+        // (the 5b review).
+        let as_voice: Vec<Option<usize>> = groups
+            .iter()
+            .map(|g| close_voice(&g.unit, centroid))
+            .collect();
         let kept: Vec<&Group> = groups
             .iter()
-            .filter(|g| close_voice(&g.unit, centroid).is_none())
-            .filter(|g| g.count as f64 >= min_share * n as f64)
+            .zip(&as_voice)
+            .filter(|(g, v)| v.is_none() && g.count as f64 >= min_share * n as f64)
+            .map(|(g, _)| g)
             .collect();
-        // Candidates: the kept clusters, then the voices.
+        // Candidates for the other windows: the kept clusters, then the voices.
         let candidates: Vec<&[f32]> = kept
             .iter()
             .map(|g| g.unit.as_slice())
             .chain(voices.iter().map(Vec::as_slice))
             .collect();
-        for (i, e) in &rest {
+        for ((i, e), &g) in rest.iter().zip(&members) {
+            if let Some(v) = as_voice[g] {
+                who[*i] = Some(Who::Voice(v));
+                continue;
+            }
             let c = nearest(candidates.iter().copied(), e).expect("a voice at least");
             who[*i] = Some(if c < kept.len() {
                 Who::Cluster(c)
@@ -450,5 +499,38 @@ mod tests {
         let l = label(&e, &[print], 0.95, CENTROID_MATCH, 0.03);
         assert_eq!(l.voices, vec![Some(0)]);
         assert!(l.windows.iter().all(|&x| x == 0));
+    }
+
+    #[test]
+    fn a_cluster_like_a_voice_goes_to_it_whole() {
+        // Two voices; a group of Ana's windows each under the window threshold, some of them
+        // individually nearer Bea's print, but as a group plainly Ana.
+        let ana = unit(&axis(0));
+        let mut bea = axis(0);
+        bea[1] = 1.4;
+        let bea = unit(&bea);
+        let e: Vec<Vec<f32>> = (0..20)
+            .map(|i| {
+                let mut v = axis(0);
+                v[3 + i % 4] = 0.5;
+                // Every fifth window leans towards Bea, enough to be nearer her print alone.
+                if i % 5 == 4 {
+                    v[1] = 0.6;
+                }
+                unit(&v)
+            })
+            .collect();
+        assert!(e.iter().any(|w| dot(w, &bea) > dot(w, &ana)));
+        let l = label(&e, &[ana, bea], 0.99, CENTROID_MATCH, 0.03);
+        assert_eq!(l.voices, vec![Some(0)]);
+        assert!(l.windows.iter().all(|&x| x == 0), "{:?}", l.windows);
+    }
+
+    #[test]
+    fn dot_matches_the_plain_sum() {
+        let a: Vec<f32> = (0..515).map(|i| (i as f32 * 0.37).sin()).collect();
+        let b: Vec<f32> = (0..515).map(|i| (i as f32 * 0.11).cos()).collect();
+        let plain: f32 = a.iter().zip(&b).map(|(x, y)| x * y).sum();
+        assert!((dot(&a, &b) - plain).abs() < 1e-3);
     }
 }

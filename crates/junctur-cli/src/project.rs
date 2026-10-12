@@ -83,11 +83,11 @@ pub fn analyze(a: Args) -> Result<(), String> {
         force: a.has("--force"),
         no_transcript,
         no_speakers: a.has("--no-speakers"),
-        // Read only when speakers are told apart, so a broken voices file cannot block the rest.
+        // Read only when speakers are told apart; a broken voices file is said and skipped.
         voices: if a.has("--no-speakers") {
             Vec::new()
         } else {
-            voices::usable()?
+            voices::usable()
         },
         ..Default::default()
     };
@@ -151,7 +151,7 @@ pub fn cut(a: Args) -> Result<(), String> {
     // The voices may have changed since `analyze`: label the speakers again first (cheap). A
     // project heard before 5b cannot be; its speakers stay as they were.
     if p.speakers().is_some() {
-        if let Err(e) = pipeline::relabel(&p, &voices::usable()?) {
+        if let Err(e) = pipeline::relabel(&p, &voices::usable()) {
             eprintln!("junctur: speakers not relabelled: {e}");
         }
     }
@@ -192,6 +192,12 @@ fn print_captions(out: &std::path::Path, files: &export::CaptionFiles) {
     println!("{} ({} captions, everyone)", out.display(), files.cues);
     for (path, name, n) in &files.speakers {
         println!("{} ({n} captions, {name})", path.display());
+    }
+    for path in &files.stale {
+        println!(
+            "{} was not written now: from an earlier export? Delete it before importing",
+            path.display()
+        );
     }
 }
 

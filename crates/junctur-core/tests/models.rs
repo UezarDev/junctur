@@ -77,6 +77,10 @@ fn segmentation_hears_nobody_in_silence_or_a_tone() {
         assert!(segment::overlaps(1, w).is_empty());
     }
     assert!(c[0].iter().all(|&x| x == 0), "silence is nobody");
+    // A steady tone is no pair of voices, and mostly nobody.
+    assert!(c[1].iter().all(|&x| x < 4), "{:?}", c[1]);
+    let quiet = c[1].iter().filter(|&&x| x == 0).count();
+    assert!(quiet * 10 >= c[1].len() * 9, "{quiet} of {}", c[1].len());
 }
 
 #[test]

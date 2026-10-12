@@ -71,6 +71,11 @@ pub struct Found {
     /// speakers are tracks, and in a 5a file (which is then heard again once).
     #[serde(default)]
     pub heard: Option<Heard>,
+    /// Every name an enrolled voice has had while labelling this recording, current or since
+    /// forgotten: a speaker's name that is one of these is the voice's, never carried onto a
+    /// cluster ([`crate::edit::Speakers::found`]).
+    #[serde(default)]
+    pub known: Vec<String>,
 }
 
 /// What hearing found on the diarized track, besides the embeddings (kept in `windows.f32`).
@@ -81,17 +86,32 @@ pub struct Heard {
     pub windows: Vec<Region>,
     /// Where two people talk at once.
     pub overlaps: Vec<Overlap>,
-    /// The embedding and segmentation models' files: another model means hearing again.
-    pub models: Vec<String>,
+    /// [`hearing_key`] of how this was heard: another model, window or threshold means hearing
+    /// again.
+    pub key: String,
     /// Numbers per embedding in `windows.f32`.
     pub dim: usize,
+    /// FNV-1a of `windows.f32` as written with this: the two files are one result, and a
+    /// `windows.f32` from another run (a copy, a crash between the writes) is not these windows.
+    pub embeddings: String,
 }
 
-fn heard_models() -> Vec<String> {
-    vec![
-        models::SPEAKER_EMBEDDING.file.to_string(),
-        models::SEGMENTATION.file.to_string(),
-    ]
+/// What hearing track `track` depends on besides the speech regions: both models (by digest) and
+/// every window and threshold that shapes the windows and the overlap stretches.
+pub fn hearing_key(track: usize) -> String {
+    let what = format!(
+        "{track}|{}|{}|{}",
+        models::SPEAKER_EMBEDDING.sha256,
+        models::SEGMENTATION.sha256,
+        diarize::hearing_settings()
+    );
+    format!("{:016x}", fnv(what.as_bytes()))
+}
+
+fn fnv(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| {
+        (h ^ b as u64).wrapping_mul(0x100_0000_01b3)
+    })
 }
 
 /// FNV-1a over the speech tracks and their regions.
@@ -161,6 +181,7 @@ pub fn find(
             turns: Vec::new(),
             speech: speech_key(speech),
             heard: None,
+            known: Vec::new(),
         },
         Plan::ByTrack(tracks) => Found {
             speech: speech_key(speech),
@@ -175,7 +196,7 @@ pub fn find(
             // Not `finish`ed: hearing stops reading after the last speech window, and the decoder
             // is dropped (killed) rather than waited for.
             let a = diarize::analyze(&mut r, &one.regions, &mut emb, Some(&mut seg))?;
-            save_embeddings(dir, &a.embeddings)?;
+            let embeddings = save_embeddings(dir, &a.embeddings)?;
             let unlabelled = Found {
                 method: Method::Voices,
                 tracks: Vec::new(),
@@ -186,9 +207,11 @@ pub fn find(
                     track: one.track,
                     windows: a.windows,
                     overlaps: a.overlaps,
-                    models: heard_models(),
+                    key: hearing_key(one.track),
                     dim: a.embeddings.first().map_or(0, Vec::len),
+                    embeddings,
                 }),
+                known: Vec::new(),
             };
             return Ok(label(&unlabelled, &a.embeddings, voices));
         }
@@ -196,21 +219,51 @@ pub fn find(
     Ok(found)
 }
 
-/// The cached result in `dir` when it still holds for `speech` with this build's models (hearing
-/// need not run again), with its embeddings when speakers are told apart by voice.
-pub fn cached(found: Found, speech: &Speech, dir: &Path) -> Option<(Found, Vec<Vec<f32>>)> {
+/// The cached result in `dir` when it still holds for `speech` and the tracks the speakers
+/// come from (`voice`, as [`find`] takes it) with this build's models and settings (hearing need
+/// not run again), with its embeddings when speakers are told apart by voice.
+pub fn cached(
+    found: Found,
+    speech: &Speech,
+    voice: &[usize],
+    dir: &Path,
+) -> Option<(Found, Vec<Vec<f32>>)> {
     if found.speech != speech_key(speech) {
+        return None;
+    }
+    // The plan follows the roles too: a track that became a voice since changes it.
+    let same_plan = match (plan(speech, voice), found.method) {
+        (Plan::Nothing, Method::None) => true,
+        (Plan::ByTrack(t), Method::Tracks) => {
+            t.iter().map(|x| Some(x.track)).collect::<Vec<_>>() == found.tracks
+        }
+        (Plan::Diarize(t), Method::Voices) => {
+            found.heard.as_ref().is_some_and(|h| h.track == t.track)
+        }
+        _ => false,
+    };
+    if !same_plan {
         return None;
     }
     if found.method != Method::Voices {
         return Some((found, Vec::new()));
     }
     let heard = found.heard.as_ref()?;
-    if heard.models != heard_models() {
+    if heard.key != hearing_key(heard.track) {
         return None;
     }
-    let e = load_embeddings(dir, heard.dim)?;
-    (e.len() == heard.windows.len()).then_some((found, e))
+    let e = heard_embeddings(heard, dir)?;
+    Some((found, e))
+}
+
+/// `windows.f32` in `dir` when it is the one `heard` was written with.
+fn heard_embeddings(heard: &Heard, dir: &Path) -> Option<Vec<Vec<f32>>> {
+    let b = std::fs::read(embeddings_path(dir)).ok()?;
+    if format!("{:016x}", fnv(&b)) != heard.embeddings {
+        return None;
+    }
+    let e = decode_embeddings(&b, heard.dim)?;
+    (e.len() == heard.windows.len()).then_some(e)
 }
 
 /// `found` labelled again with `voices` from what was heard (no audio, no model): what enrolling,
@@ -223,7 +276,7 @@ pub fn relabel(found: &Found, dir: &Path, voices: &[Voice]) -> Result<Found> {
     let e = found
         .heard
         .as_ref()
-        .and_then(|h| load_embeddings(dir, h.dim).filter(|e| e.len() == h.windows.len()))
+        .and_then(|h| heard_embeddings(h, dir))
         .ok_or_else(|| {
             crate::Error::Edit(
                 "this recording's speakers were found before Junctur kept voiceprints: run `junctur analyze` on it once"
@@ -253,18 +306,21 @@ pub fn voice_sample(
         .as_ref()
         .filter(|_| found.method == Method::Voices)
         .ok_or_else(not_heard)?;
-    let e = load_embeddings(dir, heard.dim)
-        .filter(|e| e.len() == heard.windows.len())
-        .ok_or_else(not_heard)?;
+    let e = heard_embeddings(heard, dir).ok_or_else(not_heard)?;
     let mut out = Vec::new();
     let mut seconds = 0.0;
+    // Overlaps are sorted by start and none is longer than a segmentation window, so only those
+    // starting within that much before a window can touch it.
+    let longest = diarize::segment::WINDOW_S;
     for (w, emb) in heard.windows.iter().zip(e) {
         let mid = (w.start + w.end) / 2.0;
         let chosen = stretches.iter().any(|&(a, b)| a <= mid && mid <= b);
-        let shared = heard
-            .overlaps
+        let upto = heard.overlaps.partition_point(|o| o.start < w.end);
+        let shared = heard.overlaps[..upto]
             .iter()
-            .any(|o| o.start < w.end && o.end > w.start);
+            .rev()
+            .take_while(|o| o.start > w.start - longest)
+            .any(|o| o.end > w.start);
         if chosen && !shared {
             seconds += w.end - w.start;
             out.push(emb);
@@ -303,7 +359,10 @@ pub fn label(found: &Found, embeddings: &[Vec<f32>], voices: &[Voice]) -> Found 
             // One of the two is known (or both came out as one person): the other is whoever
             // else talks nearest to the stretch, as the one cutting in or being cut in on.
             (Some(x), _) | (_, Some(x)) => neighbour(o, x, &base).map(|y| (x, y)),
-            (None, None) => None,
+            // Neither talks alone in the window: whoever the windows say talks there, and the
+            // nearest other speaker. Measured in the repair pass: 13 s more of two people on
+            // the sample at the same 91% against the avatars.
+            (None, None) => covering(o, &base).and_then(|x| neighbour(o, x, &base).map(|y| (x, y))),
         };
         for speaker in pair.into_iter().flat_map(|(a, b)| [a, b]) {
             turns.push(Turn {
@@ -314,7 +373,11 @@ pub fn label(found: &Found, embeddings: &[Vec<f32>], voices: &[Voice]) -> Found 
         }
     }
     turns.sort_by(|a, b| a.start.total_cmp(&b.start));
+    let mut known = found.known.clone();
+    add_known(&mut known, found.people.iter().flatten().map(|p| &p.name));
+    add_known(&mut known, voices.iter().map(|v| &v.name));
     Found {
+        known,
         method: Method::Voices,
         tracks: vec![None; labels.voices.len()],
         people: labels
@@ -356,6 +419,29 @@ fn who(spans: &[[f64; 2]], turns: &[Turn]) -> Option<u32> {
         .map(|(id, _)| id)
 }
 
+fn add_known<'a>(known: &mut Vec<String>, names: impl Iterator<Item = &'a String>) {
+    for n in names {
+        if !known.iter().any(|k| k.to_lowercase() == n.to_lowercase()) {
+            known.push(n.clone());
+        }
+    }
+}
+
+/// Adds to `found`'s [`Found::known`] the voice names `old` (the result it replaces) knew.
+pub fn remember_known(found: &mut Found, old: &Found) {
+    let mut known = std::mem::take(&mut found.known);
+    add_known(&mut known, old.known.iter());
+    add_known(&mut known, old.people.iter().flatten().map(|p| &p.name));
+    found.known = known;
+}
+
+/// The speaker whose turn (from windows) holds the middle of overlap `o`.
+fn covering(o: &Overlap, turns: &[Turn]) -> Option<u32> {
+    let mid = (o.start + o.end) / 2.0;
+    let i = turns.partition_point(|t| t.end < mid);
+    turns.get(i).filter(|t| t.start <= mid).map(|t| t.speaker)
+}
+
 /// The speaker other than `x` whose turn (from windows) is nearest to overlap `o`, within
 /// [`NEIGHBOUR_S`].
 fn neighbour(o: &Overlap, x: u32, turns: &[Turn]) -> Option<u32> {
@@ -377,20 +463,20 @@ fn embeddings_path(dir: &Path) -> PathBuf {
     dir.join(EMBEDDINGS_FILE)
 }
 
-/// Raw little-endian f32, [`Heard::dim`] per window, like `envelope.f32`.
-fn save_embeddings(dir: &Path, e: &[Vec<f32>]) -> Result<()> {
+/// Raw little-endian f32, [`Heard::dim`] per window, like `envelope.f32`. Returns the file's
+/// [`Heard::embeddings`] key.
+fn save_embeddings(dir: &Path, e: &[Vec<f32>]) -> Result<String> {
     let bytes: Vec<u8> = e.iter().flatten().flat_map(|v| v.to_le_bytes()).collect();
-    std::fs::write(embeddings_path(dir), bytes)?;
-    Ok(())
+    std::fs::write(embeddings_path(dir), &bytes)?;
+    Ok(format!("{:016x}", fnv(&bytes)))
 }
 
-/// The cached window embeddings; `None` when missing or not a whole number of embeddings.
-pub fn load_embeddings(dir: &Path, dim: usize) -> Option<Vec<Vec<f32>>> {
-    let b = std::fs::read(embeddings_path(dir)).ok()?;
+/// Embeddings of `dim` numbers from raw bytes; `None` when not a whole number of them.
+fn decode_embeddings(b: &[u8], dim: usize) -> Option<Vec<Vec<f32>>> {
     if dim == 0 {
         return b.is_empty().then(Vec::new);
     }
-    if b.len() % (dim * 4) != 0 {
+    if !b.len().is_multiple_of(dim * 4) {
         return None;
     }
     Some(
@@ -425,6 +511,7 @@ fn by_track(tracks: &[&SpeechTrack]) -> Found {
         turns,
         speech: String::new(),
         heard: None,
+        known: Vec::new(),
     }
 }
 
@@ -528,7 +615,7 @@ mod tests {
             name: name.into(),
             color: "#123456".into(),
             seconds: 30.0,
-            model: models::SPEAKER_EMBEDDING.file.into(),
+            model: models::SPEAKER_EMBEDDING.sha256.into(),
             print,
         }
     }
@@ -541,7 +628,7 @@ mod tests {
                 end: i as f64 * 1.5 + 1.5,
             })
             .collect();
-        let e = (0..20)
+        let e: Vec<Vec<f32>> = (0..20)
             .map(|i| {
                 unit(if i < 10 {
                     &[1.0, 0.1, 0.0]
@@ -550,6 +637,7 @@ mod tests {
                 })
             })
             .collect();
+        let bytes: Vec<u8> = e.iter().flatten().flat_map(|v| v.to_le_bytes()).collect();
         let found = Found {
             method: Method::Voices,
             tracks: vec![],
@@ -560,9 +648,11 @@ mod tests {
                 track: 0,
                 windows,
                 overlaps,
-                models: heard_models(),
+                key: hearing_key(0),
                 dim: 3,
+                embeddings: format!("{:016x}", fnv(&bytes)),
             }),
+            known: vec![],
         };
         (found, e)
     }
@@ -631,6 +721,23 @@ mod tests {
             2,
             "Ana, then Bea: no overlap turn"
         );
+        // Neither local speaker talks alone: the windows' speaker there and the nearest other.
+        let blind = Overlap {
+            start: 14.0,
+            end: 14.6,
+            a: vec![],
+            b: vec![],
+        };
+        let (found, e) = heard(vec![blind]);
+        let l = label(&found, &e, &voices);
+        let mut at: Vec<u32> = l
+            .turns
+            .iter()
+            .filter(|t| t.start == 14.0)
+            .map(|t| t.speaker)
+            .collect();
+        at.sort();
+        assert_eq!(at, vec![1, 2]);
     }
 
     #[test]
@@ -658,10 +765,44 @@ mod tests {
                     tracks: vec![],
                     seconds: 0.0
                 },
+                &[],
                 &d
             ),
             None
         );
+        // The same windows in a cached result for this speech: reused with their embeddings.
+        let speech = Speech {
+            tracks: vec![SpeechTrack {
+                track: 0,
+                regions: vec![Region {
+                    start: 0.0,
+                    end: 30.0,
+                }],
+                share: 0.5,
+            }],
+            seconds: 30.0,
+        };
+        let mine = Found {
+            speech: speech_key(&speech),
+            ..found.clone()
+        };
+        assert!(cached(mine.clone(), &speech, &[], &d).is_some());
+        // Not when the track is now a voice track of its own (another plan), or after other
+        // settings or models.
+        assert!(
+            cached(mine.clone(), &speech, &[0, 1], &d).is_some(),
+            "one voice: still diarized"
+        );
+        let mut other = mine.clone();
+        other.heard.as_mut().unwrap().key = "old".into();
+        assert!(cached(other, &speech, &[], &d).is_none());
+        // A windows.f32 of the same size from another run is not these windows.
+        let mut swapped = e.clone();
+        swapped.swap(0, 19);
+        save_embeddings(&d, &swapped).unwrap();
+        assert!(cached(mine, &speech, &[], &d).is_none());
+        assert!(relabel(&found, &d, &[]).is_err());
+        save_embeddings(&d, &e).unwrap();
         // Speakers that are tracks have no voice to sample.
         let tracks = Found {
             method: Method::Tracks,

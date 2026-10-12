@@ -31,7 +31,8 @@ pub struct Voice {
     pub color: String,
     /// Seconds of speech the print was made from.
     pub seconds: f64,
-    /// The embedding model's file name ([`models::SPEAKER_EMBEDDING`]).
+    /// The embedding model's SHA-256 ([`models::SPEAKER_EMBEDDING`]): a print is only comparable
+    /// with embeddings of the very same weights.
     pub model: String,
     pub print: Vec<f32>,
 }
@@ -58,39 +59,68 @@ pub fn default_path() -> Result<Option<PathBuf>> {
 impl Voices {
     /// The voices at `path`; none when the file does not exist. A file that does not parse is an
     /// error, never silently empty (saving over it would lose every voice).
+    /// A hand-edited name or colour the edit file could not hold is an error too, naming the voice.
     pub fn load(path: &Path) -> Result<Self> {
-        match std::fs::read(path) {
+        let bad =
+            |e: &dyn std::fmt::Display| Error::Edit(format!("voices file {}: {e}", path.display()));
+        let v: Self = match std::fs::read(path) {
             Ok(b) => serde_json::from_slice(b.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&b))
-                .map_err(|e| Error::Edit(format!("voices file {}: {e}", path.display()))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e.into()),
+                .map_err(|e| bad(&e))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => return Err(e.into()),
+        };
+        for x in &v.voices {
+            check_name(&x.name).map_err(|e| bad(&format!("{:?}: {e}", x.name)))?;
+            if parse_color(&x.color).is_none() {
+                return Err(bad(&format!(
+                    "{}: {:?} is not a colour like #F2B33D",
+                    x.name, x.color
+                )));
+            }
         }
+        Ok(v)
     }
 
-    /// Writes the file whole through a temporary file, so a crash never leaves half of it.
+    /// Writes the file whole through a temporary file of its own (two writers never share one)
+    /// renamed over it, retried briefly when a reader holds the file on Windows, as edit lists are.
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("json.tmp");
+        static SAVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SAVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = path.with_extension(format!("json.{}-{n}.tmp", std::process::id()));
         std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
+        let mut tries = 0;
+        loop {
+            match std::fs::rename(&tmp, path) {
+                Ok(()) => return Ok(()),
+                Err(e) if tries < 5 => {
+                    let _ = e;
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(40));
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(e.into());
+                }
+            }
+        }
     }
 
     /// The voices whose prints this build's embedding model can compare with.
     pub fn usable(&self) -> Vec<&Voice> {
         self.voices
             .iter()
-            .filter(|v| v.model == models::SPEAKER_EMBEDDING.file && !v.print.is_empty())
+            .filter(|v| v.model == models::SPEAKER_EMBEDDING.sha256 && !v.print.is_empty())
             .collect()
     }
 
     fn find(&self, name: &str) -> Option<usize> {
-        let name = name.trim();
+        let name = name.trim().to_lowercase();
         self.voices
             .iter()
-            .position(|v| v.name.eq_ignore_ascii_case(name))
+            .position(|v| v.name.to_lowercase() == name)
     }
 
     pub fn get(&self, name: &str) -> Option<&Voice> {
@@ -110,7 +140,7 @@ impl Voices {
             )));
         }
         let print = voiceprint(embeddings);
-        let model = models::SPEAKER_EMBEDDING.file.to_string();
+        let model = models::SPEAKER_EMBEDDING.sha256.to_string();
         let i = match self.find(&name) {
             Some(i)
                 if self.voices[i].model == model && self.voices[i].print.len() == print.len() =>
@@ -136,10 +166,17 @@ impl Voices {
                 i
             }
             None => {
-                let color = (1..)
+                let taken = |c: &str| self.voices.iter().any(|v| v.color.eq_ignore_ascii_case(c));
+                // One pass over the palette; past it (a ninth person), a colour of their own.
+                let color = (1..=8)
                     .map(default_color)
-                    .find(|c| self.voices.iter().all(|v| &v.color != c))
-                    .expect("some colour");
+                    .find(|c| !taken(c))
+                    .unwrap_or_else(|| {
+                        (self.voices.len()..)
+                            .map(generated_color)
+                            .find(|c| !taken(c))
+                            .expect("some colour")
+                    });
                 self.voices.push(Voice {
                     name,
                     color,
@@ -191,6 +228,26 @@ impl Voices {
     }
 }
 
+/// The `n`th of an endless run of distinct bright colours (golden-angle hues), for people past
+/// the palette.
+fn generated_color(n: usize) -> String {
+    let h = (n as f64 * 137.508) % 360.0;
+    let (s, l) = (0.65, 0.62);
+    let c = (1.0 - (2.0 * l - 1.0f64).abs()) * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let (r, g, b) = match (h / 60.0) as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    let to = |v: f64| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    format!("#{:02X}{:02X}{:02X}", to(r), to(g), to(b))
+}
+
 /// The unit mean of unit embeddings.
 pub fn voiceprint(embeddings: &[&[f32]]) -> Vec<f32> {
     let dim = embeddings.first().map_or(0, |e| e.len());
@@ -240,6 +297,29 @@ mod tests {
     }
 
     #[test]
+    fn a_ninth_person_gets_a_colour_of_their_own() {
+        let mut v = Voices::default();
+        let e = [1.0f32, 0.0];
+        for i in 0..10 {
+            v.enroll(&format!("P{i}"), &[&e], 5.0).unwrap();
+        }
+        let mut colours: Vec<&str> = v.voices.iter().map(|x| x.color.as_str()).collect();
+        assert!(
+            colours
+                .iter()
+                .all(|c| parse_color(c).as_deref() == Some(*c)),
+            "{colours:?}"
+        );
+        colours.sort();
+        colours.dedup();
+        assert_eq!(colours.len(), 10);
+        // Names match whatever their case, accents included.
+        v.enroll("Lucía", &[&e], 5.0).unwrap();
+        v.enroll("LUCÍA", &[&e], 5.0).unwrap();
+        assert_eq!(v.get("lucía").unwrap().seconds, 10.0);
+    }
+
+    #[test]
     fn the_file_round_trips_and_a_broken_one_is_an_error() {
         let d = scratch("file");
         let path = d.join("junctur").join("voices.json");
@@ -255,6 +335,19 @@ mod tests {
         assert!(v.usable().is_empty());
         std::fs::write(&path, "{ nope").unwrap();
         assert!(Voices::load(&path).is_err());
+        // A hand-edited colour or name the edit file cannot hold.
+        let mut odd = v.clone();
+        odd.voices[0].color = "red".into();
+        std::fs::write(&path, serde_json::to_vec(&odd).unwrap()).unwrap();
+        assert!(Voices::load(&path).unwrap_err().to_string().contains("red"));
+        odd.voices[0].color = "#123456".into();
+        odd.voices[0].name = "track=2".into();
+        std::fs::write(&path, serde_json::to_vec(&odd).unwrap()).unwrap();
+        assert!(Voices::load(&path).is_err());
+        // Saves leave no temporary file behind.
+        v.save(&path).unwrap();
+        let left: Vec<_> = std::fs::read_dir(path.parent().unwrap()).unwrap().collect();
+        assert_eq!(left.len(), 1);
         let _ = std::fs::remove_dir_all(&d);
     }
 

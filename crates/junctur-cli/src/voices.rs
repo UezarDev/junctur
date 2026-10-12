@@ -14,10 +14,17 @@ pub fn path() -> Result<std::path::PathBuf, String> {
         .ok_or_else(|| "no config folder to keep voices in (set JUNCTUR_VOICES)".into())
 }
 
-/// The voices to label speakers by: none when there is no voices file.
-pub fn usable() -> Result<Vec<Voice>, String> {
-    let v = Voices::load(&path()?).map_err(|e| e.to_string())?;
-    Ok(v.usable().into_iter().cloned().collect())
+/// The voices to label speakers by: none when there is no voices file. A voices file that cannot
+/// be read is said and labelling goes on without voices: speakers are an extra, and a broken
+/// file must not stop `analyze` or `cut` (the file is left as it is for the user to fix).
+pub fn usable() -> Vec<Voice> {
+    match path().and_then(|p| Voices::load(&p).map_err(|e| e.to_string())) {
+        Ok(v) => v.usable().into_iter().cloned().collect(),
+        Err(e) => {
+            eprintln!("junctur: {e}; labelling speakers without remembered voices");
+            Vec::new()
+        }
+    }
 }
 
 /// `<start>-<end>[,<start>-<end>...]` in seconds.
@@ -53,7 +60,9 @@ pub fn run(a: Args) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         let found =
             pipeline::enroll(&p, &mut v, name, &stretches(at)?).map_err(|e| e.to_string())?;
+        // The voices first: labels are only saved once the voices they stand on are.
         v.save(&file).map_err(|e| e.to_string())?;
+        pipeline::save_speakers(&p, &found).map_err(|e| e.to_string())?;
         let voice = v.get(name).expect("just enrolled");
         println!(
             "remembered {} ({:.1} s of speech in all; {})",
@@ -62,9 +71,12 @@ pub fn run(a: Args) -> Result<(), String> {
             file.display()
         );
         println!("{}", pipeline::describe(&found));
-        if let Some(e) = pipeline::respeak(&p, &found).map_err(|e| e.to_string())? {
+        if let Some((e, backup)) = pipeline::respeak(&p, &found).map_err(|e| e.to_string())? {
             let names: Vec<&str> = e.speakers.names.iter().map(|n| n.name.as_str()).collect();
             println!("speakers: {}", names.join(", "));
+            if let Some(b) = backup {
+                println!("the previous edit list was kept as {}", b.display());
+            }
         }
         return Ok(());
     }
@@ -77,7 +89,7 @@ pub fn run(a: Args) -> Result<(), String> {
             voice.color,
             voice.name,
             voice.seconds,
-            if voice.model == junctur_core::models::SPEAKER_EMBEDDING.file {
+            if voice.model == junctur_core::models::SPEAKER_EMBEDDING.sha256 {
                 ""
             } else {
                 ", from another model: enroll again"

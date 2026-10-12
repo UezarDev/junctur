@@ -295,8 +295,15 @@ pub fn speaker_path(out: &Path, name: &str, id: u32, taken: &mut Vec<String>) ->
     if safe.is_empty() {
         safe = format!("speaker {id}");
     }
-    if taken.iter().any(|t| t.eq_ignore_ascii_case(&safe)) {
-        safe = format!("{safe} {id}");
+    // Names that differ only in case are one file on Windows (any letters, not just ASCII); a
+    // suffixed name can be another speaker's own, so suffixes go on until one is free.
+    let free =
+        |n: &str, taken: &[String]| !taken.iter().any(|t| t.to_lowercase() == n.to_lowercase());
+    if !free(&safe, taken) {
+        safe = std::iter::once(format!("{safe} {id}"))
+            .chain((2..).map(|k| format!("{safe} {id}-{k}")))
+            .find(|n| free(n, taken))
+            .expect("some name is free");
     }
     taken.push(safe.clone());
     let stem = out
@@ -564,6 +571,28 @@ mod tests {
     #[test]
     fn speaker_files_are_named_safely_and_never_twice() {
         let out = Path::new("C:/v/rec (edited).srt");
+        // A suffixed name that is someone's own name, and case beyond ASCII.
+        let mut t = Vec::new();
+        assert_eq!(
+            speaker_path(out, "Ana 2", 1, &mut t),
+            Path::new("C:/v/rec (edited) (Ana 2).srt")
+        );
+        assert_eq!(
+            speaker_path(out, "Ana", 3, &mut t),
+            Path::new("C:/v/rec (edited) (Ana).srt")
+        );
+        assert_eq!(
+            speaker_path(out, "ana", 2, &mut t),
+            Path::new("C:/v/rec (edited) (ana 2-2).srt")
+        );
+        assert_eq!(
+            speaker_path(out, "LUCÍA", 4, &mut t),
+            Path::new("C:/v/rec (edited) (LUCÍA).srt")
+        );
+        assert_eq!(
+            speaker_path(out, "lucía", 5, &mut t),
+            Path::new("C:/v/rec (edited) (lucía 5).srt")
+        );
         let mut taken = Vec::new();
         let p = |n: &str, id, t: &mut Vec<String>| speaker_path(out, n, id, t);
         assert_eq!(

@@ -92,16 +92,22 @@ impl Segmenter {
                         // The output is log-probabilities: a frame is two people at once when
                         // the pairs together are likely enough, even if one single class wins.
                         let pairs: f32 = f.iter().skip(4).map(|x| x.exp()).sum();
+                        // Under it, nobody or one person: never a pair that won narrowly.
                         if f.len() == 7 && pairs >= PAIR_P {
                             best(4..7)
                         } else {
-                            best(0..f.len())
+                            best(0..f.len().min(4))
                         }
                     })
                     .collect()
             })
             .collect())
     }
+}
+
+/// Every setting that shapes the overlap stretches, for the hearing key.
+pub fn settings() -> String {
+    format!("{WINDOW_S} {STEP_S} {PAIR_P} {MIN_OVERLAP_S} {BRIDGE_S}")
 }
 
 pub fn window_samples() -> usize {

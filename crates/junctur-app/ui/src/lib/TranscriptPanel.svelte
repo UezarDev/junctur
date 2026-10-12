@@ -327,6 +327,8 @@
                   class="w"
                   class:cur={t.i === current}
                   class:sel={chosen && t.i >= chosen.first && t.i <= chosen.last}
+                  style:box-shadow={words.also[t.i] ? `inset 0 -2px 0 ${colour(words.also[t.i])}` : null}
+                  title={words.also[t.i] ? `${nameOf(words.speaker[t.i])} and ${nameOf(words.also[t.i])} at once` : null}
                   data-i={t.i}>{words.text[t.i]}</span
                 >
               {:else if t.kind === "cutword"}

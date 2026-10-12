@@ -83,46 +83,35 @@ impl Speakers {
     }
 
     /// "Speaker 1..N" for `turns` (speakers numbered from 1), with the names and colours of
-    /// `previous` kept wherever an id is still there: a re-cut must not undo a rename.
+    /// `previous` carried over to the same speakers: a re-cut must not undo a rename.
     pub fn new(turns: Vec<Turn>, tracks: &[Option<usize>], previous: Option<&Speakers>) -> Self {
-        Self::found(turns, tracks, &[], previous)
+        Self::found(turns, tracks, &[], previous, &[])
     }
 
     /// [`Speakers::new`], where speaker `i + 1` recognised as `people[i]` (an enrolled voice, 5b)
-    /// takes that person's name and colour instead: they are the person's in every recording, and
-    /// an id can mean someone else after the voices change.
+    /// takes that person's name and colour: they are the person's in every recording.
+    ///
+    /// Every other speaker takes the name and colour of the `previous` speaker it is, found by
+    /// what they say rather than by id: the speaker that is the same track, else the one whose
+    /// turns overlap its turns most (one to one, the largest overlaps first). Ids are renumbered
+    /// whenever the voices change (enrolled people come first), so carrying by id gave a rename to
+    /// someone else (the 5b review). With no turns on either side, by id. A previous
+    /// name in `exclude` (case aside) is never carried: those are the people's names, current or
+    /// forgotten, which belong to a voice, not to whatever cluster now sits where they were.
+    /// Speakers left without a name are "Speaker N" in the first palette colour no one else in
+    /// the list has.
     pub fn found(
         mut turns: Vec<Turn>,
         tracks: &[Option<usize>],
         people: &[Option<Person>],
         previous: Option<&Speakers>,
+        exclude: &[String],
     ) -> Self {
         turns.sort_by(|a, b| a.start.total_cmp(&b.start));
-        let names = tracks
-            .iter()
-            .enumerate()
-            .map(|(i, &track)| {
-                let id = i as u32 + 1;
-                let before = previous.and_then(|p| p.names.iter().find(|n| n.id == id));
-                let (name, color) = match people.get(i).and_then(Option::as_ref) {
-                    Some(p) => (p.name.clone(), p.color.clone()),
-                    None => (
-                        before.map_or_else(|| default_name(id), |n| n.name.clone()),
-                        before.map_or_else(|| default_color(id), |n| n.color.clone()),
-                    ),
-                };
-                SpeakerName {
-                    id,
-                    name,
-                    track,
-                    color,
-                }
-            })
-            .collect();
         // To the millisecond, as the file writes them: the list held in memory (the app plays
         // and compares it) is then the list the file reads back.
         let ms = |x: f64| (x * 1000.0).round() / 1000.0;
-        let turns = join(turns)
+        let turns: Vec<Turn> = join(turns)
             .into_iter()
             .map(|t| Turn {
                 start: ms(t.start),
@@ -130,6 +119,40 @@ impl Speakers {
                 ..t
             })
             .collect();
+        let n = tracks.len();
+        let person = |i: usize| people.get(i).and_then(Option::as_ref);
+        let carried = previous.map_or_else(
+            || vec![None; n],
+            |p| carry(&turns, tracks, n, p, exclude, &|i| person(i).is_some()),
+        );
+        let mut names: Vec<SpeakerName> = (0..n)
+            .map(|i| {
+                let id = i as u32 + 1;
+                let (name, color) = match (person(i), carried[i]) {
+                    (Some(p), _) => (p.name.clone(), p.color.clone()),
+                    // A name Junctur gave ("Speaker 3") is a number, not a name: it is not
+                    // carried, or two speakers could end up both "Speaker 3".
+                    (None, Some(c)) if c.name == default_name(c.id) => {
+                        (default_name(id), c.color.clone())
+                    }
+                    (None, Some(c)) => (c.name.clone(), c.color.clone()),
+                    (None, None) => (default_name(id), String::new()),
+                };
+                SpeakerName {
+                    id,
+                    name,
+                    track: tracks[i],
+                    color,
+                }
+            })
+            .collect();
+        // Colours last, so a new speaker never takes a colour a person or a carried name has.
+        for i in 0..n {
+            if names[i].color.is_empty() {
+                let used: Vec<String> = names.iter().map(|x| x.color.clone()).collect();
+                names[i].color = free_color(names[i].id, &used);
+            }
+        }
         Self { names, turns }
     }
 
@@ -273,6 +296,114 @@ pub fn default_name(id: u32) -> String {
     format!("Speaker {id}")
 }
 
+/// The palette colour for speaker `id`, or the next one along that no one in `used` has; when
+/// every palette colour is taken, `id`'s own.
+fn free_color(id: u32, used: &[String]) -> String {
+    (0..8u32)
+        .map(|k| default_color(id + k))
+        .find(|c| !used.iter().any(|u| u.eq_ignore_ascii_case(c)))
+        .unwrap_or_else(|| default_color(id))
+}
+
+/// For each of the `n` new speakers, the previous speaker it is (see [`Speakers::found`]); `None`
+/// for one that is a person (`is_person`) or matches nobody.
+fn carry<'p>(
+    turns: &[Turn],
+    tracks: &[Option<usize>],
+    n: usize,
+    previous: &'p Speakers,
+    exclude: &[String],
+    is_person: &dyn Fn(usize) -> bool,
+) -> Vec<Option<&'p SpeakerName>> {
+    let allowed = |p: &SpeakerName| {
+        !exclude
+            .iter()
+            .any(|x| x.to_lowercase() == p.name.to_lowercase())
+    };
+    let mut out: Vec<Option<&SpeakerName>> = vec![None; n];
+    let mut taken = vec![false; previous.names.len()];
+    // The same track first: exact.
+    for (i, slot) in out.iter_mut().enumerate() {
+        if is_person(i) {
+            continue;
+        }
+        let Some(track) = tracks[i] else { continue };
+        if let Some(j) = previous.names.iter().position(|p| p.track == Some(track)) {
+            if !taken[j] && allowed(&previous.names[j]) {
+                taken[j] = true;
+                *slot = Some(&previous.names[j]);
+            }
+        }
+    }
+    if previous.turns.is_empty() || turns.is_empty() {
+        // Nothing to match by: by id, as before 5b.
+        for (i, slot) in out.iter_mut().enumerate() {
+            if slot.is_some() || is_person(i) {
+                continue;
+            }
+            let id = i as u32 + 1;
+            if let Some(j) = previous.names.iter().position(|p| p.id == id) {
+                if !taken[j] && allowed(&previous.names[j]) {
+                    taken[j] = true;
+                    *slot = Some(&previous.names[j]);
+                }
+            }
+        }
+        return out;
+    }
+    // Overlap seconds between each new and each previous speaker's turns.
+    let spans = |ts: &[Turn], id: u32| -> Vec<(f64, f64)> {
+        ts.iter()
+            .filter(|t| t.speaker == id)
+            .map(|t| (t.start, t.end))
+            .collect()
+    };
+    let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
+    for i in (0..n).filter(|&i| out[i].is_none() && !is_person(i)) {
+        let a = spans(turns, i as u32 + 1);
+        for (j, p) in previous.names.iter().enumerate() {
+            if taken[j] || !allowed(p) {
+                continue;
+            }
+            let o = overlap(&a, &spans(&previous.turns, p.id));
+            if o > 0.0 {
+                pairs.push((o, i, j));
+            }
+        }
+    }
+    // The largest overlaps first; on a tie, the same id (a re-cut of the same labels).
+    pairs.sort_by(|a, b| {
+        b.0.total_cmp(&a.0).then_with(|| {
+            (previous.names[b.2].id == b.1 as u32 + 1)
+                .cmp(&(previous.names[a.2].id == a.1 as u32 + 1))
+        })
+    });
+    for (_, i, j) in pairs {
+        if out[i].is_none() && !taken[j] {
+            taken[j] = true;
+            out[i] = Some(&previous.names[j]);
+        }
+    }
+    out
+}
+
+/// Seconds two sorted lists of spans share (each list's spans may touch or overlap each other).
+fn overlap(a: &[(f64, f64)], b: &[(f64, f64)]) -> f64 {
+    let (mut i, mut j, mut total) = (0, 0, 0.0);
+    while i < a.len() && j < b.len() {
+        let o = a[i].1.min(b[j].1) - a[i].0.max(b[j].0);
+        if o > 0.0 {
+            total += o;
+        }
+        if a[i].1 < b[j].1 {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    total
+}
+
 /// Joins turns (sorted by start) of one speaker less than [`JOIN_S`] apart. Per speaker, not only
 /// when consecutive: since 5b another speaker's overlap turn can sit between two of one person's.
 fn join(turns: Vec<Turn>) -> Vec<Turn> {
@@ -319,6 +450,21 @@ mod tests {
         assert_eq!(again.name(2), Some("Lucía"));
         assert_eq!(again.color(2), Some("#123456"));
         assert_eq!(again.name(3), Some("Speaker 3"));
+        // Renumbered (the two swap places): a rename goes with what the speaker says, and so
+        // does a colour, but "Speaker N" stays a number and never doubles up.
+        let swapped = Speakers::new(
+            vec![t(0.0, 1.0, 2), t(2.0, 3.0, 1)],
+            &[None, None],
+            Some(&renamed),
+        );
+        assert_eq!(
+            (swapped.name(1), swapped.color(1)),
+            (Some("Lucía"), Some("#123456"))
+        );
+        assert_eq!(
+            (swapped.name(2), swapped.color(2)),
+            (Some("Speaker 2"), Some("#F2B33D"))
+        );
     }
 
     #[test]
@@ -395,7 +541,13 @@ mod tests {
         let mut before = Speakers::new(vec![], &[None, None], None);
         before.rename(1, "Old");
         before.rename(2, "Kept");
-        let s = Speakers::found(vec![], &[None, None], &[Some(ana), None], Some(&before));
+        let s = Speakers::found(
+            vec![],
+            &[None, None],
+            &[Some(ana), None],
+            Some(&before),
+            &[],
+        );
         assert_eq!((s.name(1), s.color(1)), (Some("Ana"), Some("#123456")));
         assert_eq!(s.name(2), Some("Kept"));
         // Turns are held to the millisecond, as the file writes them.

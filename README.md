@@ -70,12 +70,14 @@ the names.
 
 Voices can be remembered once and recognised in every recording: in the app, select words only one
 person says and choose "Remember voice…", or `junctur voices <file> --add <name> --at 61-75,300-312`
-(source seconds). A person's speaker then gets their name and colour in every recording; voices nobody
-remembered are grouped automatically as "Speaker N". Remembering the same name again adds to the voice;
+(source seconds). A person's speaker then gets their name and colour in every recording once it is
+labelled again: the open recording at once, any other at its next `analyze` or `cut` (`export` writes the
+edit list as it is). Voices nobody remembered are grouped automatically as "Speaker N". Remembering the same name again adds to the voice;
 half a minute from several places works best. The voices live in `junctur/voices.json` beside the config
 file (or the file `JUNCTUR_VOICES` names); `junctur voices` lists them, `--forget <name>` drops one.
 Enrolling relabels from what `analyze` kept (`windows.f32` in the project), without reading the
-recording again; `analyze` and `cut` relabel with the current voices.
+recording again; `analyze` and `cut` relabel with the current voices. A rename of a speaker nobody
+enrolled follows that speaker through a relabel (matched by when they talk, not by number).
 
 `export --srt <out.srt>` writes the captions: the transcript's kept words on the edited timeline (the
 same frames as the render and the FCPXML), each cue as `<font color>` in its speaker's colour, cut by the
@@ -83,7 +85,8 @@ same frames as the render and the FCPXML), each cue as `<font color>` in its spe
 panel or by hand). Beside `<out>.srt` (everyone, one caption at a time) it writes `<out> (<name>).srt`
 per speaker, holding everything that person says, also while someone else talks: a Resolve subtitle
 track shows one caption at a time, so put each speaker's file on its own track and overlapping talk
-shows at once. Captions are optional: with `captions on`, `render` also writes these beside the video.
+shows at once. Speaker files left from an earlier export (a name since changed) are not deleted; the
+export lists them. Captions are optional: with `captions on`, `render` also writes these beside the video.
 Checked in DaVinci Resolve (File > Import > Subtitle keeps the colours); Premiere Pro is unverified and
 likely shows its default caption style. SRT carries no size or position.
 

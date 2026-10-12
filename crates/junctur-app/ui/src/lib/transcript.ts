@@ -19,6 +19,8 @@ export interface Words {
   end: Float64Array;
   /** Speaker id per word, 0 for none. */
   speaker: Uint32Array;
+  /** A second speaker saying the word at the same time (5b), 0 for none. */
+  also: Uint32Array;
 }
 
 export function words(v: TranscriptView): Words {
@@ -27,6 +29,7 @@ export function words(v: TranscriptView): Words {
     start: Float64Array.from(v.start),
     end: Float64Array.from(v.end),
     speaker: Uint32Array.from(v.speaker ?? []),
+    also: Uint32Array.from(v.also ?? []),
   };
 }
 
