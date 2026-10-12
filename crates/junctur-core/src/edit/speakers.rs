@@ -8,6 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::captions::default_color;
+
 /// One speaker. `id` counts from 1, as the file and the user see it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpeakerName {
@@ -17,6 +19,8 @@ pub struct SpeakerName {
     /// (a mic and a Discord recorded on their own tracks). Every word heard on that track is
     /// theirs, which beats any overlap test when two tracks talk at once.
     pub track: Option<usize>,
+    /// Caption colour, `#RRGGBB` (5a): a palette colour by id until the user picks one.
+    pub color: String,
 }
 
 /// A stretch of the source one speaker talks in, in seconds.
@@ -46,7 +50,7 @@ impl Speakers {
         self.names.is_empty() && self.turns.is_empty()
     }
 
-    /// "Speaker 1..N" for `turns` (speakers numbered from 1), with the names (and tracks) of
+    /// "Speaker 1..N" for `turns` (speakers numbered from 1), with the names and colours of
     /// `previous` kept wherever an id is still there: a re-cut must not undo a rename.
     pub fn new(
         mut turns: Vec<Turn>,
@@ -59,10 +63,13 @@ impl Speakers {
             .enumerate()
             .map(|(i, &track)| {
                 let id = i as u32 + 1;
-                let name = previous
-                    .and_then(|p| p.name(id))
-                    .map_or_else(|| default_name(id), str::to_string);
-                SpeakerName { id, name, track }
+                let before = previous.and_then(|p| p.names.iter().find(|n| n.id == id));
+                SpeakerName {
+                    id,
+                    name: before.map_or_else(|| default_name(id), |n| n.name.clone()),
+                    track,
+                    color: before.map_or_else(|| default_color(id), |n| n.color.clone()),
+                }
             })
             .collect();
         Self {
@@ -88,6 +95,26 @@ impl Speakers {
             }
             None => false,
         }
+    }
+
+    /// Sets speaker `id`'s caption colour (already checked by the caller); false when there is no
+    /// such speaker.
+    pub fn recolor(&mut self, id: u32, color: &str) -> bool {
+        match self.names.iter_mut().find(|n| n.id == id) {
+            Some(n) => {
+                n.color = color.to_string();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Speaker `id`'s caption colour.
+    pub fn color(&self, id: u32) -> Option<&str> {
+        self.names
+            .iter()
+            .find(|n| n.id == id)
+            .map(|n| n.color.as_str())
     }
 
     /// The words' labeller: build once, then ask per word ([`Labeller::of_word`]).
@@ -195,10 +222,14 @@ mod tests {
         assert_eq!(s.name(2), Some("Speaker 2"));
         let mut renamed = s.clone();
         assert!(renamed.rename(2, "  Lucía "));
+        assert!(renamed.recolor(2, "#123456"));
+        assert!(!renamed.recolor(9, "#123456"));
+        assert_eq!(s.color(1), Some("#F2B33D"));
         assert!(!renamed.rename(9, "x"));
         // A re-cut finds three speakers now: the rename stays, the new one is numbered.
         let again = Speakers::new(vec![], &[None, None, None], Some(&renamed));
         assert_eq!(again.name(2), Some("Lucía"));
+        assert_eq!(again.color(2), Some("#123456"));
         assert_eq!(again.name(3), Some("Speaker 3"));
     }
 

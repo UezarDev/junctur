@@ -172,12 +172,15 @@ pub struct EditState {
     /// Changes when the list's turns (or speaker tracks) do, so the page asks for the words'
     /// labels again after an outside change; a rename leaves it as it was.
     pub speakers_key: String,
+    /// The caption settings (defaults when there is no list).
+    pub captions: edit::Captions,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SpeakerView {
     pub id: u32,
     pub name: String,
+    pub color: String,
 }
 
 /// The editor's side of the edit state: what undo and redo can do, and its last notice.
@@ -212,6 +215,7 @@ impl EditState {
                     .map(|n| SpeakerView {
                         id: n.id,
                         name: n.name.clone(),
+                        color: n.color.clone(),
                     })
                     .collect()
             }),
@@ -219,6 +223,7 @@ impl EditState {
                 .list
                 .as_ref()
                 .map_or_else(String::new, |l| speakers_key(&l.speakers)),
+            captions: edit.list.as_ref().map(|l| l.captions).unwrap_or_default(),
         }
     }
 }
@@ -266,6 +271,7 @@ mod tests {
             settings: CutSettings::default(),
             keep,
             speakers: Default::default(),
+            captions: Default::default(),
             windows: vec![],
         }
         .to_text()

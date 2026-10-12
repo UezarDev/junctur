@@ -6,7 +6,7 @@ use junctur_core::export;
 use junctur_core::pipeline::{self, PipelineOptions, Project, StageState, STAGES};
 use junctur_core::render::{self, RenderOptions};
 use junctur_core::runtime::DevicePref;
-use junctur_core::transcribe::ModelPref;
+use junctur_core::transcribe::{self, ModelPref};
 
 use crate::args::Args;
 use crate::config::{self, Config};
@@ -147,14 +147,29 @@ pub fn cut(a: Args) -> Result<(), String> {
 }
 
 pub fn export(a: Args) -> Result<(), String> {
-    a.reject_unknown(&known(&["--fcpxml"]))?;
-    let out = a
-        .path("--fcpxml")
-        .ok_or("export needs --fcpxml <out.fcpxml>")?;
+    a.reject_unknown(&known(&["--fcpxml", "--srt"]))?;
+    let (fcpxml, srt) = (a.path("--fcpxml"), a.path("--srt"));
+    if fcpxml.is_none() && srt.is_none() {
+        return Err("export needs --fcpxml <out.fcpxml> and/or --srt <out.srt>".into());
+    }
     let p = project(&a)?;
     let e = p.edit().map_err(|e| e.to_string())?;
-    export::write_fcpxml(&e, &out).map_err(|e| e.to_string())?;
-    println!("{} ({} clips)", out.display(), e.keep.len());
+    if let Some(out) = fcpxml {
+        export::write_fcpxml(&e, &out).map_err(|e| e.to_string())?;
+        println!("{} ({} clips)", out.display(), e.keep.len());
+    }
+    if let Some(out) = srt {
+        write_captions(&p, &e, &out)?;
+    }
+    Ok(())
+}
+
+/// The caption file for `e` at `out`, from the project's transcript.
+fn write_captions(p: &Project, e: &EditList, out: &std::path::Path) -> Result<(), String> {
+    let t = transcribe::load(&p.dir)
+        .ok_or("captions need a transcript: run `junctur analyze` on this file first")?;
+    let n = export::write_srt(e, &t, out).map_err(|e| e.to_string())?;
+    println!("{} ({n} captions)", out.display());
     Ok(())
 }
 
@@ -188,6 +203,10 @@ pub fn render(a: Args) -> Result<(), String> {
         r.audio_tracks,
         r.seconds
     );
+    // Captions are an optional toggle in the edit list; on, they go beside the video.
+    if e.captions.on {
+        write_captions(&p, &e, &out.with_extension("srt"))?;
+    }
     Ok(())
 }
 

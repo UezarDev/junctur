@@ -315,10 +315,10 @@ pub fn cut(
         .unwrap_or_default();
     let path = p.edit_path();
     let old = std::fs::read_to_string(&path).ok();
-    let previous = old
-        .as_deref()
-        .and_then(|t| edit::parse(t).ok())
-        .map(|e| e.speakers);
+    let parsed = old.as_deref().and_then(|t| edit::parse(t).ok());
+    let previous = parsed.as_ref().map(|e| e.speakers.clone());
+    // Caption settings are the user's, like the names: a re-cut keeps them.
+    let captions = parsed.map(|e| e.captions).unwrap_or_default();
     let speakers = speakers_for(speakers, previous.as_ref());
     let make = |settings: &CutSettings| EditList {
         source: p.file.clone(),
@@ -326,6 +326,7 @@ pub fn cut(
         settings: *settings,
         keep: edit::keep_ranges(&regions, &env, report.duration, settings),
         speakers: speakers.clone(),
+        captions,
         windows: edit::windows(&regions, &starts, report.duration, settings.window),
     };
     let e = make(settings);
@@ -431,6 +432,7 @@ mod tests {
                 end: keep_end,
             }],
             speakers: Default::default(),
+            captions: Default::default(),
             windows: vec![],
         }
         .to_text()

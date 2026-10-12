@@ -8,10 +8,31 @@ pub mod words;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use junctur_core::edit::{self, frame_ranges, frames_ceil, EditList, Envelope, Range, Saved};
+use junctur_core::edit::{
+    self, frame_ranges, frames_ceil, Captions, EditList, Envelope, Range, Saved,
+};
 
 use crate::cuts::Fps;
 pub use words::{TranscriptView, Words};
+
+/// A speaker name as the file can keep it: trimmed, one line, not starting like the speaker
+/// line's own `track=` / `color=` fields, at most [`MAX_NAME`] characters.
+fn check_name(name: &str) -> Result<&str, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("a speaker needs a name".into());
+    }
+    if name.contains(['\n', '\r']) {
+        return Err("a speaker's name is one line".into());
+    }
+    if name.starts_with("track=") || name.starts_with("color=") {
+        return Err("a speaker's name cannot start with \"track=\" or \"color=\"".into());
+    }
+    if name.chars().count() > MAX_NAME {
+        return Err(format!("a speaker's name is at most {MAX_NAME} characters"));
+    }
+    Ok(name)
+}
 
 /// Undo steps kept. A 30 h list has ~10 000 ranges (160 kB a step); this caps memory near 30 MB.
 const HISTORY: usize = 200;
@@ -151,35 +172,63 @@ impl Editor {
         }))
     }
 
-    /// Renames speaker `id` and saves; `None` when the name is already that. Not an undo step:
-    /// the history holds kept ranges only, so undoing a cut keeps the new name (the list saved
-    /// for an undo is the one in play with older ranges).
+    /// Renames speaker `id` and saves; `None` when the name is already that. Like every styling
+    /// change (below) not an undo step: the history holds kept ranges only, so undoing a cut keeps
+    /// the new name (the list saved for an undo is the one in play with older ranges).
     pub fn rename(
         &mut self,
         list: &EditList,
         id: u32,
         name: &str,
     ) -> Result<Option<Edited>, String> {
-        let name = name.trim();
-        if name.is_empty() {
-            return Err("a speaker needs a name".into());
-        }
-        // The file keeps a name as the rest of its line.
-        if name.contains(['\n', '\r']) {
-            return Err("a speaker's name is one line".into());
-        }
-        // The file reads a leading `track=<n>` as the speaker's track, not its name.
-        if name.starts_with("track=") {
-            return Err("a speaker's name cannot start with \"track=\"".into());
-        }
-        if name.chars().count() > MAX_NAME {
-            return Err(format!("a speaker's name is at most {MAX_NAME} characters"));
-        }
+        let name = check_name(name)?;
+        self.restyle(list, |l| {
+            l.speakers
+                .rename(id, name)
+                .then_some(())
+                .ok_or(format!("there is no speaker {id}"))
+        })
+    }
+
+    /// Sets speaker `id`'s caption colour (`#RRGGBB`) and saves.
+    pub fn recolor(
+        &mut self,
+        list: &EditList,
+        id: u32,
+        color: &str,
+    ) -> Result<Option<Edited>, String> {
+        let color = edit::parse_color(color.trim())
+            .ok_or_else(|| format!("{color:?} is not a colour like #F2B33D"))?;
+        self.restyle(list, |l| {
+            l.speakers
+                .recolor(id, &color)
+                .then_some(())
+                .ok_or(format!("there is no speaker {id}"))
+        })
+    }
+
+    /// Sets the caption settings (on/off and how cues are cut) and saves.
+    pub fn set_captions(
+        &mut self,
+        list: &EditList,
+        captions: Captions,
+    ) -> Result<Option<Edited>, String> {
+        captions.check()?;
+        self.restyle(list, |l| {
+            l.captions = captions;
+            Ok(())
+        })
+    }
+
+    /// Applies `f` to a copy of `list` and saves it; `None` when it changed nothing.
+    fn restyle(
+        &mut self,
+        list: &EditList,
+        f: impl FnOnce(&mut EditList) -> Result<(), String>,
+    ) -> Result<Option<Edited>, String> {
         let mut new = list.clone();
-        if !new.speakers.rename(id, name) {
-            return Err(format!("there is no speaker {id}"));
-        }
-        if new.speakers == list.speakers {
+        f(&mut new)?;
+        if new == *list {
             return Ok(None);
         }
         let path = self.path.clone().ok_or("no edit list is open")?;
@@ -193,6 +242,7 @@ impl Editor {
         }))
     }
 
+    /// Moves an undo (or redo) step to the other stack, `before` being the ranges it replaced.
     /// Moves an undo (or redo) step to the other stack, `before` being the ranges it replaced.
     fn shift(&mut self, step: Step, before: Vec<Range>) {
         match step {
@@ -277,6 +327,7 @@ mod tests {
             settings: CutSettings::default(),
             keep,
             speakers: Default::default(),
+            captions: Default::default(),
             windows: vec![],
         }
     }
@@ -494,7 +545,25 @@ mod tests {
         assert!(e.rename(&renamed, 1, &"x".repeat(MAX_NAME + 1)).is_err());
         assert!(e.rename(&renamed, 2, "Bea").is_err());
         assert!(e.rename(&renamed, 1, "track=2 Bob").is_err());
-        assert!(e.rename(&renamed, 1, "Bob track=2").is_ok());
+        assert!(e.rename(&renamed, 1, "color=#FF0000 Bob").is_err());
+        let bob = e.rename(&renamed, 1, "Bob track=2").unwrap().unwrap().list;
+        // Colours and caption settings save the same way, also not undo steps.
+        let renamed = e.rename(&bob, 1, "Ana María").unwrap().unwrap().list;
+        let red = e.recolor(&renamed, 1, " #ff0000").unwrap().unwrap().list;
+        assert_eq!(red.speakers.color(1), Some("#FF0000"));
+        assert!(e.recolor(&red, 1, "#FF0000").unwrap().is_none());
+        assert!(e.recolor(&red, 1, "red").is_err());
+        assert!(e.recolor(&red, 2, "#00FF00").is_err());
+        let on = Captions {
+            on: true,
+            ..Captions::default()
+        };
+        let captioned = e.set_captions(&red, on).unwrap().unwrap().list;
+        assert_eq!(reread(&path).captions, on);
+        assert!(e
+            .set_captions(&captioned, Captions { lines: 9, ..on })
+            .is_err());
+        let renamed = captioned;
         // Undoing the cut keeps the name.
         let undone = step(&mut e, &renamed, Step::Undo, FPS);
         assert_eq!(undone.keep, l0.keep);

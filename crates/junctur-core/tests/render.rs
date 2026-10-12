@@ -61,6 +61,7 @@ fn edit(source: &Path) -> EditList {
             },
         ],
         speakers: Default::default(),
+        captions: Default::default(),
         windows: vec![],
     }
 }

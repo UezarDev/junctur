@@ -118,6 +118,7 @@ mod tests {
             settings: Default::default(),
             keep: cut_span(&[r(0.0, 20.0)], 1.23456, 7.891011, 0.0),
             speakers: Default::default(),
+            captions: Default::default(),
             windows: vec![],
         };
         assert_eq!(super::super::parse(&list.to_text()).unwrap(), list);

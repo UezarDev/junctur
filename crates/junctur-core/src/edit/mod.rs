@@ -5,6 +5,7 @@
 //! It is the one piece of state a project owns; everything else in the project folder is a cache
 //! that can be rebuilt. The source itself is never touched.
 
+mod captions;
 mod format;
 mod frames;
 mod reduce;
@@ -17,6 +18,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+pub use captions::{default_color, parse_color, Captions};
 pub use format::{parse, FORMAT_VERSION};
 pub use frames::{frame_ranges, frame_span, frames_ceil, frames_floor};
 pub use reduce::{keep_ranges, snap_boundary, word_span, Envelope, ENVELOPE_HOP};
@@ -85,6 +87,8 @@ pub struct EditList {
     pub keep: Vec<Range>,
     /// Who speaks when; empty when the project has no speakers stage result.
     pub speakers: Speakers,
+    /// How the caption file is cut into cues, and whether captions are on.
+    pub captions: Captions,
     pub windows: Vec<Window>,
 }
 

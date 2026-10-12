@@ -62,11 +62,23 @@ export interface EditState {
   speakers: Speaker[];
   /** Changes when the words' speaker labels would (turns changed on disk), not on a rename. */
   speakersKey: string;
+  /** Caption settings (the edit list's `captions` line). */
+  captions: Captions;
 }
 
 export interface Speaker {
   id: number;
   name: string;
+  /** Caption colour, `#RRGGBB`. */
+  color: string;
+}
+
+/** How the caption file is cut (src: junctur-core edit/captions.rs). */
+export interface Captions {
+  on: boolean;
+  chars: number;
+  lines: number;
+  seconds: number;
 }
 
 /** The transcript's words (src/editor/words.rs), sorted by start; times in ms. */
@@ -113,6 +125,12 @@ export const editFrames = (start: number, end: number, keep: boolean) =>
 /** Renames speaker `id` in the edit list (saved at once, not an undo step). */
 export const renameSpeaker = (id: number, name: string) =>
   invoke<void>("rename_speaker", { id, name });
+/** Sets speaker `id`'s caption colour (`#RRGGBB`). */
+export const recolorSpeaker = (id: number, color: string) =>
+  invoke<void>("recolor_speaker", { id, color });
+export const setCaptions = (captions: Captions) => invoke<void>("set_captions", { captions });
+/** Writes the captions as an SRT at `path`; resolves to how many captions it holds. */
+export const exportCaptions = (path: string) => invoke<number>("export_captions", { path });
 export const undo = () => invoke<void>("undo");
 export const redo = () => invoke<void>("redo");
 /** The share of the window's width (0..1) on the right to keep free of video. */

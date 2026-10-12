@@ -134,6 +134,7 @@ mod tests {
             settings: CutSettings::default(),
             keep,
             speakers: Default::default(),
+            captions: Default::default(),
             windows: vec![],
         }
     }

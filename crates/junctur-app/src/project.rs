@@ -121,6 +121,7 @@ mod tests {
                 },
             ],
             speakers: Default::default(),
+            captions: Default::default(),
             windows: vec![],
         };
         std::fs::write(p.edit_path(), e.to_text()).unwrap();

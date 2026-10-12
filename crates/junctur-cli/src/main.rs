@@ -9,7 +9,7 @@
 //!                        [--no-transcript] [--no-speakers] [cut flags]
 //! junctur status <file> [--project <dir>] [--cache-dir <dir>]
 //! junctur cut <file> [--project <dir>] [--cache-dir <dir>] [cut flags]
-//! junctur export <file> --fcpxml <out.fcpxml> [--project <dir>] [--cache-dir <dir>]
+//! junctur export <file> [--fcpxml <out.fcpxml>] [--srt <out.srt>] [--project <dir>] [--cache-dir <dir>]
 //! junctur render <file> --out <out.mp4> [--project <dir>] [--cache-dir <dir>] [--full] [--force]
 //!                       [--jobs <n>]
 //! ```
@@ -34,7 +34,8 @@ const USAGE: &str = "usage:
                          [--no-speakers] [--model auto|large-v3-turbo|large-v3|large-v3-q5_0] [cut flags]
   junctur status <file> [--project <dir>] [--cache-dir <dir>]
   junctur cut <file> [--project <dir>] [--cache-dir <dir>] [cut flags]
-  junctur export <file> --fcpxml <out.fcpxml> [--project <dir>] [--cache-dir <dir>]
+  junctur export <file> [--fcpxml <out.fcpxml>] [--srt <out.srt>] [--project <dir>]
+                        [--cache-dir <dir>]
   junctur render <file> --out <out.mp4> [--project <dir>] [--cache-dir <dir>] [--full] [--force]
                         [--jobs <n>]
 cut flags: [--pad-before <s>] [--pad-after <s>] [--merge-gap <s>] [--crossfade <ms>]";

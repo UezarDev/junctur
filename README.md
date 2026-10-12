@@ -52,7 +52,7 @@ junctur analyze <file> [--project <dir>] [--cpu] [--force] [--no-transcript] [--
                        [--model auto|large-v3-turbo|large-v3|large-v3-q5_0] [cut flags]
 junctur status <file> [--project <dir>]
 junctur cut <file> [--project <dir>] [cut flags]
-junctur export <file> --fcpxml <out.fcpxml> [--project <dir>]
+junctur export <file> [--fcpxml <out.fcpxml>] [--srt <out.srt>] [--project <dir>]
 junctur render <file> --out <out.mp4> [--project <dir>] [--full] [--force] [--jobs <n>]
 cut flags: [--pad-before <s>] [--pad-after <s>] [--merge-gap <s>] [--crossfade <ms>]
 ```
@@ -63,8 +63,15 @@ in the cache unless `--project <dir>` puts it somewhere else, for example a git 
 `analyze` also tells speakers apart (`--no-speakers` skips it): one speaker per speech track when OBS
 recorded the voices on their own tracks, otherwise by voice on the mix (CAM++ embeddings, two-pass
 clustering). They are written into `edit.junctur` as `speaker <id> <name>` lines, named "Speaker 1..N",
-and `turn <start> <end> <id>` lines; rename a speaker by editing its line (or in the app). A re-cut keeps
-the names.
+and `turn <start> <end> <id>` lines; rename or recolour a speaker by editing its line (or in the app). A
+re-cut keeps the names.
+
+`export --srt <out.srt>` writes the captions: the transcript's kept words on the edited timeline (the
+same frames as the render and the FCPXML), each cue as `<font color>` in its speaker's colour, cut by the
+`captions` line (`chars=` per line, `lines=` per caption, `seconds=` longest; set in the app's Captions
+panel or by hand). Captions are optional: with `captions on`, `render` also writes `<out>.srt` beside the
+video. Checked in DaVinci Resolve (File > Import > Subtitle keeps the colours); Premiere Pro is
+unverified and likely shows its default caption style. SRT carries no size or position.
 
 `render` writes scratch pieces in a `<out>.junctur-parts` folder beside the output and deletes them;
 `--full` re-encodes everything, `--force` replaces an existing output (never the source). The source's

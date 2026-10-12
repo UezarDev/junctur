@@ -6,6 +6,7 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use junctur_core::edit::Captions;
 use serde::Serialize;
 use tauri::State;
 
@@ -138,6 +139,24 @@ pub async fn edit_frames(
 #[tauri::command]
 pub async fn rename_speaker(app: State<'_, App>, id: u32, name: String) -> Result<(), String> {
     app.core()?.rename_speaker(id, &name)
+}
+
+/// Sets speaker `id`'s caption colour (`#RRGGBB`).
+#[tauri::command]
+pub async fn recolor_speaker(app: State<'_, App>, id: u32, color: String) -> Result<(), String> {
+    app.core()?.recolor_speaker(id, &color)
+}
+
+/// Sets the caption settings: on/off and how cues are cut.
+#[tauri::command]
+pub async fn set_captions(app: State<'_, App>, captions: Captions) -> Result<(), String> {
+    app.core()?.set_captions(captions)
+}
+
+/// Writes the captions as an SRT to `path`; returns how many captions it holds.
+#[tauri::command]
+pub async fn export_captions(app: State<'_, App>, path: String) -> Result<usize, String> {
+    app.core()?.export_captions(Path::new(&path))
 }
 
 #[tauri::command]

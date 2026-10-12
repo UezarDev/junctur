@@ -10,7 +10,8 @@
 //!
 //! Edit steps (2c) run the editor as the frontend does: `cutw=12-15` / `keepw=12-15` (transcript
 //! words, by index), `cutf=300-450` / `keepf=300-450` (source frames), `undo`, `redo`, and
-//! `rename=<id>:<name>` (5a: a speaker's name; no `;` in it). Each step's
+//! `rename=<id>:<name>` (5a: a speaker's name; no `;` in it), `color=<id>:#RRGGBB`,
+//! `captions=on|off` and `srt=<path>` (write the captions there). Each step's
 //! report adds the edit state it left, and the final report re-reads `edit.junctur` from disk
 //! (`disk`: does it parse, and is it the list in play), counts the loads asked of mpv (a save must
 //! not come back as a second reload) and lists the frontend's log lines (`ui`).
@@ -69,6 +70,9 @@ enum Action {
     Pause,
     Edit(Step),
     Rename(u32, String),
+    Recolor(u32, String),
+    Captions(bool),
+    Srt(String),
 }
 
 /// The frontend's log lines (`ui_log`), kept for the report.
@@ -123,6 +127,13 @@ fn parse_steps(s: &str) -> Result<Vec<(f64, Action)>, String> {
                 let (id, name) = v.split_once(':').ok_or_else(bad)?;
                 Action::Rename(id.trim().parse().map_err(|_| bad())?, name.to_string())
             }
+            Some(("color", v)) => {
+                let (id, color) = v.split_once(':').ok_or_else(bad)?;
+                Action::Recolor(id.trim().parse().map_err(|_| bad())?, color.to_string())
+            }
+            Some(("captions", "on")) => Action::Captions(true),
+            Some(("captions", "off")) => Action::Captions(false),
+            Some(("srt", path)) if !path.is_empty() => Action::Srt(path.to_string()),
             None if action == "pause" => Action::Pause,
             None if action == "undo" => Action::Edit(Step::Undo),
             None if action == "redo" => Action::Edit(Step::Redo),
@@ -160,6 +171,14 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
         Action::Pause => p.toggle_pause(),
         Action::Edit(step) => p.edit(*step),
         Action::Rename(id, name) => p.rename_speaker(*id, name),
+        Action::Recolor(id, color) => p.recolor_speaker(*id, color),
+        Action::Captions(on) => {
+            let c = p.edit_state().captions;
+            p.set_captions(junctur_core::edit::Captions { on: *on, ..c })
+        }
+        Action::Srt(path) => p
+            .export_captions(std::path::Path::new(path))
+            .map(|n| eprintln!("junctur-app test: wrote {n} captions to {path}")),
     })?
 }
 
@@ -363,6 +382,15 @@ mod tests {
             parse_steps("5:rename=2:Ana María").unwrap(),
             vec![(5.0, Action::Rename(2, "Ana María".into()))]
         );
+        assert_eq!(
+            parse_steps("1:color=2:#FF0000;2:captions=on;3:srt=C:\\x\\out.srt").unwrap(),
+            vec![
+                (1.0, Action::Recolor(2, "#FF0000".into())),
+                (2.0, Action::Captions(true)),
+                (3.0, Action::Srt("C:\\x\\out.srt".into())),
+            ]
+        );
+        assert!(parse_steps("5:captions=maybe").is_err());
         assert!(parse_steps("5:rename=x:Ana").is_err());
         assert!(parse_steps("5:rename=2").is_err());
         assert!(parse_steps("1:cutw=3").is_err());

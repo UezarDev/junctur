@@ -120,11 +120,10 @@
       : null,
   );
 
-  // Speakers: names from the edit list, a display colour by id (the caption colours are a later
-  // part of 5a; these only tell the speakers apart here).
-  const PALETTE = ["#f2b33d", "#5fb3f2", "#8bd17c", "#e58bd8", "#f28b5f", "#7fd8d0", "#c9a3f2", "#d8d36f"];
+  // Speakers: names and caption colours from the edit list (set in the Captions panel).
   const names = $derived(new Map((edit?.speakers ?? []).map((s) => [s.id, s.name])));
-  const colour = (id: number) => PALETTE[(id - 1) % PALETTE.length];
+  const colours = $derived(new Map((edit?.speakers ?? []).map((s) => [s.id, s.color])));
+  const colour = (id: number) => colours.get(id) ?? "var(--muted)";
   const nameOf = (id: number) => names.get(id) ?? `Speaker ${id}`;
 
   // Renaming: the one name row that was clicked (by row index: the same speaker has a name row at

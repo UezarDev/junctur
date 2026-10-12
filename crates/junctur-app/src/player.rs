@@ -15,12 +15,14 @@
 
 use std::collections::VecDeque;
 use std::ops::Deref;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use junctur_core::edit::{EditList, Speakers};
+use junctur_core::edit::{Captions, EditList, Speakers};
+use junctur_core::export::srt;
+use junctur_core::output;
 use junctur_core::pipeline;
 use tauri::{AppHandle, Emitter};
 
@@ -430,6 +432,38 @@ impl Core {
     /// Renames speaker `id` in the edit list and saves it (first taking any outside change).
     pub fn rename_speaker(&self, id: u32, name: &str) -> Result<(), String> {
         self.change(|ed, list, _| ed.rename(list, id, name))
+    }
+
+    /// Sets speaker `id`'s caption colour in the edit list and saves it.
+    pub fn recolor_speaker(&self, id: u32, color: &str) -> Result<(), String> {
+        self.change(|ed, list, _| ed.recolor(list, id, color))
+    }
+
+    /// Sets the edit list's caption settings and saves them.
+    pub fn set_captions(&self, captions: Captions) -> Result<(), String> {
+        self.change(|ed, list, _| ed.set_captions(list, captions))
+    }
+
+    /// Writes the captions of the list in play to `out` as an SRT (5a), on the edited timeline
+    /// at the frame rate the player rounds to; returns the number of captions. Read and written
+    /// outside the locks once the words and the list are in hand.
+    pub fn export_captions(&self, out: &Path) -> Result<usize, String> {
+        self.prepare();
+        let words = lock(&self.editor)
+            .words
+            .clone()
+            .ok_or("captions need a transcript: run the pipeline on this recording")?;
+        let (list, fps) = {
+            let c = lock(&self.ctl);
+            let list = c.edit.list.clone().ok_or("no edit list yet")?;
+            (list, c.fps.ok_or("the frame rate is not known")?)
+        };
+        output::refuse_source(&list.source, out).map_err(|e| e.to_string())?;
+        let tracked = words.tracks.iter().copied().zip(words.list.iter());
+        let cues = srt::cues(&list, tracked, fps.num, fps.den);
+        std::fs::write(out, srt::write(&cues, &list))
+            .map_err(|e| format!("writing {}: {e}", out.display()))?;
+        Ok(cues.len())
     }
 
     /// Takes any outside change on disk, lets `f` change and save the list in play, and plays

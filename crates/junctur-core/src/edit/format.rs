@@ -7,24 +7,28 @@
 //! settings pad_before=0.25 pad_after=0.35 merge_gap=1 snap=0.15 crossfade=0.03 window=5
 //! # kept 4012.3 s of 6304.0 s (64%) in 812 ranges
 //! keep 1.234 5.678
-//! speaker 1 Speaker 1
-//! speaker 2 track=1 Lucía
+//! captions on chars=42 lines=2 seconds=6
+//! speaker 1 color=#F2B33D Speaker 1
+//! speaker 2 track=1 color=#5FB3F2 Lucía
 //! turn 1.300 4.100 1
 //! window 0 0.820 0.820 14
 //! ```
 //!
 //! `#` lines are comments. `source` takes the rest of the line, so paths need no quoting, and so
-//! does a speaker's name (after its id and an optional `track=<n>`), so renaming a speaker by hand
-//! is editing one line. Times are seconds with millisecond precision. Speaker and turn lines are
-//! written only when there are speakers, and only then is the header `junctur-edit 2` (5a): a list
-//! without them is byte-for-byte what an older build wrote and still reads there, while a list with
-//! them tells an older build it is a newer format instead of failing on its first `speaker` line.
-//! Both versions read here.
+//! does a speaker's name (after its id and the optional `track=<n>` and `color=#RRGGBB`), so
+//! renaming or recolouring a speaker by hand is editing one line. Times are seconds with millisecond precision. Speaker and turn lines are
+//! written only when there are speakers, the `captions` line only when it is not the default, and
+//! only then is the header `junctur-edit 2` (5a): a list without them is byte-for-byte what an older
+//! build wrote and still reads there, while a list with them tells an older build it is a newer
+//! format instead of failing on its first new line. Both versions read here.
 
 use std::fmt::Write;
 use std::path::PathBuf;
 
-use super::{default_name, CutSettings, EditList, Range, SpeakerName, Speakers, Turn, Window};
+use super::{
+    default_color, default_name, parse_color, Captions, CutSettings, EditList, Range, SpeakerName,
+    Speakers, Turn, Window,
+};
 
 /// The newest version this build writes (with speakers); lists without speakers are written as 1.
 pub const FORMAT_VERSION: u32 = 2;
@@ -32,7 +36,7 @@ pub const FORMAT_VERSION: u32 = 2;
 pub fn write(e: &EditList) -> String {
     let s = &e.settings;
     let mut out = String::new();
-    let version = if e.speakers.is_empty() {
+    let version = if e.speakers.is_empty() && e.captions == Captions::default() {
         1
     } else {
         FORMAT_VERSION
@@ -61,15 +65,30 @@ pub fn write(e: &EditList) -> String {
     for r in &e.keep {
         let _ = writeln!(out, "keep {:.3} {:.3}", r.start, r.end);
     }
+    let c = &e.captions;
+    if *c != Captions::default() {
+        let _ = writeln!(
+            out,
+            "# captions <on|off> chars=<per line> lines=<per caption> seconds=<longest>"
+        );
+        let _ = writeln!(
+            out,
+            "captions {} chars={} lines={} seconds={}",
+            if c.on { "on" } else { "off" },
+            c.chars,
+            c.lines,
+            c.seconds
+        );
+    }
     let sp = &e.speakers;
     if !sp.is_empty() {
         let _ = writeln!(
             out,
-            "# speaker <id> [track=<n>] <name>: rename a speaker by editing the name"
+            "# speaker <id> [track=<n>] color=<#RRGGBB> <name>: rename or recolour by editing"
         );
         for n in &sp.names {
             let track = n.track.map(|t| format!("track={t} ")).unwrap_or_default();
-            let _ = writeln!(out, "speaker {} {track}{}", n.id, n.name);
+            let _ = writeln!(out, "speaker {} {track}color={} {}", n.id, n.color, n.name);
         }
         let _ = writeln!(out, "# turn <start> <end> <speaker id>");
         for t in &sp.turns {
@@ -111,6 +130,7 @@ pub fn parse(text: &str) -> Result<EditList, String> {
         settings: CutSettings::default(),
         keep: Vec::new(),
         speakers: Speakers::default(),
+        captions: Captions::default(),
         windows: Vec::new(),
     };
     // Turn lines may come before the speaker lines they name; checked once all are read.
@@ -157,15 +177,21 @@ pub fn parse(text: &str) -> Result<EditList, String> {
                 if e.speakers.names.iter().any(|n| n.id == id) {
                     return Err(bad("a second `speaker` line for this id"));
                 }
-                let rest = rest.trim();
-                let (track, name) = match rest.strip_prefix("track=") {
-                    Some(r) => {
-                        let (t, name) = r.split_once(' ').unwrap_or((r, ""));
-                        let t: usize = t.parse().map_err(|_| bad("`track=` needs a number"))?;
-                        (Some(t), name.trim())
-                    }
-                    None => (None, rest),
-                };
+                let mut rest = rest.trim();
+                let mut track = None;
+                let mut color = None;
+                // `track=` then `color=`, each optional; the rest is the name.
+                if let Some(r) = rest.strip_prefix("track=") {
+                    let (t, r) = r.split_once(' ').unwrap_or((r, ""));
+                    track = Some(t.parse().map_err(|_| bad("`track=` needs a number"))?);
+                    rest = r.trim();
+                }
+                if let Some(r) = rest.strip_prefix("color=") {
+                    let (c, r) = r.split_once(' ').unwrap_or((r, ""));
+                    color = Some(parse_color(c).ok_or_else(|| bad("`color=` needs #RRGGBB"))?);
+                    rest = r.trim();
+                }
+                let name = rest;
                 e.speakers.names.push(SpeakerName {
                     id,
                     // A blank name is read as the default rather than refused: it is what a
@@ -176,7 +202,31 @@ pub fn parse(text: &str) -> Result<EditList, String> {
                         name.to_string()
                     },
                     track,
+                    color: color.unwrap_or_else(|| default_color(id)),
                 });
+            }
+            "captions" => {
+                let mut c = Captions::default();
+                let mut parts = rest.split_whitespace();
+                c.on = match parts.next() {
+                    Some("on") => true,
+                    Some("off") => false,
+                    _ => return Err(bad("expected `captions <on|off> ...`")),
+                };
+                for kv in parts {
+                    let (k, v) = kv
+                        .split_once('=')
+                        .ok_or_else(|| bad("expected key=value"))?;
+                    let n = || v.parse::<f64>().map_err(|_| bad("not a number"));
+                    match k {
+                        "chars" => c.chars = n()? as u32,
+                        "lines" => c.lines = n()? as u32,
+                        "seconds" => c.seconds = n()?,
+                        _ => return Err(bad("unknown caption setting")),
+                    }
+                }
+                c.check().map_err(|why| bad(&why))?;
+                e.captions = c;
             }
             "turn" => match nums()?[..] {
                 [start, end, id] if end > start && id >= 1.0 && id.fract() == 0.0 => {
@@ -248,6 +298,7 @@ mod tests {
                 },
             ],
             speakers: Speakers::default(),
+            captions: Captions::default(),
             windows: vec![Window {
                 start: 0.0,
                 score: 0.5,
@@ -265,11 +316,13 @@ mod tests {
                         id: 1,
                         name: "Speaker 1".into(),
                         track: None,
+                        color: "#F2B33D".into(),
                     },
                     SpeakerName {
                         id: 2,
                         name: "Lucía de la Cruz".into(),
                         track: Some(1),
+                        color: "#123ABC".into(),
                     },
                 ],
                 turns: vec![
@@ -295,15 +348,53 @@ mod tests {
         let text = e.to_text();
         assert!(text.starts_with("junctur-edit 2\n"), "{text}");
         assert!(
-            text.contains("speaker 2 track=1 Lucía de la Cruz\n"),
+            text.contains("speaker 2 track=1 color=#123ABC Lucía de la Cruz\n"),
             "{text}"
         );
         assert!(text.contains("turn 2.500 4.000 2\n"));
+        assert!(
+            !text.contains("captions"),
+            "default captions are not written"
+        );
         assert_eq!(parse(&text).unwrap(), e);
         let plain = sample().to_text();
         assert!(!plain.contains("speaker"));
         assert!(plain.starts_with("junctur-edit 1\n"));
         assert!(parse("junctur-edit 3\n").is_err());
+        // Caption settings alone make a version-2 list, and round-trip.
+        let c = EditList {
+            captions: Captions {
+                on: true,
+                chars: 32,
+                lines: 1,
+                seconds: 4.5,
+            },
+            ..sample()
+        };
+        let text = c.to_text();
+        assert!(text.starts_with("junctur-edit 2\n"));
+        assert!(
+            text.contains("captions on chars=32 lines=1 seconds=4.5\n"),
+            "{text}"
+        );
+        assert_eq!(parse(&text).unwrap(), c);
+    }
+
+    #[test]
+    fn hand_edited_colours_and_captions_are_read_or_refused() {
+        let head = "junctur-edit 2\nsource x.mp4\n";
+        let e = parse(&format!(
+            "{head}speaker 1 color=#a0b0c0 Ana\nspeaker 2 track=3 Bo\ncaptions off\n"
+        ))
+        .unwrap();
+        assert_eq!(e.speakers.color(1), Some("#A0B0C0"));
+        assert_eq!(e.speakers.color(2), Some(default_color(2).as_str()));
+        assert_eq!(e.speakers.name(2), Some("Bo"));
+        assert_eq!(e.captions, Captions::default());
+        assert!(parse(&format!("{head}speaker 1 color=red Ana\n")).is_err());
+        assert!(parse(&format!("{head}captions maybe\n")).is_err());
+        assert!(parse(&format!("{head}captions on chars=500\n")).is_err());
+        assert!(parse(&format!("{head}captions on size=3\n")).is_err());
     }
 
     #[test]

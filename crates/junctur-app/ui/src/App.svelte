@@ -6,6 +6,7 @@
   import Transport from "./lib/Transport.svelte";
   import ProjectPanel from "./lib/ProjectPanel.svelte";
   import TranscriptPanel from "./lib/TranscriptPanel.svelte";
+  import CaptionsPanel from "./lib/CaptionsPanel.svelte";
   import * as sel from "./lib/selection";
   import { words as toWords, type Words } from "./lib/transcript";
 
@@ -33,6 +34,9 @@
   let wordsLoading = $state(false);
   let selection = $state<sel.Selection | null>(null);
   let panelOpen = $state(true);
+  // Which side panel shows. The transcript stays mounted while hidden: laying out a 30 h
+  // transcript again on every switch would cost a noticeable moment.
+  let tab = $state<"transcript" | "captions">("transcript");
   let windowWidth = $state(window.innerWidth);
   const PANEL = 400;
   const panelWidth = $derived(player?.path && panelOpen ? Math.min(PANEL, windowWidth * 0.45) : 0);
@@ -200,15 +204,30 @@
 
   {#if panelWidth > 0}
     <div class="side" style:width="{panelWidth}px">
-      <TranscriptPanel
-        {words}
-        loading={wordsLoading}
-        {player}
-        {edit}
-        {selection}
-        onSelect={(s) => (selection = s)}
-        onError={(e) => (failure = e)}
-      />
+      <div class="tabs" role="tablist">
+        <button role="tab" aria-selected={tab === "transcript"} class:on={tab === "transcript"} onclick={() => (tab = "transcript")}
+          >Transcript</button
+        >
+        <button role="tab" aria-selected={tab === "captions"} class:on={tab === "captions"} onclick={() => (tab = "captions")}
+          >Captions</button
+        >
+      </div>
+      <div class="pane" style:display={tab === "transcript" ? "block" : "none"}>
+        <TranscriptPanel
+          {words}
+          loading={wordsLoading}
+          {player}
+          {edit}
+          {selection}
+          onSelect={(s) => (selection = s)}
+          onError={(e) => (failure = e)}
+        />
+      </div>
+      {#if tab === "captions"}
+        <div class="pane">
+          <CaptionsPanel {edit} source={player?.path ?? null} onError={(e) => (failure = e)} />
+        </div>
+      {/if}
     </div>
   {/if}
 
@@ -259,6 +278,31 @@
     top: 0;
     right: 0;
     bottom: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--panel-solid);
+  }
+  .tabs {
+    display: flex;
+    border-left: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+  }
+  .tabs button {
+    flex: 1;
+    padding: 6px 0;
+    color: var(--muted);
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+  }
+  .tabs button.on {
+    color: var(--text);
+    border-bottom-color: var(--accent);
+  }
+  .pane {
+    flex: 1;
+    min-height: 0;
   }
   .failure {
     position: absolute;
