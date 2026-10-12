@@ -15,6 +15,7 @@
   let {
     words,
     loading,
+    analysing = false,
     player,
     edit,
     selection,
@@ -23,6 +24,8 @@
   }: {
     words: Words | null;
     loading: boolean;
+    /** The recording is being analysed: the transcript comes when it is done. */
+    analysing?: boolean;
     player: api.PlayerState | null;
     edit: api.EditState | null;
     selection: sel.Selection | null;
@@ -287,7 +290,11 @@
     {#if loading}
       <p class="note">Reading the transcript…</p>
     {:else if !words}
-      <p class="note">No transcript for this recording yet. Run the pipeline on it to edit by text.</p>
+      <p class="note">
+        {analysing
+          ? "Analysing this recording: the transcript shows here when it is done."
+          : "No transcript for this recording yet. Re-analyse it (project panel) to edit by text."}
+      </p>
     {:else if laid}
       <div class="spacer" style:height="{laid.rows.length * ROW}px">
         {#each visible as { index, row } (index)}

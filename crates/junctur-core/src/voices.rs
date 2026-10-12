@@ -3,7 +3,7 @@
 //!
 //! Its own file, `junctur/voices.json` in the OS config folder (or the file `JUNCTUR_VOICES` names),
 //! beside the user's `config.json` rather than in it: `config.json` is hand-written, read by the CLI
-//! only and strict about unknown keys, while this file is written by the app and the CLI and holds
+//! and the app's analysis only, and strict about unknown keys, while this file is written by the app and the CLI and holds
 //! 512 numbers per person. Kept apart, a hand edit of one and a save of the other never meet. The
 //! engine reads it only when its caller passes the path ([`default_path`] says where it usually is).
 //!
@@ -47,12 +47,17 @@ pub fn default_path() -> Result<Option<PathBuf>> {
     match std::env::var_os(ENV) {
         Some(v) if v.is_empty() => Err(Error::Edit(format!("{ENV} is set but empty"))),
         Some(v) => Ok(Some(PathBuf::from(v))),
-        None => Ok(std::env::var_os("APPDATA")
-            .or_else(|| std::env::var_os("XDG_CONFIG_HOME"))
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-            .map(|b| b.join("junctur").join("voices.json"))),
+        None => Ok(crate::config::folder().map(|f| f.join("voices.json"))),
     }
+}
+
+/// The voices to label speakers by, from the voices file this environment points at: none when
+/// there is no file yet; an error when there is no config folder to keep one in.
+pub fn remembered() -> Result<Vec<Voice>> {
+    let path = default_path()?
+        .ok_or_else(|| Error::Config(format!("no config folder to keep voices in (set {ENV})")))?;
+    let v = Voices::load(&path)?;
+    Ok(v.usable().into_iter().cloned().collect())
 }
 
 impl Voices {

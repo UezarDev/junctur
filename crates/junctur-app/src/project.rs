@@ -1,6 +1,6 @@
 //! A recording's Junctur project as the app shows it: the same folder `junctur status` reads
 //! (`pipeline::Project::open` with the default cache), with each stage's state and whether the
-//! transcript and edit list exist. Running the stages from the app comes later.
+//! transcript and edit list exist. The app runs the stages itself in `analysis` (2d).
 
 use std::path::{Path, PathBuf};
 

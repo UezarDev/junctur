@@ -28,3 +28,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_LibraryLoader",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[features]
+# GPU analysis (Whisper and the ONNX models on CUDA), as the CLI's `cuda`. Without it the app
+# analyses on CPU.
+cuda = ["junctur-core/cuda"]

@@ -106,8 +106,10 @@ impl Jobs {
         log: &mut dyn FnMut(&str),
         f: impl FnOnce(&mut dyn FnMut(&str)) -> Result<T>,
     ) -> Result<T> {
-        log(&format!("stage {name} ..."));
+        // Recorded before the line is logged, so a caller reading `jobs.json` on it sees the stage
+        // running (the app's progress, 2d).
         self.set(dir, name, StageState::Running, None, None)?;
+        log(&format!("stage {name} ..."));
         let t0 = Instant::now();
         match f(log) {
             Ok(v) => {

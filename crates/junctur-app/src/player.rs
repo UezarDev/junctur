@@ -387,8 +387,13 @@ impl Core {
         if new_list.is_some() && new_list != c.edit.list.as_deref() {
             eprintln!("junctur-app: edit.junctur changed on disk, taken ({by})");
             ed.changed_elsewhere();
+            // A first list (the app's own analysis just wrote it, 2d) had no history to clear.
+            let notice =
+                c.edit.list.is_some().then(|| {
+                    "edit.junctur changed on disk: took it, undo history cleared".to_string()
+                });
             c.status = EditorStatus {
-                notice: Some("edit.junctur changed on disk: took it, undo history cleared".into()),
+                notice,
                 ..EditorStatus::default()
             };
         }
@@ -476,9 +481,25 @@ impl Core {
         }
     }
 
-    /// The open recording's path.
-    fn file(&self) -> Option<String> {
+    /// The open recording's path, as it was opened.
+    pub fn file(&self) -> Option<String> {
         lock(&self.ctl).file.clone()
+    }
+
+    /// An analysis of `file` (absolute) ended (2d). If it is the open recording, the words and
+    /// envelope read so far are dropped (a re-analysis may have replaced them) and the edit list on
+    /// disk is taken now rather than at the watch's next poll.
+    pub fn analysed(&self, file: &Path) {
+        let open = self.file();
+        if open.and_then(|f| std::path::absolute(f).ok()).as_deref() != Some(file) {
+            return;
+        }
+        {
+            let mut ed = lock(&self.editor);
+            ed.words = None;
+            ed.envelope = None;
+        }
+        self.reload_edit();
     }
 
     /// Puts newly labelled speakers into the list in play (names of speakers nobody enrolled are

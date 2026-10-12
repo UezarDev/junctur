@@ -96,9 +96,18 @@ and are ignored by default: `cargo test -- --ignored`.
 
 ## Desktop app (early)
 
-`crates/junctur-app` is a Tauri 2 window over the same engine: open a recording (dialog, drag and drop,
-or `junctur-app <file>`), play/pause, seek, pick the audio track, and see the recording's project state
-(stages, transcript, edit list), read from the same folder `junctur status` uses. Video is played by
+`crates/junctur-app` is a Tauri 2 window over the same engine. It opens on a start window: drop a
+recording, choose one, or pick one of the recent ones (`junctur/recent.json` beside the config file).
+`junctur-app <file>` opens a file directly. A recording never analysed opens at once and is analysed in
+the background with `junctur analyze`'s defaults (model from the config file, remembered voices); the
+project panel shows each stage as it runs, and the transcript and edit list fill in when it is done. An
+analysed recording opens straight away; when the config file now asks for another Whisper model than the
+transcript was made with, the panel says so and offers Re-analyse (never on its own). Re-analyse reruns
+only what the settings changed and re-cuts; when the edit list holds your own edits it asks first, and
+keeps them as `edit.junctur.bak*`. Build the app with `--features cuda` to analyse on the GPU.
+
+Play/pause, seek, pick the audio track, and see the recording's project state (stages, transcript, edit
+list), read from the same folder `junctur status` uses. Video is played by
 embedded mpv (libmpv's render API over OpenGL, NVDEC on), drawn under a transparent WebView so the UI
 sits on top of it. Windows only for now.
 

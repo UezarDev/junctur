@@ -12,6 +12,7 @@
 //! naming the people the user enrolled once ([`voices`]) and finding where two talk at once.
 
 pub mod cache;
+pub mod config;
 pub mod diarize;
 pub mod edit;
 pub mod error;

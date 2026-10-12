@@ -101,8 +101,30 @@ const VERSION: u32 = 2;
 /// hours of Whisper because the default moved is `--force`'s job); an explicit model must match, so
 /// `--model large-v3` is never silently ignored. The languages must match either way.
 fn reusable(t: &Transcript, opts: &TranscribeOptions) -> bool {
-    t.languages == opts.languages.allowed
-        && (opts.model == ModelPref::Auto || t.choice.model == opts.model.name())
+    answers(&t.choice.model, &t.languages, opts)
+}
+
+/// [`reusable`] on what a transcript records: the model that made it and its languages.
+pub fn answers(model: &str, languages: &[String], opts: &TranscribeOptions) -> bool {
+    languages == opts.languages.allowed.as_slice()
+        && (opts.model == ModelPref::Auto || model == opts.model.name())
+}
+
+/// What a project's finished transcript was made with: its model and languages; `None` when there
+/// is none. Reads the file without building its segments (a 30 h transcript is tens of MB), for
+/// asking whether it is out of date (2d).
+pub fn made_with(project: &Path) -> Option<(String, Vec<String>)> {
+    #[derive(Deserialize)]
+    struct Made {
+        choice: MadeChoice,
+        languages: Vec<String>,
+    }
+    #[derive(Deserialize)]
+    struct MadeChoice {
+        model: String,
+    }
+    let m: Made = serde_json::from_slice(&std::fs::read(path(project)).ok()?).ok()?;
+    Some((m.choice.model, m.languages))
 }
 
 /// Where a project keeps the transcript.

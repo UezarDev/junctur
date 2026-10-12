@@ -3,7 +3,7 @@
 //! given by hand, for scripts and for checking the labelling without the app.
 
 use junctur_core::pipeline::{self, Project};
-use junctur_core::voices::{self, Voice, Voices};
+use junctur_core::voices::{self, Voices};
 
 use crate::args::Args;
 
@@ -12,12 +12,6 @@ pub fn path() -> Result<std::path::PathBuf, String> {
     voices::default_path()
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "no config folder to keep voices in (set JUNCTUR_VOICES)".into())
-}
-
-/// The voices to label speakers by: none when there is no voices file.
-pub fn usable() -> Result<Vec<Voice>, String> {
-    let v = Voices::load(&path()?).map_err(|e| e.to_string())?;
-    Ok(v.usable().into_iter().cloned().collect())
 }
 
 /// `<start>-<end>[,<start>-<end>...]` in seconds.

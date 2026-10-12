@@ -115,13 +115,53 @@ export interface ProjectStatus {
 }
 
 export interface Opened {
+  /** The recording, absolute: what its analysis progress is keyed by. */
+  file: string;
   project: ProjectStatus | null;
   projectError: string | null;
+  /** Its analysis, when one is waiting, running or ran in this session (2d). */
+  analysis: Progress | null;
+  /** Why its analysis is out of date with the settings now; empty when it is not. */
+  outdated: string[];
+}
+
+/** A recording opened before (src/recent.rs). */
+export interface Recent {
+  path: string;
+  name: string;
+  folder: string;
+  /** Unix seconds. */
+  opened: number;
+  missing: boolean;
+}
+
+export type Phase = "queued" | "running" | "done" | "failed";
+
+/** An analysis run by the app (src/analysis.rs). */
+export interface Progress {
+  file: string;
+  phase: Phase;
+  /** The pipeline's last log line. */
+  line: string | null;
+  error: string | null;
+  project: ProjectStatus | null;
+}
+
+export interface Reanalysed {
+  progress: Progress | null;
+  /** Nothing started: the edit list holds the user's edits, so ask first. */
+  handEdited: boolean;
 }
 
 export const startupFile = () => invoke<string | null>("startup_file");
 export const playerState = () => invoke<PlayerState>("player_state");
 export const openFile = (path: string) => invoke<Opened>("open_file", { path });
+export const recent = () => invoke<Recent[]>("recent");
+export const forgetRecent = (path: string) => invoke<void>("forget_recent", { path });
+export const analysis = (path: string) => invoke<Progress | null>("analysis", { path });
+/** Analyses `path` again; without `replace`, an edit list with the user's edits starts nothing. */
+export const reanalyse = (path: string, replace: boolean) =>
+  invoke<Reanalysed>("reanalyse", { path, replace });
 export const togglePause = () => invoke<void>("toggle_pause");
 /** Resolves to the source time the seek lands on (inside a cut while skipping: the next range). */
 export const seek = (seconds: number, exact: boolean) =>
@@ -161,3 +201,6 @@ export const onPlayerState = (f: (s: PlayerState) => void): Promise<UnlistenFn> 
 
 export const onEditState = (f: (s: EditState) => void): Promise<UnlistenFn> =>
   listen<EditState>("edit-state", (e) => f(e.payload));
+
+export const onAnalysis = (f: (p: Progress) => void): Promise<UnlistenFn> =>
+  listen<Progress>("analysis", (e) => f(e.payload));

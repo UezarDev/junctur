@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { open } from "@tauri-apps/plugin-dialog";
+  import { ask, open } from "@tauri-apps/plugin-dialog";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import * as api from "./lib/api";
   import Transport from "./lib/Transport.svelte";
   import ProjectPanel from "./lib/ProjectPanel.svelte";
+  import StartWindow from "./lib/StartWindow.svelte";
   import TranscriptPanel from "./lib/TranscriptPanel.svelte";
   import CaptionsPanel from "./lib/CaptionsPanel.svelte";
   import * as sel from "./lib/selection";
@@ -15,16 +16,13 @@
   let player = $state.raw<api.PlayerState | null>(null);
   let opened = $state<api.Opened | null>(null);
   let edit = $state.raw<api.EditState | null>(null);
+  // The open recording's analysis (2d): its stages' states replace the ones read at opening.
+  let analysis = $state.raw<api.Progress | null>(null);
   // The project panel shows the edit list as last read (it reloads when the file changes).
-  const project = $derived(
-    opened?.project && edit
-      ? {
-          ...opened.project,
-          edit: edit.summary,
-          editError: edit.summary ? null : edit.error,
-        }
-      : (opened?.project ?? null),
-  );
+  const project = $derived.by(() => {
+    const p = analysis?.project ?? opened?.project ?? null;
+    return p && edit ? { ...p, edit: edit.summary, editError: edit.summary ? null : edit.error } : p;
+  });
   // Set when the player could not start (e.g. libmpv missing) or a command failed.
   let failure = $state<string | null>(null);
   let dragging = $state(false);
@@ -103,7 +101,43 @@
     try {
       failure = null;
       opened = await api.openFile(path);
+      analysis = opened.analysis;
       await loadTranscript();
+    } catch (e) {
+      failure = String(e);
+    }
+  }
+
+  const busy = (p: api.Progress | null) => p?.phase === "queued" || p?.phase === "running";
+
+  function onProgress(p: api.Progress) {
+    if (!opened || p.file !== opened.file) return;
+    const was = analysis;
+    analysis = p;
+    if (busy(was) && !busy(p)) {
+      // The run ended: what the panel said was out of date was its business; the transcript may
+      // be new (the edit list comes in through the watch).
+      if (p.phase === "done") opened = { ...opened, outdated: [] };
+      void loadTranscript();
+    }
+  }
+
+  // Re-analyse: the pipeline with the settings now, in the background. When the edit list holds
+  // the user's edits, ask before they are replaced (they are kept as a backup).
+  async function reanalyse() {
+    if (!opened) return;
+    const file = opened.file;
+    try {
+      let r = await api.reanalyse(file, false);
+      if (r.handEdited) {
+        const yes = await ask(
+          "The edit list has your own edits. Re-analysing replaces it with a fresh cut; your version is kept beside it as edit.junctur.bak (or .bak2, …).",
+          { title: "Re-analyse this recording?", kind: "warning", okLabel: "Re-analyse", cancelLabel: "Keep my edits" },
+        );
+        if (!yes) return;
+        r = await api.reanalyse(file, true);
+      }
+      if (r.progress && opened?.file === file) analysis = r.progress;
     } catch (e) {
       failure = String(e);
     }
@@ -173,6 +207,7 @@
     const unlisten = [
       api.onPlayerState((s) => (player = s)),
       api.onEditState((s) => (edit = s)),
+      api.onAnalysis(onProgress),
       getCurrentWebview().onDragDropEvent((e) => {
         const p = e.payload;
         dragging = p.type === "enter" || p.type === "over";
@@ -187,15 +222,17 @@
 
 <main class:dragging>
   {#if !player?.path}
-    <div class="empty">
-      <h1>Junctur</h1>
-      <p>Drop a recording here, or</p>
-      <button onclick={pick} disabled={!player}>Open a recording</button>
-    </div>
+    <StartWindow ready={!!player} {dragging} onPick={pick} onOpen={load} onError={(e) => (failure = e)} />
   {/if}
 
   {#if opened}
-    <ProjectPanel status={project} error={opened.projectError} />
+    <ProjectPanel
+      status={project}
+      error={opened.projectError}
+      {analysis}
+      outdated={opened.outdated}
+      onReanalyse={reanalyse}
+    />
   {/if}
 
   {#if failure || player?.error}
@@ -216,6 +253,7 @@
         <TranscriptPanel
           {words}
           loading={wordsLoading}
+          analysing={busy(analysis)}
           {player}
           {edit}
           {selection}
@@ -254,24 +292,6 @@
   }
   main.dragging {
     outline-color: var(--accent);
-  }
-  .empty {
-    position: absolute;
-    inset: 0 0 64px 0;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 4px;
-  }
-  .empty h1 {
-    margin: 0 0 8px;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-  }
-  .empty p {
-    margin: 0 0 8px;
-    color: var(--muted);
   }
   .side {
     position: absolute;

@@ -13,7 +13,11 @@
 //! `rename=<id>:<name>` (5a: a speaker's name; no `;` in it), `color=<id>:#RRGGBB`,
 //! `captions=on|off` and `srt=<path>` (write the captions there), `enroll=<first>-<last>:<name>`
 //! (5b: remember a voice from transcript words) and `forget=<name>`. Set `JUNCTUR_VOICES` to a
-//! scratch file for these, or they change the user's own voices. Each step's
+//! scratch file for these, or they change the user's own voices. `reanalyse` (2d) analyses the open
+//! recording again, replacing user edits (a recording without an edit list is analysed as it
+//! opens); the report's `analysis` is the open recording's analysis progress and `outdated` what
+//! the project panel would offer a re-analysis for. Set `JUNCTUR_RECENT` and `JUNCTUR_CACHE_DIR` to
+//! scratch places too. Each step's
 //! report adds the edit state it left, and the final report re-reads `edit.junctur` from disk
 //! (`disk`: does it parse, and is it the list in play), counts the loads asked of mpv (a save must
 //! not come back as a second reload) and lists the frontend's log lines (`ui`).
@@ -77,6 +81,7 @@ enum Action {
     Srt(String),
     Enroll(usize, usize, String),
     Forget(String),
+    Reanalyse,
 }
 
 /// The frontend's log lines (`ui_log`), kept for the report.
@@ -147,6 +152,7 @@ fn parse_steps(s: &str) -> Result<Vec<(f64, Action)>, String> {
             None if action == "pause" => Action::Pause,
             None if action == "undo" => Action::Edit(Step::Undo),
             None if action == "redo" => Action::Edit(Step::Redo),
+            None if action == "reanalyse" => Action::Reanalyse,
             _ => return Err(bad()),
         };
         steps.push((at, action));
@@ -173,7 +179,28 @@ fn with_player<T>(app: &AppHandle, f: impl FnOnce(&Player) -> T) -> Result<T, St
     Ok(f(p))
 }
 
+/// The open recording's analysis progress.
+fn analysis(app: &AppHandle) -> Option<crate::analysis::Progress> {
+    let file = with_player(app, |p| p.file()).ok()??;
+    app.try_state::<App>()?
+        .analysis
+        .progress(std::path::Path::new(&file))
+}
+
 fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
+    if let Action::Reanalyse = a {
+        let file = with_player(app, |p| p.file())?.ok_or("no file is open")?;
+        let state = app.try_state::<App>().ok_or("app not set up")?;
+        let notify = crate::commands::notifier(app.clone());
+        let r = state
+            .analysis
+            .reanalyse(std::path::Path::new(&file), true, notify)?;
+        eprintln!(
+            "junctur-app test: reanalyse started: {}",
+            r.progress.is_some()
+        );
+        return Ok(());
+    }
     with_player(app, |p| match a {
         Action::Seek(s) => p.seek(*s, true).map(|_| ()),
         Action::KeySeek(s) => p.seek(*s, false).map(|_| ()),
@@ -199,6 +226,7 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
             .enroll_voice(*first, *last, name)
             .map(|line| eprintln!("junctur-app test: {line}")),
         Action::Forget(name) => p.forget_voice(name),
+        Action::Reanalyse => unreachable!("run above"),
     })?
 }
 
@@ -334,6 +362,9 @@ pub fn arm(app: AppHandle, seconds: f64, trace: Option<Arc<Trace>>) {
                 "skips": trace.map(|t| t.report()),
                 "loads": with_player(&app, |p| p.loads()).ok(),
                 "disk": with_player(&app, disk_check).ok(),
+                "analysis": analysis(&app),
+                "outdated": with_player(&app, |p| p.file()).ok().flatten()
+                    .map(|f| crate::analysis::outdated(std::path::Path::new(&f))),
                 "ui": lock(&UI_LOG).clone(),
             }),
             Err(e) => json!({ "verdict": "error", "error": e }),
@@ -380,6 +411,8 @@ mod tests {
                 (8.0, Action::KeySeek(1.0)),
             ]
         );
+        let s = parse_steps("9:reanalyse").unwrap();
+        assert_eq!(s, vec![(9.0, Action::Reanalyse)]);
         let s = parse_steps("1:cutw=3-5;2:keepf=30-60;3:undo;4:redo").unwrap();
         assert_eq!(
             s.iter().map(|x| x.1.clone()).collect::<Vec<_>>(),

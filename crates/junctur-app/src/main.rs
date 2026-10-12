@@ -4,6 +4,7 @@
 // No console window in release builds; dev builds keep it for mpv's and the app's log lines.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod analysis;
 mod commands;
 mod cuts;
 mod editor;
@@ -11,6 +12,7 @@ mod lock;
 mod mpv;
 mod player;
 mod project;
+mod recent;
 mod state;
 mod testmode;
 mod trace;
@@ -65,6 +67,7 @@ fn main() {
             }
             app.manage(App {
                 player: Mutex::new(player),
+                analysis: Default::default(),
             });
             if let Some(secs) = test {
                 testmode::arm(app.handle().clone(), secs, trace);
@@ -87,6 +90,10 @@ fn main() {
             commands::startup_file,
             commands::player_state,
             commands::open_file,
+            commands::recent,
+            commands::forget_recent,
+            commands::analysis,
+            commands::reanalyse,
             commands::toggle_pause,
             commands::seek,
             commands::set_audio_track,
