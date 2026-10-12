@@ -48,6 +48,11 @@ pub struct EventProperty {
 }
 
 #[repr(C)]
+pub struct EventStartFile {
+    pub playlist_entry_id: i64,
+}
+
+#[repr(C)]
 pub struct EventEndFile {
     pub reason: c_int,
     pub error: c_int,

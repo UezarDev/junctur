@@ -22,11 +22,17 @@ pub struct Trace {
     runs: Mutex<Runs>,
 }
 
+/// About an hour of positions at 30 fps; a test run is seconds long, so this only bounds a
+/// forgotten one.
+const MAX_POINTS: usize = 108_000;
+
 #[derive(Default)]
 struct Runs {
     all: Vec<Run>,
     /// The playing load is kept ranges (positions are recorded).
     active: bool,
+    points: usize,
+    dropped: usize,
 }
 
 impl Trace {
@@ -55,6 +61,11 @@ impl Trace {
         if !runs.active {
             return;
         }
+        if runs.points >= MAX_POINTS {
+            runs.dropped += 1;
+            return;
+        }
+        runs.points += 1;
         if let Some(run) = runs.all.last_mut() {
             run.points.push((wall, output));
         }
@@ -63,6 +74,7 @@ impl Trace {
     pub fn report(&self) -> Value {
         let runs = lock(&self.runs);
         let crossings: Vec<Value> = runs.all.iter().flat_map(crossings).collect();
+        let jumps: Vec<Value> = runs.all.iter().flat_map(jumps).collect();
         let frames_ok = crossings.iter().filter(|c| c["framesOk"] == true).count();
         let max_stall = crossings
             .iter()
@@ -70,10 +82,12 @@ impl Trace {
             .fold(0.0, f64::max);
         json!({
             "runs": runs.all.len(),
+            "droppedPoints": runs.dropped,
             "crossed": crossings.len(),
             "framesOk": frames_ok,
             "maxStallMs": max_stall,
             "crossings": crossings,
+            "jumps": jumps,
         })
     }
 }
@@ -83,41 +97,60 @@ fn steady(a: (f64, f64), b: (f64, f64)) -> bool {
     (0.0..0.2).contains(&(b.1 - a.1))
 }
 
-/// Boundaries crossed by normal playback within one run (a seek's jump is not a crossing).
+/// Every seek within a run (output jumping other than forward by a little) with the positions
+/// mpv reported just after it. A seek while skipping must not show a frame of a cut: in the EDL
+/// such a frame would sit before its segment's start, so `inSegment` checks every position after
+/// the jump against the segment where playback settles.
+fn jumps(run: &Run) -> Vec<Value> {
+    let t = &run.timeline;
+    let p = &run.points;
+    (1..p.len())
+        .filter(|&k| !steady(p[k - 1], p[k]))
+        .map(|k| {
+            let window: Vec<f64> = p[k..p.len().min(k + 6)].iter().map(|q| q.1).collect();
+            let settled = window.last().copied().unwrap_or(p[k].1);
+            let start = t.segment_start(settled);
+            json!({
+                "positions": window,
+                "segmentStart": start,
+                "inSegment": window.iter().all(|&o| o >= start),
+            })
+        })
+        .collect()
+}
+
+/// Boundaries crossed by normal playback within one run (a seek's jump is not a crossing), in one
+/// pass over the points with a binary search per crossing.
 fn crossings(run: &Run) -> Vec<Value> {
     let t = &run.timeline;
     let p = &run.points;
+    let bounds = t.boundaries();
     let frame = |o: f64| t.fps.frame_at(t.to_source(o));
     let mut out = Vec::new();
-    let mut acc = 0;
-    for i in 1..t.ranges.len() {
-        acc += t.ranges[i - 1].1 - t.ranges[i - 1].0;
-        let b = t.fps.seconds(acc);
-        let Some(k) = p
-            .windows(2)
-            .position(|w| w[0].1 < b && w[1].1 >= b && steady(w[0], w[1]))
-        else {
+    for k in 0..p.len().saturating_sub(1) {
+        let (x, y) = (p[k], p[k + 1]);
+        let j = bounds.partition_point(|&b| b <= x.1);
+        if !steady(x, y) || j == bounds.len() || bounds[j] > y.1 {
             continue;
-        };
+        }
+        let b = bounds[j];
         // Stall: how much (wall - output) grew from just before the boundary to well after it.
-        // It is constant while playback keeps real time.
-        // Both samples come from the same stretch of playback (no seek in between), else none.
+        // It is constant while playback keeps real time. Both samples come from the same stretch
+        // of playback (no seek in between), else there is none.
         let back = (1..=k)
             .rev()
-            .take_while(|&j| steady(p[j - 1], p[j]))
-            .map(|j| p[j - 1]);
-        let before = std::iter::once(p[k]).chain(back).find(|q| q.1 < b - 0.1);
+            .take_while(|&i| steady(p[i - 1], p[i]))
+            .map(|i| p[i - 1]);
+        let before = std::iter::once(x).chain(back).find(|q| q.1 < b - 0.1);
         let ahead = (k + 2..p.len())
-            .take_while(|&j| steady(p[j - 1], p[j]))
-            .map(|j| p[j]);
-        let after = std::iter::once(p[k + 1])
-            .chain(ahead)
-            .find(|q| q.1 > b + 0.5);
+            .take_while(|&i| steady(p[i - 1], p[i]))
+            .map(|i| p[i]);
+        let after = std::iter::once(y).chain(ahead).find(|q| q.1 > b + 0.5);
         let stall = before
             .zip(after)
-            .map(|(x, y)| (((y.0 - y.1) - (x.0 - x.1)) * 1000.0).round());
-        let (from, to) = (frame(p[k].1), frame(p[k + 1].1));
-        let expect = (t.ranges[i - 1].1 - 1, t.ranges[i].0);
+            .map(|(u, v)| (((v.0 - v.1) - (u.0 - u.1)) * 1000.0).round());
+        let (from, to) = (frame(x.1), frame(y.1));
+        let expect = (t.ranges[j].1 - 1, t.ranges[j + 1].0);
         out.push(json!({
             "output": b,
             "from": from,

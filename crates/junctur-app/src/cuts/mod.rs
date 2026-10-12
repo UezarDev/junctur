@@ -25,10 +25,12 @@ pub enum Form {
     Cuts(Arc<Timeline>),
 }
 
-/// One `loadfile`, queued until mpv's `start-file` says it began, so positions are always mapped
-/// with the timeline the playing file was built from.
+/// One `loadfile`, kept until mpv's `start-file` names its playlist entry, so positions are always
+/// mapped with the timeline the playing file was built from.
 #[derive(Debug, Clone)]
 pub struct Load {
+    /// mpv's playlist entry id for this load.
+    pub entry: i64,
     pub file: String,
     pub form: Form,
 }
@@ -52,15 +54,32 @@ pub fn probe_fps(file: &Path) -> Result<Fps, String> {
         }))
 }
 
-/// Reads `edit_path`. No file yet is not an error (the pipeline has not run); one that does not
-/// parse, or keeps nothing, has no timeline and says why.
-pub fn read(edit_path: &Path, fps: Fps) -> Edit {
+/// Reads the edit list of `file` from `edit_path`, probing the frame rate when `fps` is not known
+/// yet (a process start, so callers do this outside their locks). `None` when there is no edit
+/// list; one that cannot be read, does not parse or keeps nothing has no timeline and says why.
+pub fn fetch(file: &str, edit_path: &Path, fps: Option<Fps>) -> (Option<Fps>, Option<Edit>) {
+    if !edit_path.is_file() {
+        return (fps, None);
+    }
+    let fps = match fps.map_or_else(|| probe_fps(file.as_ref()), Ok) {
+        Ok(f) => f,
+        Err(e) => return (None, Some(failed(format!("frame rate: {e}")))),
+    };
+    (Some(fps), read(edit_path, fps))
+}
+
+/// Reads `edit_path`; `None` when it does not exist.
+pub fn read(edit_path: &Path, fps: Fps) -> Option<Edit> {
     let text = match std::fs::read_to_string(edit_path) {
         Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Edit::default(),
-        Err(e) => return failed(format!("{}: {e}", edit_path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => return Some(failed(format!("{}: {e}", edit_path.display()))),
     };
-    let list = match edit::parse(&text) {
+    Some(parse(&text, edit_path, fps))
+}
+
+fn parse(text: &str, edit_path: &Path, fps: Fps) -> Edit {
+    let list = match edit::parse(text) {
         Ok(l) => l,
         Err(e) => return failed(format!("{}: {e}", edit_path.display())),
     };
@@ -81,6 +100,31 @@ pub fn read(edit_path: &Path, fps: Fps) -> Edit {
         timeline: Some(Arc::new(t)),
         summary,
         error: None,
+    }
+}
+
+/// What a re-read of the edit list leaves playing, given what played before. Ranges in play are
+/// kept through a file that is missing (deleted and about to be rewritten) or does not parse yet
+/// (a hand edit half-typed): only a list that parses replaces them. A list with the same frames
+/// keeps the same timeline, so nothing reloads for a change of scores or comments.
+pub fn merge(old: &Edit, new: Option<Edit>) -> Edit {
+    let Some(old_t) = &old.timeline else {
+        return new.unwrap_or_default();
+    };
+    match new {
+        None => Edit {
+            error: Some("the edit list is missing; still playing its last ranges".into()),
+            ..old.clone()
+        },
+        Some(n) if n.summary.is_none() => Edit {
+            error: n.error,
+            ..old.clone()
+        },
+        Some(n) if n.timeline.as_deref() == Some(old_t) => Edit {
+            timeline: Some(old_t.clone()),
+            ..n
+        },
+        Some(n) => n,
     }
 }
 
@@ -117,7 +161,7 @@ impl EditState {
                 t.ranges.iter().flat_map(|&(a, b)| [a, b]).collect()
             }),
             total_frames: t.map_or(0, |t| t.total),
-            output_frames: t.map_or(0, |t| t.fps.frame_at(t.output_duration())),
+            output_frames: t.map_or(0, |t| t.output_frames),
             summary: edit.summary.clone(),
             error: edit.error.clone(),
         }
@@ -153,8 +197,7 @@ mod tests {
     fn reads_an_edit_list() {
         let d = scratch("read");
         let p = d.join("edit.junctur");
-        assert!(read(&p, FPS).timeline.is_none(), "no file yet");
-        assert!(read(&p, FPS).error.is_none());
+        assert!(read(&p, FPS).is_none(), "no file yet");
 
         std::fs::write(
             &p,
@@ -164,7 +207,7 @@ mod tests {
             }]),
         )
         .unwrap();
-        let e = read(&p, FPS);
+        let e = read(&p, FPS).unwrap();
         assert_eq!(e.timeline.as_ref().unwrap().ranges, vec![(30, 60)]);
         let s = EditState::new(&e, true);
         assert_eq!(s.ranges, vec![30, 60]);
@@ -172,14 +215,69 @@ mod tests {
         assert_eq!(s.summary.unwrap().ranges, 1);
 
         std::fs::write(&p, list(vec![])).unwrap();
-        let e = read(&p, FPS);
+        let e = read(&p, FPS).unwrap();
         assert!(e.timeline.is_none());
         assert_eq!(e.error.as_deref(), Some("the edit list keeps nothing"));
         assert_eq!(e.summary.unwrap().ranges, 0);
 
         std::fs::write(&p, "garbage").unwrap();
-        let e = read(&p, FPS);
+        let e = read(&p, FPS).unwrap();
         assert!(e.timeline.is_none() && e.error.is_some());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn ranges_in_play_survive_a_missing_or_broken_file() {
+        let d = scratch("merge");
+        let p = d.join("edit.junctur");
+        std::fs::write(
+            &p,
+            list(vec![Range {
+                start: 1.0,
+                end: 2.0,
+            }]),
+        )
+        .unwrap();
+        let playing = read(&p, FPS).unwrap();
+        let t = playing.timeline.clone().unwrap();
+
+        let gone = merge(&playing, None);
+        assert!(Arc::ptr_eq(gone.timeline.as_ref().unwrap(), &t));
+        assert!(gone.error.is_some());
+
+        std::fs::write(
+            &p,
+            "junctur-edit 1
+keep 1",
+        )
+        .unwrap();
+        let broken = merge(&playing, read(&p, FPS));
+        assert!(Arc::ptr_eq(broken.timeline.as_ref().unwrap(), &t));
+        assert!(broken.error.is_some());
+
+        // Same frames: the same timeline (nothing reloads); new frames replace it.
+        std::fs::write(
+            &p,
+            list(vec![Range {
+                start: 1.001,
+                end: 2.0,
+            }]),
+        )
+        .unwrap();
+        let same = merge(&playing, read(&p, FPS));
+        assert!(Arc::ptr_eq(same.timeline.as_ref().unwrap(), &t));
+        std::fs::write(
+            &p,
+            list(vec![Range {
+                start: 3.0,
+                end: 4.0,
+            }]),
+        )
+        .unwrap();
+        let new = merge(&playing, read(&p, FPS));
+        assert_eq!(new.timeline.unwrap().ranges, vec![(90, 120)]);
+        // With nothing in play, a missing file is just no edit list.
+        assert!(merge(&Edit::default(), None).timeline.is_none());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

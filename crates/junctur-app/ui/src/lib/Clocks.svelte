@@ -1,7 +1,6 @@
 <script lang="ts">
-  // Source time and edited (output) time side by side. With an edit list both are timecode at the
-  // source frame rate, rounded the way the render and FCPXML round, so the frame shown is the frame
-  // named; without one, the plain clock of 2a.
+  // Source time and edited (output) time side by side. With an edit list both are timecode of the
+  // frame numbers the engine counts (the render's and FCPXML's frames); without one, 2a's clock.
   import type { EditState, PlayerState } from "./api";
   import { clock, timecode } from "./time";
 
@@ -12,14 +11,14 @@
 </script>
 
 <div class="clocks mono">
-  {#if fps && player?.output != null}
+  {#if fps && edit && player?.frame != null}
     <span title="Source time">
       <b>SRC</b>
-      {timecode(loaded ? player?.position : null, fps)} / {timecode(player?.duration, fps)}
+      {timecode(player.frame, fps)} / {timecode(edit.totalFrames, fps)}
     </span>
     <span title="Edited (output) time: the same frame in the render and in Resolve">
       <b>EDIT</b>
-      {timecode(player.output, fps)} / {timecode(player.outputDuration, fps)}
+      {timecode(player.outputFrame, fps)} / {timecode(edit.outputFrames, fps)}
       {#if player.inCut}<em>in cut</em>{/if}
     </span>
   {:else}

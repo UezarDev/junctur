@@ -9,14 +9,12 @@ export function clock(seconds: number | null | undefined): string {
 }
 
 /**
- * `h:mm:ss:ff`: the frame on screen at `seconds`, counted the way Resolve's non-drop timecode
- * counts it (whole frames, `ceil(fps)` to a second), so it names the same frame as the render and
- * the FCPXML timeline. `--:--:--:--` when unknown.
+ * `h:mm:ss:ff` for a frame number the engine counted: non-drop timecode, `ceil(fps)` frames to a
+ * second, as Resolve counts it, so it names the same frame as the render and the FCPXML timeline.
+ * No rounding happens here. `--:--:--:--` when unknown.
  */
-export function timecode(seconds: number | null | undefined, fps: { num: number; den: number }): string {
-  if (seconds == null || !Number.isFinite(seconds)) return "--:--:--:--";
-  // Same small bias as the engine's frame rounding, for float error at frame starts.
-  const frame = Math.max(0, Math.floor((seconds * fps.num) / fps.den + 1e-6));
+export function timecode(frame: number | null | undefined, fps: { num: number; den: number }): string {
+  if (frame == null || !Number.isFinite(frame)) return "--:--:--:--";
   const base = Math.ceil(fps.num / fps.den);
   const ff = frame % base;
   const s = Math.floor(frame / base);

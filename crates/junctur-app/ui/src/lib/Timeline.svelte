@@ -64,7 +64,7 @@
         frame = 0;
         const t = queued;
         queued = null;
-        if (t != null) call(() => api.seek(t, false));
+        if (t != null) call(async () => void (await api.seek(t, false)));
       });
     }
   }
@@ -75,7 +75,11 @@
     queued = null;
     scrub = to;
     scrubUntil = performance.now() + 1500;
-    call(() => api.seek(to, true));
+    // Hold the playhead where the seek really lands (a cut lands on the next kept range).
+    call(async () => {
+      const lands = await api.seek(to, true);
+      if (scrubUntil !== 0) scrub = lands;
+    });
     // If no position update comes at all, let go of the drag position anyway.
     setTimeout(() => {
       if (scrubUntil !== 0 && performance.now() >= scrubUntil) {

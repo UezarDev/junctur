@@ -5,16 +5,20 @@
 //! mpv EDL (see `cuts`). Which one is the user's skip toggle, while there is an edit list keeping
 //! something; switching forms, or an edit list that changes what plays, reloads at the same source
 //! position.
+//!
+//! The parts that commands and the edit-list watch share live in [`Core`], behind an `Arc`, so the
+//! watch reaches the player directly (through a `Weak`) instead of through the app's player lock.
 
 use std::collections::VecDeque;
+use std::ops::Deref;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter};
 
-use crate::cuts::{self, edl, watch::Watch, Edit, EditState, Form, Fps, Load};
+use crate::cuts::{self, edl, watch, Edit, EditState, Form, Fps, Load};
 use crate::lock::lock;
 use crate::mpv::{self, Event, Events, Mpv};
 use crate::state::{Change, PlayerState, OBSERVED};
@@ -45,8 +49,45 @@ const OPTIONS: &[(&str, &str)] = &[
     ("background-color", "#101114"),
 ];
 
-/// Loads mpv has been asked for but not yet begun (its `start-file` pops them), in order.
-type Loads = Arc<Mutex<VecDeque<Load>>>;
+/// Loads mpv has been asked for but not yet begun. mpv gives every `loadfile` the next playlist
+/// entry id and names it in `start-file`; a load replaced before it began (a double-tapped skip
+/// toggle) never starts, so matching by id rather than by order keeps every later load's
+/// timeline right.
+#[derive(Default)]
+struct Loads {
+    /// The last entry id mpv handed out (they count from 1).
+    last: i64,
+    waiting: VecDeque<Load>,
+}
+
+impl Loads {
+    fn push(&mut self, file: String, form: Form) -> i64 {
+        self.last += 1;
+        self.waiting.push_back(Load {
+            entry: self.last,
+            file,
+            form,
+        });
+        self.last
+    }
+
+    /// A `loadfile` mpv refused never got an entry.
+    fn unpush(&mut self) {
+        self.waiting.pop_back();
+        self.last -= 1;
+    }
+
+    /// The load mpv began as `entry`; earlier ones were replaced and are dropped.
+    fn started(&mut self, entry: i64) -> Option<Load> {
+        while self.waiting.front().is_some_and(|l| l.entry < entry) {
+            self.waiting.pop_front();
+        }
+        match self.waiting.front() {
+            Some(l) if l.entry == entry => self.waiting.pop_front(),
+            _ => None,
+        }
+    }
+}
 
 /// The recording and its edit list, as the commands left them.
 struct Ctl {
@@ -59,7 +100,7 @@ struct Ctl {
     skip: bool,
     /// The form of the last load asked for: what plays once in-flight loads land.
     requested: Form,
-    watch: Option<Watch>,
+    watch: Option<watch::Watch>,
 }
 
 impl Ctl {
@@ -80,14 +121,26 @@ fn same_form(a: &Form, b: &Form) -> bool {
 }
 
 pub struct Player {
-    mpv: Arc<Mpv>,
-    app: AppHandle,
-    state: Arc<Mutex<PlayerState>>,
-    loads: Loads,
-    ctl: Mutex<Ctl>,
+    core: Arc<Core>,
     events: Option<JoinHandle<()>>,
     #[cfg(windows)]
     video: Option<crate::video::VideoOutput>,
+}
+
+/// The player's commands (`seek`, `set_skip`, ...) are [`Core`]'s.
+impl Deref for Player {
+    type Target = Core;
+    fn deref(&self) -> &Core {
+        &self.core
+    }
+}
+
+pub struct Core {
+    mpv: Arc<Mpv>,
+    app: AppHandle,
+    state: Arc<Mutex<PlayerState>>,
+    loads: Arc<Mutex<Loads>>,
+    ctl: Mutex<Ctl>,
 }
 
 impl Player {
@@ -122,7 +175,7 @@ impl Player {
             return Err("embedded video is only implemented on Windows so far".into());
         }
         let state = Arc::new(Mutex::new(PlayerState::default()));
-        let loads = Loads::default();
+        let loads = Arc::new(Mutex::new(Loads::default()));
         let events = {
             let mut reader = mpv.events().ok_or("mpv's event reader is already taken")?;
             let shared = Shared {
@@ -136,7 +189,7 @@ impl Player {
                 .spawn(move || event_loop(&mut reader, &shared))
                 .map_err(|e| e.to_string())?
         };
-        Ok(Self {
+        let core = Arc::new(Core {
             mpv,
             app,
             state,
@@ -150,14 +203,13 @@ impl Player {
                 requested: Form::Source,
                 watch: None,
             }),
+        });
+        Ok(Self {
+            core,
             events: Some(events),
             #[cfg(windows)]
             video,
         })
-    }
-
-    pub fn state(&self) -> PlayerState {
-        lock(&self.state).clone()
     }
 
     /// New mpv frames drawn onto the surface so far (redraws of the same frame not counted).
@@ -173,178 +225,30 @@ impl Player {
     /// project's edit list, keeps something) and watches the edit list. `edit_path` is `None`
     /// when the project could not be opened.
     pub fn open(&self, path: &str, edit_path: Option<PathBuf>) -> Result<(), String> {
+        // Stamp, then read (both outside the lock: the read may start ffprobe).
+        let baseline = edit_path.as_deref().map(watch::stamp);
+        let (fps, read) = match &edit_path {
+            Some(p) => cuts::fetch(path, p, None),
+            None => (None, None),
+        };
         let mut c = lock(&self.ctl);
-        c.watch = None;
         c.file = Some(path.to_string());
-        c.fps = None;
-        c.edit = Edit::default();
+        c.fps = fps;
+        c.edit = read.unwrap_or_default();
         c.edit_path = edit_path.clone();
-        self.read_edit(&mut c);
-        if let Some(p) = edit_path {
-            let app = self.app.clone();
-            c.watch = Some(Watch::start(p, move || crate::commands::reload_edit(&app)));
-        }
+        c.watch = edit_path.zip(baseline).map(|(p, base)| {
+            let core = Arc::downgrade(&self.core);
+            watch::Watch::start(p, base, move || {
+                if let Some(core) = Weak::upgrade(&core) {
+                    core.reload_edit();
+                }
+            })
+        });
         lock(&self.state).set_reference(c.edit.timeline.clone());
         let form = c.wanted();
         let loaded = self.load(&mut c, form, None, false);
         self.emit_edit(&c);
         loaded
-    }
-
-    /// The edit list changed on disk: takes it and, when that changes what plays, reloads at the
-    /// same source position.
-    pub fn reload_edit(&self) {
-        let mut c = lock(&self.ctl);
-        if c.file.is_none() {
-            return;
-        }
-        let before = c.edit.timeline.clone();
-        self.read_edit(&mut c);
-        let same = match (&before, &c.edit.timeline) {
-            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-            (None, None) => true,
-            _ => false,
-        };
-        if !same {
-            lock(&self.state).set_reference(c.edit.timeline.clone());
-            self.emit_state();
-            let want = c.wanted();
-            if !same_form(&want, &c.requested) {
-                if let Err(e) = self.reload(&mut c, want) {
-                    eprintln!("junctur-app: reload after an edit-list change: {e}");
-                }
-            }
-        }
-        self.emit_edit(&c);
-    }
-
-    pub fn set_skip(&self, on: bool) -> Result<(), String> {
-        let mut c = lock(&self.ctl);
-        c.skip = on;
-        let want = c.wanted();
-        let r = if c.file.is_some() && !same_form(&want, &c.requested) {
-            self.reload(&mut c, want)
-        } else {
-            Ok(())
-        };
-        self.emit_edit(&c);
-        r
-    }
-
-    pub fn edit_state(&self) -> EditState {
-        let c = lock(&self.ctl);
-        EditState::new(&c.edit, c.skip)
-    }
-
-    pub fn toggle_pause(&self) -> Result<(), String> {
-        self.mpv.command(&["cycle", "pause"])
-    }
-
-    /// Seeks to source time `seconds`. While kept ranges play, a time inside a cut lands on the
-    /// next kept range (past the last one, on the end). `exact` lands on the frame (slower on
-    /// long GOPs); without it mpv seeks to a keyframe, which is what a dragged seek bar wants
-    /// until it is released.
-    pub fn seek(&self, seconds: f64, exact: bool) -> Result<(), String> {
-        let target = match &lock(&self.ctl).requested {
-            Form::Cuts(t) => cuts_start(t, seconds),
-            Form::Source => seconds,
-        };
-        let mode = if exact {
-            "absolute+exact"
-        } else {
-            "absolute+keyframes"
-        };
-        self.mpv.command(&["seek", &format!("{target:.6}"), mode])
-    }
-
-    pub fn set_audio_track(&self, id: i64) -> Result<(), String> {
-        self.mpv.set_string("aid", &id.to_string())
-    }
-
-    /// Re-reads the edit list. A file that does not parse keeps the old timeline (a hand edit
-    /// half-typed should not change what plays); one with the same frames keeps the same
-    /// timeline, so only a real change reloads.
-    fn read_edit(&self, c: &mut Ctl) {
-        let (Some(file), Some(path)) = (c.file.clone(), c.edit_path.clone()) else {
-            return;
-        };
-        if !path.is_file() {
-            c.edit = Edit::default();
-            return;
-        }
-        let fps = match c.fps {
-            Some(f) => f,
-            None => match cuts::probe_fps(file.as_ref()) {
-                Ok(f) => *c.fps.insert(f),
-                Err(e) => {
-                    c.edit = Edit {
-                        error: Some(format!("frame rate: {e}")),
-                        ..Edit::default()
-                    };
-                    return;
-                }
-            },
-        };
-        let new = cuts::read(&path, fps);
-        if new.summary.is_none() && new.error.is_some() && c.edit.timeline.is_some() {
-            c.edit.error = new.error;
-            return;
-        }
-        if let (Some(old), Some(t)) = (&c.edit.timeline, &new.timeline) {
-            if old == t {
-                c.edit = Edit {
-                    timeline: Some(old.clone()),
-                    ..new
-                };
-                return;
-            }
-        }
-        c.edit = new;
-    }
-
-    /// Loads `form` at the current source position, keeping pause.
-    fn reload(&self, c: &mut Ctl, form: Form) -> Result<(), String> {
-        let (pos, paused) = {
-            let s = lock(&self.state);
-            (s.position, s.paused)
-        };
-        self.load(c, form, pos, paused)
-    }
-
-    /// Asks mpv to play `form` from source time `from` (the start when `None`).
-    fn load(&self, c: &mut Ctl, form: Form, from: Option<f64>, paused: bool) -> Result<(), String> {
-        let file = c.file.clone().ok_or("no file is open")?;
-        let (url, start) = match &form {
-            Form::Source => (file.clone(), from),
-            Form::Cuts(t) => (edl::url(&file, t), from.map(|s| cuts_start(t, s))),
-        };
-        self.mpv
-            .set_string("pause", if paused { "yes" } else { "no" })?;
-        let start = start.map(|s| format!("start={s:.6}"));
-        let mut args = vec!["loadfile", url.as_str(), "replace"];
-        if let Some(s) = &start {
-            // The playlist index (-1: none) comes before per-file options since mpv 0.38.
-            args.extend(["-1", s.as_str()]);
-        }
-        lock(&self.loads).push_back(Load {
-            file,
-            form: form.clone(),
-        });
-        if let Err(e) = self.mpv.command(&args) {
-            lock(&self.loads).pop_back();
-            return Err(e);
-        }
-        c.requested = form;
-        Ok(())
-    }
-
-    fn emit_state(&self) {
-        let snapshot = lock(&self.state).clone();
-        let _ = self.app.emit(STATE_EVENT, snapshot);
-    }
-
-    fn emit_edit(&self, c: &Ctl) {
-        let _ = self.app.emit(EDIT_EVENT, EditState::new(&c.edit, c.skip));
     }
 
     pub fn resize(&self, w: u32, h: u32) {
@@ -392,17 +296,142 @@ impl Drop for Player {
     }
 }
 
-/// Where source time `s` lands in an EDL of `t`: its output time, the next kept range's start when
-/// `s` is cut, the end past the last range.
-fn cuts_start(t: &cuts::Timeline, s: f64) -> f64 {
-    t.snap(s)
-        .map_or(t.output_duration(), |kept| t.to_output(kept).0)
+impl Core {
+    pub fn state(&self) -> PlayerState {
+        lock(&self.state).clone()
+    }
+
+    /// The edit list changed on disk: takes it and, when that changes what plays, reloads at the
+    /// same source position. The file is read outside the lock.
+    pub fn reload_edit(&self) {
+        let (file, path, fps) = {
+            let c = lock(&self.ctl);
+            let (Some(file), Some(path)) = (c.file.clone(), c.edit_path.clone()) else {
+                return;
+            };
+            (file, path, c.fps)
+        };
+        let (fps, read) = cuts::fetch(&file, &path, fps);
+        let mut c = lock(&self.ctl);
+        if c.file.as_deref() != Some(file.as_str()) {
+            return; // another file was opened meanwhile
+        }
+        c.fps = c.fps.or(fps);
+        let before = c.edit.timeline.clone();
+        c.edit = cuts::merge(&c.edit, read);
+        let same = match (&before, &c.edit.timeline) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            lock(&self.state).set_reference(c.edit.timeline.clone());
+            self.emit_state();
+            let want = c.wanted();
+            if !same_form(&want, &c.requested) {
+                if let Err(e) = self.reload(&mut c, want) {
+                    eprintln!("junctur-app: reload after an edit-list change: {e}");
+                }
+            }
+        }
+        self.emit_edit(&c);
+    }
+
+    pub fn set_skip(&self, on: bool) -> Result<(), String> {
+        let mut c = lock(&self.ctl);
+        c.skip = on;
+        let want = c.wanted();
+        let r = if c.file.is_some() && !same_form(&want, &c.requested) {
+            self.reload(&mut c, want)
+        } else {
+            Ok(())
+        };
+        self.emit_edit(&c);
+        r
+    }
+
+    pub fn edit_state(&self) -> EditState {
+        let c = lock(&self.ctl);
+        EditState::new(&c.edit, c.skip)
+    }
+
+    pub fn toggle_pause(&self) -> Result<(), String> {
+        self.mpv.command(&["cycle", "pause"])
+    }
+
+    /// Seeks to source time `seconds` and returns the source time it lands on: while kept ranges
+    /// play, a time inside a cut lands on the next kept range (past the last one, on its last
+    /// frame). `exact` lands on the frame (slower on long GOPs); without it mpv seeks to a
+    /// keyframe, which is what a dragged seek bar wants until it is released.
+    pub fn seek(&self, seconds: f64, exact: bool) -> Result<f64, String> {
+        let (target, lands) = match &lock(&self.ctl).requested {
+            Form::Cuts(t) => t.seek_target(seconds),
+            Form::Source => (seconds, seconds),
+        };
+        let mode = if exact {
+            "absolute+exact"
+        } else {
+            "absolute+keyframes"
+        };
+        self.mpv.command(&["seek", &format!("{target:.6}"), mode])?;
+        lock(&self.state).expect(lands);
+        Ok(lands)
+    }
+
+    pub fn set_audio_track(&self, id: i64) -> Result<(), String> {
+        self.mpv.set_string("aid", &id.to_string())
+    }
+
+    /// Loads `form` where playback is (or is about to be, after a seek or load still landing),
+    /// keeping pause.
+    fn reload(&self, c: &mut Ctl, form: Form) -> Result<(), String> {
+        let (pos, paused) = {
+            let s = lock(&self.state);
+            (s.resume_from(), s.paused)
+        };
+        self.load(c, form, pos, paused)
+    }
+
+    /// Asks mpv to play `form` from source time `from` (the start when `None`).
+    fn load(&self, c: &mut Ctl, form: Form, from: Option<f64>, paused: bool) -> Result<(), String> {
+        let file = c.file.clone().ok_or("no file is open")?;
+        let from = from.unwrap_or(0.0);
+        let (url, start, lands) = match &form {
+            Form::Source => (file.clone(), from, from),
+            Form::Cuts(t) => {
+                let (o, s) = t.seek_target(from);
+                (edl::url(&file, t), o, s)
+            }
+        };
+        self.mpv
+            .set_string("pause", if paused { "yes" } else { "no" })?;
+        // The playlist index (-1: none) comes before per-file options since mpv 0.38.
+        let start = format!("start={start:.6}");
+        let args = ["loadfile", url.as_str(), "replace", "-1", start.as_str()];
+        lock(&self.loads).push(file, form.clone());
+        if let Err(e) = self.mpv.command(&args) {
+            lock(&self.loads).unpush();
+            return Err(e);
+        }
+        lock(&self.state).expect(lands);
+        c.requested = form;
+        Ok(())
+    }
+
+    fn emit_state(&self) {
+        let snapshot = lock(&self.state).clone();
+        let _ = self.app.emit(STATE_EVENT, snapshot);
+    }
+
+    fn emit_edit(&self, c: &Ctl) {
+        let _ = self.app.emit(EDIT_EVENT, EditState::new(&c.edit, c.skip));
+    }
 }
 
 /// What the event thread shares with the player.
 struct Shared {
     state: Arc<Mutex<PlayerState>>,
-    loads: Loads,
+    loads: Arc<Mutex<Loads>>,
     app: AppHandle,
     trace: Option<Arc<Trace>>,
 }
@@ -443,9 +472,11 @@ fn event_loop(events: &mut Events, shared: &Shared) {
                 eprintln!("mpv [{prefix}] {level}: {text}");
                 continue;
             }
-            Event::StartFile => {
-                let Some(load) = lock(&shared.loads).pop_front() else {
-                    eprintln!("junctur-app: mpv started a file the player did not load");
+            Event::StartFile { entry } => {
+                let Some(load) = lock(&shared.loads).started(*entry) else {
+                    eprintln!(
+                        "junctur-app: mpv started entry {entry}, which the player did not load"
+                    );
                     continue;
                 };
                 if let Some(t) = &shared.trace {
@@ -476,5 +507,28 @@ fn event_loop(events: &mut Events, shared: &Shared) {
         } else if change == Change::Position {
             held = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_replaced_load_does_not_shift_later_ones() {
+        let mut l = Loads::default();
+        let a = l.push("f".into(), Form::Source);
+        let b = l.push("f".into(), Form::Source);
+        let c = l.push("f".into(), Form::Source);
+        assert_eq!((a, b, c), (1, 2, 3));
+        // 2 was replaced before it began, so mpv starts 3 after 1.
+        assert_eq!(l.started(1).map(|x| x.entry), Some(1));
+        assert_eq!(l.started(3).map(|x| x.entry), Some(3));
+        assert!(l.waiting.is_empty());
+        // A refused loadfile takes back its id.
+        l.push("f".into(), Form::Source);
+        l.unpush();
+        assert_eq!(l.push("f".into(), Form::Source), 4);
+        assert!(l.started(9).is_none(), "an entry the player never loaded");
     }
 }

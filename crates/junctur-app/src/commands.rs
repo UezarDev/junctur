@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::State;
 
 use crate::cuts::EditState;
 use crate::lock::lock;
@@ -81,25 +81,14 @@ pub async fn edit_state(app: State<'_, App>) -> Result<EditState, String> {
     app.with(|p| Ok(p.edit_state()))
 }
 
-/// The edit-list watch's callback. It runs on the watch's own thread, so it finds the player
-/// through the app rather than holding a reference to it.
-pub fn reload_edit(app: &AppHandle) {
-    let Some(state) = app.try_state::<App>() else {
-        return;
-    };
-    let guard = lock(&state.player);
-    if let Ok(p) = &*guard {
-        p.reload_edit();
-    }
-}
-
 #[tauri::command]
 pub async fn toggle_pause(app: State<'_, App>) -> Result<(), String> {
-    app.with(Player::toggle_pause)
+    app.with(|p| p.toggle_pause())
 }
 
+/// Returns the source time the seek lands on (a cut lands on the next kept range while skipping).
 #[tauri::command]
-pub async fn seek(app: State<'_, App>, seconds: f64, exact: bool) -> Result<(), String> {
+pub async fn seek(app: State<'_, App>, seconds: f64, exact: bool) -> Result<f64, String> {
     app.with(|p| p.seek(seconds, exact))
 }
 

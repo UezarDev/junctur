@@ -68,4 +68,39 @@ mod tests {
         mpv.set_string("pause", "yes").unwrap();
         assert!(mpv.set_string("no-such-property", "1").is_err());
     }
+
+    /// The player matches mpv's `start-file` to its loads by playlist entry id: each `loadfile`
+    /// gets the next id, and a load replaced before it began never starts. Pinned here because the
+    /// skip toggle (two loads in quick succession) depends on it.
+    #[test]
+    #[ignore = "needs libmpv (scripts/fetch-libmpv.ps1)"]
+    fn loads_get_consecutive_entry_ids() {
+        let opts = [
+            ("vo", "null"),
+            ("ao", "null"),
+            ("config", "no"),
+            ("idle", "yes"),
+        ];
+        let mpv = Arc::new(Mpv::new(load().unwrap(), &opts).unwrap());
+        let mut events = mpv.events().unwrap();
+        for d in 1..=3 {
+            let url = format!("av://lavfi:testsrc=d={d}");
+            mpv.command(&["loadfile", &url, "replace"]).unwrap();
+        }
+        let mut started = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            match events.wait(0.5) {
+                Some(Event::StartFile { entry }) => started.push(entry),
+                Some(Event::FileLoaded) => break,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            started.last(),
+            Some(&3),
+            "the last load is entry 3: {started:?}"
+        );
+        assert!(started.windows(2).all(|w| w[0] < w[1]), "{started:?}");
+    }
 }

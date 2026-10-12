@@ -24,6 +24,9 @@ export interface PlayerState {
   /** Output (edited) time and length, when there is an edit list. `position` is source time. */
   output: number | null;
   outputDuration: number | null;
+  /** Source and output frame on screen (with an edit list), rounded by the engine. */
+  frame: number | null;
+  outputFrame: number | null;
   /** The source position is inside a cut (only while the whole file plays). */
   inCut: boolean;
 }
@@ -70,7 +73,9 @@ export const startupFile = () => invoke<string | null>("startup_file");
 export const playerState = () => invoke<PlayerState>("player_state");
 export const openFile = (path: string) => invoke<Opened>("open_file", { path });
 export const togglePause = () => invoke<void>("toggle_pause");
-export const seek = (seconds: number, exact: boolean) => invoke<void>("seek", { seconds, exact });
+/** Resolves to the source time the seek lands on (inside a cut while skipping: the next range). */
+export const seek = (seconds: number, exact: boolean) =>
+  invoke<number>("seek", { seconds, exact });
 export const setAudioTrack = (id: number) => invoke<void>("set_audio_track", { id });
 export const setSkip = (on: boolean) => invoke<void>("set_skip", { on });
 export const editState = () => invoke<EditState>("edit_state");

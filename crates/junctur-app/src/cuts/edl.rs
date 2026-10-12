@@ -4,24 +4,19 @@
 //! not stall on long-GOP recordings (phase 2b measured 0 ms vs 100-300 ms for seeking at range
 //! ends). In that timeline mpv's `time-pos` is output time.
 
-use super::timeline::Timeline;
+use super::timeline::{Timeline, EDL_DECIMALS};
 
-/// How far before its first frame a segment starts. mpv keeps frames with `start <= pts < start +
-/// length`; starting exactly on the frame lets float rounding drop it (or let frame `end` in), so
-/// every boundary sits a hair before its frame. Far below a frame and below an audio sample's
-/// audibility (0.1 ms is ~5 samples at 48 kHz).
-pub const BIAS: f64 = 1e-4;
-
-/// `edl://` for `file` playing only `t`'s kept ranges. `t` must keep something.
+/// `edl://` for `file` playing only `t`'s kept ranges. `t` must keep something. The segments'
+/// times come from the timeline already rounded, so mpv's timeline and the app's mapping agree
+/// (see `timeline`).
 pub fn url(file: &str, t: &Timeline) -> String {
     // `%<bytes>%` escapes the path, so commas, semicolons or non-ASCII in it need no quoting.
     let escaped = format!("%{}%{}", file.len(), file);
     let mut s = String::with_capacity(16 + t.ranges.len() * (escaped.len() + 24));
     s.push_str("edl://!no_chapters;");
-    for &(a, b) in &t.ranges {
-        let start = (t.fps.seconds(a) - BIAS).max(0.0);
-        let length = t.fps.seconds(b - a);
-        s.push_str(&format!("{escaped},{start:.6},{length:.6};"));
+    for &(start, length) in t.segments() {
+        let d = EDL_DECIMALS;
+        s.push_str(&format!("{escaped},{start:.d$},{length:.d$};"));
     }
     s
 }

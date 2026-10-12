@@ -10,9 +10,11 @@ use std::time::{Duration, SystemTime};
 const POLL: Duration = Duration::from_millis(400);
 
 /// What a poll sees: `None` while the file does not exist.
-type Stamp = Option<(u64, Option<SystemTime>)>;
+pub type Stamp = Option<(u64, Option<SystemTime>)>;
 
-fn stamp(path: &Path) -> Stamp {
+/// The file's size and modification time now. Taken *before* the caller reads the file, so a
+/// write landing between the stamp and the read is seen as a change rather than lost.
+pub fn stamp(path: &Path) -> Stamp {
     std::fs::metadata(path)
         .ok()
         .map(|m| (m.len(), m.modified().ok()))
@@ -57,14 +59,12 @@ pub struct Watch {
 }
 
 impl Watch {
-    /// Calls `changed` on its own thread after each settled change to `path`, starting from how
-    /// `path` is now (the caller has just read it).
-    pub fn start(path: PathBuf, changed: impl Fn() + Send + 'static) -> Self {
+    /// Calls `changed` on its own thread after each settled change to `path` from `baseline`
+    /// (its [`stamp`] from before the caller last read it).
+    pub fn start(path: PathBuf, baseline: Stamp, changed: impl Fn() + Send + 'static) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
-        // Stamped here, not on the thread, so a change right after the caller's read is not taken
-        // as the starting point.
-        let mut settle = Settle::new(stamp(&path));
+        let mut settle = Settle::new(baseline);
         let spawned = std::thread::Builder::new()
             .name("edit-watch".into())
             .spawn(move || loop {
@@ -120,10 +120,20 @@ mod tests {
         let p = d.join("edit.junctur");
         std::fs::write(&p, "a").unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
-        let w = Watch::start(p.clone(), move || {
+        let w = Watch::start(p.clone(), stamp(&p), move || {
             let _ = tx.send(());
         });
         std::fs::write(&p, "longer").unwrap();
+        assert!(rx.recv_timeout(Duration::from_secs(5)).is_ok());
+        drop(w);
+        // A write between the caller's stamp (taken before its read) and the watch starting is
+        // still a change.
+        let base = stamp(&p);
+        std::fs::write(&p, "written in between").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let w = Watch::start(p.clone(), base, move || {
+            let _ = tx.send(());
+        });
         assert!(rx.recv_timeout(Duration::from_secs(5)).is_ok());
         drop(w);
         let _ = std::fs::remove_dir_all(&d);

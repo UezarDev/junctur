@@ -3,9 +3,10 @@
 //! (state, new frames drawn, and a verdict) as one `junctur-app test:` JSON line on stdout, and
 //! exits.
 //!
-//! `JUNCTUR_TEST_STEPS="2:seek=130.5;4:skip=off;6:skip=on;7:pause"` also runs player actions at
-//! those seconds, and the report gives the state each one led to (sampled just before the next)
-//! and the skip trace (see `trace`): every range boundary crossed with its frames and stall.
+//! `JUNCTUR_TEST_STEPS="2:seek=130.5;3:kseek=200;4:skip=off;6:skip=on;7:pause"` also runs player
+//! actions at those seconds (`kseek` is a keyframe seek, as a dragged timeline sends), and the
+//! report gives the state each one led to (sampled just before the next) and the skip trace (see
+//! `trace`): every range boundary crossed with its frames and stall.
 //!
 //! Embedding can only be checked in a real window, so this is the way a script (or a later phase)
 //! runs the app without putting a window or a sound in front of the user.
@@ -54,6 +55,8 @@ fn parse(v: Option<&str>) -> Option<f64> {
 #[derive(Debug, Clone, PartialEq)]
 enum Action {
     Seek(f64),
+    /// A keyframe seek, as the timeline sends while it is dragged.
+    KeySeek(f64),
     Skip(bool),
     Pause,
 }
@@ -69,6 +72,7 @@ fn parse_steps(s: &str) -> Result<Vec<(f64, Action)>, String> {
         let action = action.trim();
         let action = match action.split_once('=') {
             Some(("seek", v)) => Action::Seek(v.parse().map_err(|_| bad())?),
+            Some(("kseek", v)) => Action::KeySeek(v.parse().map_err(|_| bad())?),
             Some(("skip", "on")) => Action::Skip(true),
             Some(("skip", "off")) => Action::Skip(false),
             None if action == "pause" => Action::Pause,
@@ -100,7 +104,8 @@ fn with_player<T>(app: &AppHandle, f: impl FnOnce(&Player) -> T) -> Result<T, St
 
 fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
     with_player(app, |p| match a {
-        Action::Seek(s) => p.seek(*s, true),
+        Action::Seek(s) => p.seek(*s, true).map(|_| ()),
+        Action::KeySeek(s) => p.seek(*s, false).map(|_| ()),
         Action::Skip(on) => p.set_skip(*on),
         Action::Pause => p.toggle_pause(),
     })?
@@ -226,7 +231,7 @@ mod tests {
 
     #[test]
     fn parses_steps_in_time_order() {
-        let s = parse_steps("4:skip=off; 2:seek=130.5 ;6:skip=on;7:pause;").unwrap();
+        let s = parse_steps("4:skip=off; 2:seek=130.5 ;6:skip=on;7:pause;8:kseek=1").unwrap();
         assert_eq!(
             s,
             vec![
@@ -234,6 +239,7 @@ mod tests {
                 (4.0, Action::Skip(false)),
                 (6.0, Action::Skip(true)),
                 (7.0, Action::Pause),
+                (8.0, Action::KeySeek(1.0)),
             ]
         );
         assert!(parse_steps("2:jump=3").is_err());

@@ -6,6 +6,7 @@
 //! of the load that is actually playing.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -34,7 +35,8 @@ pub struct PlayerState {
     pub path: Option<String>,
     /// Source time, in either form.
     pub position: Option<f64>,
-    /// Source length.
+    /// Source length: the edit list's frame grid when there is one (so both forms agree), else
+    /// mpv's.
     pub duration: Option<f64>,
     pub paused: bool,
     pub audio_tracks: Vec<AudioTrack>,
@@ -44,9 +46,13 @@ pub struct PlayerState {
     pub error: Option<String>,
     /// Only the kept ranges are playing.
     pub cuts: bool,
-    /// Output (edited) time and length, when there is a timeline.
+    /// Output (edited) time and length in mpv's EDL timeline, when there is a timeline.
     pub output: Option<f64>,
     pub output_duration: Option<f64>,
+    /// The source frame and output frame on screen, when there is a timeline: what the clocks
+    /// show, counted here once so the frontend does no frame rounding of its own.
+    pub frame: Option<u64>,
+    pub output_frame: Option<u64>,
     /// The source position is inside a cut (only when the whole file plays).
     pub in_cut: bool,
     #[serde(skip)]
@@ -58,7 +64,16 @@ pub struct PlayerState {
     /// The current edit list's timeline, for output time while the whole file plays.
     #[serde(skip)]
     reference: Option<Arc<Timeline>>,
+    /// Where a load or seek just asked to go (source time), until mpv's position gets there.
+    #[serde(skip)]
+    pending: Option<(f64, Instant)>,
+    /// mpv's playlist entry of the playing load.
+    #[serde(skip)]
+    entry: i64,
 }
+
+/// How long a requested position stands in for mpv's before it is taken as having landed elsewhere.
+const PENDING_FOR: Duration = Duration::from_secs(3);
 
 /// How an event changed the state, so the position (which changes every frame) can be sent to
 /// the frontend less often than everything else.
@@ -72,11 +87,27 @@ pub enum Change {
 impl PlayerState {
     /// mpv began `load` (its `start-file`).
     pub fn start(&mut self, load: Load) {
+        self.entry = load.entry;
         self.path = Some(load.file);
         self.form = load.form;
         self.mpv_pos = None;
         self.mpv_duration = None;
         self.derive();
+    }
+
+    /// A load or seek is going to source time `s`.
+    pub fn expect(&mut self, s: f64) {
+        self.pending = Some((s, Instant::now()));
+    }
+
+    /// The source position to reload at: the one asked for while mpv has not reached it yet (a
+    /// fresh load has no position, and right after a seek mpv still reports the old one), else
+    /// mpv's.
+    pub fn resume_from(&self) -> Option<f64> {
+        match self.pending {
+            Some((s, at)) if at.elapsed() < PENDING_FOR => Some(s),
+            _ => self.position,
+        }
     }
 
     /// The edit list changed: maps the whole file's positions with `t` from now on.
@@ -91,10 +122,12 @@ impl PlayerState {
                 self.error = None;
                 Change::Other
             }
+            // Only the playing entry's failure: a load replaced while it opened is not an error.
             Event::EndFile {
+                entry,
                 reason: EndReason::Error,
                 error,
-            } => {
+            } if *entry == self.entry => {
                 self.error = Some(error.clone().unwrap_or_else(|| "playback failed".into()));
                 self.path = None;
                 self.form = Form::Source;
@@ -143,24 +176,35 @@ impl PlayerState {
 
     /// The two clocks from mpv's raw position and the timeline in play.
     fn derive(&mut self) {
-        match &self.form {
+        let t = match &self.form {
             Form::Cuts(t) => {
                 self.cuts = true;
                 self.in_cut = false;
                 self.output = self.mpv_pos;
                 self.position = self.mpv_pos.map(|o| t.to_source(o));
-                self.duration = Some(t.source_duration());
-                self.output_duration = Some(t.output_duration());
+                Some(t.clone())
             }
             Form::Source => {
                 self.cuts = false;
                 self.position = self.mpv_pos;
-                self.duration = self.mpv_duration;
-                let t = self.reference.as_deref();
-                let mapped = t.zip(self.mpv_pos).map(|(t, s)| t.to_output(s));
+                let t = self.reference.clone();
+                let mapped = t.as_deref().zip(self.mpv_pos).map(|(t, s)| t.to_output(s));
                 self.output = mapped.map(|m| m.0);
                 self.in_cut = mapped.is_some_and(|m| m.1);
-                self.output_duration = t.map(Timeline::output_duration);
+                t
+            }
+        };
+        self.duration = t
+            .as_deref()
+            .map(Timeline::source_duration)
+            .or(self.mpv_duration);
+        self.output_duration = t.as_deref().map(Timeline::output_duration);
+        let at = t.as_deref().zip(self.position);
+        self.frame = at.map(|(t, s)| t.fps.frame_at(s));
+        self.output_frame = at.map(|(t, s)| t.output_frame(s));
+        if let (Some((want, _)), Some(pos)) = (self.pending, self.position) {
+            if (pos - want).abs() < 0.5 {
+                self.pending = None;
             }
         }
     }
@@ -169,6 +213,7 @@ impl PlayerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cuts::timeline::EDL_BIAS;
     use crate::cuts::Fps;
     use junctur_core::edit::Range;
 
@@ -178,6 +223,7 @@ mod tests {
 
     fn source(file: &str) -> Load {
         Load {
+            entry: 1,
             file: file.into(),
             form: Form::Source,
         }
@@ -239,7 +285,15 @@ mod tests {
     fn errors_last_until_a_file_loads() {
         let mut s = PlayerState::default();
         s.start(source("bad.mp4"));
+        // A replaced load's failure is not this one's.
         s.apply(&Event::EndFile {
+            entry: 0,
+            reason: EndReason::Error,
+            error: Some("old".into()),
+        });
+        assert_eq!(s.error, None);
+        s.apply(&Event::EndFile {
+            entry: 1,
             reason: EndReason::Error,
             error: Some("unrecognized file format".into()),
         });
@@ -248,6 +302,7 @@ mod tests {
         // Replacing a file ends the old one with Stop: not an error, and it keeps the message.
         assert_eq!(
             s.apply(&Event::EndFile {
+                entry: 1,
                 reason: EndReason::Stop,
                 error: None
             }),
@@ -265,27 +320,53 @@ mod tests {
         s.set_reference(Some(timeline()));
         s.apply(&prop(TIME_POS, Value::Double(5.5)));
         assert_eq!(s.position, Some(5.5));
-        assert!((s.output.unwrap() - 1.5).abs() < 1e-9);
+        assert!((s.output.unwrap() - 1.5).abs() < 1e-3);
+        assert_eq!((s.frame, s.output_frame), (Some(165), Some(45)));
         assert!(!s.in_cut && !s.cuts);
         s.apply(&prop(TIME_POS, Value::Double(3.0)));
         assert!(s.in_cut);
-        assert_eq!(s.output_duration, Some(3.0));
+        assert_eq!(s.output_frame, Some(30), "a cut shows the next kept frame");
+        assert!((s.output_duration.unwrap() - 3.0).abs() < 1e-9);
+        // The edit list's length, not mpv's, so both forms show the same total.
+        s.apply(&prop(DURATION, Value::Double(10.02)));
+        assert_eq!(s.duration, Some(10.0));
+    }
+
+    #[test]
+    fn a_requested_position_stands_in_until_mpv_reaches_it() {
+        let mut s = PlayerState::default();
+        s.start(source("a.mp4"));
+        s.apply(&prop(TIME_POS, Value::Double(1.0)));
+        assert_eq!(s.resume_from(), Some(1.0));
+        s.expect(40.0);
+        // mpv still reports where it was before the seek.
+        s.apply(&prop(TIME_POS, Value::Double(1.03)));
+        assert_eq!(s.resume_from(), Some(40.0));
+        s.apply(&prop(TIME_POS, Value::Double(40.0)));
+        s.apply(&prop(TIME_POS, Value::Double(40.5)));
+        assert_eq!(s.resume_from(), Some(40.5));
+        // A fresh load has no position yet.
+        s.expect(0.0);
+        s.start(source("a.mp4"));
+        assert_eq!((s.position, s.resume_from()), (None, Some(0.0)));
     }
 
     #[test]
     fn kept_ranges_map_to_source_time() {
         let mut s = PlayerState::default();
         s.start(Load {
+            entry: 1,
             file: "a.mp4".into(),
             form: Form::Cuts(timeline()),
         });
-        // In the EDL mpv counts output time; 1.5 s of output is 5.5 s of source.
-        s.apply(&prop(TIME_POS, Value::Double(1.5)));
+        // In the EDL mpv counts output time: frame 165 (5.5 s of source) shows at 1.5 s + the bias.
+        s.apply(&prop(TIME_POS, Value::Double(1.5 + EDL_BIAS)));
         s.apply(&prop(DURATION, Value::Double(3.0)));
         assert!(s.cuts);
         assert_eq!(s.path.as_deref(), Some("a.mp4"));
-        assert_eq!(s.output, Some(1.5));
-        assert!((s.position.unwrap() - 5.5).abs() < 1e-9);
+        assert_eq!(s.output, Some(1.5 + EDL_BIAS));
+        assert!((s.position.unwrap() - 5.5).abs() < 1e-3);
+        assert_eq!((s.frame, s.output_frame), (Some(165), Some(45)));
         assert!((s.duration.unwrap() - 10.0).abs() < 1e-9, "source length");
         // The next load starts clean, in its own form.
         s.start(source("a.mp4"));
