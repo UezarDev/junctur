@@ -1,0 +1,30 @@
+[package]
+name = "junctur-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Junctur desktop app: the engine behind a Tauri window with embedded mpv playback"
+
+[[bin]]
+name = "junctur-app"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+junctur-core = { path = "../junctur-core" }
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+libloading = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_OpenGL",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+] }

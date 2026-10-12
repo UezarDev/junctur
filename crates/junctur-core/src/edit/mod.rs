@@ -7,16 +7,20 @@
 mod format;
 mod frames;
 mod reduce;
+mod save;
 mod scores;
+mod splice;
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 pub use format::{parse, FORMAT_VERSION};
-pub use frames::{frame_ranges, frames_ceil, frames_floor};
-pub use reduce::{keep_ranges, Envelope, ENVELOPE_HOP};
+pub use frames::{frame_ranges, frame_span, frames_ceil, frames_floor};
+pub use reduce::{keep_ranges, snap_boundary, word_span, Envelope, ENVELOPE_HOP};
+pub use save::{backup_path, save, Saved};
 pub use scores::windows;
+pub use splice::{cut_span, keep_span};
 
 /// A kept stretch of the source, in seconds.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

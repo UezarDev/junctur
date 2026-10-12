@@ -67,6 +67,35 @@ keyframe index is kept in the cache, so rendering the same recording again skips
 `separate` without `--track` picks the track `tracks` called the mix. Model tests download the models
 and are ignored by default: `cargo test -- --ignored`.
 
+## Desktop app (early)
+
+`crates/junctur-app` is a Tauri 2 window over the same engine: open a recording (dialog, drag and drop,
+or `junctur-app <file>`), play/pause, seek, pick the audio track, and see the recording's project state
+(stages, transcript, edit list), read from the same folder `junctur status` uses. Video is played by
+embedded mpv (libmpv's render API over OpenGL, NVDEC on), drawn under a transparent WebView so the UI
+sits on top of it. Windows only for now.
+
+With an edit list, the preview plays only the kept ranges, and the transcript panel edits by text: select
+words and press Delete to cut them (K keeps), restore a folded cut, or nudge a range's ends from the bar
+above the timeline (shift-drag on the timeline selects a stretch). Boundaries snap into the pauses the way
+`junctur cut` places them, every edit is saved to `edit.junctur` at once, Ctrl+Z / Ctrl+Y undo and redo,
+and a list the app did not write itself is first kept as `edit.junctur.bak` (then `.bak2`, ...).
+
+Setup, once (Node.js 20+ for the frontend):
+
+```sh
+pwsh scripts/fetch-libmpv.ps1        # pinned libmpv build into vendor/mpv/ (git-ignored)
+cd crates/junctur-app && npm install
+npm run tauri dev                    # dev server + app; `npm run build` builds the frontend only
+```
+
+The app looks for `libmpv-2.dll` in `JUNCTUR_LIBMPV`, beside the executable, then in `vendor/mpv/`.
+Without it the window still opens and says what is missing. Plain `cargo build`/`cargo test` do not need
+the DLL or the built frontend (`dist/`); only a release build (`npm run tauri build`) embeds the frontend.
+`JUNCTUR_TEST_OFFSCREEN=<seconds>` runs the app off-screen and silent, prints the player state as one
+JSON line and exits, for scripted launch checks. The libmpv test is ignored by default:
+`cargo test -p junctur-app -- --ignored`.
+
 ## Models
 
 Downloaded on first use into `<cache>/models/`, checked against pinned SHA-256 digests, never committed:
@@ -110,7 +139,7 @@ Results are cached in the OS user cache folder under `junctur/`; override it wit
 - Track analysis, voice isolation, speakers (done)
 - Engine core: voice activity detection, transcription, edit list, FCPXML export (done)
 - Smart rendering: re-encode only around cuts (done)
-- Desktop app with preview and transcript editing
+- Desktop app: embedded mpv playback, a preview that skips cuts, transcript editing (started)
 - Highlight signals, review mode and an auto mode that learns from your edits
 
 ## License

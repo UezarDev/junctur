@@ -1,0 +1,57 @@
+/* The page is transparent: mpv's video is drawn under the WebView and shows wherever the UI
+   paints nothing. Only panels and bars get a background. */
+:root {
+  --panel: rgba(16, 17, 20, 0.82);
+  --panel-solid: #101114;
+  --line: rgba(255, 255, 255, 0.1);
+  --text: #e8e6e3;
+  --muted: #9a978f;
+  --accent: #f2b33d;
+  --bad: #ef6f5e;
+  --good: #7fc98a;
+  color-scheme: dark;
+  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  color: var(--text);
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  user-select: none;
+}
+
+button,
+select {
+  font: inherit;
+  color: inherit;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled),
+select:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+button:disabled,
+select:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+select option {
+  background: var(--panel-solid);
+}
+
+.mono {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
