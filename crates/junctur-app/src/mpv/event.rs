@@ -37,6 +37,8 @@ impl EndReason {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     Shutdown,
+    /// A `loadfile` began; one per load, in order, before that file's properties change.
+    StartFile,
     FileLoaded,
     /// `error` is mpv's message when the file could not be played.
     EndFile {
@@ -61,6 +63,7 @@ pub(super) unsafe fn decode(api: &ffi::Api, e: &ffi::Event) -> Option<Event> {
     Some(match e.event_id {
         ffi::EVENT_NONE => return None,
         ffi::EVENT_SHUTDOWN => Event::Shutdown,
+        ffi::EVENT_START_FILE => Event::StartFile,
         ffi::EVENT_FILE_LOADED => Event::FileLoaded,
         ffi::EVENT_END_FILE => {
             let end = &*(e.data as *const ffi::EventEndFile);

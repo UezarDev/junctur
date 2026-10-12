@@ -7,8 +7,9 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
+use crate::cuts::EditState;
 use crate::lock::lock;
 use crate::player::Player;
 use crate::project::{self, ProjectStatus};
@@ -50,10 +51,14 @@ pub async fn player_state(app: State<'_, App>) -> Result<PlayerState, String> {
     app.with(|p| Ok(p.state()))
 }
 
+/// Opens the project first, so the player knows the edit list before it loads (and can start in
+/// the kept-ranges form); a project that cannot open still plays the whole file.
 #[tauri::command]
 pub async fn open_file(app: State<'_, App>, path: String) -> Result<Opened, String> {
-    app.with(|p| p.open(&path))?;
-    Ok(match project::status(Path::new(&path), None) {
+    let status = project::status(Path::new(&path), None);
+    let edit_path = status.as_ref().ok().map(|s| s.edit_path.clone());
+    app.with(|p| p.open(&path, edit_path))?;
+    Ok(match status {
         Ok(s) => Opened {
             project: Some(s),
             project_error: None,
@@ -63,6 +68,29 @@ pub async fn open_file(app: State<'_, App>, path: String) -> Result<Opened, Stri
             project_error: Some(e),
         },
     })
+}
+
+/// Plays only the kept ranges (`on`) or the whole file.
+#[tauri::command]
+pub async fn set_skip(app: State<'_, App>, on: bool) -> Result<(), String> {
+    app.with(|p| p.set_skip(on))
+}
+
+#[tauri::command]
+pub async fn edit_state(app: State<'_, App>) -> Result<EditState, String> {
+    app.with(|p| Ok(p.edit_state()))
+}
+
+/// The edit-list watch's callback. It runs on the watch's own thread, so it finds the player
+/// through the app rather than holding a reference to it.
+pub fn reload_edit(app: &AppHandle) {
+    let Some(state) = app.try_state::<App>() else {
+        return;
+    };
+    let guard = lock(&state.player);
+    if let Ok(p) = &*guard {
+        p.reload_edit();
+    }
 }
 
 #[tauri::command]

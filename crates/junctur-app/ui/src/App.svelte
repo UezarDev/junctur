@@ -8,6 +8,17 @@
 
   let player = $state<api.PlayerState | null>(null);
   let opened = $state<api.Opened | null>(null);
+  let edit = $state<api.EditState | null>(null);
+  // The project panel shows the edit list as last read (it reloads when the file changes).
+  const project = $derived(
+    opened?.project && edit
+      ? {
+          ...opened.project,
+          edit: edit.summary,
+          editError: edit.summary ? null : edit.error,
+        }
+      : (opened?.project ?? null),
+  );
   // Set when the player could not start (e.g. libmpv missing) or a command failed.
   let failure = $state<string | null>(null);
   let dragging = $state(false);
@@ -45,6 +56,8 @@
     if (e.code === "Space" && player?.path) {
       e.preventDefault();
       run(api.togglePause);
+    } else if (e.code === "KeyS" && player?.path && edit?.ranges.length) {
+      run(() => api.setSkip(!edit?.skip));
     }
   }
 
@@ -52,6 +65,7 @@
     api.playerState().then(
       async (s) => {
         player = s;
+        edit = await api.editState();
         const file = await api.startupFile();
         if (file) await load(file);
       },
@@ -59,6 +73,7 @@
     );
     const unlisten = [
       api.onPlayerState((s) => (player = s)),
+      api.onEditState((s) => (edit = s)),
       getCurrentWebview().onDragDropEvent((e) => {
         const p = e.payload;
         dragging = p.type === "enter" || p.type === "over";
@@ -81,14 +96,14 @@
   {/if}
 
   {#if opened}
-    <ProjectPanel status={opened.project} error={opened.projectError} />
+    <ProjectPanel status={project} error={opened.projectError} />
   {/if}
 
   {#if failure || player?.error}
     <div class="failure" role="alert">{failure ?? player?.error}</div>
   {/if}
 
-  <Transport {player} onOpen={pick} onError={(e) => (failure = e)} />
+  <Transport {player} {edit} onOpen={pick} onError={(e) => (failure = e)} />
 </main>
 
 <style>

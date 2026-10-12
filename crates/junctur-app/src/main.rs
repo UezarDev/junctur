@@ -5,12 +5,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod cuts;
 mod lock;
 mod mpv;
 mod player;
 mod project;
 mod state;
 mod testmode;
+mod trace;
 #[cfg(windows)]
 mod video;
 
@@ -54,7 +56,8 @@ fn main() {
             } else {
                 &[]
             };
-            let player = Player::start(app.handle().clone(), &window, extra);
+            let trace = testmode::trace();
+            let player = Player::start(app.handle().clone(), &window, extra, trace.clone());
             if let Err(e) = &player {
                 eprintln!("junctur-app: no player: {e}");
             }
@@ -62,7 +65,7 @@ fn main() {
                 player: Mutex::new(player),
             });
             if let Some(secs) = test {
-                testmode::arm(app.handle().clone(), secs);
+                testmode::arm(app.handle().clone(), secs, trace);
             }
             Ok(())
         })
@@ -85,6 +88,8 @@ fn main() {
             commands::toggle_pause,
             commands::seek,
             commands::set_audio_track,
+            commands::set_skip,
+            commands::edit_state,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the app")

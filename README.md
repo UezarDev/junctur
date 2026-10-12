@@ -133,7 +133,7 @@ Results are cached in the OS user cache folder under `junctur/`; override it wit
 - Track analysis, voice isolation, speakers (done)
 - Engine core: voice activity detection, transcription, edit list, FCPXML export (done)
 - Smart rendering: re-encode only around cuts (done)
-- Desktop app: shell with embedded mpv playback (started); preview that skips cuts, transcript editing
+- Desktop app: embedded mpv playback and a preview that skips cuts (started); transcript editing
 - Highlight signals, review mode and an auto mode that learns from your edits
 
 ## License

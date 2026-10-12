@@ -17,6 +17,9 @@ pub struct ProjectStatus {
     pub edit: Option<EditSummary>,
     /// The edit list exists but does not parse (hand-edited, or a newer format).
     pub edit_error: Option<String>,
+    /// Where the edit list is (or will be), for the player to read and watch.
+    #[serde(skip)]
+    pub edit_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -67,6 +70,7 @@ pub fn status(file: &Path, cache_dir: Option<PathBuf>) -> Result<ProjectStatus, 
         transcript: transcribe::path(&p.dir).is_file(),
         edit,
         edit_error,
+        edit_path: p.edit_path(),
     })
 }
 

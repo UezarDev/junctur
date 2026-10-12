@@ -19,6 +19,36 @@ export interface PlayerState {
   audioTracks: AudioTrack[];
   hwdec: string | null;
   error: string | null;
+  /** Only the kept ranges are playing (the edit list's EDL). */
+  cuts: boolean;
+  /** Output (edited) time and length, when there is an edit list. `position` is source time. */
+  output: number | null;
+  outputDuration: number | null;
+  /** The source position is inside a cut (only while the whole file plays). */
+  inCut: boolean;
+}
+
+export interface Fps {
+  num: number;
+  den: number;
+}
+
+export interface EditSummary {
+  ranges: number;
+  kept: number;
+  duration: number;
+}
+
+/** The edit list as the timeline draws it (src/cuts/mod.rs `EditState`). */
+export interface EditState {
+  skip: boolean;
+  fps: Fps | null;
+  /** Kept source frames, flattened: [start0, end0, start1, end1, ...]. */
+  ranges: number[];
+  totalFrames: number;
+  outputFrames: number;
+  summary: EditSummary | null;
+  error: string | null;
 }
 
 export type StageState = "pending" | "running" | "done" | "failed";
@@ -27,7 +57,7 @@ export interface ProjectStatus {
   dir: string;
   stages: { name: string; state: StageState }[];
   transcript: boolean;
-  edit: { ranges: number; kept: number; duration: number } | null;
+  edit: EditSummary | null;
   editError: string | null;
 }
 
@@ -42,6 +72,11 @@ export const openFile = (path: string) => invoke<Opened>("open_file", { path });
 export const togglePause = () => invoke<void>("toggle_pause");
 export const seek = (seconds: number, exact: boolean) => invoke<void>("seek", { seconds, exact });
 export const setAudioTrack = (id: number) => invoke<void>("set_audio_track", { id });
+export const setSkip = (on: boolean) => invoke<void>("set_skip", { on });
+export const editState = () => invoke<EditState>("edit_state");
 
 export const onPlayerState = (f: (s: PlayerState) => void): Promise<UnlistenFn> =>
   listen<PlayerState>("player-state", (e) => f(e.payload));
+
+export const onEditState = (f: (s: EditState) => void): Promise<UnlistenFn> =>
+  listen<EditState>("edit-state", (e) => f(e.payload));

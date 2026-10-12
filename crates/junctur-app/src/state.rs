@@ -1,31 +1,40 @@
 //! What the frontend shows of playback, folded from mpv's events. Kept apart from the player so
 //! the folding is tested without libmpv.
+//!
+//! mpv's own position means source time when the whole file plays and output time when only the
+//! kept ranges play (an EDL); this folds both into the two clocks the UI shows, with the timeline
+//! of the load that is actually playing.
+
+use std::sync::Arc;
 
 use serde::Serialize;
 
+use crate::cuts::{Form, Load, Timeline};
 use crate::mpv::{audio_tracks, AudioTrack, EndReason, Event, Format, Value};
 
-/// The properties the player observes, with the ids mpv echoes back in its change events.
-pub const OBSERVED: [(u64, &str, Format); 6] = [
-    (PATH, "path", Format::Str),
+/// The properties the player observes, with the ids mpv echoes back in its change events. Not
+/// `path`: in EDL form it is the whole EDL (a megabyte at 30 h); the file comes from the load.
+pub const OBSERVED: [(u64, &str, Format); 5] = [
     (TIME_POS, "time-pos", Format::Double),
     (DURATION, "duration", Format::Double),
     (PAUSE, "pause", Format::Flag),
     (TRACK_LIST, "track-list", Format::Str),
     (HWDEC, "hwdec-current", Format::Str),
 ];
-const PATH: u64 = 1;
 const TIME_POS: u64 = 2;
 const DURATION: u64 = 3;
 const PAUSE: u64 = 4;
 const TRACK_LIST: u64 = 5;
 const HWDEC: u64 = 6;
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerState {
+    /// The recording playing (in either form).
     pub path: Option<String>,
+    /// Source time, in either form.
     pub position: Option<f64>,
+    /// Source length.
     pub duration: Option<f64>,
     pub paused: bool,
     pub audio_tracks: Vec<AudioTrack>,
@@ -33,6 +42,22 @@ pub struct PlayerState {
     pub hwdec: Option<String>,
     /// Why the last file did not play, until another one loads.
     pub error: Option<String>,
+    /// Only the kept ranges are playing.
+    pub cuts: bool,
+    /// Output (edited) time and length, when there is a timeline.
+    pub output: Option<f64>,
+    pub output_duration: Option<f64>,
+    /// The source position is inside a cut (only when the whole file plays).
+    pub in_cut: bool,
+    #[serde(skip)]
+    mpv_pos: Option<f64>,
+    #[serde(skip)]
+    mpv_duration: Option<f64>,
+    #[serde(skip)]
+    form: Form,
+    /// The current edit list's timeline, for output time while the whole file plays.
+    #[serde(skip)]
+    reference: Option<Arc<Timeline>>,
 }
 
 /// How an event changed the state, so the position (which changes every frame) can be sent to
@@ -45,6 +70,21 @@ pub enum Change {
 }
 
 impl PlayerState {
+    /// mpv began `load` (its `start-file`).
+    pub fn start(&mut self, load: Load) {
+        self.path = Some(load.file);
+        self.form = load.form;
+        self.mpv_pos = None;
+        self.mpv_duration = None;
+        self.derive();
+    }
+
+    /// The edit list changed: maps the whole file's positions with `t` from now on.
+    pub fn set_reference(&mut self, t: Option<Arc<Timeline>>) {
+        self.reference = t;
+        self.derive();
+    }
+
     pub fn apply(&mut self, e: &Event) -> Change {
         match e {
             Event::FileLoaded => {
@@ -56,6 +96,9 @@ impl PlayerState {
                 error,
             } => {
                 self.error = Some(error.clone().unwrap_or_else(|| "playback failed".into()));
+                self.path = None;
+                self.form = Form::Source;
+                self.derive();
                 Change::Other
             }
             Event::Property { id, value } => self.property(*id, value),
@@ -74,12 +117,15 @@ impl PlayerState {
         };
         match id {
             TIME_POS => {
-                self.position = num(value);
+                self.mpv_pos = num(value);
+                self.derive();
                 return Change::Position;
             }
-            PATH => self.path = text(value),
             HWDEC => self.hwdec = text(value),
-            DURATION => self.duration = num(value),
+            DURATION => {
+                self.mpv_duration = num(value);
+                self.derive();
+            }
             PAUSE => self.paused = matches!(value, Value::Flag(true)),
             TRACK_LIST => {
                 self.audio_tracks = match value {
@@ -94,23 +140,68 @@ impl PlayerState {
         }
         Change::Other
     }
+
+    /// The two clocks from mpv's raw position and the timeline in play.
+    fn derive(&mut self) {
+        match &self.form {
+            Form::Cuts(t) => {
+                self.cuts = true;
+                self.in_cut = false;
+                self.output = self.mpv_pos;
+                self.position = self.mpv_pos.map(|o| t.to_source(o));
+                self.duration = Some(t.source_duration());
+                self.output_duration = Some(t.output_duration());
+            }
+            Form::Source => {
+                self.cuts = false;
+                self.position = self.mpv_pos;
+                self.duration = self.mpv_duration;
+                let t = self.reference.as_deref();
+                let mapped = t.zip(self.mpv_pos).map(|(t, s)| t.to_output(s));
+                self.output = mapped.map(|m| m.0);
+                self.in_cut = mapped.is_some_and(|m| m.1);
+                self.output_duration = t.map(Timeline::output_duration);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cuts::Fps;
+    use junctur_core::edit::Range;
 
     fn prop(id: u64, value: Value) -> Event {
         Event::Property { id, value }
     }
 
+    fn source(file: &str) -> Load {
+        Load {
+            file: file.into(),
+            form: Form::Source,
+        }
+    }
+
+    /// Kept 1-2 s and 5-7 s of 10 s.
+    fn timeline() -> Arc<Timeline> {
+        let keep = [
+            Range {
+                start: 1.0,
+                end: 2.0,
+            },
+            Range {
+                start: 5.0,
+                end: 7.0,
+            },
+        ];
+        Arc::new(Timeline::new(&keep, 10.0, Fps { num: 30, den: 1 }))
+    }
+
     #[test]
     fn folds_properties() {
         let mut s = PlayerState::default();
-        assert_eq!(
-            s.apply(&prop(PATH, Value::Str("C:/a.mp4".into()))),
-            Change::Other
-        );
+        s.start(source("C:/a.mp4"));
         assert_eq!(s.apply(&prop(DURATION, Value::Double(12.5))), Change::Other);
         assert_eq!(s.apply(&prop(PAUSE, Value::Flag(true))), Change::Other);
         assert_eq!(
@@ -127,35 +218,33 @@ mod tests {
         assert_eq!(s.position, Some(3.0));
         assert_eq!(s.audio_tracks.len(), 2);
         assert!(s.audio_tracks[1].selected);
+        // No edit list: no output clock.
+        assert_eq!((s.output, s.cuts, s.in_cut), (None, false, false));
     }
 
     #[test]
     fn unavailable_properties_clear() {
         // mpv reports a property with no value (MPV_FORMAT_NONE) when no file is loaded.
-        let mut s = PlayerState {
-            position: Some(1.0),
-            duration: Some(2.0),
-            path: Some("x".into()),
-            ..Default::default()
-        };
+        let mut s = PlayerState::default();
+        s.start(source("x"));
+        s.apply(&prop(TIME_POS, Value::Double(1.0)));
+        s.apply(&prop(DURATION, Value::Double(2.0)));
         s.apply(&prop(TIME_POS, Value::None));
         s.apply(&prop(DURATION, Value::None));
-        s.apply(&prop(PATH, Value::None));
-        assert_eq!(
-            (s.position, s.duration, s.path.as_deref()),
-            (None, None, None)
-        );
+        assert_eq!((s.position, s.duration), (None, None));
         assert_eq!(s.apply(&prop(99, Value::None)), Change::None);
     }
 
     #[test]
     fn errors_last_until_a_file_loads() {
         let mut s = PlayerState::default();
+        s.start(source("bad.mp4"));
         s.apply(&Event::EndFile {
             reason: EndReason::Error,
             error: Some("unrecognized file format".into()),
         });
         assert_eq!(s.error.as_deref(), Some("unrecognized file format"));
+        assert_eq!(s.path, None, "nothing is playing");
         // Replacing a file ends the old one with Stop: not an error, and it keeps the message.
         assert_eq!(
             s.apply(&Event::EndFile {
@@ -167,6 +256,40 @@ mod tests {
         assert!(s.error.is_some());
         s.apply(&Event::FileLoaded);
         assert_eq!(s.error, None);
+    }
+
+    #[test]
+    fn whole_file_maps_to_output_time() {
+        let mut s = PlayerState::default();
+        s.start(source("a.mp4"));
+        s.set_reference(Some(timeline()));
+        s.apply(&prop(TIME_POS, Value::Double(5.5)));
+        assert_eq!(s.position, Some(5.5));
+        assert!((s.output.unwrap() - 1.5).abs() < 1e-9);
+        assert!(!s.in_cut && !s.cuts);
+        s.apply(&prop(TIME_POS, Value::Double(3.0)));
+        assert!(s.in_cut);
+        assert_eq!(s.output_duration, Some(3.0));
+    }
+
+    #[test]
+    fn kept_ranges_map_to_source_time() {
+        let mut s = PlayerState::default();
+        s.start(Load {
+            file: "a.mp4".into(),
+            form: Form::Cuts(timeline()),
+        });
+        // In the EDL mpv counts output time; 1.5 s of output is 5.5 s of source.
+        s.apply(&prop(TIME_POS, Value::Double(1.5)));
+        s.apply(&prop(DURATION, Value::Double(3.0)));
+        assert!(s.cuts);
+        assert_eq!(s.path.as_deref(), Some("a.mp4"));
+        assert_eq!(s.output, Some(1.5));
+        assert!((s.position.unwrap() - 5.5).abs() < 1e-9);
+        assert!((s.duration.unwrap() - 10.0).abs() < 1e-9, "source length");
+        // The next load starts clean, in its own form.
+        s.start(source("a.mp4"));
+        assert_eq!((s.position, s.cuts), (None, false));
     }
 
     #[test]
