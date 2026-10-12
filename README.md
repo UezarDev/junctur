@@ -75,6 +75,12 @@ or `junctur-app <file>`), play/pause, seek, pick the audio track, and see the re
 embedded mpv (libmpv's render API over OpenGL, NVDEC on), drawn under a transparent WebView so the UI
 sits on top of it. Windows only for now.
 
+With an edit list, the preview plays only the kept ranges, and the transcript panel edits by text: select
+words and press Delete to cut them (K keeps), restore a folded cut, or nudge a range's ends from the bar
+above the timeline (shift-drag on the timeline selects a stretch). Boundaries snap into the pauses the way
+`junctur cut` places them, every edit is saved to `edit.junctur` at once, Ctrl+Z / Ctrl+Y undo and redo,
+and a list the app did not write itself is first kept as `edit.junctur.bak` (then `.bak2`, ...).
+
 Setup, once (Node.js 20+ for the frontend):
 
 ```sh
@@ -133,7 +139,7 @@ Results are cached in the OS user cache folder under `junctur/`; override it wit
 - Track analysis, voice isolation, speakers (done)
 - Engine core: voice activity detection, transcription, edit list, FCPXML export (done)
 - Smart rendering: re-encode only around cuts (done)
-- Desktop app: embedded mpv playback and a preview that skips cuts (started); transcript editing
+- Desktop app: embedded mpv playback, a preview that skips cuts, transcript editing (started)
 - Highlight signals, review mode and an auto mode that learns from your edits
 
 ## License

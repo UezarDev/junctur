@@ -8,6 +8,10 @@
 //!
 //! The parts that commands and the edit-list watch share live in [`Core`], behind an `Arc`, so the
 //! watch reaches the player directly (through a `Weak`) instead of through the app's player lock.
+//!
+//! Edits (`editor`) reach playback the way a changed file does, through [`Core::take`], but
+//! directly: the app never waits for its own save to come back through the watch. Locks are taken
+//! in the order editor, ctl, state.
 
 use std::collections::VecDeque;
 use std::ops::Deref;
@@ -16,9 +20,11 @@ use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use junctur_core::edit::EditList;
 use tauri::{AppHandle, Emitter};
 
-use crate::cuts::{self, edl, watch, Edit, EditState, Form, Fps, Load};
+use crate::cuts::{self, edl, watch, Edit, EditState, Form, Fps, History, Load};
+use crate::editor::{Editor, Step, TranscriptView};
 use crate::lock::lock;
 use crate::mpv::{self, Event, Events, Mpv};
 use crate::state::{Change, PlayerState, OBSERVED};
@@ -101,6 +107,8 @@ struct Ctl {
     /// The form of the last load asked for: what plays once in-flight loads land.
     requested: Form,
     watch: Option<watch::Watch>,
+    /// The editor's undo/redo state, copied here so the edit state can be sent under this lock.
+    history: History,
 }
 
 impl Ctl {
@@ -140,6 +148,8 @@ pub struct Core {
     app: AppHandle,
     state: Arc<Mutex<PlayerState>>,
     loads: Arc<Mutex<Loads>>,
+    /// Also serialises edits: one is applied, saved and handed to playback before the next.
+    editor: Mutex<Editor>,
     ctl: Mutex<Ctl>,
 }
 
@@ -194,6 +204,7 @@ impl Player {
             app,
             state,
             loads,
+            editor: Mutex::new(Editor::default()),
             ctl: Mutex::new(Ctl {
                 file: None,
                 edit_path: None,
@@ -202,6 +213,7 @@ impl Player {
                 skip: true,
                 requested: Form::Source,
                 watch: None,
+                history: History::default(),
             }),
         });
         Ok(Self {
@@ -210,6 +222,11 @@ impl Player {
             #[cfg(windows)]
             video,
         })
+    }
+
+    /// The part commands and the watch share, to use without holding the app's player lock.
+    pub fn core(&self) -> Arc<Core> {
+        self.core.clone()
     }
 
     /// New mpv frames drawn onto the surface so far (redraws of the same frame not counted).
@@ -231,11 +248,14 @@ impl Player {
             Some(p) => cuts::fetch(path, p, None),
             None => (None, None),
         };
+        let mut ed = lock(&self.editor);
+        ed.reset(edit_path.clone());
         let mut c = lock(&self.ctl);
         c.file = Some(path.to_string());
         c.fps = fps;
         c.edit = read.unwrap_or_default();
         c.edit_path = edit_path.clone();
+        c.history = History::default();
         c.watch = edit_path.zip(baseline).map(|(p, base)| {
             let core = Arc::downgrade(&self.core);
             watch::Watch::start(p, base, move || {
@@ -302,8 +322,11 @@ impl Core {
     }
 
     /// The edit list changed on disk: takes it and, when that changes what plays, reloads at the
-    /// same source position. The file is read outside the lock.
+    /// same source position. The file is read outside the ctl lock. The app's own save is already
+    /// in play, so finding it here does nothing (no reload loop, no jump of the playhead); any
+    /// other change ends the undo history, which would otherwise undo over it.
     pub fn reload_edit(&self) {
+        let mut ed = lock(&self.editor);
         let (file, path, fps) = {
             let c = lock(&self.ctl);
             let (Some(file), Some(path)) = (c.file.clone(), c.edit_path.clone()) else {
@@ -311,14 +334,29 @@ impl Core {
             };
             (file, path, c.fps)
         };
+        if std::fs::read_to_string(&path).is_ok_and(|t| ed.is_own(&t)) {
+            return;
+        }
         let (fps, read) = cuts::fetch(&file, &path, fps);
         let mut c = lock(&self.ctl);
         if c.file.as_deref() != Some(file.as_str()) {
             return; // another file was opened meanwhile
         }
         c.fps = c.fps.or(fps);
+        if read.as_ref().is_some_and(|e| e.list.is_some()) {
+            ed.changed_elsewhere();
+            c.history = History::default();
+        }
+        let merged = cuts::merge(&c.edit, read);
+        self.take(&mut c, merged);
+    }
+
+    /// Plays `new` in place of the edit list in play: when its frames differ, maps positions with
+    /// it and reloads the kept ranges at the same source position (snapped forward if now cut),
+    /// keeping pause. Then reports the edit state.
+    fn take(&self, c: &mut Ctl, new: Edit) {
         let before = c.edit.timeline.clone();
-        c.edit = cuts::merge(&c.edit, read);
+        c.edit = new;
         let same = match (&before, &c.edit.timeline) {
             (Some(a), Some(b)) => Arc::ptr_eq(a, b),
             (None, None) => true,
@@ -329,12 +367,68 @@ impl Core {
             self.emit_state();
             let want = c.wanted();
             if !same_form(&want, &c.requested) {
-                if let Err(e) = self.reload(&mut c, want) {
+                if let Err(e) = self.reload(c, want) {
                     eprintln!("junctur-app: reload after an edit-list change: {e}");
                 }
             }
         }
-        self.emit_edit(&c);
+        self.emit_edit(c);
+    }
+
+    /// Applies an edit, undo or redo to the list in play, saves it and plays the result.
+    pub fn edit(&self, step: Step) -> Result<(), String> {
+        let mut ed = lock(&self.editor);
+        let (list, fps) = {
+            let c = lock(&self.ctl);
+            let list = c.edit.list.clone().ok_or_else(|| {
+                c.edit.error.clone().unwrap_or_else(|| {
+                    "no edit list yet: run the pipeline on this recording".into()
+                })
+            })?;
+            (list, c.fps.ok_or("the frame rate is not known")?)
+        };
+        let new = ed.edit(&list, step, fps)?;
+        let mut c = lock(&self.ctl);
+        c.history = History {
+            can_undo: ed.can_undo(),
+            can_redo: ed.can_redo(),
+        };
+        match new {
+            Some(new) => {
+                let merged = cuts::merge(&c.edit, Some(cuts::from_list(new, fps)));
+                self.take(&mut c, merged);
+            }
+            None => self.emit_edit(&c),
+        }
+        Ok(())
+    }
+
+    /// The transcript's words, read on first use; `None` without a project or transcript.
+    pub fn transcript(&self) -> Option<TranscriptView> {
+        let words = lock(&self.editor).words()?;
+        Some(TranscriptView::new(&words))
+    }
+
+    /// Keeps the right-hand `share` of the window (0..1) free of video, for a panel there.
+    pub fn set_video_margin(&self, share: f64) -> Result<(), String> {
+        let share = if share.is_finite() {
+            share.clamp(0.0, 0.8)
+        } else {
+            0.0
+        };
+        self.mpv
+            .set_string("video-margin-ratio-right", &format!("{share:.4}"))
+    }
+
+    /// The edit list's path and the list in play (test mode compares them).
+    pub fn edit_file(&self) -> (Option<PathBuf>, Option<Arc<EditList>>) {
+        let c = lock(&self.ctl);
+        (c.edit_path.clone(), c.edit.list.clone())
+    }
+
+    /// How many loads the player has asked mpv for (test mode checks saves do not reload twice).
+    pub fn loads(&self) -> i64 {
+        lock(&self.loads).last
     }
 
     pub fn set_skip(&self, on: bool) -> Result<(), String> {
@@ -352,7 +446,7 @@ impl Core {
 
     pub fn edit_state(&self) -> EditState {
         let c = lock(&self.ctl);
-        EditState::new(&c.edit, c.skip)
+        EditState::new(&c.edit, c.skip, c.fps, c.history)
     }
 
     pub fn toggle_pause(&self) -> Result<(), String> {
@@ -424,7 +518,10 @@ impl Core {
     }
 
     fn emit_edit(&self, c: &Ctl) {
-        let _ = self.app.emit(EDIT_EVENT, EditState::new(&c.edit, c.skip));
+        let _ = self.app.emit(
+            EDIT_EVENT,
+            EditState::new(&c.edit, c.skip, c.fps, c.history),
+        );
     }
 }
 

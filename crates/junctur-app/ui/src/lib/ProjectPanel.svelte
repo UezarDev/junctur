@@ -53,7 +53,7 @@
   aside {
     position: absolute;
     top: 16px;
-    right: 16px;
+    left: 16px;
     width: 300px;
     padding: 8px 12px 10px;
     border-radius: 8px;

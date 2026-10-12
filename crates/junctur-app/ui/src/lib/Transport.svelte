@@ -2,15 +2,27 @@
   import * as api from "./api";
   import Timeline from "./Timeline.svelte";
   import Clocks from "./Clocks.svelte";
+  import EditBar from "./EditBar.svelte";
+  import type { Selection } from "./selection";
 
   let {
     player,
     edit,
+    selection,
+    span,
+    right,
+    onSelect,
     onOpen,
     onError,
   }: {
     player: api.PlayerState | null;
     edit: api.EditState | null;
+    selection: Selection | null;
+    /** The selection in source seconds, drawn on the timeline. */
+    span: { start: number; end: number } | null;
+    /** Pixels on the right taken by the transcript panel. */
+    right: number;
+    onSelect: (s: Selection | null) => void;
     onOpen: () => void;
     onError: (message: string) => void;
   } = $props();
@@ -39,7 +51,11 @@
   }
 </script>
 
-<footer>
+<footer style:right="{right}px">
+  {#if loaded}
+    <EditBar {player} {edit} {selection} {onError} />
+  {/if}
+  <div class="row">
   <button onclick={onOpen} disabled={!player} title="Open a recording">Open</button>
   <button
     class="play"
@@ -60,7 +76,7 @@
     Skip cuts
   </button>
   <Clocks {player} {edit} />
-  <Timeline {player} {edit} {onError} />
+  <Timeline {player} {edit} {span} {onSelect} {onError} />
   <select
     value={selectedTrack}
     disabled={!player?.audioTracks.length}
@@ -74,6 +90,7 @@
       <option value={t.id}>Track {trackLabel(t)}</option>
     {/each}
   </select>
+  </div>
 </footer>
 
 <style>
@@ -83,10 +100,15 @@
     right: 0;
     bottom: 0;
     display: flex;
-    align-items: center;
-    gap: 10px;
+    flex-direction: column;
+    gap: 8px;
     padding: 12px 16px;
     background: linear-gradient(to top, var(--panel) 60%, transparent);
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
   }
   .play {
     min-width: 64px;

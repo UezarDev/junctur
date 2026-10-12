@@ -36,6 +36,25 @@ impl Envelope {
     }
 }
 
+/// Where a hand-made boundary goes in the pause `gap` between two words (end of the one before,
+/// start of the one after), placed as [`keep_ranges`] places its own: `pad_after` past the speech
+/// when the side before is kept (`kept_before`), else `pad_before` ahead of the speech after, then
+/// the quietest step within `snap`. Never outside the gap, so a cut never clips either word; a gap
+/// the words overlap in gives its middle.
+pub fn snap_boundary(env: &Envelope, gap: (f64, f64), kept_before: bool, s: &CutSettings) -> f64 {
+    let (a, b) = gap;
+    if b <= a {
+        return (a + b) / 2.0;
+    }
+    let target = if kept_before {
+        a + s.pad_after
+    } else {
+        b - s.pad_before
+    }
+    .clamp(a, b);
+    env.quietest((target - s.snap).max(a), (target + s.snap).min(b), target)
+}
+
 /// Ranges to keep from speech regions (any order, any number of tracks) within `[0, total]`.
 pub fn keep_ranges(speech: &[Region], env: &Envelope, total: f64, s: &CutSettings) -> Vec<Range> {
     let mut regions: Vec<Region> = speech.to_vec();
@@ -128,5 +147,30 @@ mod tests {
             &CutSettings::default(),
         );
         assert!((k[0].start - 9.70).abs() < 1e-6, "{:?}", k[0]);
+    }
+
+    #[test]
+    fn hand_boundaries_pad_snap_and_stay_in_the_gap() {
+        let s = CutSettings::default();
+        // Flat: just the pad. After kept speech ending at 10.0, 0.35 s later; before speech at
+        // 12.0, 0.25 s earlier.
+        let b = snap_boundary(&flat(), (10.0, 12.0), true, &s);
+        assert!((b - 10.35).abs() < 1e-9, "{b}");
+        let b = snap_boundary(&flat(), (10.0, 12.0), false, &s);
+        assert!((b - 11.75).abs() < 1e-9, "{b}");
+        // A pause shorter than the pad: the far edge of the gap, never into the next word.
+        let b = snap_boundary(&flat(), (10.0, 10.1), true, &s);
+        assert!((b - 10.1).abs() < 1e-9, "{b}");
+        // A quiet step within `snap` wins, but not one past the next word's start.
+        let mut e = vec![1.0f32; 2000];
+        e[1040] = 0.0;
+        e[1060] = 0.0;
+        let b = snap_boundary(&Envelope(e.clone()), (10.0, 10.5), true, &s);
+        assert!((b - 10.40).abs() < 1e-6, "{b}");
+        // Before speech at 10.45: the target is 10.20, and 10.40 is beyond `snap` of it.
+        let b = snap_boundary(&Envelope(e), (10.0, 10.45), false, &s);
+        assert!((b - 10.20).abs() < 1e-6, "{b}");
+        // Overlapping words (two tracks): the middle.
+        assert_eq!(snap_boundary(&flat(), (5.0, 4.0), true, &s), 4.5);
     }
 }

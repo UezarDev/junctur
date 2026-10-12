@@ -10,7 +10,8 @@ pub mod watch;
 use std::path::Path;
 use std::sync::Arc;
 
-use junctur_core::{edit, ffmpeg};
+use junctur_core::edit::{self, EditList};
+use junctur_core::ffmpeg;
 use serde::Serialize;
 
 use crate::project::EditSummary;
@@ -38,6 +39,8 @@ pub struct Load {
 /// The edit list as last read from disk.
 #[derive(Debug, Clone, Default)]
 pub struct Edit {
+    /// The list as parsed: what the editor edits.
+    pub list: Option<Arc<EditList>>,
     pub timeline: Option<Arc<Timeline>>,
     pub summary: Option<EditSummary>,
     /// Why there is no timeline (or why the last change was not taken): unreadable, keeps nothing.
@@ -79,24 +82,31 @@ pub fn read(edit_path: &Path, fps: Fps) -> Option<Edit> {
 }
 
 fn parse(text: &str, edit_path: &Path, fps: Fps) -> Edit {
-    let list = match edit::parse(text) {
-        Ok(l) => l,
-        Err(e) => return failed(format!("{}: {e}", edit_path.display())),
-    };
+    match edit::parse(text) {
+        Ok(l) => from_list(l, fps),
+        Err(e) => failed(format!("{}: {e}", edit_path.display())),
+    }
+}
+
+/// An edit list that parsed (read from disk, or made by the editor) on the frame grid.
+pub fn from_list(list: EditList, fps: Fps) -> Edit {
     let summary = Some(EditSummary {
         ranges: list.keep.len(),
         kept: list.kept(),
         duration: list.duration,
     });
     let t = Timeline::new(&list.keep, list.duration, fps);
+    let list = Some(Arc::new(list));
     if t.is_empty() {
         return Edit {
+            list,
             timeline: None,
             summary,
             error: Some("the edit list keeps nothing".into()),
         };
     }
     Edit {
+        list,
         timeline: Some(Arc::new(t)),
         summary,
         error: None,
@@ -142,6 +152,7 @@ fn failed(error: String) -> Edit {
 pub struct EditState {
     /// The user's choice; it takes effect only while there is a timeline.
     pub skip: bool,
+    /// The frame rate the ranges are counted in, once known (also for a list keeping nothing).
     pub fps: Option<Fps>,
     /// Kept source frames, flattened `[start0, end0, start1, end1, ...]` (compact for thousands).
     pub ranges: Vec<u64>,
@@ -149,14 +160,25 @@ pub struct EditState {
     pub output_frames: u64,
     pub summary: Option<EditSummary>,
     pub error: Option<String>,
+    /// There is a parsed list the editor can change.
+    pub editable: bool,
+    pub can_undo: bool,
+    pub can_redo: bool,
+}
+
+/// What the editor's history allows, as the edit state reports it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct History {
+    pub can_undo: bool,
+    pub can_redo: bool,
 }
 
 impl EditState {
-    pub fn new(edit: &Edit, skip: bool) -> Self {
+    pub fn new(edit: &Edit, skip: bool, fps: Option<Fps>, history: History) -> Self {
         let t = edit.timeline.as_deref();
         Self {
             skip,
-            fps: t.map(|t| t.fps),
+            fps: t.map(|t| t.fps).or(fps),
             ranges: t.map_or_else(Vec::new, |t| {
                 t.ranges.iter().flat_map(|&(a, b)| [a, b]).collect()
             }),
@@ -164,6 +186,9 @@ impl EditState {
             output_frames: t.map_or(0, |t| t.output_frames),
             summary: edit.summary.clone(),
             error: edit.error.clone(),
+            editable: edit.list.is_some() && fps.is_some(),
+            can_undo: history.can_undo,
+            can_redo: history.can_redo,
         }
     }
 }
@@ -209,7 +234,7 @@ mod tests {
         .unwrap();
         let e = read(&p, FPS).unwrap();
         assert_eq!(e.timeline.as_ref().unwrap().ranges, vec![(30, 60)]);
-        let s = EditState::new(&e, true);
+        let s = EditState::new(&e, true, Some(FPS), History::default());
         assert_eq!(s.ranges, vec![30, 60]);
         assert_eq!((s.total_frames, s.output_frames), (300, 30));
         assert_eq!(s.summary.unwrap().ranges, 1);

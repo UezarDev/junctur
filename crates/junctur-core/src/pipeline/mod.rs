@@ -20,6 +20,14 @@ use crate::tracks::{self, Role, TrackReport};
 use crate::transcribe::{self, Languages, ModelPref, Source, TranscribeOptions, Transcript};
 use crate::{cache, Error, Result};
 
+const ENVELOPE_FILE: &str = "envelope.f32";
+
+/// The speech tracks' envelope the `speech` stage left in project folder `dir`, which hand-made
+/// cuts snap to as the reduction's do. `None` before that stage ran.
+pub fn envelope(dir: &Path) -> Option<edit::Envelope> {
+    speech::load_envelope(&dir.join(ENVELOPE_FILE)).ok()
+}
+
 /// Where a recording's derived files live: `<cache>/projects/<key>/` unless the caller names a
 /// folder (e.g. one inside a git repo, to track the edit list).
 #[derive(Debug, Clone)]
@@ -55,7 +63,7 @@ impl Project {
         self.dir.join("speech.json")
     }
     fn envelope_path(&self) -> PathBuf {
-        self.dir.join("envelope.f32")
+        self.dir.join(ENVELOPE_FILE)
     }
 
     pub fn jobs(&self) -> Jobs {

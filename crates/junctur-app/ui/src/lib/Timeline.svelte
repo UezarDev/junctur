@@ -1,19 +1,25 @@
 <script lang="ts">
   // The whole recording in source time: kept stretches lit, cuts dark, the playhead, click/drag to
-  // seek. The ranges are painted onto a canvas only when the edit list or the size changes (each
+  // seek, shift-drag to select a stretch to cut or keep (drawn over the bar, as is a transcript
+  // selection). The ranges are painted onto a canvas only when the edit list or the size changes (each
   // pixel column shaded by how much of it is kept, see coverage.ts), and the playhead is a separate
   // element moved by CSS, so a position update never repaints thousands of ranges.
   import { onMount } from "svelte";
   import * as api from "./api";
   import { coverage } from "./coverage";
+  import type { Selection } from "./selection";
 
   let {
     player,
     edit,
+    span,
+    onSelect,
     onError,
   }: {
     player: api.PlayerState | null;
     edit: api.EditState | null;
+    span: { start: number; end: number } | null;
+    onSelect: (s: Selection | null) => void;
     onError: (message: string) => void;
   } = $props();
 
@@ -98,18 +104,42 @@
     }
   });
 
+  // Shift-drag: a stretch of whole frames from where the drag began.
+  let selectFrom: number | null = null;
+  function frameAt(clientX: number): number {
+    const f = edit?.fps;
+    return f ? Math.round((timeAt(clientX) * f.num) / f.den) : 0;
+  }
+
+  function selectTo(clientX: number) {
+    if (selectFrom == null) return;
+    const to = frameAt(clientX);
+    const [a, b] = [Math.min(selectFrom, to), Math.max(selectFrom, to)];
+    onSelect(b > a ? { kind: "frames", start: a, end: b } : null);
+  }
+
   function down(e: PointerEvent) {
     if (!loaded || !duration || e.button !== 0) return;
     bar.setPointerCapture(e.pointerId);
+    if (e.shiftKey && edit?.editable && edit.fps) {
+      selectFrom = frameAt(e.clientX);
+      return;
+    }
     dragging = true;
     dragTo(timeAt(e.clientX));
   }
 
   function move(e: PointerEvent) {
-    if (dragging) dragTo(timeAt(e.clientX));
+    if (selectFrom != null) selectTo(e.clientX);
+    else if (dragging) dragTo(timeAt(e.clientX));
   }
 
   function up(e: PointerEvent) {
+    if (selectFrom != null) {
+      selectTo(e.clientX);
+      selectFrom = null;
+      return;
+    }
     if (!dragging) return;
     dragging = false;
     release(timeAt(e.clientX));
@@ -172,6 +202,13 @@
   aria-valuenow={shown}
 >
   <canvas bind:this={canvas}></canvas>
+  {#if span && duration}
+    <div
+      class="sel"
+      style:left="{(Math.max(0, span.start) / duration) * 100}%"
+      style:width="{(Math.max(0, span.end - span.start) / duration) * 100}%"
+    ></div>
+  {/if}
   {#if loaded && duration}
     <div class="head" style:left="{fraction * 100}%"></div>
   {/if}
@@ -201,6 +238,17 @@
     width: 100%;
     height: 10px;
     border-radius: 3px;
+  }
+  .sel {
+    position: absolute;
+    top: 3px;
+    height: 16px;
+    min-width: 2px;
+    border-radius: 2px;
+    background: rgba(120, 170, 255, 0.35);
+    border: 1px solid rgba(120, 170, 255, 0.8);
+    box-sizing: border-box;
+    pointer-events: none;
   }
   .head {
     position: absolute;

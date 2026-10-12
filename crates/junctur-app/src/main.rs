@@ -6,6 +6,7 @@
 
 mod commands;
 mod cuts;
+mod editor;
 mod lock;
 mod mpv;
 mod player;
@@ -90,6 +91,13 @@ fn main() {
             commands::set_audio_track,
             commands::set_skip,
             commands::edit_state,
+            commands::transcript,
+            commands::edit_words,
+            commands::edit_frames,
+            commands::undo,
+            commands::redo,
+            commands::set_video_margin,
+            commands::ui_log,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the app")

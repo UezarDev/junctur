@@ -52,6 +52,17 @@ export interface EditState {
   outputFrames: number;
   summary: EditSummary | null;
   error: string | null;
+  /** There is a list the editor can change (src/editor). */
+  editable: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
+}
+
+/** The transcript's words (src/editor/words.rs): texts joined by newlines, times in ms. */
+export interface TranscriptView {
+  text: string;
+  start: number[];
+  end: number[];
 }
 
 export type StageState = "pending" | "running" | "done" | "failed";
@@ -79,6 +90,18 @@ export const seek = (seconds: number, exact: boolean) =>
 export const setAudioTrack = (id: number) => invoke<void>("set_audio_track", { id });
 export const setSkip = (on: boolean) => invoke<void>("set_skip", { on });
 export const editState = () => invoke<EditState>("edit_state");
+export const transcript = () => invoke<TranscriptView | null>("transcript");
+/** Cuts (`keep` false) or keeps words `first..=last`, snapped into the pauses around them. */
+export const editWords = (first: number, last: number, keep: boolean) =>
+  invoke<void>("edit_words", { first, last, keep });
+/** Cuts or keeps source frames `[start, end)` exactly. */
+export const editFrames = (start: number, end: number, keep: boolean) =>
+  invoke<void>("edit_frames", { start, end, keep });
+export const undo = () => invoke<void>("undo");
+export const redo = () => invoke<void>("redo");
+/** The share of the window's width (0..1) on the right to keep free of video. */
+export const setVideoMargin = (right: number) => invoke<void>("set_video_margin", { right });
+export const uiLog = (message: string) => invoke<void>("ui_log", { message });
 
 export const onPlayerState = (f: (s: PlayerState) => void): Promise<UnlistenFn> =>
   listen<PlayerState>("player-state", (e) => f(e.payload));

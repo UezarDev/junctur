@@ -4,14 +4,15 @@
 //! thread: an mpv command blocks until mpv takes it, and a dragged seek bar sends many.
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::State;
 
 use crate::cuts::EditState;
+use crate::editor::{Op, Step, TranscriptView};
 use crate::lock::lock;
-use crate::player::Player;
+use crate::player::{Core, Player};
 use crate::project::{self, ProjectStatus};
 use crate::state::PlayerState;
 
@@ -28,6 +29,12 @@ impl App {
             Ok(p) => f(p),
             Err(e) => Err(e.clone()),
         }
+    }
+
+    /// The player's shared part, for a command that should not hold the app's player lock while
+    /// it works (edits save a file; the transcript is parsed on first use).
+    fn core(&self) -> Result<Arc<Core>, String> {
+        self.with(|p| Ok(p.core()))
     }
 }
 
@@ -95,4 +102,56 @@ pub async fn seek(app: State<'_, App>, seconds: f64, exact: bool) -> Result<f64,
 #[tauri::command]
 pub async fn set_audio_track(app: State<'_, App>, id: i64) -> Result<(), String> {
     app.with(|p| p.set_audio_track(id))
+}
+
+/// The open recording's transcript words, or `None` when it has none yet. Read outside the app's
+/// player lock: a 30 h transcript takes a moment to parse the first time.
+#[tauri::command]
+pub async fn transcript(app: State<'_, App>) -> Result<Option<TranscriptView>, String> {
+    Ok(app.core()?.transcript())
+}
+
+/// Cuts (`keep` false) or keeps transcript words `first..=last`, snapped into the pauses around.
+#[tauri::command]
+pub async fn edit_words(
+    app: State<'_, App>,
+    first: usize,
+    last: usize,
+    keep: bool,
+) -> Result<(), String> {
+    app.core()?.edit(Step::Do(Op::Words { first, last, keep }))
+}
+
+/// Cuts or keeps source frames `[start, end)` exactly (timeline selections, nudges, restoring a
+/// whole cut stretch).
+#[tauri::command]
+pub async fn edit_frames(
+    app: State<'_, App>,
+    start: u64,
+    end: u64,
+    keep: bool,
+) -> Result<(), String> {
+    app.core()?.edit(Step::Do(Op::Frames { start, end, keep }))
+}
+
+#[tauri::command]
+pub async fn undo(app: State<'_, App>) -> Result<(), String> {
+    app.core()?.edit(Step::Undo)
+}
+
+#[tauri::command]
+pub async fn redo(app: State<'_, App>) -> Result<(), String> {
+    app.core()?.edit(Step::Redo)
+}
+
+/// The share of the window's width the transcript panel covers, kept free of video.
+#[tauri::command]
+pub async fn set_video_margin(app: State<'_, App>, right: f64) -> Result<(), String> {
+    app.with(|p| p.set_video_margin(right))
+}
+
+/// A line from the frontend for the app's log (timings test mode reports).
+#[tauri::command]
+pub fn ui_log(message: String) {
+    crate::testmode::ui_log(message);
 }

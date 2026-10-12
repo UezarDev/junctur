@@ -5,10 +5,15 @@
   import * as api from "./lib/api";
   import Transport from "./lib/Transport.svelte";
   import ProjectPanel from "./lib/ProjectPanel.svelte";
+  import TranscriptPanel from "./lib/TranscriptPanel.svelte";
+  import * as sel from "./lib/selection";
+  import { words as toWords, type Words } from "./lib/transcript";
 
-  let player = $state<api.PlayerState | null>(null);
+  // Raw (not deeply reactive): these are replaced whole on every update, and a 30 h transcript or
+  // edit list read through a reactive proxy makes every layout pass several times slower.
+  let player = $state.raw<api.PlayerState | null>(null);
   let opened = $state<api.Opened | null>(null);
-  let edit = $state<api.EditState | null>(null);
+  let edit = $state.raw<api.EditState | null>(null);
   // The project panel shows the edit list as last read (it reloads when the file changes).
   const project = $derived(
     opened?.project && edit
@@ -23,12 +28,49 @@
   let failure = $state<string | null>(null);
   let dragging = $state(false);
 
+  // The transcript and what is selected in it (or on the timeline).
+  let words = $state.raw<Words | null>(null);
+  let wordsLoading = $state(false);
+  let selection = $state<sel.Selection | null>(null);
+  let panelOpen = $state(true);
+  let windowWidth = $state(window.innerWidth);
+  const PANEL = 400;
+  const panelWidth = $derived(player?.path && panelOpen ? Math.min(PANEL, windowWidth * 0.45) : 0);
+  const span = $derived(sel.seconds(selection, words, edit?.fps ?? null));
+
+  // The panel is opaque; mpv keeps the picture out from under it.
+  $effect(() => {
+    const share = windowWidth > 0 ? panelWidth / windowWidth : 0;
+    api.setVideoMargin(share).catch(() => {});
+  });
+
+  async function loadTranscript() {
+    words = null;
+    selection = null;
+    wordsLoading = true;
+    try {
+      const t0 = performance.now();
+      const view = await api.transcript();
+      const t1 = performance.now();
+      words = view ? toWords(view) : null;
+      const n = words?.text.length ?? 0;
+      void api.uiLog(
+        `transcript ${n} words: fetched in ${(t1 - t0).toFixed(0)} ms, split in ${(performance.now() - t1).toFixed(0)} ms`,
+      );
+    } catch (e) {
+      failure = String(e);
+    } finally {
+      wordsLoading = false;
+    }
+  }
+
   const VIDEO = ["mp4", "mkv", "mov", "flv", "ts", "webm", "avi"];
 
   async function load(path: string) {
     try {
       failure = null;
       opened = await api.openFile(path);
+      await loadTranscript();
     } catch (e) {
       failure = String(e);
     }
@@ -53,7 +95,31 @@
 
   function onKey(e: KeyboardEvent) {
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
-    if (e.code === "Space" && player?.path) {
+    const ctrl = e.ctrlKey || e.metaKey;
+    if (edit?.editable && player?.path) {
+      if (ctrl && (e.code === "KeyY" || (e.code === "KeyZ" && e.shiftKey))) {
+        e.preventDefault();
+        return run(api.redo);
+      }
+      if (ctrl && e.code === "KeyZ") {
+        e.preventDefault();
+        return run(api.undo);
+      }
+      if (selection && (e.code === "Delete" || e.code === "Backspace")) {
+        e.preventDefault();
+        const s = selection;
+        return run(() => sel.apply(s, false));
+      }
+      if (selection && e.code === "KeyK" && !ctrl) {
+        const s = selection;
+        return run(() => sel.apply(s, true));
+      }
+    }
+    if (e.code === "Escape") {
+      selection = null;
+    } else if (e.code === "KeyT" && !ctrl && player?.path) {
+      panelOpen = !panelOpen;
+    } else if (e.code === "Space" && player?.path) {
       e.preventDefault();
       run(api.togglePause);
     } else if (e.code === "KeyS" && player?.path && edit?.ranges.length) {
@@ -84,7 +150,7 @@
   });
 </script>
 
-<svelte:window onkeydown={onKey} />
+<svelte:window onkeydown={onKey} onresize={() => (windowWidth = window.innerWidth)} />
 
 <main class:dragging>
   {#if !player?.path}
@@ -103,7 +169,30 @@
     <div class="failure" role="alert">{failure ?? player?.error}</div>
   {/if}
 
-  <Transport {player} {edit} onOpen={pick} onError={(e) => (failure = e)} />
+  {#if panelWidth > 0}
+    <div class="side" style:width="{panelWidth}px">
+      <TranscriptPanel
+        {words}
+        loading={wordsLoading}
+        {player}
+        {edit}
+        {selection}
+        onSelect={(s) => (selection = s)}
+        onError={(e) => (failure = e)}
+      />
+    </div>
+  {/if}
+
+  <Transport
+    {player}
+    {edit}
+    {selection}
+    {span}
+    right={panelWidth}
+    onSelect={(s) => (selection = s)}
+    onOpen={pick}
+    onError={(e) => (failure = e)}
+  />
 </main>
 
 <style>
@@ -136,9 +225,16 @@
     margin: 0 0 8px;
     color: var(--muted);
   }
+  .side {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+  }
   .failure {
     position: absolute;
-    left: 16px;
+    left: 50%;
+    transform: translateX(-50%);
     top: 16px;
     max-width: 60%;
     padding: 8px 12px;

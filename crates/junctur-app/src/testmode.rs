@@ -8,16 +8,23 @@
 //! report gives the state each one led to (sampled just before the next) and the skip trace (see
 //! `trace`): every range boundary crossed with its frames and stall.
 //!
+//! Edit steps (2c) run the editor as the frontend does: `cutw=12-15` / `keepw=12-15` (transcript
+//! words, by index), `cutf=300-450` / `keepf=300-450` (source frames), `undo`, `redo`. Each step's
+//! report adds the edit state it left, and the final report re-reads `edit.junctur` from disk
+//! (`disk`: does it parse, and is it the list in play), counts the loads asked of mpv (a save must
+//! not come back as a second reload) and lists the frontend's log lines (`ui`).
+//!
 //! Embedding can only be checked in a real window, so this is the way a script (or a later phase)
 //! runs the app without putting a window or a sound in front of the user.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
 use crate::commands::App;
+use crate::editor::{Op, Step};
 use crate::lock::lock;
 use crate::player::Player;
 use crate::state::PlayerState;
@@ -59,6 +66,24 @@ enum Action {
     KeySeek(f64),
     Skip(bool),
     Pause,
+    Edit(Step),
+}
+
+/// The frontend's log lines (`ui_log`), kept for the report.
+static UI_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// A line from the frontend: printed, and kept for the report in test mode.
+pub fn ui_log(message: String) {
+    eprintln!("junctur-app ui: {message}");
+    if seconds().is_some() {
+        lock(&UI_LOG).push(message);
+    }
+}
+
+/// `"a-b"` as two whole numbers.
+fn pair(v: &str) -> Option<(u64, u64)> {
+    let (a, b) = v.split_once('-')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
 }
 
 /// `"<seconds>:<action>;..."`, sorted by time. Unknown steps are an error, so a typo in a check
@@ -75,7 +100,26 @@ fn parse_steps(s: &str) -> Result<Vec<(f64, Action)>, String> {
             Some(("kseek", v)) => Action::KeySeek(v.parse().map_err(|_| bad())?),
             Some(("skip", "on")) => Action::Skip(true),
             Some(("skip", "off")) => Action::Skip(false),
+            Some((kind @ ("cutw" | "keepw" | "cutf" | "keepf"), v)) => {
+                let (a, b) = pair(v).ok_or_else(bad)?;
+                let keep = kind.starts_with("keep");
+                Action::Edit(Step::Do(if kind.ends_with('w') {
+                    Op::Words {
+                        first: a as usize,
+                        last: b as usize,
+                        keep,
+                    }
+                } else {
+                    Op::Frames {
+                        start: a,
+                        end: b,
+                        keep,
+                    }
+                }))
+            }
             None if action == "pause" => Action::Pause,
+            None if action == "undo" => Action::Edit(Step::Undo),
+            None if action == "redo" => Action::Edit(Step::Redo),
             _ => return Err(bad()),
         };
         steps.push((at, action));
@@ -108,6 +152,7 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
         Action::KeySeek(s) => p.seek(*s, false).map(|_| ()),
         Action::Skip(on) => p.set_skip(*on),
         Action::Pause => p.toggle_pause(),
+        Action::Edit(step) => p.edit(*step),
     })?
 }
 
@@ -120,18 +165,57 @@ struct Ran<'a> {
     at: f64,
     action: &'a Action,
     error: Option<String>,
+    /// How long the action itself took (an edit: apply, save and hand to playback).
+    ms: f64,
 }
 
 impl Ran<'_> {
     fn report(self, app: &AppHandle) -> Value {
         let after = snapshot(app).ok().map(|s| s.0);
+        let edit = with_player(app, |p| p.edit_state()).ok().map(|e| {
+            json!({
+                "ranges": e.summary.as_ref().map(|s| s.ranges),
+                "kept": e.summary.as_ref().map(|s| s.kept),
+                "outputFrames": e.output_frames,
+                "canUndo": e.can_undo,
+                "canRedo": e.can_redo,
+                "error": e.error,
+            })
+        });
         json!({
             "at": self.at,
             "action": format!("{:?}", self.action),
             "error": self.error,
+            "ms": self.ms,
             "after": after,
+            "edit": edit,
         })
     }
+}
+
+/// `edit.junctur` as it is on disk now, against the list in play: it must parse and be the same
+/// list, and the backups beside it are listed.
+fn disk_check(p: &Player) -> Value {
+    let (path, playing) = p.edit_file();
+    let Some(path) = path else {
+        return Value::Null;
+    };
+    let read = std::fs::read_to_string(&path).map_err(|e| e.to_string());
+    let parsed = read.and_then(|t| junctur_core::edit::parse(&t));
+    let backups: Vec<String> = std::fs::read_dir(path.parent().unwrap_or(&path))
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.contains(".bak"))
+                .collect()
+        })
+        .unwrap_or_default();
+    json!({
+        "parses": parsed.as_ref().err().cloned().map_or(Value::Bool(true), Value::String),
+        "ranges": parsed.as_ref().ok().map(|l| l.keep.len()),
+        "sameAsPlaying": parsed.ok().zip(playing).map(|(d, p)| d == *p),
+        "backups": backups,
+    })
 }
 
 /// The trace test mode records into, when test mode is on.
@@ -176,10 +260,13 @@ pub fn arm(app: AppHandle, seconds: f64, trace: Option<Arc<Trace>>) {
             if let Some(r) = last.take() {
                 done.push(r.report(&app));
             }
+            let t0 = Instant::now();
+            let error = run(&app, action).err();
             last = Some(Ran {
                 at: *at,
                 action,
-                error: run(&app, action).err(),
+                error,
+                ms: t0.elapsed().as_secs_f64() * 1000.0,
             });
         }
         if !sampled {
@@ -197,6 +284,9 @@ pub fn arm(app: AppHandle, seconds: f64, trace: Option<Arc<Trace>>) {
                 "state": state,
                 "steps": done,
                 "skips": trace.map(|t| t.report()),
+                "loads": with_player(&app, |p| p.loads()).ok(),
+                "disk": with_player(&app, disk_check).ok(),
+                "ui": lock(&UI_LOG).clone(),
             }),
             Err(e) => json!({ "verdict": "error", "error": e }),
         };
@@ -242,6 +332,25 @@ mod tests {
                 (8.0, Action::KeySeek(1.0)),
             ]
         );
+        let s = parse_steps("1:cutw=3-5;2:keepf=30-60;3:undo;4:redo").unwrap();
+        assert_eq!(
+            s.iter().map(|x| x.1.clone()).collect::<Vec<_>>(),
+            vec![
+                Action::Edit(Step::Do(Op::Words {
+                    first: 3,
+                    last: 5,
+                    keep: false
+                })),
+                Action::Edit(Step::Do(Op::Frames {
+                    start: 30,
+                    end: 60,
+                    keep: true
+                })),
+                Action::Edit(Step::Undo),
+                Action::Edit(Step::Redo),
+            ]
+        );
+        assert!(parse_steps("1:cutw=3").is_err());
         assert!(parse_steps("2:jump=3").is_err());
         assert!(parse_steps("x:pause").is_err());
         assert_eq!(parse_steps("").unwrap(), vec![]);
