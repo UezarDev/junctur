@@ -449,6 +449,7 @@ impl Core {
     /// outside the locks once the words and the list are in hand.
     pub fn export_captions(&self, out: &Path) -> Result<usize, String> {
         self.prepare();
+        // An `Arc` of the words, not a copy; the lock is held only to take it.
         let words = lock(&self.editor)
             .words
             .clone()

@@ -16,11 +16,12 @@
 //!
 //! `#` lines are comments. `source` takes the rest of the line, so paths need no quoting, and so
 //! does a speaker's name (after its id and the optional `track=<n>` and `color=#RRGGBB`), so
-//! renaming or recolouring a speaker by hand is editing one line. Times are seconds with millisecond precision. Speaker and turn lines are
-//! written only when there are speakers, the `captions` line only when it is not the default, and
-//! only then is the header `junctur-edit 2` (5a): a list without them is byte-for-byte what an older
-//! build wrote and still reads there, while a list with them tells an older build it is a newer
-//! format instead of failing on its first new line. Both versions read here.
+//! renaming or recolouring a speaker by hand is editing one line. Times are seconds with
+//! millisecond precision. Speaker and turn lines are written only when there are speakers, the
+//! `captions` line only when it is not the default, and only then is the header `junctur-edit 2`
+//! (5a): a list without them is byte-for-byte what an older build wrote and still reads there,
+//! while a list with them tells an older build it is a newer format instead of failing on its
+//! first new line. Both versions read here.
 
 use std::fmt::Write;
 use std::path::PathBuf;
@@ -186,10 +187,14 @@ pub fn parse(text: &str) -> Result<EditList, String> {
                     track = Some(t.parse().map_err(|_| bad("`track=` needs a number"))?);
                     rest = r.trim();
                 }
+                // `color=` only with a real colour after it: a list from before colours may
+                // have a name like "color=red Ana", which stays a name.
                 if let Some(r) = rest.strip_prefix("color=") {
                     let (c, r) = r.split_once(' ').unwrap_or((r, ""));
-                    color = Some(parse_color(c).ok_or_else(|| bad("`color=` needs #RRGGBB"))?);
-                    rest = r.trim();
+                    if let Some(c) = parse_color(c) {
+                        color = Some(c);
+                        rest = r.trim();
+                    }
                 }
                 let name = rest;
                 e.speakers.names.push(SpeakerName {
@@ -217,11 +222,11 @@ pub fn parse(text: &str) -> Result<EditList, String> {
                     let (k, v) = kv
                         .split_once('=')
                         .ok_or_else(|| bad("expected key=value"))?;
-                    let n = || v.parse::<f64>().map_err(|_| bad("not a number"));
+                    let whole = || v.parse::<u32>().map_err(|_| bad("not a whole number"));
                     match k {
-                        "chars" => c.chars = n()? as u32,
-                        "lines" => c.lines = n()? as u32,
-                        "seconds" => c.seconds = n()?,
+                        "chars" => c.chars = whole()?,
+                        "lines" => c.lines = whole()?,
+                        "seconds" => c.seconds = v.parse().map_err(|_| bad("not a number"))?,
                         _ => return Err(bad("unknown caption setting")),
                     }
                 }
@@ -391,7 +396,13 @@ mod tests {
         assert_eq!(e.speakers.color(2), Some(default_color(2).as_str()));
         assert_eq!(e.speakers.name(2), Some("Bo"));
         assert_eq!(e.captions, Captions::default());
-        assert!(parse(&format!("{head}speaker 1 color=red Ana\n")).is_err());
+        // Not a colour: part of the name, as an older list would have it.
+        let old = parse(&format!("{head}speaker 1 color=red Ana\n")).unwrap();
+        assert_eq!(old.speakers.name(1), Some("color=red Ana"));
+        assert_eq!(old.speakers.color(1), Some(default_color(1).as_str()));
+        let back = parse(&old.to_text()).unwrap();
+        assert_eq!(back.speakers, old.speakers);
+        assert!(parse(&format!("{head}captions on chars=42.9\n")).is_err());
         assert!(parse(&format!("{head}captions maybe\n")).is_err());
         assert!(parse(&format!("{head}captions on chars=500\n")).is_err());
         assert!(parse(&format!("{head}captions on size=3\n")).is_err());

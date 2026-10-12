@@ -243,7 +243,6 @@ impl Editor {
     }
 
     /// Moves an undo (or redo) step to the other stack, `before` being the ranges it replaced.
-    /// Moves an undo (or redo) step to the other stack, `before` being the ranges it replaced.
     fn shift(&mut self, step: Step, before: Vec<Range>) {
         match step {
             Step::Do(_) => {}

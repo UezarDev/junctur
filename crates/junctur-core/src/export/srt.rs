@@ -22,6 +22,9 @@ const PAUSE_S: f64 = 1.0;
 /// A cue stays at least this long when the next one leaves room: one word flashed for its own
 /// 0.2 s cannot be read.
 const MIN_S: f64 = 0.8;
+/// No cue is shorter than this: when the next one would start sooner (two tracks talking at once),
+/// the next one waits. Shorter than [`MIN_S`] so a quick exchange does not drift far behind.
+const READABLE_S: f64 = 0.5;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cue {
@@ -43,6 +46,13 @@ struct Timeline {
 }
 
 impl Timeline {
+    /// Output seconds of the whole edited timeline.
+    fn total(&self) -> f64 {
+        let frames =
+            self.before.last().copied().unwrap_or(0) + self.ranges.last().map_or(0, |(a, b)| b - a);
+        frames as f64 * self.den / self.num
+    }
+
     fn new(edit: &EditList, num: u64, den: u64) -> Self {
         let total = frames_ceil(edit.duration, num, den);
         let ranges = frame_ranges(&edit.keep, num, den, total);
@@ -87,28 +97,36 @@ fn width(s: &str) -> usize {
     s.chars().count()
 }
 
-/// `words` broken greedily into lines of at most `chars` (a longer word gets a line to itself).
-fn wrap(words: &[String], chars: usize) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    for w in words {
-        match lines.last_mut() {
-            Some(l) if width(l) + 1 + width(w) <= chars => {
-                l.push(' ');
-                l.push_str(w);
+/// What a word shows as: whole `<...>` and `{...}` spans removed (they would read as tags or
+/// `{\an8}`-style codes; a bracket left open drops just the bracket), line breaks as spaces (a
+/// blank line ends a cue), runs of space as one, trimmed.
+fn clean(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        let close = match c {
+            '<' => '>',
+            '{' => '}',
+            '>' | '}' => continue,
+            '\r' | '\n' | '\t' => {
+                out.push(' ');
+                continue;
             }
-            _ => lines.push(w.clone()),
+            _ => {
+                out.push(c);
+                continue;
+            }
+        };
+        // Skip the span and its closing bracket, if it closes.
+        if chars.clone().any(|x| x == close) {
+            for x in chars.by_ref() {
+                if x == close {
+                    break;
+                }
+            }
         }
     }
-    lines
-}
-
-/// What a word shows as: trimmed, without `<` and `>` (they would read as tags), braces kept out
-/// too (`{\an8}`-style codes).
-fn clean(text: &str) -> String {
-    text.trim()
-        .chars()
-        .filter(|c| !matches!(c, '<' | '>' | '{' | '}'))
-        .collect()
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The cues for `edit`'s kept words. `words` is every transcript word with the track it was heard
@@ -125,12 +143,19 @@ pub fn cues<'a>(
     let mut words: Vec<(usize, &Word)> = words.into_iter().collect();
     words.sort_by(|a, b| a.1.start.total_cmp(&b.1.start));
 
+    /// The cue being filled; its lines are wrapped as words arrive, so a word costs O(1).
     struct Open {
         start: f64,
         end: f64,
         speaker: u32,
-        words: Vec<String>,
+        lines: Vec<String>,
     }
+    let chars = c.chars as usize;
+    // Lines `lines` would have with `w` added (the greedy wrap of [`wrap_onto`]).
+    let lines_with = |lines: &[String], w: &str| match lines.last() {
+        Some(l) if width(l) + 1 + width(w) <= chars => lines.len(),
+        _ => lines.len() + 1,
+    };
     let mut out: Vec<Cue> = Vec::new();
     let mut open: Option<Open> = None;
     let close = |o: Open, out: &mut Vec<Cue>| {
@@ -138,7 +163,7 @@ pub fn cues<'a>(
             start: o.start,
             end: o.end,
             speaker: o.speaker,
-            lines: wrap(&o.words, c.chars as usize),
+            lines: o.lines,
         })
     };
     for (track, w) in words {
@@ -152,12 +177,10 @@ pub fn cues<'a>(
         let (start, end) = (tl.map(i, w.start), tl.map(i, w.end));
         let speaker = label.of_word(track, w.start, w.end).unwrap_or(0);
         if let Some(o) = &mut open {
-            let mut more = o.words.clone();
-            more.push(text.clone());
-            let fits = wrap(&more, c.chars as usize).len() <= c.lines as usize;
+            let fits = lines_with(&o.lines, &text) <= c.lines as usize;
             if o.speaker == speaker && start - o.end < PAUSE_S && end - o.start <= c.seconds && fits
             {
-                o.words = more;
+                o.lines = wrap_onto(std::mem::take(&mut o.lines), &text, chars);
                 o.end = o.end.max(end);
                 continue;
             }
@@ -169,35 +192,49 @@ pub fn cues<'a>(
             start,
             end,
             speaker,
-            words: vec![text],
+            lines: vec![text],
         });
     }
     if let Some(o) = open.take() {
         close(o, &mut out);
     }
-    settle(&mut out, c.seconds);
+    settle(&mut out, c.seconds, tl.total());
     out
 }
 
+/// `lines` with `w` added by the greedy wrap.
+fn wrap_onto(mut lines: Vec<String>, w: &str, chars: usize) -> Vec<String> {
+    match lines.last_mut() {
+        Some(l) if width(l) + 1 + width(w) <= chars => {
+            l.push(' ');
+            l.push_str(w);
+        }
+        _ => lines.push(w.to_string()),
+    }
+    lines
+}
+
 /// Cues in order and never overlapping (Resolve puts subtitles on one track, which cannot hold
-/// two at once): each ends by the next one's start; a short one is held to [`MIN_S`] where there
-/// is room, never past the longest a cue may last.
-fn settle(cues: &mut [Cue], longest: f64) {
+/// two at once), all within the edited timeline's `total` seconds. Each cue lasts at least
+/// [`READABLE_S`]: a next cue starting sooner (two tracks talking at once) waits that long. Then
+/// each ends by the next one's start, held to [`MIN_S`] where there is room, never past the
+/// longest a cue may last. A cue pushed past the end of the timeline is dropped.
+fn settle(cues: &mut Vec<Cue>, longest: f64, total: f64) {
     cues.sort_by(|a, b| a.start.total_cmp(&b.start));
     for i in 0..cues.len() {
+        let floor = cues[i].start + READABLE_S;
+        if let Some(n) = cues.get_mut(i + 1) {
+            if n.start < floor {
+                n.end += floor - n.start;
+                n.start = floor;
+            }
+        }
         let next = cues.get(i + 1).map_or(f64::INFINITY, |n| n.start);
         let c = &mut cues[i];
         let want = c.end.max(c.start + MIN_S).min(c.start + longest);
-        c.end = want.min(next).max(c.start + 0.001);
-        let end = c.end;
-        if let Some(n) = cues.get_mut(i + 1) {
-            // Words of two tracks can start together; the later cue starts once this one ends.
-            n.start = n.start.max(end);
-            if n.end <= n.start {
-                n.end = n.start + 0.001;
-            }
-        }
+        c.end = want.min(next).min(total);
     }
+    cues.retain(|c| c.end > c.start);
 }
 
 /// `HH:MM:SS,mmm`.
@@ -304,7 +341,9 @@ mod tests {
         assert_eq!(c[1].speaker, 2);
         assert!((c[1].start - 2.2).abs() < 1e-9, "{}", c[1].start);
         let text = write(&c, &e);
-        assert!(text.starts_with("1\r\n00:00:00,500 --> 00:00:01,600\r\n<font color=\"#F2B33D\">hola amigos</font>\r\n\r\n2\r\n00:00:02,200 --> "), "{text}");
+        let first = "1\r\n00:00:00,500 --> 00:00:01,600\r\n\
+                     <font color=\"#F2B33D\">hola amigos</font>\r\n\r\n2\r\n00:00:02,200 --> ";
+        assert!(text.starts_with(first), "{text}");
         assert!(text.contains("<font color=\"#5FB3F2\">qué tal</font>"));
     }
 
@@ -346,7 +385,7 @@ mod tests {
             word(1.9, 2.1, "cuatro"), // would make a 2nd line: new cue
             word(5.0, 5.2, "cinco"),  // after a 2.9 s pause: new cue
             word(5.3, 5.5, "seis"),
-            word(8.0, 8.2, "siete"), // still under 1 s gap? no: 2.5 s pause
+            word(8.0, 8.2, "siete"), // after a 2.5 s pause: new cue
             word(19.0, 19.5, "a"),
             word(20.5, 20.8, "b"), // speaker 2: new cue
         ];
@@ -372,6 +411,28 @@ mod tests {
         let c = cues(&e, w.iter().map(|w| (0, w)), 30, 1);
         assert!(c.len() >= 3);
         assert!(c.iter().all(|c| c.end - c.start <= 2.0 + 1e-9), "{c:?}");
+    }
+
+    #[test]
+    fn cues_that_start_together_both_get_readable_time() {
+        // Two tracks: "sí" on track 0 (speaker 1) and "no" on track 3 (speaker 2), same start.
+        let mut e = edit(&[(0.0, 40.0)], Captions::default());
+        e.speakers = Speakers::new(vec![], &[Some(0), Some(3)], None);
+        let (a, b) = (word(10.0, 10.2, "sí"), word(10.0, 10.3, "no"));
+        let c = cues(&e, [(0, &a), (3, &b)], 30, 1);
+        assert_eq!(c.len(), 2, "{c:?}");
+        assert!((c[0].end - c[0].start - READABLE_S).abs() < 1e-9, "{c:?}");
+        assert!((c[1].start - c[0].end).abs() < 1e-9);
+        assert!(c[1].end - c[1].start >= READABLE_S, "{c:?}");
+    }
+
+    #[test]
+    fn the_last_cue_ends_with_the_edited_timeline() {
+        // Kept 0-10 s; a last word at 9.8-9.9 would be held to 10.6.
+        let e = edit(&[(0.0, 10.0)], Captions::default());
+        let w = word(9.8, 9.9, "fin");
+        let c = cues(&e, [(0, &w)], 30, 1);
+        assert!((c[0].end - 10.0).abs() < 1e-9, "{c:?}");
     }
 
     #[test]
@@ -401,11 +462,13 @@ mod tests {
         e.speakers = Speakers::default();
         let w = [
             word(1.0, 1.2, " <b>hey</b> "),
-            word(1.3, 1.4, "{\\an8}"),
+            word(1.3, 1.4, "{\\an8}vale"),
             word(1.5, 1.6, "   "),
+            word(1.7, 1.8, "dos\r\nlíneas"),
+            word(1.9, 2.0, "a<b"),
         ];
         let c = cues(&e, w.iter().map(|w| (0, w)), 30, 1);
-        assert_eq!(c[0].lines, vec!["bhey/b \\an8"]);
+        assert_eq!(c[0].lines, vec!["hey vale dos líneas ab"]);
         let text = write(&c, &e);
         assert!(!text.contains("<font"), "no speaker, no colour");
         assert!(cues(&e, [], 30, 1).is_empty());

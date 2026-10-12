@@ -178,6 +178,17 @@ pub fn render(a: Args) -> Result<(), String> {
     let out = a.path("--out").ok_or("render needs --out <out.mp4>")?;
     let p = project(&a)?;
     let e = p.edit().map_err(|e| e.to_string())?;
+    // With captions on, what the caption file needs is checked before an encode that can take an
+    // hour, not after it.
+    let captions = if e.captions.on {
+        let srt = out.with_extension("srt");
+        junctur_core::output::refuse_source(&e.source, &srt).map_err(|e| e.to_string())?;
+        let t = transcribe::load(&p.dir)
+            .ok_or("captions are on but there is no transcript: run `junctur analyze` first")?;
+        Some((srt, t))
+    } else {
+        None
+    };
     let opts = RenderOptions {
         full: a.has("--full"),
         overwrite: a.has("--force"),
@@ -204,8 +215,9 @@ pub fn render(a: Args) -> Result<(), String> {
         r.seconds
     );
     // Captions are an optional toggle in the edit list; on, they go beside the video.
-    if e.captions.on {
-        write_captions(&p, &e, &out.with_extension("srt"))?;
+    if let Some((srt, t)) = captions {
+        let n = export::write_srt(&e, &t, &srt).map_err(|e| e.to_string())?;
+        println!("{} ({n} captions)", srt.display());
     }
     Ok(())
 }
