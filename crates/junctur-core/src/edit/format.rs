@@ -1,7 +1,7 @@
 //! The edit list's text form. One fact per line, so a git diff of a hand edit is one line:
 //!
 //! ```text
-//! junctur-edit 1
+//! junctur-edit 2
 //! source C:\Videos\stream.mp4
 //! duration 6304.021
 //! settings pad_before=0.25 pad_after=0.35 merge_gap=1 snap=0.15 crossfade=0.03 window=5
@@ -16,20 +16,28 @@
 //! `#` lines are comments. `source` takes the rest of the line, so paths need no quoting, and so
 //! does a speaker's name (after its id and an optional `track=<n>`), so renaming a speaker by hand
 //! is editing one line. Times are seconds with millisecond precision. Speaker and turn lines are
-//! written only when there are speakers, so a list without them reads exactly as before (5a): the
-//! version stays 1, since every file an older build wrote still parses the same.
+//! written only when there are speakers, and only then is the header `junctur-edit 2` (5a): a list
+//! without them is byte-for-byte what an older build wrote and still reads there, while a list with
+//! them tells an older build it is a newer format instead of failing on its first `speaker` line.
+//! Both versions read here.
 
 use std::fmt::Write;
 use std::path::PathBuf;
 
 use super::{default_name, CutSettings, EditList, Range, SpeakerName, Speakers, Turn, Window};
 
-pub const FORMAT_VERSION: u32 = 1;
+/// The newest version this build writes (with speakers); lists without speakers are written as 1.
+pub const FORMAT_VERSION: u32 = 2;
 
 pub fn write(e: &EditList) -> String {
     let s = &e.settings;
     let mut out = String::new();
-    let _ = writeln!(out, "junctur-edit {FORMAT_VERSION}");
+    let version = if e.speakers.is_empty() {
+        1
+    } else {
+        FORMAT_VERSION
+    };
+    let _ = writeln!(out, "junctur-edit {version}");
     let _ = writeln!(out, "source {}", e.source.display());
     let _ = writeln!(out, "duration {:.3}", e.duration);
     let _ = writeln!(
@@ -85,9 +93,17 @@ pub fn parse(text: &str) -> Result<EditList, String> {
         .enumerate()
         .map(|(i, l)| (i + 1, l.trim()))
         .filter(|(_, l)| !l.is_empty() && !l.starts_with('#'));
+    let version = |l: &str| {
+        l.strip_prefix("junctur-edit ")
+            .and_then(|v| v.parse::<u32>().ok())
+    };
     match lines.next() {
-        Some((_, l)) if l == format!("junctur-edit {FORMAT_VERSION}") => {}
-        _ => return Err(format!("not a junctur-edit {FORMAT_VERSION} file")),
+        Some((_, l)) if version(l).is_some_and(|v| (1..=FORMAT_VERSION).contains(&v)) => {}
+        _ => {
+            return Err(format!(
+                "not a junctur-edit file this build reads (versions 1 to {FORMAT_VERSION})"
+            ))
+        }
     }
     let mut e = EditList {
         source: PathBuf::new(),
@@ -277,70 +293,39 @@ mod tests {
     fn speakers_round_trip_and_stay_out_of_lists_without_them() {
         let e = with_speakers();
         let text = e.to_text();
+        assert!(text.starts_with("junctur-edit 2\n"), "{text}");
         assert!(
-            text.contains(
-                "speaker 2 track=1 Lucía de la Cruz
-"
-            ),
+            text.contains("speaker 2 track=1 Lucía de la Cruz\n"),
             "{text}"
         );
-        assert!(text.contains(
-            "turn 2.500 4.000 2
-"
-        ));
+        assert!(text.contains("turn 2.500 4.000 2\n"));
         assert_eq!(parse(&text).unwrap(), e);
-        assert!(!sample().to_text().contains("speaker"));
+        let plain = sample().to_text();
+        assert!(!plain.contains("speaker"));
+        assert!(plain.starts_with("junctur-edit 1\n"));
+        assert!(parse("junctur-edit 3\n").is_err());
     }
 
     #[test]
     fn hand_edited_speakers_are_read_or_refused_by_line() {
-        let head = "junctur-edit 1
-source x.mp4
-";
+        let head = "junctur-edit 2\nsource x.mp4\n";
         // A rename by hand, a blank name, turns before their speakers and out of order.
         let e = parse(&format!(
-            "{head}turn 5 6 2
-turn 1 2 1
-speaker 2   Ana  
-speaker 1
-"
+            "{head}turn 5 6 2\nturn 1 2 1\nspeaker 2   Ana  \nspeaker 1\n"
         ))
         .unwrap();
         assert_eq!(e.speakers.name(1), Some("Speaker 1"));
         assert_eq!(e.speakers.name(2), Some("Ana"));
         assert_eq!(e.speakers.turns[0].speaker, 1);
-        let err = parse(&format!(
-            "{head}speaker 1 A
-turn 1 2 3
-"
-        ))
-        .unwrap_err();
+        let err = parse(&format!("{head}speaker 1 A\nturn 1 2 3\n")).unwrap_err();
         assert!(
             err.starts_with("line 4") && err.contains("speaker 3"),
             "{err}"
         );
-        assert!(parse(&format!(
-            "{head}speaker 0 A
-"
-        ))
-        .is_err());
-        assert!(parse(&format!(
-            "{head}speaker 1 A
-speaker 1 B
-"
-        ))
-        .is_err());
-        assert!(parse(&format!(
-            "{head}speaker 1 track=x A
-"
-        ))
-        .is_err());
-        assert!(parse(&format!(
-            "{head}speaker 1 A
-turn 2 1 1
-"
-        ))
-        .is_err());
+        assert!(parse(&format!("{head}speaker 0 A\n")).is_err());
+        assert!(parse(&format!("{head}speaker 1 A\nspeaker 1 B\n")).is_err());
+        assert!(parse(&format!("{head}speaker 1 track=x A\n")).is_err());
+        assert!(parse(&format!("{head}speaker 1 A\nturn 2 1 1\n")).is_err());
     }
 
     #[test]

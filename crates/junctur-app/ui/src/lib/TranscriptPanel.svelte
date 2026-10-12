@@ -127,11 +127,14 @@
   const colour = (id: number) => PALETTE[(id - 1) % PALETTE.length];
   const nameOf = (id: number) => names.get(id) ?? `Speaker ${id}`;
 
-  // Renaming: one name row at a time turns into an input; Enter or leaving it saves, Escape drops.
-  let renaming = $state<number | null>(null);
+  // Renaming: the one name row that was clicked (by row index: the same speaker has a name row at
+  // every turn) turns into an input; Enter or leaving it saves, Escape drops it. While it is open
+  // the list stops following the playhead, so the row is not scrolled away (and unmounted) under
+  // the user's typing.
+  let renaming = $state<{ id: number; row: number } | null>(null);
   let draft = $state("");
-  function startRename(id: number) {
-    renaming = id;
+  function startRename(id: number, row: number) {
+    renaming = { id, row };
     draft = nameOf(id);
   }
   function focusInput(el: HTMLInputElement) {
@@ -139,7 +142,7 @@
     el.select();
   }
   function finishRename(save: boolean) {
-    const id = renaming;
+    const id = renaming?.id;
     renaming = null;
     if (!save || id == null) return;
     const name = draft.trim();
@@ -165,7 +168,7 @@
   $effect(() => {
     if (!laid || current < 0 || !scroller) return;
     const row = laid.rowOf[current];
-    if (performance.now() < pausedUntil) return;
+    if (renaming || performance.now() < pausedUntil) return;
     const y = row * ROW;
     if (y < top + ROW || y > top + height - 3 * ROW) {
       ours = Math.max(0, Math.round(y - height / 3));
@@ -292,7 +295,7 @@
           <div class="row" style:top="{index * ROW}px" style:padding-left="{GUTTER}px">
             {#if row.speaker != null}
               {@const id = row.speaker}
-              {#if renaming === id}
+              {#if renaming?.row === index}
                 <input
                   class="rename"
                   maxlength="60"
@@ -312,7 +315,7 @@
                   class="speaker"
                   style:color={colour(id)}
                   onpointerdown={(e) => e.stopPropagation()}
-                  onclick={() => startRename(id)}
+                  onclick={() => startRename(id, index)}
                   title="Rename this speaker">{nameOf(id)}</button
                 >
               {/if}

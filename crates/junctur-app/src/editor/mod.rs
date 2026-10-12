@@ -168,6 +168,10 @@ impl Editor {
         if name.contains(['\n', '\r']) {
             return Err("a speaker's name is one line".into());
         }
+        // The file reads a leading `track=<n>` as the speaker's track, not its name.
+        if name.starts_with("track=") {
+            return Err("a speaker's name cannot start with \"track=\"".into());
+        }
         if name.chars().count() > MAX_NAME {
             return Err(format!("a speaker's name is at most {MAX_NAME} characters"));
         }
@@ -489,6 +493,8 @@ mod tests {
         assert!(e.rename(&renamed, 1, "a\nb").is_err());
         assert!(e.rename(&renamed, 1, &"x".repeat(MAX_NAME + 1)).is_err());
         assert!(e.rename(&renamed, 2, "Bea").is_err());
+        assert!(e.rename(&renamed, 1, "track=2 Bob").is_err());
+        assert!(e.rename(&renamed, 1, "Bob track=2").is_ok());
         // Undoing the cut keeps the name.
         let undone = step(&mut e, &renamed, Step::Undo, FPS);
         assert_eq!(undone.keep, l0.keep);

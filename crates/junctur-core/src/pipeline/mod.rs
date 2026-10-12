@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 pub use jobs::{Jobs, StageRecord, StageState, STAGES};
-pub use speakers::{Found, Method};
+pub use speakers::{speech_key, Found, Method};
 pub use speech::{Speech, SpeechTrack};
 
 use crate::edit::{self, CutSettings, EditList, Speakers};
@@ -127,10 +127,18 @@ pub fn run(p: &Project, opts: &PipelineOptions, log: &mut dyn FnMut(&str)) -> Re
         tracks::analyze(&p.file, &a)
     })?;
     let speech = speech_stage(p, &mut jobs, &report, opts.force, log)?;
+    // Speakers are an extra, not core: when they cannot be found (the model cannot be fetched
+    // offline, say), the run goes on without them and the edit list keeps the names it had.
     let speakers = if opts.no_speakers {
         None
     } else {
-        Some(speakers_stage(p, &mut jobs, &speech, opts, log)?)
+        match speakers_stage(p, &mut jobs, &report, &speech, opts, log) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                log(&format!("speakers: {e}; going on without them"));
+                None
+            }
+        }
     };
     let transcript = if opts.no_transcript {
         None
@@ -191,21 +199,29 @@ fn speech_stage(
     Ok(speech)
 }
 
-/// Who talks when, reused unless `force`.
+/// Who talks when, reused unless `force` or the speech regions it was found from changed.
 fn speakers_stage(
     p: &Project,
     jobs: &mut Jobs,
+    report: &TrackReport,
     speech: &Speech,
     opts: &PipelineOptions,
     log: &mut dyn FnMut(&str),
 ) -> Result<Found> {
-    let found = match p.speakers().filter(|_| !opts.force) {
+    let key = speech_key(speech);
+    let found = match p.speakers().filter(|f| !opts.force && f.speech == key) {
         Some(f) => {
             jobs.skip(&p.dir, "speakers", log)?;
             f
         }
         None => jobs.stage(&p.dir, "speakers", log, |_| {
-            let f = speakers::find(&p.file, speech, &p.cache_dir, opts.device)?;
+            let f = speakers::find(
+                &p.file,
+                speech,
+                &voice_tracks(report),
+                &p.cache_dir,
+                opts.device,
+            )?;
             std::fs::write(p.speakers_path(), serde_json::to_vec_pretty(&f)?)?;
             Ok(f)
         })?,
@@ -270,9 +286,20 @@ pub fn speech_tracks(report: &TrackReport) -> Vec<usize> {
         .collect()
 }
 
+/// The speech tracks whose role is a single voice (a mic, a Discord), not a mix.
+fn voice_tracks(report: &TrackReport) -> Vec<usize> {
+    report
+        .logical
+        .iter()
+        .filter(|l| l.role == Role::Voice)
+        .map(|l| l.members[0])
+        .collect()
+}
+
 /// (Re)write the edit list from cached analysis. A hand-edited list is kept as a backup before
 /// being replaced ([`back_up_hand_edit`]). Speaker names already in the list are kept by id, so a
-/// re-cut never undoes a rename.
+/// re-cut never undoes a rename; without `speakers` (skipped, or the stage failed) the list keeps
+/// the speakers it had.
 pub fn cut(
     p: &Project,
     report: &TrackReport,
@@ -292,9 +319,7 @@ pub fn cut(
         .as_deref()
         .and_then(|t| edit::parse(t).ok())
         .map(|e| e.speakers);
-    let speakers = speakers.map_or_else(Speakers::default, |f| {
-        Speakers::new(f.turns.clone(), &f.tracks, previous.as_ref())
-    });
+    let speakers = speakers_for(speakers, previous.as_ref());
     let make = |settings: &CutSettings| EditList {
         source: p.file.clone(),
         duration: report.duration,
@@ -324,9 +349,19 @@ pub fn cut(
     Ok(e)
 }
 
+/// The speakers a re-cut writes: found ones named as `previous` named them, or with nothing
+/// found (skipped, or the stage failed) the ones `previous` had, so neither erases a rename.
+fn speakers_for(found: Option<&Found>, previous: Option<&Speakers>) -> Speakers {
+    match found {
+        Some(f) => Speakers::new(f.turns.clone(), &f.tracks, previous),
+        None => previous.cloned().unwrap_or_default(),
+    }
+}
+
 /// Keep `old`, the edit list about to be replaced, unless Junctur wrote it: `regenerate` remakes a
 /// list from the current analysis, and a list it reproduces from its own recorded settings has
-/// nothing of the user's in it. Anything else (a hand edit, a list that no longer parses, one made
+/// nothing of the user's in it. An untouched app save is compared without its stamp: a list the
+/// app only renamed a speaker in is reproduced by the re-cut (names are carried over). Anything else (a hand edit, a list that no longer parses, one made
 /// from older analysis) goes to the first free `edit.junctur.bak`, `edit.junctur.bak2`, ...
 /// Backups are never overwritten: a single `.bak` rewritten on every re-cut lost the hand edit to
 /// the next generated list (1d).
@@ -335,7 +370,8 @@ fn back_up_hand_edit(
     old: &str,
     regenerate: impl Fn(&CutSettings) -> String,
 ) -> Result<()> {
-    let generated = edit::parse(old).is_ok_and(|e| regenerate(&e.settings) == old);
+    let body = edit::unstamped(old);
+    let generated = edit::parse(body).is_ok_and(|e| regenerate(&e.settings) == body);
     if generated {
         return Ok(());
     }
@@ -424,9 +460,45 @@ mod tests {
         assert_eq!(bak("edit.junctur.bak"), Some(hand1));
         assert_eq!(bak("edit.junctur.bak2"), Some(hand2));
         assert_eq!(bak("edit.junctur.bak3"), None);
+        // An untouched app save the re-cut reproduces (a speaker renamed in the app, the stamp
+        // aside) is Junctur's own; an app save with other ranges is the user's.
+        let renamed = dir.join("renamed.junctur");
+        let wide_list = edit::parse(&regenerate(&wide)).unwrap();
+        edit::save(&renamed, &wide_list).unwrap();
+        let stamped = std::fs::read_to_string(&renamed).unwrap();
+        assert_ne!(stamped, regenerate(&wide));
+        back_up_hand_edit(&dir, &stamped, regenerate).unwrap();
+        assert_eq!(bak("edit.junctur.bak3"), None);
+        edit::save(&renamed, &edit::parse(&list(wide, 4.0)).unwrap()).unwrap();
+        let app_cut = std::fs::read_to_string(&renamed).unwrap();
+        back_up_hand_edit(&dir, &app_cut, regenerate).unwrap();
+        assert_eq!(bak("edit.junctur.bak3"), Some(app_cut));
+        std::fs::remove_file(dir.join("edit.junctur.bak3")).unwrap();
         // A list that does not parse is the user's too.
         back_up_hand_edit(&dir, "junctur-edit 1\nkeep x\n", regenerate).unwrap();
         assert!(bak("edit.junctur.bak3").is_some());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_recut_without_found_speakers_keeps_the_ones_the_list_had() {
+        let turn = |speaker| edit::Turn {
+            start: 1.0,
+            end: 2.0,
+            speaker,
+        };
+        let mut had = Speakers::new(vec![turn(1), turn(2)], &[None, None], None);
+        had.rename(2, "Ana");
+        // `--no-speakers`, or a failed stage: nothing found, nothing erased.
+        assert_eq!(speakers_for(None, Some(&had)), had);
+        assert!(speakers_for(None, None).is_empty());
+        // Found again: the rename carries over.
+        let found = Found {
+            method: Method::Voices,
+            tracks: vec![None, None],
+            turns: vec![turn(2)],
+            speech: String::new(),
+        };
+        assert_eq!(speakers_for(Some(&found), Some(&had)).name(2), Some("Ana"));
     }
 }

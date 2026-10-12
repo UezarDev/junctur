@@ -192,7 +192,8 @@ pub fn summarize(segs: &[Region], labels: &[usize]) -> Diarization {
         secs[t.speaker] += t.end - t.start;
     }
     let total: f64 = secs.iter().sum();
-    // Labels absorbed into another speaker leave empty slots; they are not speakers.
+    // Defensive: a label with no talk time (none today; `two_pass` labels are dense) is not a
+    // speaker.
     let mut order: Vec<usize> = (0..n).filter(|&l| secs[l] > 0.0).collect();
     order.sort_by(|&a, &b| secs[b].total_cmp(&secs[a]));
     // Renumber so speaker 0 talks most.

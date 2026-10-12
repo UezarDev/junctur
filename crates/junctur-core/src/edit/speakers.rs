@@ -92,24 +92,24 @@ impl Speakers {
 
     /// The words' labeller: build once, then ask per word ([`Labeller::of_word`]).
     pub fn labeller(&self) -> Labeller<'_> {
-        let reach = self
-            .turns
-            .iter()
-            .scan(f64::NEG_INFINITY, |m, t| {
-                *m = m.max(t.end);
-                Some(*m)
-            })
-            .collect();
+        let mut reach: Vec<(f64, usize)> = Vec::with_capacity(self.turns.len());
+        for (i, t) in self.turns.iter().enumerate() {
+            match reach.last() {
+                Some(&(end, j)) if end >= t.end => reach.push((end, j)),
+                _ => reach.push((t.end, i)),
+            }
+        }
         Labeller { s: self, reach }
     }
 }
 
-/// Labels words with speakers. Holds the latest turn end up to each turn, so finding the turns
-/// that overlap a word stops as soon as no earlier turn can reach it (a 30 h transcript is a few
-/// hundred thousand words against tens of thousands of turns).
+/// Labels words with speakers. Holds, per turn, the latest end among the turns up to it and which
+/// turn that is, so finding the turns that overlap a word stops as soon as no earlier turn can
+/// reach it, and the nearest turn before a word is one lookup (a 30 h transcript is a few hundred
+/// thousand words against tens of thousands of turns).
 pub struct Labeller<'a> {
     s: &'a Speakers,
-    reach: Vec<f64>,
+    reach: Vec<(f64, usize)>,
 }
 
 impl Labeller<'_> {
@@ -122,15 +122,20 @@ impl Labeller<'_> {
         if let Some(n) = self.s.names.iter().find(|n| n.track == Some(track)) {
             return Some(n.id);
         }
-        let upto = turns.partition_point(|t| t.start < end);
+        // Turns starting at or before the word's end; a turn touching a zero-length word (Whisper
+        // gives some) counts as overlapping it, with overlap 0.
+        let upto = turns.partition_point(|t| t.start <= end);
         let mut best: Option<(f64, u32)> = None;
         for i in (0..upto).rev() {
-            if self.reach[i] <= start {
+            if self.reach[i].0 < start {
                 break;
             }
             let t = &turns[i];
+            if t.end < start {
+                continue;
+            }
             let overlap = t.end.min(end) - t.start.max(start);
-            if overlap > 0.0 && best.is_none_or(|(o, _)| overlap > o) {
+            if best.is_none_or(|(o, _)| overlap > o) {
                 best = Some((overlap, t.speaker));
             }
         }
@@ -138,17 +143,11 @@ impl Labeller<'_> {
             return Some(s);
         }
         // Nothing overlaps: the turn ending last before the word, or the first one after it.
-        let before = upto
-            .checked_sub(1)
-            .map(|i| (start - self.reach[i], i))
-            .map(|(d, i)| {
-                // The turn that reaches furthest is the nearest one before the word.
-                let j = (0..=i)
-                    .rev()
-                    .find(|&j| turns[j].end == self.reach[i])
-                    .unwrap_or(i);
-                (d, turns[j].speaker)
-            });
+        // The turn reaching furthest before the word is the nearest one there.
+        let before = upto.checked_sub(1).map(|i| {
+            let (end, j) = self.reach[i];
+            (start - end, turns[j].speaker)
+        });
         let after = turns.get(upto).map(|t| (t.start - end, t.speaker));
         [before, after]
             .into_iter()
@@ -235,6 +234,12 @@ mod tests {
         assert_eq!(s.labeller().of_word(0, 13.0, 13.5), Some(2));
         assert_eq!(s.labeller().of_word(0, 35.0, 35.5), Some(1));
         assert_eq!(s.labeller().of_word(0, 25.0, 25.5), None);
+        // A zero-length word inside a turn, and one exactly on a turn's edge.
+        assert_eq!(s.labeller().of_word(0, 11.5, 11.5), Some(2));
+        assert_eq!(s.labeller().of_word(0, 40.0, 40.0), Some(1));
+        // Nearest before: the turn reaching furthest, not the last to start.
+        let long = Speakers::new(vec![t(0.0, 30.0, 1), t(5.0, 6.0, 2)], &[None, None], None);
+        assert_eq!(long.labeller().of_word(0, 31.0, 31.5), Some(1));
         assert_eq!(Speakers::default().labeller().of_word(0, 1.0, 2.0), None);
     }
 
