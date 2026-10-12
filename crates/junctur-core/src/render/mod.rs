@@ -421,4 +421,93 @@ mod tests {
         assert_eq!(std::fs::read(&out).unwrap(), b"render 2");
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    /// Every frame of `file`'s video, decoded small (32x24 luma).
+    fn small_frames(file: &Path) -> Vec<Vec<u8>> {
+        let out = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(file)
+            .args([
+                "-vf",
+                "scale=32:24",
+                "-pix_fmt",
+                "gray",
+                "-fps_mode",
+                "passthrough",
+            ])
+            .args(["-f", "rawvideo", "-"])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        out.stdout
+            .chunks_exact(32 * 24)
+            .map(<[u8]>::to_vec)
+            .collect()
+    }
+
+    fn mse(a: &[u8], b: &[u8]) -> f64 {
+        let d = a
+            .iter()
+            .zip(b)
+            .map(|(&x, &y)| (x as f64 - y as f64).powi(2));
+        d.sum::<f64>() / a.len() as f64
+    }
+
+    #[test]
+    #[ignore = "needs NVENC"]
+    fn a_batch_lands_on_the_frames_its_pieces_did() {
+        let dir = std::env::temp_dir().join(format!("junctur-batch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // testsrc2 moves every frame, so a frame is told from its neighbours.
+        let src = dir.join("in.mp4");
+        let ok = std::process::Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=s=320x240:r=30:d=10",
+            ])
+            .args([
+                "-c:v", "libx264", "-g", "30", "-bf", "2", "-pix_fmt", "yuv420p",
+            ])
+            .arg(&src)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let info = source::inspect(&src).unwrap();
+        let kf = &info.keyframes;
+        let pieces = plan::pieces(&[(10, 50), (70, 130), (140, 200)], kf, plan::gop(kf));
+        let batches = plan::batches(&pieces, 150, 900);
+        let mut joined = 0;
+        for b in batches.iter().filter(|b| b.len() > 1) {
+            let batch = &pieces[b.clone()];
+            let one = dir.join("batch.ts");
+            ffmpeg::ffmpeg(&video::args(&src, batch, &info.video, true, &one)).unwrap();
+            let mut apart = Vec::new();
+            for p in batch {
+                let each = dir.join("piece.ts");
+                ffmpeg::ffmpeg(&video::args(&src, &[*p], &info.video, true, &each)).unwrap();
+                apart.extend(small_frames(&each));
+            }
+            // Compared with the pieces encoded one by one, not the source: on these clips both
+            // land one frame late (1e open issue), and batching must not change where.
+            let together = small_frames(&one);
+            assert_eq!(together.len(), apart.len());
+            for (k, f) in together.iter().enumerate() {
+                let here = mse(f, &apart[k]);
+                for n in [k.wrapping_sub(1), k + 1] {
+                    if let Some(other) = apart.get(n) {
+                        assert!(here < mse(f, other), "batch frame {k} is piece frame {n}");
+                    }
+                }
+            }
+            joined += 1;
+        }
+        assert!(joined > 0, "no batch in {batches:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

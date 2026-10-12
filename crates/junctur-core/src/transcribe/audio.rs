@@ -4,16 +4,18 @@
 //! One ffmpeg per chunk (1b) seeked into the whole recording for every few seconds of speech:
 //! ~0.3 s to open a 5-track MP4, ~2k times on a 30 h track, with the GPU waiting each time. A cached
 //! 16 kHz file was rejected for disk: 6.9 GB of f32 per 30 h track (16-bit would quantize a Discord
-//! track recorded at -70 dB to a few steps). Read forward, a chunk's sample `i` is exactly time
-//! `start + i / 16000` on the timeline VAD measured, which the per-chunk seek only came close to.
+//! track recorded at -70 dB to a few steps). Read forward from one seek, a chunk's sample `i` is
+//! time `start + i / 16000` on the decoder's timeline to within a sample, where each per-chunk seek
+//! could land differently.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::SyncSender;
 
 use super::Chunk;
 use crate::ffmpeg::{PcmReader, Span};
 use crate::vad;
-use crate::Result;
+use crate::{Error, Result};
 
 /// Chunks that share one language detection: consecutive chunks of one track, together at most
 /// Whisper's 30 s window and within [`GROUP_SPAN`] of each other.
@@ -57,12 +59,14 @@ pub struct Heard {
 }
 
 /// Decode the groups whose index `wanted` accepts, track by track, sending each as it is read.
-/// Each track gets one ffmpeg, started at its first wanted group. Stops early, without error, once
-/// the receiver is gone (Whisper failed).
+/// Each track gets one ffmpeg, started at its first wanted group. Stops once `stop` is set or the
+/// receiver is gone (Whisper failed): `stop` is checked between decoder reads, so a sparse track does
+/// not decode on for hours to the next send.
 pub fn read(
     file: &Path,
     groups: &[Group],
     wanted: &dyn Fn(usize) -> bool,
+    stop: &AtomicBool,
     tx: &SyncSender<Result<Heard>>,
 ) {
     let mut i = 0;
@@ -71,7 +75,7 @@ pub fn read(
         let end = (i..groups.len())
             .find(|&k| groups[k].track != track)
             .unwrap_or(groups.len());
-        let r = read_track(file, track, &groups[..end], i, wanted, tx);
+        let r = read_track(file, track, &groups[..end], i, wanted, stop, tx);
         if let Err(e) = r {
             let _ = tx.send(Err(e));
             return;
@@ -87,17 +91,21 @@ fn read_track(
     groups: &[Group],
     from: usize,
     wanted: &dyn Fn(usize) -> bool,
+    stop: &AtomicBool,
     tx: &SyncSender<Result<Heard>>,
 ) -> Result<()> {
     let Some(first) = (from..groups.len()).find(|&k| wanted(k)) else {
         return Ok(());
     };
-    let origin = groups[first].chunks[0].start;
+    // The decoder is started at whole milliseconds (`PcmReader` writes the seek with `{:.3}`); the
+    // stream counts from the same instant.
+    let origin = (groups[first].chunks[0].start * 1000.0).round() / 1000.0;
     let span = Span {
         start: origin,
         len: None,
     };
-    let mut stream = Stream::new(PcmReader::open(file, track, vad::RATE, 1, span)?, origin);
+    let reader = PcmReader::open(file, track, vad::RATE, 1, span)?;
+    let mut stream = Stream::new(reader, origin, stop);
     for (k, g) in groups.iter().enumerate().skip(first) {
         if !wanted(k) {
             continue;
@@ -133,9 +141,11 @@ impl Decode for PcmReader {
 }
 
 /// A forward reader over one decoded track, addressed in seconds from `origin`.
-pub struct Stream<S> {
+pub struct Stream<'a, S> {
     src: S,
     origin: f64,
+    /// Set when nobody wants the samples any more.
+    stop: &'a AtomicBool,
     /// Samples from `base` on, read but not yet taken.
     buf: Vec<f32>,
     base: u64,
@@ -146,11 +156,12 @@ pub struct Stream<S> {
 /// Samples per read from the decoder.
 const BLOCK: usize = vad::RATE as usize;
 
-impl<S: Decode> Stream<S> {
-    pub fn new(src: S, origin: f64) -> Self {
+impl<'a, S: Decode> Stream<'a, S> {
+    pub fn new(src: S, origin: f64, stop: &'a AtomicBool) -> Self {
         Self {
             src,
             origin,
+            stop,
             buf: Vec::new(),
             base: 0,
             block: Vec::with_capacity(BLOCK),
@@ -169,6 +180,9 @@ impl<S: Decode> Stream<S> {
         while !self.eof && self.base + (self.buf.len() as u64) < to {
             // Nothing before `from` is wanted again: drop it before reading more, so a long
             // silence between chunks is never held.
+            if self.stop.load(Ordering::Relaxed) {
+                return Err(Error::Model("transcription stopped".into()));
+            }
             let dead = from.saturating_sub(self.base).min(self.buf.len() as u64) as usize;
             self.buf.drain(..dead);
             self.base += dead as u64;
@@ -255,7 +269,8 @@ mod tests {
     fn chunks_are_cut_from_one_forward_stream() {
         let rate = vad::RATE as u64;
         // The stream starts at 100 s in the recording.
-        let mut s = Stream::new(counter(700 * rate, false), 100.0);
+        let go = AtomicBool::new(false);
+        let mut s = Stream::new(counter(700 * rate, false), 100.0, &go);
         let a = s.take(100.5, 101.0).unwrap();
         assert_eq!(a.len(), rate as usize / 2);
         assert_eq!(a[0], (rate / 2) as f32);
@@ -271,8 +286,20 @@ mod tests {
 
     #[test]
     fn a_failed_decode_is_an_error() {
-        let mut s = Stream::new(counter(16_000, true), 0.0);
+        let go = AtomicBool::new(false);
+        let mut s = Stream::new(counter(16_000, true), 0.0, &go);
         assert!(s.take(0.0, 0.5).is_ok());
         assert!(s.take(0.5, 2.0).is_err());
+    }
+
+    #[test]
+    fn a_stopped_stream_reads_no_further() {
+        let stop = AtomicBool::new(false);
+        let mut s = Stream::new(counter(u64::MAX, false), 0.0, &stop);
+        assert!(s.take(0.0, 1.0).is_ok());
+        stop.store(true, Ordering::Relaxed);
+        // Ten hours ahead: refused at the first read, not decoded through.
+        assert!(s.take(36_000.0, 36_001.0).is_err());
+        assert!(s.src.next < 3 * vad::RATE as u64, "read {}", s.src.next);
     }
 }

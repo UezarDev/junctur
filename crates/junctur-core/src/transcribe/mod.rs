@@ -12,6 +12,7 @@ mod words;
 
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Instant;
 
@@ -25,7 +26,7 @@ pub use words::Word;
 
 use crate::runtime::{Device, DevicePref};
 use crate::vad::Region;
-use crate::{models, Result};
+use crate::{models, Error, Result};
 
 /// One audio track to transcribe, with its speech regions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -280,22 +281,39 @@ impl Run<'_> {
         finished: &mut dyn FnMut(Segment) -> Result<()>,
     ) -> Result<()> {
         let wanted = |k: usize| self.todo[k].iter().any(|&t| t);
+        let stop = AtomicBool::new(false);
         std::thread::scope(|scope| {
             let (tx, rx) = mpsc::sync_channel(AHEAD);
-            scope.spawn(move || audio::read(file, self.groups, &wanted, &tx));
-            // Returning early drops `rx`, which stops the reader at its next send.
-            for heard in rx {
-                let Heard { group, samples } = heard?;
-                let g = &self.groups[group];
-                let lang = self.language(w, &samples)?;
-                for ((c, s), &todo) in g.chunks.iter().zip(&samples).zip(&self.todo[group]) {
-                    if todo {
-                        finished(self.segment(w, s, g.track, c, &lang)?)?;
-                    }
+            let stop = &stop;
+            let reader = scope.spawn(move || audio::read(file, self.groups, &wanted, stop, &tx));
+            let heard = self.consume(rx, w, finished);
+            // Whisper is done or failed: the reader stops at its next decoder read.
+            stop.store(true, Ordering::Relaxed);
+            // Joined here, so a panicking reader is an error `Jobs::stage` records, not an unwind.
+            let joined = reader.join();
+            heard?;
+            joined.map_err(|_| Error::Model("the transcription reader thread panicked".into()))
+        })
+    }
+
+    /// Whisper on each group as the reader sends it. Takes `rx` so it is dropped on return.
+    fn consume(
+        &self,
+        rx: mpsc::Receiver<Result<Heard>>,
+        w: &mut Whisper,
+        finished: &mut dyn FnMut(Segment) -> Result<()>,
+    ) -> Result<()> {
+        for heard in rx {
+            let Heard { group, samples } = heard?;
+            let g = &self.groups[group];
+            let lang = self.language(w, &samples)?;
+            for ((c, s), &todo) in g.chunks.iter().zip(&samples).zip(&self.todo[group]) {
+                if todo {
+                    finished(self.segment(w, s, g.track, c, &lang)?)?;
                 }
             }
-            Ok(())
-        })
+        }
+        Ok(())
     }
 
     /// The language of a group, from all its audio at once (Whisper's 30 s window).

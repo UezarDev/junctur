@@ -100,7 +100,8 @@ fn faint(a: &Activity, speech: Option<Speech>) -> (Role, f64, String) {
             Role::Unknown,
             0.3,
             format!(
-                "faint: mean {:.0} dB, near-silent {:.0}% of the time; a low-level source                  (PC or Discord audio turned down, or bleed), not enough to tell which",
+                "faint: mean {:.0} dB, near-silent {:.0}% of the time; a low-level source \
+                 (PC or Discord audio turned down, or bleed), not enough to tell which",
                 a.mean_db,
                 pct(a.near_silent_share)
             ),
@@ -109,7 +110,8 @@ fn faint(a: &Activity, speech: Option<Speech>) -> (Role, f64, String) {
             Role::Voice,
             0.6,
             format!(
-                "faint (mean {:.0} dB) but carries speech {:.0}% of the time: likely Discord                  turned down, or mic bleed",
+                "faint (mean {:.0} dB) but carries speech {:.0}% of the time: likely Discord \
+                 turned down, or mic bleed",
                 a.mean_db,
                 pct(s.share)
             ),
@@ -152,7 +154,8 @@ fn with_speech(s: Speech, substantial: usize) -> (Role, f64, String) {
             Role::Mix,
             0.8,
             format!(
-                "the only substantial track: speech {:.0}% of the time over a background that keeps                  playing (only {:.0}% of the gaps near-silent)",
+                "the only substantial track: speech {:.0}% of the time over a background that keeps \
+                 playing (only {:.0}% of the gaps near-silent)",
                 pct(s.share),
                 pct(s.quiet_gaps)
             ),
@@ -162,7 +165,8 @@ fn with_speech(s: Speech, substantial: usize) -> (Role, f64, String) {
             Role::Voice,
             0.5,
             format!(
-                "speech {:.0}% of the time over continuous sound: a noisy voice track, or game                  audio with voices in it",
+                "speech {:.0}% of the time over continuous sound: a noisy voice track, or game \
+                 audio with voices in it",
                 pct(s.share)
             ),
         )
@@ -260,6 +264,31 @@ mod tests {
         let mut s = act(-120.0);
         s.silent = true;
         assert_eq!(decide(&s, sp(0.5, 0.5), &cx(false, 1)).0, Role::Silent);
+    }
+
+    #[test]
+    fn reasons_read_as_one_line() {
+        // Every branch: a line continuation lost in a refactor once left runs of spaces in these.
+        let mut silent = act(-120.0);
+        silent.silent = true;
+        let mut sum = cx(false, 3);
+        sum.sum_of_others = Some(1e-4);
+        let cases = [
+            decide(&silent, None, &cx(false, 1)),
+            decide(&act(-20.0), sp(0.3, 0.5), &sum),
+            decide(&act(-70.0), None, &cx(true, 1)),
+            decide(&act(-70.0), sp(0.3, 0.9), &cx(true, 1)),
+            decide(&act(-70.0), sp(0.02, 0.9), &cx(true, 1)),
+            decide(&act(-25.0), None, &cx(false, 1)),
+            decide(&act(-25.0), None, &cx(false, 2)),
+            decide(&act(-25.0), sp(0.0, 0.0), &cx(false, 1)),
+            decide(&act(-25.0), sp(0.4, 0.9), &cx(false, 2)),
+            decide(&act(-25.0), sp(0.4, 0.1), &cx(false, 1)),
+            decide(&act(-25.0), sp(0.4, 0.1), &cx(false, 2)),
+        ];
+        for (_, _, why) in cases {
+            assert!(!why.contains("  "), "{why:?}");
+        }
     }
 
     #[test]

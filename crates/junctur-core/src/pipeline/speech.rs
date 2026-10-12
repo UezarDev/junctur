@@ -3,6 +3,7 @@
 //! snapping uses. One decode pass per track feeds both.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -37,15 +38,23 @@ const HOP: usize = (vad::RATE as f64 * ENVELOPE_HOP) as usize;
 
 /// Speech regions on each of `tracks` and the loudest-track envelope. Each track runs on a thread
 /// of its own (its own decode and Silero session): a 30 h recording with two speech tracks took
-/// twice one track's time when they ran one after the other.
+/// twice one track's time when they ran one after the other. The first track to fail stops the
+/// others at their next read, rather than letting them decode on to the end.
 pub fn detect(file: &Path, tracks: &[usize], cache_dir: &Path) -> Result<(Speech, Envelope)> {
     let model = models::ensure(&models::SILERO_VAD, cache_dir)?;
-    let results: Vec<Result<Track>> = std::thread::scope(|scope| {
+    let failed = AtomicBool::new(false);
+    let results: Vec<Result<Option<Track>>> = std::thread::scope(|scope| {
         let handles: Vec<_> = tracks
             .iter()
             .map(|&track| {
-                let model = &model;
-                scope.spawn(move || one_track(file, track, model))
+                let (model, failed) = (&model, &failed);
+                scope.spawn(move || {
+                    let r = one_track(file, track, model, failed);
+                    if r.is_err() {
+                        failed.store(true, Ordering::Relaxed);
+                    }
+                    r
+                })
             })
             .collect();
         handles
@@ -59,8 +68,15 @@ pub fn detect(file: &Path, tracks: &[usize], cache_dir: &Path) -> Result<(Speech
     let mut env: Vec<f32> = Vec::new();
     let mut out = Vec::new();
     let mut seconds: f64 = 0.0;
-    for r in results {
-        let t = r?;
+    // A failure is reported, not the tracks it stopped (those come back as None).
+    if let Some(e) = results.iter().position(Result::is_err) {
+        return Err(results
+            .into_iter()
+            .nth(e)
+            .and_then(Result::err)
+            .expect("an error"));
+    }
+    for t in results.into_iter().flatten().flatten() {
         // The loudest speech track at each instant: a cut must be quiet on all of them.
         if env.len() < t.env.len() {
             env.resize(t.env.len(), 0.0);
@@ -88,13 +104,17 @@ struct Track {
     seconds: f64,
 }
 
-/// One decode of `track` feeds both the VAD and the envelope.
-fn one_track(file: &Path, track: usize, model: &Path) -> Result<Track> {
+/// One decode of `track` feeds both the VAD and the envelope. None when `stop` was set (another
+/// track failed) before it finished.
+fn one_track(file: &Path, track: usize, model: &Path, stop: &AtomicBool) -> Result<Option<Track>> {
     let mut vad = Vad::open(model)?;
     let mut r = PcmReader::open(file, track, vad::RATE, 1, Span::default())?;
     let (mut probs, mut env, mut n) = (Vec::new(), Vec::new(), 0usize);
     let mut x = Vec::with_capacity(READ);
     loop {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
         r.read_into(&mut x, READ)?;
         if x.is_empty() {
             break;
@@ -110,7 +130,7 @@ fn one_track(file: &Path, track: usize, model: &Path) -> Result<Track> {
     r.finish()?;
     let len = n as f64 / vad::RATE as f64;
     let regions = vad::regions(&probs, 0.0);
-    Ok(Track {
+    Ok(Some(Track {
         speech: SpeechTrack {
             track,
             share: vad::share(&regions, len),
@@ -118,7 +138,7 @@ fn one_track(file: &Path, track: usize, model: &Path) -> Result<Track> {
         },
         env,
         seconds: len,
-    })
+    }))
 }
 
 pub fn save_envelope(path: &Path, env: &Envelope) -> Result<()> {
