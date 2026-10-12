@@ -36,15 +36,20 @@ impl Envelope {
     }
 }
 
-/// Where a hand-made boundary goes in the pause `gap` between two words (end of the one before,
-/// start of the one after), placed as [`keep_ranges`] places its own: `pad_after` past the speech
-/// when the side before is kept (`kept_before`), else `pad_before` ahead of the speech after, then
-/// the quietest step within `snap`. Never outside the gap, so a cut never clips either word; a gap
-/// the words overlap in gives its middle.
-pub fn snap_boundary(env: &Envelope, gap: (f64, f64), kept_before: bool, s: &CutSettings) -> f64 {
+/// Where a hand-made boundary goes in the pause `gap` between speech (where the speech before ends,
+/// where the speech after starts), placed as [`keep_ranges`] places its own: `pad_after` past the
+/// speech when the side before is kept (`kept_before`), else `pad_before` ahead of the speech
+/// after, then the quietest step within `snap`. Never outside the gap, so it clips neither side.
+/// `None` when there is no pause (the two overlap, e.g. on two tracks).
+pub fn snap_boundary(
+    env: &Envelope,
+    gap: (f64, f64),
+    kept_before: bool,
+    s: &CutSettings,
+) -> Option<f64> {
     let (a, b) = gap;
     if b <= a {
-        return (a + b) / 2.0;
+        return None;
     }
     let target = if kept_before {
         a + s.pad_after
@@ -52,7 +57,32 @@ pub fn snap_boundary(env: &Envelope, gap: (f64, f64), kept_before: bool, s: &Cut
         b - s.pad_before
     }
     .clamp(a, b);
-    env.quietest((target - s.snap).max(a), (target + s.snap).min(b), target)
+    Some(env.quietest((target - s.snap).max(a), (target + s.snap).min(b), target))
+}
+
+/// The span a hand edit of a run of words changes: cut (`keep` false) or keep `run` (the run's
+/// first start, its latest end), from a boundary in the pause before it to one in the pause after,
+/// each placed by [`snap_boundary`]. `before` is where earlier speech ends (the latest end of any
+/// earlier word, on any track) and `after` where later speech starts (the earliest later start);
+/// `None` at either end of the transcript, where the neighbour counts as speech both pads away.
+/// Where no pause exists (speech on another track overlaps the run's edge) the boundary is the
+/// run's own edge: a cut removes every track, so that overlapping word is cut there too.
+pub fn word_span(
+    before: Option<f64>,
+    run: (f64, f64),
+    after: Option<f64>,
+    keep: bool,
+    env: &Envelope,
+    s: &CutSettings,
+    duration: f64,
+) -> (f64, f64) {
+    let pads = s.pad_before + s.pad_after;
+    let before = before.unwrap_or((run.0 - pads).max(0.0));
+    let after = after.unwrap_or((run.1 + pads).min(duration));
+    // A cut ends kept speech before the run; a keep starts kept speech at it.
+    let start = snap_boundary(env, (before, run.0), !keep, s).unwrap_or(run.0);
+    let end = snap_boundary(env, (run.1, after), keep, s).unwrap_or(run.1);
+    (start, end.max(start))
 }
 
 /// Ranges to keep from speech regions (any order, any number of tracks) within `[0, total]`.
@@ -154,23 +184,53 @@ mod tests {
         let s = CutSettings::default();
         // Flat: just the pad. After kept speech ending at 10.0, 0.35 s later; before speech at
         // 12.0, 0.25 s earlier.
-        let b = snap_boundary(&flat(), (10.0, 12.0), true, &s);
+        let snap =
+            |env: &Envelope, gap, kept_before| snap_boundary(env, gap, kept_before, &s).unwrap();
+        let b = snap(&flat(), (10.0, 12.0), true);
         assert!((b - 10.35).abs() < 1e-9, "{b}");
-        let b = snap_boundary(&flat(), (10.0, 12.0), false, &s);
+        let b = snap(&flat(), (10.0, 12.0), false);
         assert!((b - 11.75).abs() < 1e-9, "{b}");
         // A pause shorter than the pad: the far edge of the gap, never into the next word.
-        let b = snap_boundary(&flat(), (10.0, 10.1), true, &s);
+        let b = snap(&flat(), (10.0, 10.1), true);
         assert!((b - 10.1).abs() < 1e-9, "{b}");
         // A quiet step within `snap` wins, but not one past the next word's start.
         let mut e = vec![1.0f32; 2000];
         e[1040] = 0.0;
         e[1060] = 0.0;
-        let b = snap_boundary(&Envelope(e.clone()), (10.0, 10.5), true, &s);
+        let b = snap(&Envelope(e.clone()), (10.0, 10.5), true);
         assert!((b - 10.40).abs() < 1e-6, "{b}");
         // Before speech at 10.45: the target is 10.20, and 10.40 is beyond `snap` of it.
-        let b = snap_boundary(&Envelope(e), (10.0, 10.45), false, &s);
+        let b = snap(&Envelope(e), (10.0, 10.45), false);
         assert!((b - 10.20).abs() < 1e-6, "{b}");
-        // Overlapping words (two tracks): the middle.
-        assert_eq!(snap_boundary(&flat(), (5.0, 4.0), true, &s), 4.5);
+        // Overlapping speech (two tracks): no pause to place it in.
+        assert_eq!(snap_boundary(&flat(), (5.0, 4.0), true, &s), None);
+    }
+
+    #[test]
+    fn word_spans_never_clip_and_say_when_there_is_no_pause() {
+        let s = CutSettings::default();
+        let env = Envelope::default();
+        // Cut a run 12.0-12.5 with speech ending at 11.0 before and starting at 14.0 after.
+        let (a, b) = word_span(Some(11.0), (12.0, 12.5), Some(14.0), false, &env, &s, 60.0);
+        assert!(
+            (a - 11.35).abs() < 1e-9 && (b - 13.75).abs() < 1e-9,
+            "{a} {b}"
+        );
+        // Keep it: pads around the run itself.
+        let (a, b) = word_span(Some(11.0), (12.0, 12.5), Some(14.0), true, &env, &s, 60.0);
+        assert!(
+            (a - 11.75).abs() < 1e-9 && (b - 12.85).abs() < 1e-9,
+            "{a} {b}"
+        );
+        // A word on another track runs 10-15, past the run: no pause either side, so the run's
+        // own edges, not a point inside that word claimed as a clean pause.
+        let (a, b) = word_span(Some(15.0), (12.0, 12.5), Some(12.2), false, &env, &s, 60.0);
+        assert_eq!((a, b), (12.0, 12.5));
+        // Ends of the transcript: neighbours both pads away, within the recording.
+        let (a, b) = word_span(None, (0.2, 1.0), None, false, &env, &s, 1.1);
+        assert!(
+            (0.0..=0.2).contains(&a) && (1.0..=1.1).contains(&b),
+            "{a} {b}"
+        );
     }
 }

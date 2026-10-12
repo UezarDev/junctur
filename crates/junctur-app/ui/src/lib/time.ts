@@ -21,3 +21,20 @@ export function timecode(frame: number | null | undefined, fps: { num: number; d
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${Math.floor(s / 3600)}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}:${pad(ff)}`;
 }
+
+type Rate = { num: number; den: number };
+
+/** Source seconds where `frame` starts. */
+export function toSeconds(frame: number, fps: Rate): number {
+  return (frame * fps.den) / fps.num;
+}
+
+/** Source milliseconds where `frame` starts. */
+export function msOf(frame: number, fps: Rate): number {
+  return toSeconds(frame, fps) * 1000;
+}
+
+/** The frame on screen at `seconds` (`round` for the nearest frame boundary instead). */
+export function toFrame(seconds: number, fps: Rate, round: (x: number) => number = Math.floor): number {
+  return round((seconds * fps.num) / fps.den + (round === Math.floor ? 1e-6 : 0));
+}

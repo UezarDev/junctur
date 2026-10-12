@@ -38,10 +38,18 @@
   const panelWidth = $derived(player?.path && panelOpen ? Math.min(PANEL, windowWidth * 0.45) : 0);
   const span = $derived(sel.seconds(selection, words, edit?.fps ?? null));
 
-  // The panel is opaque; mpv keeps the picture out from under it.
+  // The panel is opaque; mpv keeps the picture out from under it. Sent once a window resize
+  // settles, and only when the share really changed (each is a blocking mpv call).
+  let sentShare = -1;
+  let marginTimer = 0;
   $effect(() => {
-    const share = windowWidth > 0 ? panelWidth / windowWidth : 0;
-    api.setVideoMargin(share).catch(() => {});
+    const share = windowWidth > 0 ? Math.round((panelWidth / windowWidth) * 1000) / 1000 : 0;
+    clearTimeout(marginTimer);
+    marginTimer = window.setTimeout(() => {
+      if (share === sentShare) return;
+      sentShare = share;
+      api.setVideoMargin(share).catch(() => (sentShare = -1));
+    }, 100);
   });
 
   async function loadTranscript() {

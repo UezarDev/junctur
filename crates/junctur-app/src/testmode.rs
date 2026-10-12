@@ -180,6 +180,7 @@ impl Ran<'_> {
                 "canUndo": e.can_undo,
                 "canRedo": e.can_redo,
                 "error": e.error,
+                "notice": e.notice,
             })
         });
         json!({

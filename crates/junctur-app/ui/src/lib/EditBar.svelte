@@ -5,7 +5,7 @@
   import * as api from "./api";
   import * as sel from "./selection";
   import { nudge, under } from "./nudge";
-  import { timecode } from "./time";
+  import { timecode, toFrame } from "./time";
 
   let {
     player,
@@ -20,9 +20,9 @@
   } = $props();
 
   const fps = $derived(edit?.fps ?? null);
-  const frame = $derived(
-    player?.frame ?? (fps && player?.position != null ? Math.floor((player.position * fps.num) / fps.den) : null),
-  );
+  const frame = $derived(player?.frame ?? (fps && player?.position != null ? toFrame(player.position, fps) : null));
+  // An unreadable edit list, an outside change, a backup made: said under the buttons.
+  const message = $derived(edit?.error ?? edit?.notice ?? null);
   const stretch = $derived(edit && frame != null ? under(edit, frame) : null);
 
   async function call(f: () => Promise<void>) {
@@ -67,6 +67,9 @@
         >
       </span>
     {/if}
+    {#if message}
+      <span class="message" class:bad={!!edit.error}>{message}</span>
+    {/if}
   </div>
 {/if}
 
@@ -97,6 +100,14 @@
   .n {
     padding: 2px 6px;
     font-size: 11px;
+  }
+  .message {
+    flex-basis: 100%;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .message.bad {
+    color: var(--bad);
   }
   .dash {
     color: var(--muted);

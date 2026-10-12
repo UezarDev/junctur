@@ -21,10 +21,11 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use junctur_core::edit::EditList;
+use junctur_core::pipeline;
 use tauri::{AppHandle, Emitter};
 
-use crate::cuts::{self, edl, watch, Edit, EditState, Form, Fps, History, Load};
-use crate::editor::{Editor, Step, TranscriptView};
+use crate::cuts::{self, edl, watch, Edit, EditState, EditorStatus, Form, Fps, Load};
+use crate::editor::{Edited, Editor, Op, Step, TranscriptView, Words};
 use crate::lock::lock;
 use crate::mpv::{self, Event, Events, Mpv};
 use crate::state::{Change, PlayerState, OBSERVED};
@@ -107,8 +108,9 @@ struct Ctl {
     /// The form of the last load asked for: what plays once in-flight loads land.
     requested: Form,
     watch: Option<watch::Watch>,
-    /// The editor's undo/redo state, copied here so the edit state can be sent under this lock.
-    history: History,
+    /// The editor's undo/redo state and last notice, copied here so the edit state can be sent
+    /// under this lock.
+    status: EditorStatus,
 }
 
 impl Ctl {
@@ -117,6 +119,30 @@ impl Ctl {
             (Some(t), true) => Form::Cuts(t.clone()),
             _ => Form::Source,
         }
+    }
+}
+
+/// What the edit bar should say after a saved edit: a backup made (and why), or word boundaries
+/// placed without the envelope.
+fn notice(e: &Edited) -> Option<String> {
+    let name = |p: &std::path::Path| {
+        p.file_name().map_or_else(
+            || p.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        )
+    };
+    match (&e.saved.backup, e.saved.replaced_unreadable) {
+        (Some(b), true) => Some(format!(
+            "edit.junctur did not parse; it was kept as {} and replaced",
+            name(b)
+        )),
+        (None, true) => Some("edit.junctur did not parse; replaced it (a backup holds it)".into()),
+        (Some(b), false) => Some(format!("the previous edit.junctur was kept as {}", name(b))),
+        (None, false) if e.unsnapped => Some(
+            "no speech envelope in this project: word cuts use the pads, not snapped to quiet"
+                .into(),
+        ),
+        _ => None,
     }
 }
 
@@ -213,7 +239,7 @@ impl Player {
                 skip: true,
                 requested: Form::Source,
                 watch: None,
-                history: History::default(),
+                status: EditorStatus::default(),
             }),
         });
         Ok(Self {
@@ -255,7 +281,7 @@ impl Player {
         c.fps = fps;
         c.edit = read.unwrap_or_default();
         c.edit_path = edit_path.clone();
-        c.history = History::default();
+        c.status = EditorStatus::default();
         c.watch = edit_path.zip(baseline).map(|(p, base)| {
             let core = Arc::downgrade(&self.core);
             watch::Watch::start(p, base, move || {
@@ -327,34 +353,51 @@ impl Core {
     /// other change ends the undo history, which would otherwise undo over it.
     pub fn reload_edit(&self) {
         let mut ed = lock(&self.editor);
+        if let Err(e) = self.sync(&mut ed, "watch") {
+            eprintln!("junctur-app: reload after an edit-list change: {e}");
+        }
+    }
+
+    /// Takes the edit list on disk when someone other than the app changed it (the watch, and
+    /// every edit before it applies, so an outside change inside the watch's settle time is played
+    /// and edited on, not overwritten unseen). The app's own last save is skipped. A list that
+    /// parses and differs from the one in play ends the undo history; one that does not parse
+    /// keeps the ranges in play (`cuts::merge`) and says why in the edit state.
+    /// `by` names the caller in the log line an outside change leaves.
+    fn sync(&self, ed: &mut Editor, by: &str) -> Result<(), String> {
         let (file, path, fps) = {
             let c = lock(&self.ctl);
             let (Some(file), Some(path)) = (c.file.clone(), c.edit_path.clone()) else {
-                return;
+                return Ok(());
             };
             (file, path, c.fps)
         };
         if std::fs::read_to_string(&path).is_ok_and(|t| ed.is_own(&t)) {
-            return;
+            return Ok(());
         }
         let (fps, read) = cuts::fetch(&file, &path, fps);
         let mut c = lock(&self.ctl);
         if c.file.as_deref() != Some(file.as_str()) {
-            return; // another file was opened meanwhile
+            return Ok(()); // another file was opened meanwhile
         }
         c.fps = c.fps.or(fps);
-        if read.as_ref().is_some_and(|e| e.list.is_some()) {
+        let new_list = read.as_ref().and_then(|e| e.list.as_deref());
+        if new_list.is_some() && new_list != c.edit.list.as_deref() {
+            eprintln!("junctur-app: edit.junctur changed on disk, taken ({by})");
             ed.changed_elsewhere();
-            c.history = History::default();
+            c.status = EditorStatus {
+                notice: Some("edit.junctur changed on disk: took it, undo history cleared".into()),
+                ..EditorStatus::default()
+            };
         }
         let merged = cuts::merge(&c.edit, read);
-        self.take(&mut c, merged);
+        self.take(&mut c, merged)
     }
 
     /// Plays `new` in place of the edit list in play: when its frames differ, maps positions with
     /// it and reloads the kept ranges at the same source position (snapped forward if now cut),
     /// keeping pause. Then reports the edit state.
-    fn take(&self, c: &mut Ctl, new: Edit) {
+    fn take(&self, c: &mut Ctl, new: Edit) -> Result<(), String> {
         let before = c.edit.timeline.clone();
         c.edit = new;
         let same = match (&before, &c.edit.timeline) {
@@ -362,22 +405,27 @@ impl Core {
             (None, None) => true,
             _ => false,
         };
+        let mut result = Ok(());
         if !same {
             lock(&self.state).set_reference(c.edit.timeline.clone());
             self.emit_state();
             let want = c.wanted();
             if !same_form(&want, &c.requested) {
-                if let Err(e) = self.reload(c, want) {
-                    eprintln!("junctur-app: reload after an edit-list change: {e}");
-                }
+                result = self.reload(c, want);
             }
         }
         self.emit_edit(c);
+        result
     }
 
-    /// Applies an edit, undo or redo to the list in play, saves it and plays the result.
+    /// Applies an edit, undo or redo to the edit list (first taking any outside change on disk),
+    /// saves it and plays the result.
     pub fn edit(&self, step: Step) -> Result<(), String> {
+        if let Step::Do(Op::Words { .. }) = step {
+            self.prepare();
+        }
         let mut ed = lock(&self.editor);
+        let synced = self.sync(&mut ed, "before an edit");
         let (list, fps) = {
             let c = lock(&self.ctl);
             let list = c.edit.list.clone().ok_or_else(|| {
@@ -387,25 +435,52 @@ impl Core {
             })?;
             (list, c.fps.ok_or("the frame rate is not known")?)
         };
-        let new = ed.edit(&list, step, fps)?;
+        synced.map_err(|e| format!("the preview did not reload: {e}"))?;
+        let edited = ed.edit(&list, step, fps)?;
         let mut c = lock(&self.ctl);
-        c.history = History {
+        let mut status = EditorStatus {
             can_undo: ed.can_undo(),
             can_redo: ed.can_redo(),
+            notice: None,
         };
-        match new {
-            Some(new) => {
-                let merged = cuts::merge(&c.edit, Some(cuts::from_list(new, fps)));
-                self.take(&mut c, merged);
-            }
-            None => self.emit_edit(&c),
-        }
-        Ok(())
+        let Some(edited) = edited else {
+            c.status = status;
+            self.emit_edit(&c);
+            return Ok(());
+        };
+        status.notice = notice(&edited);
+        c.status = status;
+        let merged = cuts::merge(&c.edit, Some(cuts::from_list(edited.list, fps)));
+        self.take(&mut c, merged)
+            .map_err(|e| format!("saved, but the preview did not reload: {e}"))
     }
 
-    /// The transcript's words, read on first use; `None` without a project or transcript.
+    /// Reads the transcript and the speech envelope, if not yet in the editor, outside its lock
+    /// (a 30 h transcript or envelope is tens of MB) so the watch and other edits are not held up.
+    fn prepare(&self) {
+        let (dir, words, env) = {
+            let ed = lock(&self.editor);
+            let Some(dir) = ed.project_dir().map(PathBuf::from) else {
+                return;
+            };
+            (dir, ed.words.is_none(), ed.envelope.is_none())
+        };
+        let w = words.then(|| Words::load(&dir).map(Arc::new)).flatten();
+        let e = env
+            .then(|| pipeline::envelope(&dir).map(Arc::new))
+            .flatten();
+        let mut ed = lock(&self.editor);
+        if ed.project_dir() == Some(dir.as_path()) {
+            ed.words = ed.words.take().or(w);
+            ed.envelope = ed.envelope.take().or(e);
+        }
+    }
+
+    /// The transcript's words, read on first use (and again while there are none, as the pipeline
+    /// may write them); `None` without a project or transcript.
     pub fn transcript(&self) -> Option<TranscriptView> {
-        let words = lock(&self.editor).words()?;
+        self.prepare();
+        let words = lock(&self.editor).words.clone()?;
         Some(TranscriptView::new(&words))
     }
 
@@ -446,7 +521,7 @@ impl Core {
 
     pub fn edit_state(&self) -> EditState {
         let c = lock(&self.ctl);
-        EditState::new(&c.edit, c.skip, c.fps, c.history)
+        EditState::new(&c.edit, c.skip, c.fps, &c.status)
     }
 
     pub fn toggle_pause(&self) -> Result<(), String> {
@@ -520,7 +595,7 @@ impl Core {
     fn emit_edit(&self, c: &Ctl) {
         let _ = self.app.emit(
             EDIT_EVENT,
-            EditState::new(&c.edit, c.skip, c.fps, c.history),
+            EditState::new(&c.edit, c.skip, c.fps, &c.status),
         );
     }
 }

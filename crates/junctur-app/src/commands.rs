@@ -147,7 +147,7 @@ pub async fn redo(app: State<'_, App>) -> Result<(), String> {
 /// The share of the window's width the transcript panel covers, kept free of video.
 #[tauri::command]
 pub async fn set_video_margin(app: State<'_, App>, right: f64) -> Result<(), String> {
-    app.with(|p| p.set_video_margin(right))
+    app.core()?.set_video_margin(right)
 }
 
 /// A line from the frontend for the app's log (timings test mode reports).

@@ -1,13 +1,14 @@
 <script lang="ts">
   // The transcript beside the video: kept words in order, cut runs folded, the word under the
   // playhead lit and followed. Rows have one fixed height and only those on screen (plus a few) are
-  // in the DOM, so a 30 h transcript scrolls like a short one; an edit re-runs the layout
-  // (transcript.ts, one pass over the words) but re-renders only the visible rows.
+  // in the DOM, so a 30 h transcript scrolls like a short one. An edit rebuilds the tokens
+  // (transcript.ts, one pass over the words); a resize or a fold toggle only repacks them into rows.
   import { onMount } from "svelte";
   import { SvelteSet } from "svelte/reactivity";
   import * as api from "./api";
   import * as sel from "./selection";
-  import { layout, stamp, wordAt, type Stretch, type Token, type Words } from "./transcript";
+  import { toSeconds } from "./time";
+  import { pack, stamp, tokens, wordAt, type Stretch, type Token, type Words } from "./transcript";
 
   let {
     words,
@@ -34,14 +35,23 @@
   const OVERSCAN = 12;
   // After the user scrolls, the list stops following the playhead for this long.
   const FOLLOW_PAUSE_MS = 4000;
+  // A window drag resizes every frame; rows are repacked once it settles.
+  const RESIZE_SETTLE_MS = 120;
   const FONT = '14px "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif';
   const SMALL = '12px "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif';
+  const SPACE = 4;
 
   let scroller: HTMLDivElement;
   let width = $state(0);
   let height = $state(0);
   let top = $state(0);
   const open = new SvelteSet<number>();
+
+  // A new transcript (another recording) starts with every fold closed.
+  $effect(() => {
+    void words;
+    open.clear();
+  });
 
   // Text widths measured once per distinct string (speech repeats words a lot).
   const ctx = document.createElement("canvas").getContext("2d")!;
@@ -56,40 +66,55 @@
     }
     return w;
   }
-  const SPACE = 4;
 
   function seconds(frames: Stretch): number {
-    const f = edit?.fps;
-    return f ? ((frames.end - frames.start) * f.den) / f.num : 0;
+    return edit?.fps ? toSeconds(frames.end - frames.start, edit.fps) : 0;
   }
 
-  function foldLabel(t: Extract<Token, { kind: "cut" }>): string {
+  function foldLabel(t: Extract<Token, { kind: "cut" }>, isOpen: boolean): string {
     const n = t.last - t.first + 1;
-    return `${t.open ? "▾" : "▸"} cut ${seconds(t.frames).toFixed(1)} s, ${n} word${n === 1 ? "" : "s"}`;
+    return `${isOpen ? "▾" : "▸"} cut ${seconds(t.frames).toFixed(1)} s, ${n} word${n === 1 ? "" : "s"}`;
   }
 
-  function tokenWidth(t: Token): number {
-    if (!words) return 0;
+  function markWidth(t: Token): number {
     switch (t.kind) {
       case "word":
       case "cutword":
-        return measure(words.text[t.i], FONT) + SPACE;
-      case "cut":
-        // The label, its padding, and the keep button.
-        return measure(foldLabel(t), SMALL) + measure("keep", SMALL) + 34 + SPACE;
+        return 0; // measured per transcript, in `wordWidth`
+      case "cut": {
+        // The wider of the two labels (open or closed), the padding, and the keep button.
+        const label = Math.max(measure(foldLabel(t, true), SMALL), measure(foldLabel(t, false), SMALL));
+        return label + measure("keep", SMALL) + 34 + SPACE;
+      }
       case "gap":
         return 10 + SPACE;
     }
   }
 
-  const laid = $derived.by(() => {
-    if (!words || width <= 0) return null;
+  // Only a slow step is logged (test mode reads the log; a 30 h transcript is the case to watch).
+  const SLOW_MS = 50;
+  function timed<T>(what: string, f: () => T): T {
     const t0 = performance.now();
-    const l = layout(words, edit, open, tokenWidth, Math.max(80, width - GUTTER - 2 * PAD));
+    const out = f();
     const ms = performance.now() - t0;
-    void api.uiLog(`layout ${words.text.length} words, ${l.rows.length} rows in ${ms.toFixed(1)} ms`);
-    return l;
-  });
+    if (ms > SLOW_MS) void api.uiLog(`slow transcript ${what}: ${ms.toFixed(0)} ms`).catch(() => {});
+    return out;
+  }
+
+  // Per transcript: each word's width.
+  const wordWidth = $derived(
+    words ? timed("widths", () => Float64Array.from(words!.text, (t) => measure(t, FONT) + SPACE)) : null,
+  );
+  // Per edit: which words are kept, the folds.
+  const toks = $derived(
+    words && wordWidth ? timed("tokens", () => tokens(words!, wordWidth!, edit, markWidth)) : null,
+  );
+  // Per resize or fold toggle: rows only.
+  const laid = $derived(
+    toks && words && width > 0
+      ? timed("rows", () => pack(toks, words!.text.length, open, Math.max(80, width - GUTTER - 2 * PAD)))
+      : null,
+  );
 
   const first = $derived(Math.max(0, Math.floor(top / ROW) - OVERSCAN));
   const visible = $derived.by(() => {
@@ -100,9 +125,7 @@
     return out;
   });
 
-  const current = $derived(
-    words && player?.position != null ? wordAt(words, player.position * 1000) : -1,
-  );
+  const current = $derived(words && player?.position != null ? wordAt(words, player.position * 1000) : -1);
   const chosen = $derived(selection?.kind === "words" ? selection : null);
 
   // Following the playhead: scroll so the current word's row stays in view, unless the user has
@@ -122,7 +145,7 @@
 
   function onScroll() {
     top = scroller.scrollTop;
-    if (Math.abs(top - ours) > 1) pausedUntil = performance.now() + FOLLOW_PAUSE_MS;
+    if (ours < 0 || Math.abs(top - ours) > 1) pausedUntil = performance.now() + FOLLOW_PAUSE_MS;
     ours = -1;
   }
 
@@ -136,43 +159,51 @@
 
   // Selecting: press on a word, drag across others, release. A press and release on one word
   // without moving seeks there (and selects it); shift extends the selection from its anchor.
+  // `pressed` is the one drag in progress; `anchor` outlives it, for shift-clicks.
   let anchor = -1;
+  let pressed = false;
   let moved = false;
-  function wordOf(e: Event): number {
-    const el = (e.target as HTMLElement | null)?.closest<HTMLElement>("[data-i]");
+  function wordUnder(target: EventTarget | Element | null): number {
+    const el = (target as HTMLElement | null)?.closest?.<HTMLElement>("[data-i]");
     return el ? Number(el.dataset.i) : -1;
   }
 
   function down(e: PointerEvent) {
-    const i = wordOf(e);
+    pressed = false;
+    const i = wordUnder(e.target);
     if (i < 0 || e.button !== 0) return;
     e.preventDefault();
     if (e.shiftKey && chosen) {
-      onSelect(sel.words(anchor >= 0 ? anchor : chosen.first, i));
+      // The anchor only counts while it is an end of the current selection (the timeline may
+      // have replaced it).
+      const from = anchor === chosen.first || anchor === chosen.last ? anchor : chosen.first;
+      anchor = from;
+      onSelect(sel.words(from, i));
       moved = true;
     } else {
       anchor = i;
       moved = false;
       onSelect(sel.words(i, i));
     }
+    pressed = true;
     scroller.setPointerCapture(e.pointerId);
   }
 
   function move(e: PointerEvent) {
-    if (anchor < 0 || !(e.buttons & 1)) return;
+    if (!pressed || !(e.buttons & 1)) return;
     // Captured: the target is the scroller, so find the word under the pointer instead.
-    const el = document.elementFromPoint(e.clientX, e.clientY);
-    const i = el ? wordOf({ target: el } as unknown as Event) : -1;
+    const i = wordUnder(document.elementFromPoint(e.clientX, e.clientY));
     if (i >= 0 && (i !== anchor || moved)) {
       moved = true;
       onSelect(sel.words(anchor, i));
     }
   }
 
-  function up(e: PointerEvent) {
-    if (anchor < 0) return;
-    const i = anchor;
-    if (!moved && !e.shiftKey && words) {
+  function up() {
+    if (!pressed) return;
+    pressed = false;
+    if (!moved && words && anchor >= 0) {
+      const i = anchor;
       call(() => api.seek(words!.start[i] / 1000, true));
     }
     moved = false;
@@ -188,12 +219,19 @@
   }
 
   onMount(() => {
+    let timer = 0;
     const ro = new ResizeObserver(() => {
-      width = scroller.clientWidth;
       height = scroller.clientHeight;
+      clearTimeout(timer);
+      // The first size at once, later ones once the resize settles.
+      if (width === 0) width = scroller.clientWidth;
+      else timer = window.setTimeout(() => (width = scroller.clientWidth), RESIZE_SETTLE_MS);
     });
     ro.observe(scroller);
-    return () => ro.disconnect();
+    return () => {
+      clearTimeout(timer);
+      ro.disconnect();
+    };
   });
 </script>
 
@@ -223,7 +261,8 @@
         {#each visible as { index, row } (index)}
           <div class="row" style:top="{index * ROW}px" style:padding-left="{GUTTER}px">
             {#if row.para != null}<span class="time">{stamp(row.para)}</span>{/if}
-            {#each row.tokens as t, k (k)}
+            {#each row.tokens as k (k)}
+              {@const t = toks!.list[k]}
               {#if t.kind === "word"}
                 <span
                   class="w"
@@ -241,7 +280,7 @@
               {:else if t.kind === "cut"}
                 <span class="fold">
                   <button class="label" onclick={() => toggle(t)} title="Show or hide the cut words"
-                    >{foldLabel(t)}</button
+                    >{foldLabel(t, open.has(t.first))}</button
                   ><button class="keep" onclick={() => restore(t.frames)} title="Keep this cut stretch again"
                     >keep</button
                   >

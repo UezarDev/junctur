@@ -4,6 +4,7 @@
  * Shared by the transcript, the timeline and the edit bar so all three show and act on one thing.
  */
 import * as api from "./api";
+import { toSeconds } from "./time";
 import type { Words } from "./transcript";
 
 export type Selection =
@@ -27,7 +28,7 @@ export function seconds(
     return { start: w.start[sel.first] / 1000, end: w.end[sel.last] / 1000 };
   }
   if (!fps) return null;
-  return { start: (sel.start * fps.den) / fps.num, end: (sel.end * fps.den) / fps.num };
+  return { start: toSeconds(sel.start, fps), end: toSeconds(sel.end, fps) };
 }
 
 /** Cuts (`keep` false) or keeps the selection. */
@@ -44,6 +45,6 @@ export function describe(sel: Selection | null, fps: api.Fps | null): string {
     const n = sel.last - sel.first + 1;
     return n === 1 ? "1 word" : `${n} words`;
   }
-  const s = fps ? ((sel.end - sel.start) * fps.den) / fps.num : 0;
+  const s = fps ? toSeconds(sel.end - sel.start, fps) : 0;
   return `${s.toFixed(2)} s of timeline`;
 }

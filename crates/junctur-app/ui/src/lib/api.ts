@@ -56,11 +56,13 @@ export interface EditState {
   editable: boolean;
   canUndo: boolean;
   canRedo: boolean;
+  /** What the last edit or outside change did that the user should know. */
+  notice: string | null;
 }
 
-/** The transcript's words (src/editor/words.rs): texts joined by newlines, times in ms. */
+/** The transcript's words (src/editor/words.rs), sorted by start; times in ms. */
 export interface TranscriptView {
-  text: string;
+  text: string[];
   start: number[];
   end: number[];
 }

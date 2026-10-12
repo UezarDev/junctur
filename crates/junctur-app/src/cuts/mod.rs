@@ -164,17 +164,21 @@ pub struct EditState {
     pub editable: bool,
     pub can_undo: bool,
     pub can_redo: bool,
+    /// What the last edit or outside change did that the user should know (a backup made, an
+    /// unreadable file replaced, cuts placed without the envelope).
+    pub notice: Option<String>,
 }
 
-/// What the editor's history allows, as the edit state reports it.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct History {
+/// The editor's side of the edit state: what undo and redo can do, and its last notice.
+#[derive(Debug, Clone, Default)]
+pub struct EditorStatus {
     pub can_undo: bool,
     pub can_redo: bool,
+    pub notice: Option<String>,
 }
 
 impl EditState {
-    pub fn new(edit: &Edit, skip: bool, fps: Option<Fps>, history: History) -> Self {
+    pub fn new(edit: &Edit, skip: bool, fps: Option<Fps>, status: &EditorStatus) -> Self {
         let t = edit.timeline.as_deref();
         Self {
             skip,
@@ -187,8 +191,9 @@ impl EditState {
             summary: edit.summary.clone(),
             error: edit.error.clone(),
             editable: edit.list.is_some() && fps.is_some(),
-            can_undo: history.can_undo,
-            can_redo: history.can_redo,
+            can_undo: status.can_undo,
+            can_redo: status.can_redo,
+            notice: status.notice.clone(),
         }
     }
 }
@@ -234,7 +239,7 @@ mod tests {
         .unwrap();
         let e = read(&p, FPS).unwrap();
         assert_eq!(e.timeline.as_ref().unwrap().ranges, vec![(30, 60)]);
-        let s = EditState::new(&e, true, Some(FPS), History::default());
+        let s = EditState::new(&e, true, Some(FPS), &EditorStatus::default());
         assert_eq!(s.ranges, vec![30, 60]);
         assert_eq!((s.total_frames, s.output_frames), (300, 30));
         assert_eq!(s.summary.unwrap().ranges, 1);

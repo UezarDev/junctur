@@ -4,7 +4,7 @@
  * frames it passes over into whatever the growing side is, so every nudge is one exact frame edit.
  */
 import type { EditState } from "./api";
-import { cutStretches, type Stretch } from "./transcript";
+import type { Stretch } from "./transcript";
 
 export interface Under extends Stretch {
   kept: boolean;
@@ -12,14 +12,22 @@ export interface Under extends Stretch {
   index: number;
 }
 
-/** The stretch holding source frame `frame`. */
+/** The stretch holding source frame `frame`: a binary search, as this runs on every position. */
 export function under(edit: EditState, frame: number): Under | null {
   const r = edit.ranges;
-  for (let i = 0; i < r.length; i += 2) {
-    if (frame >= r[i] && frame < r[i + 1]) return { start: r[i], end: r[i + 1], kept: true, index: i / 2 + 1 };
+  const n = r.length / 2;
+  // The first range ending after `frame`.
+  let lo = 0;
+  let hi = n;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (r[2 * mid + 1] <= frame) lo = mid + 1;
+    else hi = mid;
   }
-  const c = cutStretches(edit).find((s) => frame >= s.start && frame < s.end);
-  return c ? { ...c, kept: false, index: 0 } : null;
+  if (lo < n && r[2 * lo] <= frame) return { start: r[2 * lo], end: r[2 * lo + 1], kept: true, index: lo + 1 };
+  const start = lo > 0 ? r[2 * lo - 1] : 0;
+  const end = lo < n ? r[2 * lo] : edit.totalFrames;
+  return frame >= start && frame < end ? { start, end, kept: false, index: 0 } : null;
 }
 
 /** The frame edit that moves `edge` of `s` by `by` frames (negative: earlier), or null if none. */

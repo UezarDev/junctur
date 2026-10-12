@@ -8,6 +8,7 @@
   import * as api from "./api";
   import { coverage } from "./coverage";
   import type { Selection } from "./selection";
+  import { toFrame, toSeconds } from "./time";
 
   let {
     player,
@@ -32,7 +33,7 @@
   // Source length: the edit list's frame grid when there is one, else what mpv reports.
   const duration = $derived(
     hasRanges && edit?.fps
-      ? (edit.totalFrames * edit.fps.den) / edit.fps.num
+      ? toSeconds(edit.totalFrames, edit.fps)
       : (player?.duration ?? 0),
   );
 
@@ -108,7 +109,7 @@
   let selectFrom: number | null = null;
   function frameAt(clientX: number): number {
     const f = edit?.fps;
-    return f ? Math.round((timeAt(clientX) * f.num) / f.den) : 0;
+    return f ? toFrame(timeAt(clientX), f, Math.round) : 0;
   }
 
   function selectTo(clientX: number) {
