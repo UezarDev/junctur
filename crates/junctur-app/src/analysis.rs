@@ -66,12 +66,31 @@ pub struct Reanalysed {
 /// Told of every change of a run's progress (the app sends it to the page).
 pub type Notify = Arc<dyn Fn(&Progress) + Send + Sync>;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Analysis {
     runs: Arc<Mutex<HashMap<PathBuf, Progress>>>,
     gate: Arc<Mutex<()>>,
     /// The cache the projects live in; `None` is the default one (the CLI's).
     cache_dir: Option<PathBuf>,
+    /// The user's options a run starts from ([`user_options`]); tests pass their own, so they
+    /// never read the user's config or voices files.
+    user: fn() -> Result<PipelineOptions, String>,
+}
+
+impl Default for Analysis {
+    fn default() -> Self {
+        Self {
+            runs: Default::default(),
+            gate: Default::default(),
+            cache_dir: None,
+            user: user_options,
+        }
+    }
+}
+
+/// The options `junctur analyze` starts from: model from the config file, remembered voices.
+fn user_options() -> Result<PipelineOptions, String> {
+    config::analysis_options(None, false, false).map_err(|e| e.to_string())
 }
 
 /// The key a recording's runs are kept under: its absolute path, as the project names it.
@@ -79,25 +98,15 @@ fn key(file: &Path) -> PathBuf {
     std::path::absolute(file).unwrap_or_else(|_| file.to_path_buf())
 }
 
-/// The options a run of `p` uses: the user's (model from the config file, remembered voices),
-/// device auto, and the cut settings of the list on disk, so a re-analysis keeps settings `junctur
-/// cut` set. Never `force`: stages whose results still answer the options are reused.
-fn options(p: &Project) -> Result<PipelineOptions, String> {
-    let mut o = config::analysis_options(None, false, false).map_err(|e| e.to_string())?;
-    if let Ok(e) = p.edit() {
-        o.cut = e.settings;
-    }
-    Ok(o)
-}
-
-/// Why `file`'s analysis is out of date with the settings now (see `pipeline::outdated`); a
-/// settings file that cannot be read says so instead.
+/// Why `file`'s analysis is out of date with the settings now (see `pipeline::outdated`); a config
+/// file that cannot be read says so instead. Only the transcript's settings count, so the voices
+/// file is not read: a broken one is no reason to analyse again.
 pub fn outdated(file: &Path) -> Vec<String> {
     let p = match Project::open(file, None, None) {
         Ok(p) => p,
         Err(_) => return Vec::new(),
     };
-    match options(&p) {
+    match config::analysis_options(None, false, true) {
         Ok(o) => pipeline::outdated(&p, &o),
         Err(e) => vec![format!("The settings could not be read: {e}")],
     }
@@ -108,8 +117,35 @@ impl Analysis {
     fn with_cache(cache_dir: PathBuf) -> Self {
         Self {
             cache_dir: Some(cache_dir),
+            user: || Ok(PipelineOptions::default()),
             ..Self::default()
         }
+    }
+
+    /// The options a run of `p` uses: the user's, device auto, and the cut settings of the list on
+    /// disk, so a re-analysis keeps settings `junctur cut` set. Never `force`: stages whose results
+    /// still answer the options are reused.
+    fn options(&self, p: &Project) -> Result<PipelineOptions, String> {
+        let mut o = (self.user)()?;
+        if let Ok(e) = p.edit() {
+            o.cut = e.settings;
+        }
+        Ok(o)
+    }
+
+    /// A run that could not start (its project could not be opened), recorded so the page shows
+    /// the error where it shows progress, not as a failed open.
+    pub fn failed(&self, file: &Path, error: String) -> Progress {
+        let k = key(file);
+        let r = Progress {
+            file: k.display().to_string(),
+            phase: Phase::Failed,
+            line: None,
+            error: Some(error),
+            project: self.status(&k),
+        };
+        lock(&self.runs).insert(k, r.clone());
+        r
     }
 
     pub fn progress(&self, file: &Path) -> Option<Progress> {
@@ -187,7 +223,7 @@ impl Analysis {
         let k = p.file.clone();
         self.update(&k, notify.as_ref(), |r| r.phase = Phase::Running);
         let name = k.file_name().map(|n| n.to_string_lossy().into_owned());
-        let result = options(p).and_then(|o| {
+        let result = self.options(p).and_then(|o| {
             pipeline::run(p, &o, &mut |line| {
                 eprintln!(
                     "junctur-app analysis ({}): {line}",
@@ -302,7 +338,9 @@ mod tests {
             .unwrap();
         assert!(!r.hand_edited && r.progress.is_some());
         // Wait for it to end before removing its folder.
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
         while a.busy(&file) {
+            assert!(std::time::Instant::now() < deadline, "the run never ended");
             std::thread::sleep(Duration::from_millis(20));
         }
         let _ = std::fs::remove_dir_all(&d);

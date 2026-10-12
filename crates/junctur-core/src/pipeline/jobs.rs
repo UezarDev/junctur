@@ -93,7 +93,8 @@ impl Jobs {
             }
             s.note = note;
         }
-        std::fs::write(dir.join("jobs.json"), serde_json::to_vec_pretty(self)?)?;
+        // Whole or not at all: a half-written file would read back as every stage pending.
+        crate::output::write_replacing(&dir.join("jobs.json"), serde_json::to_vec_pretty(self)?)?;
         Ok(())
     }
 

@@ -111,9 +111,10 @@ pub fn answers(model: &str, languages: &[String], opts: &TranscribeOptions) -> b
 }
 
 /// What a project's finished transcript was made with: its model and languages; `None` when there
-/// is none. Reads the file without building its segments (a 30 h transcript is tens of MB), for
-/// asking whether it is out of date (2d).
-pub fn made_with(project: &Path) -> Option<(String, Vec<String>)> {
+/// is none, `Some(Err)` when there is one that cannot be read (a run would make it again). Reads
+/// the file without building its segments (a 30 h transcript is tens of MB), for asking whether it
+/// is out of date (2d).
+pub fn made_with(project: &Path) -> Option<std::result::Result<(String, Vec<String>), String>> {
     #[derive(Deserialize)]
     struct Made {
         choice: MadeChoice,
@@ -123,8 +124,16 @@ pub fn made_with(project: &Path) -> Option<(String, Vec<String>)> {
     struct MadeChoice {
         model: String,
     }
-    let m: Made = serde_json::from_slice(&std::fs::read(path(project)).ok()?).ok()?;
-    Some((m.choice.model, m.languages))
+    let bytes = match std::fs::read(path(project)) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => return Some(Err(e.to_string())),
+    };
+    Some(
+        serde_json::from_slice::<Made>(&bytes)
+            .map(|m| (m.choice.model, m.languages))
+            .map_err(|e| e.to_string()),
+    )
 }
 
 /// Where a project keeps the transcript.

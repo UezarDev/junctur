@@ -19,6 +19,7 @@ use crate::project::{self, ProjectStatus};
 use crate::recent::{self, Recent};
 use crate::state::PlayerState;
 use crate::voices::VoiceView;
+use junctur_core::pipeline::StageState;
 
 /// The player, or why it could not start (libmpv missing, no GL): the window still opens and
 /// says so instead of the app failing to launch.
@@ -116,9 +117,20 @@ pub async fn open_file(
     let mut analysis = app.analysis.progress(file);
     let mut outdated = Vec::new();
     if let Ok(s) = &status {
-        let unanalysed = s.edit.is_none() && s.edit_error.is_none();
+        // No list, or one that does not parse left by a run that never finished its `edit` stage
+        // (a list the user broke by hand after a finished run is theirs to fix, not to replace).
+        let finished = s
+            .stages
+            .iter()
+            .any(|st| st.name == "edit" && st.state == StageState::Done);
+        let unanalysed = s.edit.is_none() && (s.edit_error.is_none() || !finished);
         if unanalysed {
-            analysis = Some(app.analysis.start(file, notifier(handle))?);
+            // The file plays even when its analysis cannot start; the panel says why.
+            analysis = Some(
+                app.analysis
+                    .start(file, notifier(handle))
+                    .unwrap_or_else(|e| app.analysis.failed(file, e)),
+            );
         } else if !app.analysis.busy(file) {
             outdated = analysis::outdated(file);
         }
@@ -167,8 +179,14 @@ pub async fn reanalyse(
     path: String,
     replace: bool,
 ) -> Result<Reanalysed, String> {
-    app.analysis
-        .reanalyse(Path::new(&path), replace, notifier(handle))
+    // Off the async runtime: asking whether the list holds user edits reads the track analysis
+    // and the transcript.
+    let analysis = app.analysis.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        analysis.reanalyse(Path::new(&path), replace, notifier(handle))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Plays only the kept ranges (`on`) or the whole file.
@@ -303,11 +321,12 @@ pub async fn enroll_voice(
 /// Forgets voice `name`, relabelling the open recording.
 #[tauri::command]
 pub async fn forget_voice(app: State<'_, App>, name: String) -> Result<(), String> {
-    match app.editable() {
-        Ok(core) => core.forget_voice(&name),
-        // No player (libmpv missing): the voice can still be forgotten.
-        Err(_) => crate::voices::forget(None, &name).map(|_| ()),
+    // No player (libmpv missing): the voice can still be forgotten. With one, not while the open
+    // recording is analysed: the run took the voices as they were and would label it with this one.
+    if app.core().is_err() {
+        return crate::voices::forget(None, &name).map(|_| ());
     }
+    app.editable()?.forget_voice(&name)
 }
 
 #[tauri::command]

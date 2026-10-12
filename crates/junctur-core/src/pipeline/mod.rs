@@ -394,7 +394,9 @@ pub fn cut(
     if let (Some(old), true) = (&d.old, d.users) {
         back_up(&p.dir, old)?;
     }
-    std::fs::write(p.edit_path(), d.list.to_text())?;
+    // Whole or not at all: a list cut short by a close would open as an analysed recording whose
+    // list does not parse.
+    crate::output::write_replacing(&p.edit_path(), d.list.to_text())?;
     Ok(d.list)
 }
 
@@ -500,7 +502,8 @@ pub fn outdated(p: &Project, opts: &PipelineOptions) -> Vec<String> {
     };
     match transcribe::made_with(&p.dir) {
         None => vec!["There is no transcript yet.".to_string()],
-        Some((model, languages)) if !transcribe::answers(&model, &languages, &t) => {
+        Some(Err(e)) => vec![format!("The transcript could not be read ({e}).")],
+        Some(Ok((model, languages))) if !transcribe::answers(&model, &languages, &t) => {
             vec![if languages != t.languages.allowed {
                 format!(
                     "Transcribed in {}; the settings ask for {}.",
@@ -514,7 +517,7 @@ pub fn outdated(p: &Project, opts: &PipelineOptions) -> Vec<String> {
                 )
             }]
         }
-        Some(_) => Vec::new(),
+        Some(Ok(_)) => Vec::new(),
     }
 }
 
@@ -728,6 +731,13 @@ mod tests {
         std::fs::write(transcribe::path(&p.dir), made(r#"["en"]"#)).unwrap();
         let why = outdated(&p, &opts(ModelPref::Auto));
         assert_eq!(why, vec!["Transcribed in en; the settings ask for es+en."]);
+        // Unreadable is not missing: a run would make it again, and the user hears why.
+        std::fs::write(transcribe::path(&p.dir), "{ torn").unwrap();
+        let why = outdated(&p, &opts(ModelPref::Auto));
+        assert!(
+            why[0].starts_with("The transcript could not be read"),
+            "{why:?}"
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 

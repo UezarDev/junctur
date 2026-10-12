@@ -7,16 +7,10 @@
 //! file beside the list, so a list kept in git or moved stays self-describing.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use super::EditList;
 
 const STAMP: &str = "# saved by the Junctur app, unchanged since if this matches: ";
-
-/// A rename can meet a reader (an antivirus scan, the edit-list watch) holding the file on
-/// Windows; it is retried this many times, this far apart, before the save fails.
-const RENAME_TRIES: u32 = 5;
-const RENAME_WAIT: Duration = Duration::from_millis(40);
 
 /// What a save did.
 #[derive(Debug, Clone, PartialEq)]
@@ -120,14 +114,7 @@ fn replace(path: &Path, tmp: &Path, old: Option<String>, text: &str) -> std::io:
             backup = Some(to);
         }
     }
-    let mut tries = 1;
-    while let Err(e) = std::fs::rename(tmp, path) {
-        if tries >= RENAME_TRIES {
-            return Err(e);
-        }
-        tries += 1;
-        std::thread::sleep(RENAME_WAIT);
-    }
+    crate::output::rename_over(tmp, path)?;
     Ok(Saved {
         text: text.to_string(),
         backup,

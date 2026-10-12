@@ -49,18 +49,14 @@ fn read(path: &Path) -> Vec<Entry> {
         .unwrap_or_default()
 }
 
-/// Through a temporary file and a rename, so a reader never sees half a list.
+/// Through a temporary file of its own and a rename, so a reader never sees half a list and two
+/// writers never share a temporary file.
 fn write(path: &Path, list: &[Entry]) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let tmp = path.with_extension("json.tmp");
     let json = serde_json::to_vec_pretty(list).map_err(|e| e.to_string())?;
-    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        e.to_string()
-    })
+    junctur_core::output::write_replacing(path, json).map_err(|e| e.to_string())
 }
 
 /// `list` with `path` first, opened at `now`; each path once, at most [`MAX`]. Paths are compared

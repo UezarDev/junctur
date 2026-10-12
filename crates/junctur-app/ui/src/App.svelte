@@ -100,8 +100,18 @@
   async function load(path: string) {
     try {
       failure = null;
-      opened = await api.openFile(path);
-      analysis = opened.analysis;
+      const o = await api.openFile(path);
+      opened = o;
+      analysis = o.analysis;
+      // Progress sent while the open was on its way was dropped (no `opened` yet to match it):
+      // read where the run is now. A run that already ended needs nothing more, as the
+      // transcript is read just below.
+      const now = await api.analysis(o.file);
+      // Never back: an event handled meanwhile may already be further on than this answer.
+      if (now && opened === o && rank(now) >= rank(analysis)) {
+        analysis = now;
+        if (now.phase === "done") opened = { ...o, outdated: [] };
+      }
       await loadTranscript();
     } catch (e) {
       failure = String(e);
@@ -109,6 +119,8 @@
   }
 
   const busy = (p: api.Progress | null) => p?.phase === "queued" || p?.phase === "running";
+  const rank = (p: api.Progress | null) =>
+    p ? { queued: 1, running: 2, done: 3, failed: 3 }[p.phase] : 0;
 
   function onProgress(p: api.Progress) {
     if (!opened || p.file !== opened.file) return;
