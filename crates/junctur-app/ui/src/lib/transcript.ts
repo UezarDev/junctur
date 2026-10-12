@@ -5,6 +5,9 @@
  * token's width measured once. `pack` (per resize or fold toggle): the tokens broken into
  * fixed-height rows, numbers only. The view then renders just the rows on screen. A 30 h transcript
  * is a few hundred thousand words; both steps are one pass (plus a binary search per word).
+ *
+ * Where the speaker changes (5a) the next row is the speaker's name, a row of its own: rows have
+ * one height, so a name row needs no width accounting and never shares a line with words.
  */
 import type { EditState, TranscriptView } from "./api";
 import { msOf } from "./time";
@@ -14,10 +17,17 @@ export interface Words {
   /** Milliseconds. */
   start: Float64Array;
   end: Float64Array;
+  /** Speaker id per word, 0 for none. */
+  speaker: Uint32Array;
 }
 
 export function words(v: TranscriptView): Words {
-  return { text: v.text, start: Float64Array.from(v.start), end: Float64Array.from(v.end) };
+  return {
+    text: v.text,
+    start: Float64Array.from(v.start),
+    end: Float64Array.from(v.end),
+    speaker: Uint32Array.from(v.speaker ?? []),
+  };
 }
 
 /** A stretch of source frames, `[start, end)`. */
@@ -48,6 +58,8 @@ export interface Row {
   tokens: number[];
   /** Source milliseconds of the paragraph this row starts, if it starts one. */
   para: number | null;
+  /** A name row: the speaker (id) whose words follow. Such a row holds no tokens. */
+  speaker: number | null;
 }
 
 export interface Layout {
@@ -153,19 +165,49 @@ export function tokens(
   };
 }
 
-/** Breaks `t` into rows `max` px wide; cut words show only while their fold is in `open`. */
-export function pack(t: Tokens, words: number, open: Set<number>, max: number): Layout {
+/** The speaker of a token: a word's own, a fold's first word's; 0 for none or a gap. */
+function speakerOf(tok: Token, speaker: Uint32Array): number {
+  switch (tok.kind) {
+    case "word":
+    case "cutword":
+      return speaker[tok.i] ?? 0;
+    case "cut":
+      return speaker[tok.first] ?? 0;
+    case "gap":
+      return 0;
+  }
+}
+
+/**
+ * Breaks `t` into rows `max` px wide; cut words show only while their fold is in `open`. A name
+ * row goes before the first token of each change of speaker (`speaker`: per word, 0 for none,
+ * which continues whoever spoke last).
+ */
+export function pack(
+  t: Tokens,
+  words: number,
+  open: Set<number>,
+  max: number,
+  speaker: Uint32Array = new Uint32Array(0),
+): Layout {
   const rows: Row[] = [];
   const rowOf = new Int32Array(words);
   let row: Row | null = null;
   let used = 0;
   let lastEnd = -Infinity;
+  let talking = 0;
   for (let k = 0; k < t.list.length; k++) {
     const tok = t.list[k];
     if (tok.kind === "cutword" && !open.has(tok.fold)) continue;
-    const para = t.at[k] - lastEnd >= PARAGRAPH_MS;
-    if (!row || para || used + t.width[k] > max) {
-      row = { tokens: [], para: para ? t.at[k] : null };
+    const who = speakerOf(tok, speaker);
+    const turn = who !== 0 && who !== talking;
+    if (turn) {
+      talking = who;
+      rows.push({ tokens: [], para: null, speaker: who });
+    }
+    const para = turn || t.at[k] - lastEnd >= PARAGRAPH_MS;
+    if (!row || turn || para || used + t.width[k] > max) {
+      row = { tokens: [], para: para ? t.at[k] : null, speaker: null };
       rows.push(row);
       used = 0;
     }

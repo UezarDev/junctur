@@ -134,6 +134,12 @@ pub async fn edit_frames(
     app.core()?.edit(Step::Do(Op::Frames { start, end, keep }))
 }
 
+/// Renames speaker `id` in the edit list.
+#[tauri::command]
+pub async fn rename_speaker(app: State<'_, App>, id: u32, name: String) -> Result<(), String> {
+    app.core()?.rename_speaker(id, &name)
+}
+
 #[tauri::command]
 pub async fn undo(app: State<'_, App>) -> Result<(), String> {
     app.core()?.edit(Step::Undo)

@@ -52,12 +52,17 @@
     }, 100);
   });
 
+  // The edit state's speakers key the words' labels were made with: when it moves (an outside
+  // change to the turns), the labels are fetched again. A rename does not move it.
+  let labelledWith = "";
+
   async function loadTranscript() {
     words = null;
     selection = null;
     wordsLoading = true;
     try {
       const t0 = performance.now();
+      labelledWith = edit?.speakersKey ?? "";
       const view = await api.transcript();
       const t1 = performance.now();
       words = view ? toWords(view) : null;
@@ -71,6 +76,22 @@
       wordsLoading = false;
     }
   }
+
+  $effect(() => {
+    const key = edit?.speakersKey ?? "";
+    if (!words || wordsLoading || key === labelledWith) return;
+    labelledWith = key;
+    const before = words;
+    api.transcript().then(
+      (view) => {
+        // Only onto the same transcript (another file may have opened meanwhile).
+        if (view && words === before && view.speaker.length === before.text.length) {
+          words = { ...before, speaker: Uint32Array.from(view.speaker) };
+        }
+      },
+      (e) => (failure = String(e)),
+    );
+  });
 
   const VIDEO = ["mp4", "mkv", "mov", "flv", "ts", "webm", "avi"];
 

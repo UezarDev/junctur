@@ -9,7 +9,8 @@
 //! `trace`): every range boundary crossed with its frames and stall.
 //!
 //! Edit steps (2c) run the editor as the frontend does: `cutw=12-15` / `keepw=12-15` (transcript
-//! words, by index), `cutf=300-450` / `keepf=300-450` (source frames), `undo`, `redo`. Each step's
+//! words, by index), `cutf=300-450` / `keepf=300-450` (source frames), `undo`, `redo`, and
+//! `rename=<id>:<name>` (5a: a speaker's name; no `;` in it). Each step's
 //! report adds the edit state it left, and the final report re-reads `edit.junctur` from disk
 //! (`disk`: does it parse, and is it the list in play), counts the loads asked of mpv (a save must
 //! not come back as a second reload) and lists the frontend's log lines (`ui`).
@@ -67,6 +68,7 @@ enum Action {
     Skip(bool),
     Pause,
     Edit(Step),
+    Rename(u32, String),
 }
 
 /// The frontend's log lines (`ui_log`), kept for the report.
@@ -117,6 +119,10 @@ fn parse_steps(s: &str) -> Result<Vec<(f64, Action)>, String> {
                     }
                 }))
             }
+            Some(("rename", v)) => {
+                let (id, name) = v.split_once(':').ok_or_else(bad)?;
+                Action::Rename(id.trim().parse().map_err(|_| bad())?, name.to_string())
+            }
             None if action == "pause" => Action::Pause,
             None if action == "undo" => Action::Edit(Step::Undo),
             None if action == "redo" => Action::Edit(Step::Redo),
@@ -153,6 +159,7 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
         Action::Skip(on) => p.set_skip(*on),
         Action::Pause => p.toggle_pause(),
         Action::Edit(step) => p.edit(*step),
+        Action::Rename(id, name) => p.rename_speaker(*id, name),
     })?
 }
 
@@ -181,6 +188,7 @@ impl Ran<'_> {
                 "canRedo": e.can_redo,
                 "error": e.error,
                 "notice": e.notice,
+                "speakers": e.speakers,
             })
         });
         json!({
@@ -351,6 +359,12 @@ mod tests {
                 Action::Edit(Step::Redo),
             ]
         );
+        assert_eq!(
+            parse_steps("5:rename=2:Ana María").unwrap(),
+            vec![(5.0, Action::Rename(2, "Ana María".into()))]
+        );
+        assert!(parse_steps("5:rename=x:Ana").is_err());
+        assert!(parse_steps("5:rename=2").is_err());
         assert!(parse_steps("1:cutw=3").is_err());
         assert!(parse_steps("2:jump=3").is_err());
         assert!(parse_steps("x:pause").is_err());

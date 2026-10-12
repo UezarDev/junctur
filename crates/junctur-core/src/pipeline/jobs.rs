@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::Result;
 
 /// Stage names, in run order.
-pub const STAGES: [&str; 4] = ["tracks", "speech", "transcribe", "edit"];
+pub const STAGES: [&str; 5] = ["tracks", "speech", "speakers", "transcribe", "edit"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -67,6 +67,25 @@ impl Jobs {
         seconds: Option<f64>,
         note: Option<String>,
     ) -> Result<()> {
+        if !self.stages.iter().any(|s| s.name == name) {
+            // A stage added after this project's `jobs.json` was written (5a's `speakers`): put it
+            // in run order, or its state would be dropped on every run.
+            let order = |n: &str| STAGES.iter().position(|&x| x == n);
+            let at = self
+                .stages
+                .iter()
+                .position(|s| order(&s.name) > order(name))
+                .unwrap_or(self.stages.len());
+            self.stages.insert(
+                at,
+                StageRecord {
+                    name: name.to_string(),
+                    state: StageState::Pending,
+                    seconds: None,
+                    note: None,
+                },
+            );
+        }
         if let Some(s) = self.stages.iter_mut().find(|s| s.name == name) {
             s.state = state;
             if seconds.is_some() {
@@ -148,6 +167,26 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("boom"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_stage_an_older_file_does_not_list_is_added_in_run_order() {
+        let dir = std::env::temp_dir().join(format!("junctur-jobs-old-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = r#"{"file":"x.mp4","stages":[
+            {"name":"tracks","state":"done","seconds":1.0,"note":null},
+            {"name":"speech","state":"done","seconds":1.0,"note":null},
+            {"name":"transcribe","state":"done","seconds":1.0,"note":null},
+            {"name":"edit","state":"done","seconds":1.0,"note":null}]}"#;
+        std::fs::write(dir.join("jobs.json"), old).unwrap();
+        let mut j = Jobs::load(&dir);
+        j.set(&dir, "speakers", StageState::Done, Some(2.0), None)
+            .unwrap();
+        let back = Jobs::load(&dir);
+        let names: Vec<&str> = back.stages.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, STAGES);
+        assert_eq!(back.get("speakers").unwrap().state, StageState::Done);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

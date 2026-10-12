@@ -7,16 +7,22 @@
 //! settings pad_before=0.25 pad_after=0.35 merge_gap=1 snap=0.15 crossfade=0.03 window=5
 //! # kept 4012.3 s of 6304.0 s (64%) in 812 ranges
 //! keep 1.234 5.678
+//! speaker 1 Speaker 1
+//! speaker 2 track=1 Lucía
+//! turn 1.300 4.100 1
 //! window 0 0.820 0.820 14
 //! ```
 //!
-//! `#` lines are comments. `source` takes the rest of the line, so paths need no quoting.
-//! Times are seconds with millisecond precision.
+//! `#` lines are comments. `source` takes the rest of the line, so paths need no quoting, and so
+//! does a speaker's name (after its id and an optional `track=<n>`), so renaming a speaker by hand
+//! is editing one line. Times are seconds with millisecond precision. Speaker and turn lines are
+//! written only when there are speakers, so a list without them reads exactly as before (5a): the
+//! version stays 1, since every file an older build wrote still parses the same.
 
 use std::fmt::Write;
 use std::path::PathBuf;
 
-use super::{CutSettings, EditList, Range, Window};
+use super::{default_name, CutSettings, EditList, Range, SpeakerName, Speakers, Turn, Window};
 
 pub const FORMAT_VERSION: u32 = 1;
 
@@ -47,6 +53,21 @@ pub fn write(e: &EditList) -> String {
     for r in &e.keep {
         let _ = writeln!(out, "keep {:.3} {:.3}", r.start, r.end);
     }
+    let sp = &e.speakers;
+    if !sp.is_empty() {
+        let _ = writeln!(
+            out,
+            "# speaker <id> [track=<n>] <name>: rename a speaker by editing the name"
+        );
+        for n in &sp.names {
+            let track = n.track.map(|t| format!("track={t} ")).unwrap_or_default();
+            let _ = writeln!(out, "speaker {} {track}{}", n.id, n.name);
+        }
+        let _ = writeln!(out, "# turn <start> <end> <speaker id>");
+        for t in &sp.turns {
+            let _ = writeln!(out, "turn {:.3} {:.3} {}", t.start, t.end, t.speaker);
+        }
+    }
     let _ = writeln!(out, "# window <start> <score> <speech share> <words>");
     for w in &e.windows {
         let _ = writeln!(
@@ -73,8 +94,11 @@ pub fn parse(text: &str) -> Result<EditList, String> {
         duration: 0.0,
         settings: CutSettings::default(),
         keep: Vec::new(),
+        speakers: Speakers::default(),
         windows: Vec::new(),
     };
+    // Turn lines may come before the speaker lines they name; checked once all are read.
+    let mut turn_lines: Vec<usize> = Vec::new();
     for (n, line) in lines {
         let (key, rest) = line.split_once(' ').unwrap_or((line, ""));
         let bad = |what: &str| format!("line {n}: {what}: {line}");
@@ -108,6 +132,51 @@ pub fn parse(text: &str) -> Result<EditList, String> {
                 [start, end] if end > start => e.keep.push(Range { start, end }),
                 _ => return Err(bad("expected `keep <start> <end>` with end after start")),
             },
+            "speaker" => {
+                let (id, rest) = rest.split_once(' ').unwrap_or((rest, ""));
+                let id: u32 = match id.parse() {
+                    Ok(id) if id > 0 => id,
+                    _ => return Err(bad("expected `speaker <id> [track=<n>] <name>`, id from 1")),
+                };
+                if e.speakers.names.iter().any(|n| n.id == id) {
+                    return Err(bad("a second `speaker` line for this id"));
+                }
+                let rest = rest.trim();
+                let (track, name) = match rest.strip_prefix("track=") {
+                    Some(r) => {
+                        let (t, name) = r.split_once(' ').unwrap_or((r, ""));
+                        let t: usize = t.parse().map_err(|_| bad("`track=` needs a number"))?;
+                        (Some(t), name.trim())
+                    }
+                    None => (None, rest),
+                };
+                e.speakers.names.push(SpeakerName {
+                    id,
+                    // A blank name is read as the default rather than refused: it is what a
+                    // half-finished hand rename leaves.
+                    name: if name.is_empty() {
+                        default_name(id)
+                    } else {
+                        name.to_string()
+                    },
+                    track,
+                });
+            }
+            "turn" => match nums()?[..] {
+                [start, end, id] if end > start && id >= 1.0 && id.fract() == 0.0 => {
+                    e.speakers.turns.push(Turn {
+                        start,
+                        end,
+                        speaker: id as u32,
+                    });
+                    turn_lines.push(n);
+                }
+                _ => {
+                    return Err(bad(
+                        "expected `turn <start> <end> <speaker id>` with end after start",
+                    ))
+                }
+            },
             "window" => match nums()?[..] {
                 [start, score, speech, words] => e.windows.push(Window {
                     start,
@@ -120,6 +189,16 @@ pub fn parse(text: &str) -> Result<EditList, String> {
             _ => return Err(bad("unknown line")),
         }
     }
+    for (t, n) in e.speakers.turns.iter().zip(&turn_lines) {
+        if e.speakers.name(t.speaker).is_none() {
+            return Err(format!(
+                "line {n}: turn names speaker {}, which no `speaker` line declares",
+                t.speaker
+            ));
+        }
+    }
+    e.speakers.names.sort_by_key(|n| n.id);
+    e.speakers.turns.sort_by(|a, b| a.start.total_cmp(&b.start));
     // Hand edits may leave ranges out of order or overlapping; the renderer wants neither.
     e.keep.sort_by(|a, b| a.start.total_cmp(&b.start));
     let mut merged: Vec<Range> = Vec::new();
@@ -152,6 +231,7 @@ mod tests {
                     end: 12.0,
                 },
             ],
+            speakers: Speakers::default(),
             windows: vec![Window {
                 start: 0.0,
                 score: 0.5,
@@ -159,6 +239,108 @@ mod tests {
                 words: 7,
             }],
         }
+    }
+
+    fn with_speakers() -> EditList {
+        EditList {
+            speakers: Speakers {
+                names: vec![
+                    SpeakerName {
+                        id: 1,
+                        name: "Speaker 1".into(),
+                        track: None,
+                    },
+                    SpeakerName {
+                        id: 2,
+                        name: "Lucía de la Cruz".into(),
+                        track: Some(1),
+                    },
+                ],
+                turns: vec![
+                    Turn {
+                        start: 1.5,
+                        end: 3.0,
+                        speaker: 1,
+                    },
+                    Turn {
+                        start: 2.5,
+                        end: 4.0,
+                        speaker: 2,
+                    },
+                ],
+            },
+            ..sample()
+        }
+    }
+
+    #[test]
+    fn speakers_round_trip_and_stay_out_of_lists_without_them() {
+        let e = with_speakers();
+        let text = e.to_text();
+        assert!(
+            text.contains(
+                "speaker 2 track=1 Lucía de la Cruz
+"
+            ),
+            "{text}"
+        );
+        assert!(text.contains(
+            "turn 2.500 4.000 2
+"
+        ));
+        assert_eq!(parse(&text).unwrap(), e);
+        assert!(!sample().to_text().contains("speaker"));
+    }
+
+    #[test]
+    fn hand_edited_speakers_are_read_or_refused_by_line() {
+        let head = "junctur-edit 1
+source x.mp4
+";
+        // A rename by hand, a blank name, turns before their speakers and out of order.
+        let e = parse(&format!(
+            "{head}turn 5 6 2
+turn 1 2 1
+speaker 2   Ana  
+speaker 1
+"
+        ))
+        .unwrap();
+        assert_eq!(e.speakers.name(1), Some("Speaker 1"));
+        assert_eq!(e.speakers.name(2), Some("Ana"));
+        assert_eq!(e.speakers.turns[0].speaker, 1);
+        let err = parse(&format!(
+            "{head}speaker 1 A
+turn 1 2 3
+"
+        ))
+        .unwrap_err();
+        assert!(
+            err.starts_with("line 4") && err.contains("speaker 3"),
+            "{err}"
+        );
+        assert!(parse(&format!(
+            "{head}speaker 0 A
+"
+        ))
+        .is_err());
+        assert!(parse(&format!(
+            "{head}speaker 1 A
+speaker 1 B
+"
+        ))
+        .is_err());
+        assert!(parse(&format!(
+            "{head}speaker 1 track=x A
+"
+        ))
+        .is_err());
+        assert!(parse(&format!(
+            "{head}speaker 1 A
+turn 2 1 1
+"
+        ))
+        .is_err());
     }
 
     #[test]

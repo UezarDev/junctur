@@ -167,6 +167,17 @@ pub struct EditState {
     /// What the last edit or outside change did that the user should know (a backup made, an
     /// unreadable file replaced, cuts placed without the envelope).
     pub notice: Option<String>,
+    /// The speakers the list names, by id.
+    pub speakers: Vec<SpeakerView>,
+    /// Changes when the list's turns (or speaker tracks) do, so the page asks for the words'
+    /// labels again after an outside change; a rename leaves it as it was.
+    pub speakers_key: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SpeakerView {
+    pub id: u32,
+    pub name: String,
 }
 
 /// The editor's side of the edit state: what undo and redo can do, and its last notice.
@@ -194,8 +205,44 @@ impl EditState {
             can_undo: status.can_undo,
             can_redo: status.can_redo,
             notice: status.notice.clone(),
+            speakers: edit.list.as_ref().map_or_else(Vec::new, |l| {
+                l.speakers
+                    .names
+                    .iter()
+                    .map(|n| SpeakerView {
+                        id: n.id,
+                        name: n.name.clone(),
+                    })
+                    .collect()
+            }),
+            speakers_key: edit
+                .list
+                .as_ref()
+                .map_or_else(String::new, |l| speakers_key(&l.speakers)),
         }
     }
+}
+
+/// FNV-1a over the turns and speaker tracks (not the names): what the words' labels depend on.
+/// A string, since a 64-bit number does not survive JSON into JavaScript exactly.
+fn speakers_key(s: &edit::Speakers) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |x: u64| {
+        for b in x.to_le_bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100_0000_01b3);
+        }
+    };
+    for n in &s.names {
+        eat(n.id as u64);
+        eat(n.track.map_or(u64::MAX, |t| t as u64));
+    }
+    for t in &s.turns {
+        eat(t.start.to_bits());
+        eat(t.end.to_bits());
+        eat(t.speaker as u64);
+    }
+    format!("{h:016x}")
 }
 
 #[cfg(test)]
@@ -218,6 +265,7 @@ mod tests {
             duration: 10.0,
             settings: CutSettings::default(),
             keep,
+            speakers: Default::default(),
             windows: vec![],
         }
         .to_text()

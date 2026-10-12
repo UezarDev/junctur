@@ -48,7 +48,7 @@ junctur tracks <file> [--json <out.json>] [--cache-dir <dir>] [--no-cache] [--no
                       [--windows <n>] [--window-seconds <s>]
 junctur separate <file> [--track <n>] [--start <s>] [--duration <s>] [--cpu] [--force]
                         [--no-speakers] [--json <out.json>] [--cache-dir <dir>]
-junctur analyze <file> [--project <dir>] [--cpu] [--force] [--no-transcript]
+junctur analyze <file> [--project <dir>] [--cpu] [--force] [--no-transcript] [--no-speakers]
                        [--model auto|large-v3-turbo|large-v3|large-v3-q5_0] [cut flags]
 junctur status <file> [--project <dir>]
 junctur cut <file> [--project <dir>] [cut flags]
@@ -57,8 +57,14 @@ junctur render <file> --out <out.mp4> [--project <dir>] [--full] [--force] [--jo
 cut flags: [--pad-before <s>] [--pad-after <s>] [--merge-gap <s>] [--crossfade <ms>]
 ```
 
-A recording's project folder (transcript, speech regions, `edit.junctur`, `jobs.json`) lives in the
-cache unless `--project <dir>` puts it somewhere else, for example a git repository.
+A recording's project folder (transcript, speech regions, speakers, `edit.junctur`, `jobs.json`) lives
+in the cache unless `--project <dir>` puts it somewhere else, for example a git repository.
+
+`analyze` also tells speakers apart (`--no-speakers` skips it): one speaker per speech track when OBS
+recorded the voices on their own tracks, otherwise by voice on the mix (CAM++ embeddings, two-pass
+clustering). They are written into `edit.junctur` as `speaker <id> <name>` lines, named "Speaker 1..N",
+and `turn <start> <end> <id>` lines; rename a speaker by editing its line (or in the app). A re-cut keeps
+the names.
 
 `render` writes scratch pieces in a `<out>.junctur-parts` folder beside the output and deletes them;
 `--full` re-encodes everything, `--force` replaces an existing output (never the source). The source's

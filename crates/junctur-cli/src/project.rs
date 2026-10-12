@@ -53,7 +53,13 @@ fn model(
 }
 
 pub fn analyze(a: Args) -> Result<(), String> {
-    let mut k = known(&["--cpu", "--model", "--force", "--no-transcript"]);
+    let mut k = known(&[
+        "--cpu",
+        "--model",
+        "--force",
+        "--no-transcript",
+        "--no-speakers",
+    ]);
     k.extend(CUT_FLAGS);
     a.reject_unknown(&k)?;
     let p = project(&a)?;
@@ -75,6 +81,7 @@ pub fn analyze(a: Args) -> Result<(), String> {
         cut: cut_settings(&a)?,
         force: a.has("--force"),
         no_transcript,
+        no_speakers: a.has("--no-speakers"),
         ..Default::default()
     };
     let out = pipeline::run(&p, &opts, &mut |line| eprintln!("junctur: {line}"))
@@ -196,6 +203,14 @@ fn print_edit(p: &Project, e: &EditList) {
         e.duration,
         e.keep.len()
     );
+    if !e.speakers.names.is_empty() {
+        let names: Vec<&str> = e.speakers.names.iter().map(|n| n.name.as_str()).collect();
+        println!(
+            "speakers: {} ({} turns; rename them in the edit list's `speaker` lines)",
+            names.join(", "),
+            e.speakers.turns.len()
+        );
+    }
     println!("  {}", p.edit_path().display());
 }
 

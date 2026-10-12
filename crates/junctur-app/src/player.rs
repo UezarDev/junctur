@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use junctur_core::edit::EditList;
+use junctur_core::edit::{EditList, Speakers};
 use junctur_core::pipeline;
 use tauri::{AppHandle, Emitter};
 
@@ -424,6 +424,20 @@ impl Core {
         if let Step::Do(Op::Words { .. }) = step {
             self.prepare();
         }
+        self.change(|ed, list, fps| ed.edit(list, step, fps))
+    }
+
+    /// Renames speaker `id` in the edit list and saves it (first taking any outside change).
+    pub fn rename_speaker(&self, id: u32, name: &str) -> Result<(), String> {
+        self.change(|ed, list, _| ed.rename(list, id, name))
+    }
+
+    /// Takes any outside change on disk, lets `f` change and save the list in play, and plays
+    /// the result.
+    fn change(
+        &self,
+        f: impl FnOnce(&mut Editor, &EditList, Fps) -> Result<Option<Edited>, String>,
+    ) -> Result<(), String> {
         let mut ed = lock(&self.editor);
         let synced = self.sync(&mut ed, "before an edit");
         let (list, fps) = {
@@ -436,7 +450,7 @@ impl Core {
             (list, c.fps.ok_or("the frame rate is not known")?)
         };
         synced.map_err(|e| format!("the preview did not reload: {e}"))?;
-        let edited = ed.edit(&list, step, fps)?;
+        let edited = f(&mut ed, &list, fps)?;
         let mut c = lock(&self.ctl);
         let mut status = EditorStatus {
             can_undo: ed.can_undo(),
@@ -477,11 +491,15 @@ impl Core {
     }
 
     /// The transcript's words, read on first use (and again while there are none, as the pipeline
-    /// may write them); `None` without a project or transcript.
+    /// may write them), labelled with the speakers of the list in play; `None` without a project
+    /// or transcript.
     pub fn transcript(&self) -> Option<TranscriptView> {
         self.prepare();
         let words = lock(&self.editor).words.clone()?;
-        Some(TranscriptView::new(&words))
+        let list = lock(&self.ctl).edit.list.clone();
+        let none = Speakers::default();
+        let speakers = list.as_deref().map_or(&none, |l| &l.speakers);
+        Some(TranscriptView::new(&words, speakers))
     }
 
     /// Keeps the right-hand `share` of the window (0..1) free of video, for a panel there.

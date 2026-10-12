@@ -15,6 +15,9 @@ pub use words::{TranscriptView, Words};
 
 /// Undo steps kept. A 30 h list has ~10 000 ranges (160 kB a step); this caps memory near 30 MB.
 const HISTORY: usize = 200;
+/// The longest speaker name the app takes: a name labels a transcript paragraph and, later, a
+/// caption style; past this it is a sentence, not a name.
+pub const MAX_NAME: usize = 60;
 
 /// One change to the kept ranges.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -148,6 +151,44 @@ impl Editor {
         }))
     }
 
+    /// Renames speaker `id` and saves; `None` when the name is already that. Not an undo step:
+    /// the history holds kept ranges only, so undoing a cut keeps the new name (the list saved
+    /// for an undo is the one in play with older ranges).
+    pub fn rename(
+        &mut self,
+        list: &EditList,
+        id: u32,
+        name: &str,
+    ) -> Result<Option<Edited>, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("a speaker needs a name".into());
+        }
+        // The file keeps a name as the rest of its line.
+        if name.contains(['\n', '\r']) {
+            return Err("a speaker's name is one line".into());
+        }
+        if name.chars().count() > MAX_NAME {
+            return Err(format!("a speaker's name is at most {MAX_NAME} characters"));
+        }
+        let mut new = list.clone();
+        if !new.speakers.rename(id, name) {
+            return Err(format!("there is no speaker {id}"));
+        }
+        if new.speakers == list.speakers {
+            return Ok(None);
+        }
+        let path = self.path.clone().ok_or("no edit list is open")?;
+        let saved =
+            edit::save(&path, &new).map_err(|e| format!("saving {}: {e}", path.display()))?;
+        self.written = Some(saved.text.clone());
+        Ok(Some(Edited {
+            list: new,
+            saved,
+            unsnapped: false,
+        }))
+    }
+
     /// Moves an undo (or redo) step to the other stack, `before` being the ranges it replaced.
     fn shift(&mut self, step: Step, before: Vec<Range>) {
         match step {
@@ -231,6 +272,7 @@ mod tests {
             duration: 60.0,
             settings: CutSettings::default(),
             keep,
+            speakers: Default::default(),
             windows: vec![],
         }
     }
@@ -407,6 +449,50 @@ mod tests {
             keep: false,
         });
         assert!(e.edit(&l2, tiny, FPS).unwrap_err().contains("frame"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn renames_are_saved_and_survive_undo() {
+        use junctur_core::edit::{Speakers, Turn};
+        let d = scratch("rename");
+        let path = d.join("edit.junctur");
+        let mut e = Editor::default();
+        e.reset(Some(path.clone()));
+        let mut l0 = list(vec![r(0.0, 30.0)]);
+        l0.speakers = Speakers::new(
+            vec![Turn {
+                start: 1.0,
+                end: 5.0,
+                speaker: 1,
+            }],
+            &[None],
+            None,
+        );
+        let l1 = step(
+            &mut e,
+            &l0,
+            Step::Do(Op::Frames {
+                start: 30,
+                end: 60,
+                keep: false,
+            }),
+            FPS,
+        );
+        let renamed = e.rename(&l1, 1, "  Ana María ").unwrap().unwrap().list;
+        assert_eq!(renamed.speakers.name(1), Some("Ana María"));
+        assert_eq!(reread(&path), renamed);
+        assert!(e.is_own(&std::fs::read_to_string(&path).unwrap()));
+        // The same name again writes nothing; bad names and ids are refused.
+        assert!(e.rename(&renamed, 1, "Ana María").unwrap().is_none());
+        assert!(e.rename(&renamed, 1, "  ").is_err());
+        assert!(e.rename(&renamed, 1, "a\nb").is_err());
+        assert!(e.rename(&renamed, 1, &"x".repeat(MAX_NAME + 1)).is_err());
+        assert!(e.rename(&renamed, 2, "Bea").is_err());
+        // Undoing the cut keeps the name.
+        let undone = step(&mut e, &renamed, Step::Undo, FPS);
+        assert_eq!(undone.keep, l0.keep);
+        assert_eq!(undone.speakers.name(1), Some("Ana María"));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

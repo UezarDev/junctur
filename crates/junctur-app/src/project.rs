@@ -120,6 +120,7 @@ mod tests {
                     end: 25.0,
                 },
             ],
+            speakers: Default::default(),
             windows: vec![],
         };
         std::fs::write(p.edit_path(), e.to_text()).unwrap();

@@ -58,6 +58,15 @@ export interface EditState {
   canRedo: boolean;
   /** What the last edit or outside change did that the user should know. */
   notice: string | null;
+  /** The speakers the edit list names (ids from 1). */
+  speakers: Speaker[];
+  /** Changes when the words' speaker labels would (turns changed on disk), not on a rename. */
+  speakersKey: string;
+}
+
+export interface Speaker {
+  id: number;
+  name: string;
 }
 
 /** The transcript's words (src/editor/words.rs), sorted by start; times in ms. */
@@ -65,6 +74,8 @@ export interface TranscriptView {
   text: string[];
   start: number[];
   end: number[];
+  /** Each word's speaker id, 0 for none. */
+  speaker: number[];
 }
 
 export type StageState = "pending" | "running" | "done" | "failed";
@@ -99,6 +110,9 @@ export const editWords = (first: number, last: number, keep: boolean) =>
 /** Cuts or keeps source frames `[start, end)` exactly. */
 export const editFrames = (start: number, end: number, keep: boolean) =>
   invoke<void>("edit_frames", { start, end, keep });
+/** Renames speaker `id` in the edit list (saved at once, not an undo step). */
+export const renameSpeaker = (id: number, name: string) =>
+  invoke<void>("rename_speaker", { id, name });
 export const undo = () => invoke<void>("undo");
 export const redo = () => invoke<void>("redo");
 /** The share of the window's width (0..1) on the right to keep free of video. */

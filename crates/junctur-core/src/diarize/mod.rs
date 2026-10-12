@@ -15,7 +15,7 @@ use crate::runtime::{self, Device, DevicePref};
 use crate::vad::{Region, RATE};
 use crate::Result;
 
-pub use cluster::{absorb_small, cluster, SAME_SPEAKER};
+pub use cluster::{two_pass, FIRST, MERGE};
 
 /// Segment length for one embedding. Long enough for a stable voiceprint, short enough that one
 /// segment rarely spans two speakers.
@@ -159,7 +159,7 @@ pub fn diarize(
         }
     }
     embs.extend(embed_all(embedder, &mut clips)?);
-    let labels = absorb_small(&embs, &cluster(&embs, SAME_SPEAKER), MINOR_SHARE);
+    let labels = two_pass(&embs, FIRST, MERGE, MINOR_SHARE);
     Ok(summarize(&segs, &labels))
 }
 

@@ -1,5 +1,6 @@
 //! The edit list: which ranges of the source to keep, as a readable text file the user can diff,
-//! commit and hand-edit, plus a score per short time window for the later Review/Swipe modes.
+//! commit and hand-edit, plus who speaks when (named speakers and their turns) and a score per short
+//! time window for the later Review/Swipe modes.
 //!
 //! It is the one piece of state a project owns; everything else in the project folder is a cache
 //! that can be rebuilt. The source itself is never touched.
@@ -9,6 +10,7 @@ mod frames;
 mod reduce;
 mod save;
 mod scores;
+mod speakers;
 mod splice;
 
 use std::path::PathBuf;
@@ -20,6 +22,7 @@ pub use frames::{frame_ranges, frame_span, frames_ceil, frames_floor};
 pub use reduce::{keep_ranges, snap_boundary, word_span, Envelope, ENVELOPE_HOP};
 pub use save::{backup_path, save, Saved};
 pub use scores::windows;
+pub use speakers::{default_name, Labeller, SpeakerName, Speakers, Turn};
 pub use splice::{cut_span, keep_span};
 
 /// A kept stretch of the source, in seconds.
@@ -80,6 +83,8 @@ pub struct EditList {
     pub duration: f64,
     pub settings: CutSettings,
     pub keep: Vec<Range>,
+    /// Who speaks when; empty when the project has no speakers stage result.
+    pub speakers: Speakers,
     pub windows: Vec<Window>,
 }
 

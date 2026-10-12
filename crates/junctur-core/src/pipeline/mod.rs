@@ -6,15 +6,17 @@
 //! each stage did, for `junctur status`; the stage results themselves are the source of truth.
 
 mod jobs;
+mod speakers;
 mod speech;
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 pub use jobs::{Jobs, StageRecord, StageState, STAGES};
+pub use speakers::{Found, Method};
 pub use speech::{Speech, SpeechTrack};
 
-use crate::edit::{self, CutSettings, EditList};
+use crate::edit::{self, CutSettings, EditList, Speakers};
 use crate::runtime::DevicePref;
 use crate::tracks::{self, Role, TrackReport};
 use crate::transcribe::{self, Languages, ModelPref, Source, TranscribeOptions, Transcript};
@@ -62,6 +64,9 @@ impl Project {
     fn speech_path(&self) -> PathBuf {
         self.dir.join("speech.json")
     }
+    fn speakers_path(&self) -> PathBuf {
+        self.dir.join("speakers.json")
+    }
     fn envelope_path(&self) -> PathBuf {
         self.dir.join(ENVELOPE_FILE)
     }
@@ -72,6 +77,11 @@ impl Project {
 
     pub fn speech(&self) -> Option<Speech> {
         serde_json::from_slice(&std::fs::read(self.speech_path()).ok()?).ok()
+    }
+
+    /// Who talks when, as the `speakers` stage left it; `None` before it ran.
+    pub fn speakers(&self) -> Option<Found> {
+        serde_json::from_slice(&std::fs::read(self.speakers_path()).ok()?).ok()
     }
 
     pub fn edit(&self) -> Result<EditList> {
@@ -90,12 +100,15 @@ pub struct PipelineOptions {
     pub force: bool,
     /// Stop after speech detection (no Whisper).
     pub no_transcript: bool,
+    /// Skip telling speakers apart (the edit list then names none).
+    pub no_speakers: bool,
 }
 
 /// What a finished run produced.
 pub struct Outcome {
     pub report: TrackReport,
     pub speech: Speech,
+    pub speakers: Option<Found>,
     pub transcript: Option<Transcript>,
     pub edit: EditList,
 }
@@ -114,17 +127,30 @@ pub fn run(p: &Project, opts: &PipelineOptions, log: &mut dyn FnMut(&str)) -> Re
         tracks::analyze(&p.file, &a)
     })?;
     let speech = speech_stage(p, &mut jobs, &report, opts.force, log)?;
+    let speakers = if opts.no_speakers {
+        None
+    } else {
+        Some(speakers_stage(p, &mut jobs, &speech, opts, log)?)
+    };
     let transcript = if opts.no_transcript {
         None
     } else {
         Some(transcribe_stage(p, &mut jobs, &report, &speech, opts, log)?)
     };
     let edit = jobs.stage(&p.dir, "edit", log, |_| {
-        cut(p, &report, &speech, transcript.as_ref(), &opts.cut)
+        cut(
+            p,
+            &report,
+            &speech,
+            speakers.as_ref(),
+            transcript.as_ref(),
+            &opts.cut,
+        )
     })?;
     Ok(Outcome {
         report,
         speech,
+        speakers,
         transcript,
         edit,
     })
@@ -163,6 +189,37 @@ fn speech_stage(
         ));
     }
     Ok(speech)
+}
+
+/// Who talks when, reused unless `force`.
+fn speakers_stage(
+    p: &Project,
+    jobs: &mut Jobs,
+    speech: &Speech,
+    opts: &PipelineOptions,
+    log: &mut dyn FnMut(&str),
+) -> Result<Found> {
+    let found = match p.speakers().filter(|_| !opts.force) {
+        Some(f) => {
+            jobs.skip(&p.dir, "speakers", log)?;
+            f
+        }
+        None => jobs.stage(&p.dir, "speakers", log, |_| {
+            let f = speakers::find(&p.file, speech, &p.cache_dir, opts.device)?;
+            std::fs::write(p.speakers_path(), serde_json::to_vec_pretty(&f)?)?;
+            Ok(f)
+        })?,
+    };
+    log(&match found.method {
+        Method::Tracks => format!("{} speakers, one per speech track", found.tracks.len()),
+        Method::Voices => format!(
+            "{} speaker(s) told apart by voice, {} turns",
+            found.tracks.len(),
+            found.turns.len()
+        ),
+        Method::None => "no speakers: no track carries speech".into(),
+    });
+    Ok(found)
 }
 
 /// Whisper over the speech regions, resumed or reused when it can be.
@@ -214,11 +271,13 @@ pub fn speech_tracks(report: &TrackReport) -> Vec<usize> {
 }
 
 /// (Re)write the edit list from cached analysis. A hand-edited list is kept as a backup before
-/// being replaced ([`back_up_hand_edit`]).
+/// being replaced ([`back_up_hand_edit`]). Speaker names already in the list are kept by id, so a
+/// re-cut never undoes a rename.
 pub fn cut(
     p: &Project,
     report: &TrackReport,
     speech: &Speech,
+    speakers: Option<&Found>,
     transcript: Option<&Transcript>,
     settings: &CutSettings,
 ) -> Result<EditList> {
@@ -227,19 +286,38 @@ pub fn cut(
     let starts: Vec<f64> = transcript
         .map(|t| t.words().map(|w| w.start).collect())
         .unwrap_or_default();
+    let path = p.edit_path();
+    let old = std::fs::read_to_string(&path).ok();
+    let previous = old
+        .as_deref()
+        .and_then(|t| edit::parse(t).ok())
+        .map(|e| e.speakers);
+    let speakers = speakers.map_or_else(Speakers::default, |f| {
+        Speakers::new(f.turns.clone(), &f.tracks, previous.as_ref())
+    });
     let make = |settings: &CutSettings| EditList {
         source: p.file.clone(),
         duration: report.duration,
         settings: *settings,
         keep: edit::keep_ranges(&regions, &env, report.duration, settings),
+        speakers: speakers.clone(),
         windows: edit::windows(&regions, &starts, report.duration, settings.window),
     };
     let e = make(settings);
     let text = e.to_text();
-    let path = p.edit_path();
-    if let Ok(old) = std::fs::read_to_string(&path) {
+    if let Some(old) = old {
         if old != text {
-            back_up_hand_edit(&p.dir, &old, |s| make(s).to_text())?;
+            // A list written before speakers existed (or with `--no-speakers`) is compared as
+            // Junctur would have written it then, without them: gaining speakers is not a reason
+            // to back it up.
+            let had_speakers = previous.as_ref().is_some_and(|s| !s.is_empty());
+            back_up_hand_edit(&p.dir, &old, |s| {
+                let mut e = make(s);
+                if !had_speakers {
+                    e.speakers = Speakers::default();
+                }
+                e.to_text()
+            })?;
         }
     }
     std::fs::write(&path, text)?;
@@ -283,7 +361,14 @@ pub fn recut(p: &Project, settings: &CutSettings) -> Result<EditList> {
     let report = tracks::analyze(&p.file, &opts)?;
     let transcript = transcribe::load(&p.dir);
     let t0 = Instant::now();
-    let e = cut(p, &report, &speech, transcript.as_ref(), settings)?;
+    let e = cut(
+        p,
+        &report,
+        &speech,
+        p.speakers().as_ref(),
+        transcript.as_ref(),
+        settings,
+    )?;
     let mut jobs = p.jobs();
     jobs.file = p.file.clone();
     jobs.set(
@@ -309,6 +394,7 @@ mod tests {
                 start: 0.0,
                 end: keep_end,
             }],
+            speakers: Default::default(),
             windows: vec![],
         }
         .to_text()

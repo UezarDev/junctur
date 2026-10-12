@@ -94,6 +94,7 @@ fn main() {
             commands::transcript,
             commands::edit_words,
             commands::edit_frames,
+            commands::rename_speaker,
             commands::undo,
             commands::redo,
             commands::set_video_margin,

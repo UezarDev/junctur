@@ -137,6 +137,7 @@ mod tests {
             duration: 10.0,
             settings: CutSettings::default(),
             keep: vec![Range { start: 0.0, end }],
+            speakers: Default::default(),
             windows: vec![],
         }
     }
