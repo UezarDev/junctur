@@ -43,6 +43,8 @@ pub enum Event {
         entry: i64,
     },
     FileLoaded,
+    /// Playback (re)started after a load or a seek: the audio chain exists from here on.
+    PlaybackRestart,
     /// `error` is mpv's message when the file could not be played.
     EndFile {
         entry: i64,
@@ -71,6 +73,7 @@ pub(super) unsafe fn decode(api: &ffi::Api, e: &ffi::Event) -> Option<Event> {
             entry: (*(e.data as *const ffi::EventStartFile)).playlist_entry_id,
         },
         ffi::EVENT_FILE_LOADED => Event::FileLoaded,
+        ffi::EVENT_PLAYBACK_RESTART => Event::PlaybackRestart,
         ffi::EVENT_END_FILE => {
             let end = &*(e.data as *const ffi::EventEndFile);
             let reason = EndReason::from_raw(end.reason);

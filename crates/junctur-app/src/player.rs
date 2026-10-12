@@ -11,7 +11,11 @@
 //!
 //! Edits (`editor`) reach playback the way a changed file does, through [`Core::take`], but
 //! directly: the app never waits for its own save to come back through the watch. Locks are taken
-//! in the order editor, ctl, state.
+//! in the order editor, ctl, state, mixer (state and mixer are never held together).
+//!
+//! Every audio track plays at once, each with a meter and a mute (2e, `mixer`): each load carries
+//! the mixer's filter graphs, a mute is sent to the playing graph in place, and the event thread
+//! reads the meters while playing.
 
 use std::collections::VecDeque;
 use std::ops::Deref;
@@ -28,6 +32,7 @@ use tauri::{AppHandle, Emitter};
 use crate::cuts::{self, edl, watch, Edit, EditState, EditorStatus, Form, Fps, Load};
 use crate::editor::{Edited, Editor, Op, Step, TranscriptView, Words};
 use crate::lock::lock;
+use crate::mixer::{self, Mixer, MixerState};
 use crate::mpv::{self, Event, Events, Mpv};
 use crate::state::{Change, PlayerState, OBSERVED};
 use crate::trace::Trace;
@@ -35,6 +40,12 @@ use crate::voices;
 
 pub const STATE_EVENT: &str = "player-state";
 pub const EDIT_EVENT: &str = "edit-state";
+pub const MIXER_EVENT: &str = "mixer-state";
+pub const LEVELS_EVENT: &str = "levels";
+
+/// How often the meters are read while playing: smooth enough for a meter, and one small property
+/// read each time.
+const LEVELS_EVERY: Duration = Duration::from_millis(50);
 
 /// Position updates arrive every frame; the frontend needs a few a second.
 const POSITION_EVERY: Duration = Duration::from_millis(100);
@@ -179,6 +190,8 @@ pub struct Core {
     /// Also serialises edits: one is applied, saved and handed to playback before the next.
     editor: Mutex<Editor>,
     ctl: Mutex<Ctl>,
+    /// Shared with the event thread, which resends the mutes when playback restarts.
+    mixer: Arc<Mutex<Mixer>>,
 }
 
 impl Player {
@@ -214,11 +227,14 @@ impl Player {
         }
         let state = Arc::new(Mutex::new(PlayerState::default()));
         let loads = Arc::new(Mutex::new(Loads::default()));
+        let mixer = Arc::new(Mutex::new(Mixer::default()));
         let events = {
             let mut reader = mpv.events().ok_or("mpv's event reader is already taken")?;
             let shared = Shared {
                 state: state.clone(),
                 loads: loads.clone(),
+                mixer: mixer.clone(),
+                mpv: mpv.clone(),
                 app: app.clone(),
                 trace,
             };
@@ -233,6 +249,7 @@ impl Player {
             state,
             loads,
             editor: Mutex::new(Editor::default()),
+            mixer,
             ctl: Mutex::new(Ctl {
                 file: None,
                 edit_path: None,
@@ -270,12 +287,21 @@ impl Player {
     /// project's edit list, keeps something) and watches the edit list. `edit_path` is `None`
     /// when the project could not be opened.
     pub fn open(&self, path: &str, edit_path: Option<PathBuf>) -> Result<(), String> {
-        // Stamp, then read (both outside the lock: the read may start ffprobe).
+        // Stamp, then read (both outside the lock: the read may start ffprobe). The mixer's track
+        // count may take a second ffprobe, run alongside rather than after.
         let baseline = edit_path.as_deref().map(watch::stamp);
-        let (fps, read) = match &edit_path {
-            Some(p) => cuts::fetch(path, p, None),
-            None => (None, None),
-        };
+        let dir = edit_path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf);
+        let ((fps, read), mixer) = std::thread::scope(|s| {
+            let m = s.spawn(|| Mixer::open(path, dir));
+            let read = match &edit_path {
+                Some(p) => cuts::fetch(path, p, None),
+                None => (None, None),
+            };
+            (read, m.join().unwrap_or_default())
+        });
         let mut ed = lock(&self.editor);
         ed.reset(edit_path.clone());
         let mut c = lock(&self.ctl);
@@ -293,9 +319,11 @@ impl Player {
             })
         });
         lock(&self.state).set_reference(c.edit.timeline.clone());
+        *lock(&self.mixer) = mixer;
         let form = c.wanted();
         let loaded = self.load(&mut c, form, None, false);
         self.emit_edit(&c);
+        self.emit_mixer();
         loaded
     }
 
@@ -674,8 +702,65 @@ impl Core {
         Ok(lands)
     }
 
-    pub fn set_audio_track(&self, id: i64) -> Result<(), String> {
-        self.mpv.set_string("aid", &id.to_string())
+    pub fn mixer(&self) -> MixerState {
+        lock(&self.mixer).state()
+    }
+
+    /// Mutes or unmutes audio track `track` (0-based) at once, in the graph playing, and remembers
+    /// it for the recording. Playback only: the edit list and renders never see it.
+    pub fn set_muted(&self, track: usize, muted: bool) -> Result<(), String> {
+        let saved = {
+            let mut m = lock(&self.mixer);
+            let saved = m.set_muted(track, muted);
+            // Under the lock, so two quick clicks reach mpv in order.
+            send_weights(&self.mpv, &m);
+            saved
+        };
+        self.emit_mixer();
+        saved
+    }
+
+    /// The analysis of `file` (absolute) moved on (2d): once its `tracks` stage has left the
+    /// roles, a mixer still on track 1 only (nothing was analysed when it opened) takes their
+    /// default mutes, unless the user set some meanwhile.
+    pub fn tracks_known(&self, file: &Path) {
+        {
+            let m = lock(&self.mixer);
+            if !m.provisional() || !m.is_for(file) {
+                return;
+            }
+        }
+        // Read outside the lock; `None` until the stage has run.
+        let Some(report) = mixer::report(file) else {
+            return;
+        };
+        let changed = {
+            let mut m = lock(&self.mixer);
+            // Another recording may have opened, or the user muted something, meanwhile.
+            if !m.provisional() || !m.is_for(file) {
+                return;
+            }
+            let changed = m.learn(&report);
+            if changed {
+                send_weights(&self.mpv, &m);
+            }
+            changed
+        };
+        eprintln!("junctur-app: track roles known, default mutes taken (changed: {changed})");
+        self.emit_mixer();
+    }
+
+    /// The meters (each track's peak) and what is heard after the mutes, in dBFS, read now.
+    pub fn levels(&self) -> (Vec<Option<f32>>, Option<f32>) {
+        let n = lock(&self.mixer).len();
+        let meter = self
+            .mpv
+            .get_string(&format!("af-metadata/{}", mixer::METER));
+        let heard = self.mpv.get_string(&format!("af-metadata/{}", mixer::MIX));
+        (
+            meter.map_or_else(|| vec![None; n], |j| mixer::levels(&j, n)),
+            heard.and_then(|j| mixer::heard(&j)),
+        )
     }
 
     /// Loads `form` where playback is (or is about to be, after a seek or load still landing),
@@ -701,9 +786,14 @@ impl Core {
         };
         self.mpv
             .set_string("pause", if paused { "yes" } else { "no" })?;
-        // The playlist index (-1: none) comes before per-file options since mpv 0.38.
-        let start = format!("start={start:.6}");
-        let args = ["loadfile", url.as_str(), "replace", "-1", start.as_str()];
+        // The playlist index (-1: none) comes before per-file options since mpv 0.38. The mixer's
+        // graphs go with each load, with the mutes as they are now.
+        let mut options = format!("start={start:.6}");
+        if let Some(m) = lock(&self.mixer).load_options() {
+            options.push(',');
+            options.push_str(&m);
+        }
+        let args = ["loadfile", url.as_str(), "replace", "-1", options.as_str()];
         lock(&self.loads).push(file, form.clone());
         if let Err(e) = self.mpv.command(&args) {
             lock(&self.loads).unpush();
@@ -719,6 +809,11 @@ impl Core {
         let _ = self.app.emit(STATE_EVENT, snapshot);
     }
 
+    fn emit_mixer(&self) {
+        let state = lock(&self.mixer).state();
+        let _ = self.app.emit(MIXER_EVENT, state);
+    }
+
     fn emit_edit(&self, c: &Ctl) {
         let _ = self.app.emit(
             EDIT_EVENT,
@@ -727,17 +822,55 @@ impl Core {
     }
 }
 
+/// Sends `m`'s mutes to the graph playing. It fails when there is none (no file, no audio, or a
+/// load whose chain is not up yet); the next `playback-restart` sends them again.
+fn send_weights(mpv: &Mpv, m: &Mixer) {
+    if m.len() > 0 {
+        let w = m.weights();
+        let _ = mpv.command(&["af-command", mixer::MIX, "weights", &w, mixer::MIX_FILTER]);
+    }
+}
+
+#[derive(Clone, serde::Serialize)]
+struct Levels {
+    /// Each track's peak in dBFS, as last measured (`None`: not measured).
+    levels: Vec<Option<f32>>,
+}
+
 /// What the event thread shares with the player.
 struct Shared {
     state: Arc<Mutex<PlayerState>>,
     loads: Arc<Mutex<Loads>>,
+    mixer: Arc<Mutex<Mixer>>,
+    mpv: Arc<Mpv>,
     app: AppHandle,
     trace: Option<Arc<Trace>>,
+}
+
+impl Shared {
+    /// Sends the meters, read now, when there are tracks to meter.
+    fn send_levels(&self) {
+        let n = lock(&self.mixer).len();
+        if n == 0 {
+            return;
+        }
+        let Some(json) = self
+            .mpv
+            .get_string(&format!("af-metadata/{}", mixer::METER))
+        else {
+            return;
+        };
+        let levels = Levels {
+            levels: mixer::levels(&json, n),
+        };
+        let _ = self.app.emit(LEVELS_EVENT, levels);
+    }
 }
 
 fn event_loop(events: &mut Events, shared: &Shared) {
     let state = &shared.state;
     let mut last_sent = Instant::now() - POSITION_EVERY;
+    let mut levels_sent = Instant::now() - LEVELS_EVERY;
     // A held-back position is sent once its interval is up, so the last one (a seek while
     // paused) is never lost.
     let mut held = false;
@@ -771,6 +904,11 @@ fn event_loop(events: &mut Events, shared: &Shared) {
                 eprintln!("mpv [{prefix}] {level}: {text}");
                 continue;
             }
+            Event::PlaybackRestart => {
+                // A mute changed after this load was asked for is not in its graph yet.
+                send_weights(&shared.mpv, &lock(&shared.mixer));
+                continue;
+            }
             Event::StartFile { entry } => {
                 let Some(load) = lock(&shared.loads).started(*entry) else {
                     eprintln!(
@@ -795,6 +933,11 @@ fn event_loop(events: &mut Events, shared: &Shared) {
                 change
             }
         };
+        // Positions come every frame while playing, and only then: the meters ride on them.
+        if change == Change::Position && levels_sent.elapsed() >= LEVELS_EVERY {
+            levels_sent = Instant::now();
+            shared.send_levels();
+        }
         let due = match change {
             Change::None => false,
             Change::Position => last_sent.elapsed() >= POSITION_EVERY,

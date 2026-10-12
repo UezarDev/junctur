@@ -23,6 +23,7 @@ pub const EVENT_LOG_MESSAGE: c_int = 2;
 pub const EVENT_START_FILE: c_int = 6;
 pub const EVENT_END_FILE: c_int = 7;
 pub const EVENT_FILE_LOADED: c_int = 8;
+pub const EVENT_PLAYBACK_RESTART: c_int = 21;
 pub const EVENT_PROPERTY_CHANGE: c_int = 22;
 
 pub const RENDER_PARAM_INVALID: c_int = 0;
@@ -104,6 +105,8 @@ pub struct Api {
     pub set_option_string: unsafe extern "C" fn(*mut Handle, *const c_char, *const c_char) -> c_int,
     pub command: unsafe extern "C" fn(*mut Handle, *mut *const c_char) -> c_int,
     pub set_property: unsafe extern "C" fn(*mut Handle, *const c_char, c_int, *mut c_void) -> c_int,
+    pub get_property_string: unsafe extern "C" fn(*mut Handle, *const c_char) -> *mut c_char,
+    pub free: unsafe extern "C" fn(*mut c_void),
     pub observe_property: unsafe extern "C" fn(*mut Handle, u64, *const c_char, c_int) -> c_int,
     pub request_log_messages: unsafe extern "C" fn(*mut Handle, *const c_char) -> c_int,
     pub wait_event: unsafe extern "C" fn(*mut Handle, c_double) -> *mut Event,
@@ -141,6 +144,8 @@ impl Api {
                 set_option_string: sym!(lib, "mpv_set_option_string"),
                 command: sym!(lib, "mpv_command"),
                 set_property: sym!(lib, "mpv_set_property"),
+                get_property_string: sym!(lib, "mpv_get_property_string"),
+                free: sym!(lib, "mpv_free"),
                 observe_property: sym!(lib, "mpv_observe_property"),
                 request_log_messages: sym!(lib, "mpv_request_log_messages"),
                 wait_event: sym!(lib, "mpv_wait_event"),

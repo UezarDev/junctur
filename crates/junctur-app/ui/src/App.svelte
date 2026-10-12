@@ -16,6 +16,8 @@
   let player = $state.raw<api.PlayerState | null>(null);
   let opened = $state<api.Opened | null>(null);
   let edit = $state.raw<api.EditState | null>(null);
+  // Every track's mute and role (2e); the meters come straight to the mixer.
+  let mixer = $state.raw<api.MixerState | null>(null);
   // The open recording's analysis (2d): its stages' states replace the ones read at opening.
   let analysis = $state.raw<api.Progress | null>(null);
   // The project panel shows the edit list as last read (it reloads when the file changes).
@@ -211,6 +213,7 @@
       async (s) => {
         player = s;
         edit = await api.editState();
+        mixer = await api.mixer();
         const file = await api.startupFile();
         if (file) await load(file);
       },
@@ -219,6 +222,7 @@
     const unlisten = [
       api.onPlayerState((s) => (player = s)),
       api.onEditState((s) => (edit = s)),
+      api.onMixer((s) => (mixer = s)),
       api.onAnalysis(onProgress),
       getCurrentWebview().onDragDropEvent((e) => {
         const p = e.payload;
@@ -284,6 +288,7 @@
   <Transport
     {player}
     {edit}
+    {mixer}
     {selection}
     {span}
     right={panelWidth}

@@ -135,6 +135,26 @@ export interface Recent {
   missing: boolean;
 }
 
+/** A distinct track's role from the track analysis (junctur-core tracks/mod.rs). */
+export type Role = "mix" | "voice" | "game_pc" | "music" | "silent" | "unknown";
+
+/** One audio track in the preview's mix (src/mixer.rs). */
+export interface MixTrack {
+  /** 0-based; the play bar shows it from 1. */
+  index: number;
+  muted: boolean;
+  role: Role | null;
+  /** The track this one is a copy of. */
+  copyOf: number | null;
+}
+
+/** Every track plays at once (2e); where the mutes came from. */
+export interface MixerState {
+  tracks: MixTrack[];
+  /** `provisional`: no roles yet, track 1 only; `roles`: their defaults; `remembered`: the user's. */
+  source: "provisional" | "roles" | "remembered";
+}
+
 export type Phase = "queued" | "running" | "done" | "failed";
 
 /** An analysis run by the app (src/analysis.rs). */
@@ -166,7 +186,10 @@ export const togglePause = () => invoke<void>("toggle_pause");
 /** Resolves to the source time the seek lands on (inside a cut while skipping: the next range). */
 export const seek = (seconds: number, exact: boolean) =>
   invoke<number>("seek", { seconds, exact });
-export const setAudioTrack = (id: number) => invoke<void>("set_audio_track", { id });
+export const mixer = () => invoke<MixerState>("mixer");
+/** Mutes or unmutes track `track` (0-based) in the preview; remembered for the recording. */
+export const setMuted = (track: number, muted: boolean) =>
+  invoke<void>("set_muted", { track, muted });
 export const setSkip = (on: boolean) => invoke<void>("set_skip", { on });
 export const editState = () => invoke<EditState>("edit_state");
 export const transcript = () => invoke<TranscriptView | null>("transcript");
@@ -204,3 +227,10 @@ export const onEditState = (f: (s: EditState) => void): Promise<UnlistenFn> =>
 
 export const onAnalysis = (f: (p: Progress) => void): Promise<UnlistenFn> =>
   listen<Progress>("analysis", (e) => f(e.payload));
+
+export const onMixer = (f: (s: MixerState) => void): Promise<UnlistenFn> =>
+  listen<MixerState>("mixer-state", (e) => f(e.payload));
+
+/** Each track's peak in dBFS, about 20 times a second while playing (none while paused). */
+export const onLevels = (f: (levels: (number | null)[]) => void): Promise<UnlistenFn> =>
+  listen<{ levels: (number | null)[] }>("levels", (e) => f(e.payload.levels));

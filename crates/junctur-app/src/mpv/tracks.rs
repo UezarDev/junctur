@@ -1,5 +1,5 @@
-//! mpv's `track-list` property (JSON when read as a string), narrowed to the audio tracks the app
-//! lets the user choose between. OBS recordings carry 3-5 of them.
+//! mpv's `track-list` property (JSON when read as a string), narrowed to the audio tracks: their
+//! titles name the mixer's strips (2e plays them all at once). OBS recordings carry 3-5 of them.
 
 use serde::{Deserialize, Serialize};
 

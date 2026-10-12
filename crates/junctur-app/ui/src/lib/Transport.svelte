@@ -3,11 +3,13 @@
   import Timeline from "./Timeline.svelte";
   import Clocks from "./Clocks.svelte";
   import EditBar from "./EditBar.svelte";
+  import Mixer from "./Mixer.svelte";
   import type { Selection } from "./selection";
 
   let {
     player,
     edit,
+    mixer,
     selection,
     span,
     right,
@@ -17,6 +19,7 @@
   }: {
     player: api.PlayerState | null;
     edit: api.EditState | null;
+    mixer: api.MixerState | null;
     selection: Selection | null;
     /** The selection in source seconds, drawn on the timeline. */
     span: { start: number; end: number } | null;
@@ -28,7 +31,6 @@
   } = $props();
 
   const loaded = $derived(!!player?.path);
-  const selectedTrack = $derived(player?.audioTracks.find((t) => t.selected)?.id ?? "");
   // Skipping needs an edit list that keeps something; otherwise the toggle says why not.
   const canSkip = $derived(loaded && !!edit?.fps && edit.ranges.length > 0);
   const skipTitle = $derived(
@@ -44,16 +46,14 @@
       onError(String(e));
     }
   }
-
-  function trackLabel(t: api.AudioTrack): string {
-    const parts = [t.title, t.lang, t.channels ? `${t.channels}ch` : null].filter(Boolean);
-    return `${t.id}${parts.length ? ": " + parts.join(", ") : ""}`;
-  }
 </script>
 
 <footer style:right="{right}px">
   {#if loaded}
     <EditBar {player} {edit} {selection} {onError} />
+    <!-- Every track at once, with a meter and a mute each (2e); its own row, so the timeline
+         keeps the play row's width however many tracks there are. -->
+    <Mixer {mixer} tracks={player?.audioTracks ?? []} {onError} />
   {/if}
   <div class="row">
   <button onclick={onOpen} disabled={!player} title="Open a recording">Open</button>
@@ -77,19 +77,6 @@
   </button>
   <Clocks {player} {edit} />
   <Timeline {player} {edit} {span} {onSelect} {onError} />
-  <select
-    value={selectedTrack}
-    disabled={!player?.audioTracks.length}
-    title="Audio track"
-    onchange={(e) => call(() => api.setAudioTrack(Number(e.currentTarget.value)))}
-  >
-    {#if !player?.audioTracks.length}
-      <option value="">No audio</option>
-    {/if}
-    {#each player?.audioTracks ?? [] as t (t.id)}
-      <option value={t.id}>Track {trackLabel(t)}</option>
-    {/each}
-  </select>
   </div>
 </footer>
 
@@ -116,8 +103,5 @@
   .skip.on {
     border-color: var(--accent);
     color: var(--accent);
-  }
-  select {
-    max-width: 220px;
   }
 </style>

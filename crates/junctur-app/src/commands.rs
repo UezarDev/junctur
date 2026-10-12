@@ -14,6 +14,7 @@ use crate::analysis::{self, Analysis, Notify, Progress, Reanalysed};
 use crate::cuts::EditState;
 use crate::editor::{Op, Step, TranscriptView};
 use crate::lock::lock;
+use crate::mixer::MixerState;
 use crate::player::{Core, Player};
 use crate::project::{self, ProjectStatus};
 use crate::recent::{self, Recent};
@@ -63,8 +64,11 @@ impl App {
 /// on this event, and must not get the words read before the run.
 pub fn notifier(handle: AppHandle) -> Notify {
     Arc::new(move |p: &Progress| {
-        if !p.phase.busy() {
-            if let Some(core) = handle.try_state::<App>().and_then(|a| a.core().ok()) {
+        if let Some(core) = handle.try_state::<App>().and_then(|a| a.core().ok()) {
+            // The track roles come from a run's first stage: the mutes follow them then, not when
+            // Whisper is done (2e).
+            core.tracks_known(Path::new(&p.file));
+            if !p.phase.busy() {
                 core.analysed(Path::new(&p.file));
             }
         }
@@ -211,9 +215,17 @@ pub async fn seek(app: State<'_, App>, seconds: f64, exact: bool) -> Result<f64,
     app.with(|p| p.seek(seconds, exact))
 }
 
+/// The open recording's tracks with their mutes and roles (2e).
 #[tauri::command]
-pub async fn set_audio_track(app: State<'_, App>, id: i64) -> Result<(), String> {
-    app.with(|p| p.set_audio_track(id))
+pub async fn mixer(app: State<'_, App>) -> Result<MixerState, String> {
+    app.with(|p| Ok(p.mixer()))
+}
+
+/// Mutes or unmutes audio track `track` (0-based) in the preview, remembered for the recording.
+/// Playback only, so allowed while the recording is analysed.
+#[tauri::command]
+pub async fn set_muted(app: State<'_, App>, track: usize, muted: bool) -> Result<(), String> {
+    app.core()?.set_muted(track, muted)
 }
 
 /// The open recording's transcript words, or `None` when it has none yet. Read outside the app's

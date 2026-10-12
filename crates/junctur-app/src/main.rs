@@ -9,6 +9,7 @@ mod commands;
 mod cuts;
 mod editor;
 mod lock;
+mod mixer;
 mod mpv;
 mod player;
 mod project;
@@ -96,7 +97,8 @@ fn main() {
             commands::reanalyse,
             commands::toggle_pause,
             commands::seek,
-            commands::set_audio_track,
+            commands::mixer,
+            commands::set_muted,
             commands::set_skip,
             commands::edit_state,
             commands::transcript,
