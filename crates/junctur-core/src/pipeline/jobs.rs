@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::Result;
 
+/// The file in a project folder.
+pub(crate) const FILE: &str = "jobs.json";
+
 /// Stage names, in run order.
 pub const STAGES: [&str; 5] = ["tracks", "speech", "speakers", "transcribe", "edit"];
 
@@ -38,7 +41,7 @@ pub struct Jobs {
 
 impl Jobs {
     pub fn load(dir: &Path) -> Self {
-        std::fs::read(dir.join("jobs.json"))
+        std::fs::read(dir.join(FILE))
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_else(|| Jobs {
@@ -94,7 +97,7 @@ impl Jobs {
             s.note = note;
         }
         // Whole or not at all: a half-written file would read back as every stage pending.
-        crate::output::write_replacing(&dir.join("jobs.json"), serde_json::to_vec_pretty(self)?)?;
+        crate::output::write_replacing(&dir.join(FILE), serde_json::to_vec_pretty(self)?)?;
         Ok(())
     }
 
@@ -182,7 +185,7 @@ mod tests {
             {"name":"speech","state":"done","seconds":1.0,"note":null},
             {"name":"transcribe","state":"done","seconds":1.0,"note":null},
             {"name":"edit","state":"done","seconds":1.0,"note":null}]}"#;
-        std::fs::write(dir.join("jobs.json"), old).unwrap();
+        std::fs::write(dir.join(FILE), old).unwrap();
         let mut j = Jobs::load(&dir);
         j.set(&dir, "speakers", StageState::Done, Some(2.0), None)
             .unwrap();

@@ -18,6 +18,7 @@ pub mod edit;
 pub mod error;
 pub mod export;
 pub mod ffmpeg;
+pub mod hidden;
 pub mod models;
 pub mod output;
 pub mod pipeline;

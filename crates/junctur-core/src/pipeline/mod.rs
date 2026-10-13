@@ -21,7 +21,7 @@ use crate::runtime::DevicePref;
 use crate::tracks::{self, Role, TrackReport};
 use crate::transcribe::{self, Languages, ModelPref, Source, TranscribeOptions, Transcript};
 use crate::voices::{Voice, Voices};
-use crate::{cache, Error, Result};
+use crate::{cache, hidden, Error, Result};
 
 const ENVELOPE_FILE: &str = "envelope.f32";
 
@@ -43,6 +43,7 @@ pub struct Project {
 impl Project {
     pub fn open(file: &Path, cache_dir: Option<PathBuf>, dir: Option<PathBuf>) -> Result<Self> {
         let cache_dir = cache_dir.unwrap_or_else(cache::default_dir);
+        let in_cache = dir.is_none();
         let dir = match dir {
             Some(d) => d,
             None => cache_dir
@@ -50,6 +51,14 @@ impl Project {
                 .join(cache::key(file, "project1")?),
         };
         std::fs::create_dir_all(&dir)?;
+        // 2f: a run started by a packaged app (Claude desktop) wrote into a hidden copy of the cache.
+        // Its results come in only while this folder has no run of its own (no `jobs.json`), so one
+        // analysis is never mixed with another's stage files; its track reports always (keyed, so a
+        // missing one is never a conflict).
+        if in_cache {
+            hidden::adopt_copies(&dir, |d| !d.join(jobs::FILE).exists());
+        }
+        hidden::adopt_copies(&cache_dir.join("tracks"), |_| true);
         Ok(Self {
             // Absolute: the edit list and the FCPXML name the source, and must work from anywhere.
             // Not `canonicalize`, whose `\\?\` form Resolve cannot open.

@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 use crate::pipeline::PipelineOptions;
 use crate::transcribe::ModelPref;
-use crate::{voices, Error, Result};
+use crate::{hidden, voices, Error, Result};
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -26,12 +26,17 @@ pub struct Config {
 
 /// The user's Junctur folder in the OS config folder (`%APPDATA%\junctur`), where the config file,
 /// the voices (5b) and the app's recent recordings (2d) live; `None` when there is no config folder.
+/// The first call in a process takes the files a packaged app's hidden copy of it has and it lacks
+/// (2f, [`hidden`]), so settings and voices saved from a Claude-launched run are not lost to the app.
 pub fn folder() -> Option<PathBuf> {
-    std::env::var_os("APPDATA")
+    static ADOPTED: std::sync::Once = std::sync::Once::new();
+    let folder = std::env::var_os("APPDATA")
         .or_else(|| std::env::var_os("XDG_CONFIG_HOME"))
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .map(|b| b.join("junctur"))
+        .map(|b| b.join("junctur"))?;
+    ADOPTED.call_once(|| hidden::adopt_copies(&folder, |_| true));
+    Some(folder)
 }
 
 /// Read the config file this environment points at.
