@@ -12,7 +12,7 @@ pub struct Captions {
     pub on: bool,
     /// Most characters on one line.
     pub chars: u32,
-    /// Most lines in one cue.
+    /// Most lines in one cue, per speaker: people talking at once each get this many (5e).
     pub lines: u32,
     /// Longest a cue stays on screen, in seconds.
     pub seconds: f64,
@@ -47,7 +47,7 @@ impl Captions {
         }
         if !LINES.contains(&self.lines) {
             return Err(format!(
-                "lines per caption must be {} to {}",
+                "lines per speaker must be {} to {}",
                 LINES.start(),
                 LINES.end()
             ));
