@@ -54,15 +54,36 @@ impl App {
     /// run has not yet written its list, whose `edit` stage would replace it (an edit made
     /// meanwhile would only be backed up and replaced). Once written, nothing later in the run
     /// replaces it (2j): edits go on while it transcribes.
-    fn editable(&self) -> Result<Arc<Core>, String> {
+    ///
+    /// The command holds what this returns while it works: a run of the recording asked for
+    /// meanwhile waits for it (2m, [`Analysis::edit`]), so a voice enrolled just as a re-analysis
+    /// starts is in `speakers.json` before the run's speakers stage reads it.
+    fn editable(&self) -> Result<Editable, String> {
         let core = self.core()?;
-        if core
-            .file()
-            .is_some_and(|f| !self.analysis.editable(Path::new(&f)))
-        {
-            return Err("analysing this recording: edits wait until its edit list is made".into());
-        }
-        Ok(core)
+        let editing = match core.file() {
+            Some(f) => Some(self.analysis.edit(Path::new(&f)).ok_or(
+                "analysing this recording: edits wait until its edit list is made".to_string(),
+            )?),
+            None => None,
+        };
+        Ok(Editable {
+            core,
+            _editing: editing,
+        })
+    }
+}
+
+/// The player's core for one edit of the open recording, and the mark that holds a run of that
+/// recording off until the edit is done ([`App::editable`]).
+struct Editable {
+    core: Arc<Core>,
+    _editing: Option<analysis::Editing>,
+}
+
+impl std::ops::Deref for Editable {
+    type Target = Core;
+    fn deref(&self) -> &Core {
+        &self.core
     }
 }
 

@@ -20,10 +20,15 @@
 //! The transcription lane is a [`Lane`] (2k): first come, first served, and paused from any
 //! recording, the transcribing one stopping between chunks ([`Analysis::pause`]); the page sees
 //! who is on it through [`Analysis::transcription`].
+//!
+//! A run that panics ends `Failed` like any other (2m), and an edit of a recording and a run of it
+//! never overlap ([`Analysis::edit`], 2m): a check that a recording is editable followed by the
+//! edit let a re-analysis asked meanwhile read `speakers.json` before an enrollment wrote its pin
+//! and write over it after.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use junctur_core::config;
 use junctur_core::pipeline::{self, PipelineOptions, Project, Step, Steps};
@@ -161,6 +166,9 @@ pub struct Analysis {
     order: Arc<Mutex<()>>,
     /// The lane's shape as last sent to the page ([`Analysis::lane_moved`]).
     lane_sent: Arc<Mutex<Option<Shape>>>,
+    /// Edits in progress per recording ([`Analysis::edit`]); a run of one waits for its edits to
+    /// end before its first half (2m).
+    editing: Arc<Edits>,
     /// The cache the projects live in; `None` is the default one (the CLI's).
     cache_dir: Option<PathBuf>,
     /// The user's options a run starts from ([`user_options`]); tests pass their own, so they
@@ -179,6 +187,7 @@ impl Default for Analysis {
             transcription: Default::default(),
             order: Default::default(),
             lane_sent: Default::default(),
+            editing: Default::default(),
             cache_dir: None,
             user: user_options,
             halves: pipeline_halves,
@@ -224,6 +233,48 @@ fn pipeline_halves<'a>(
 /// The options `junctur analyze` starts from: model from the config file, remembered voices.
 fn user_options() -> Result<PipelineOptions, String> {
     config::analysis_options(None, false, false).map_err(|e| e.to_string())
+}
+
+/// How many edits of each recording are in progress, and a way to wait for them to end.
+#[derive(Default)]
+struct Edits {
+    count: Mutex<HashMap<PathBuf, usize>>,
+    ended: Condvar,
+}
+
+/// An edit of a recording in progress ([`Analysis::edit`]): until it drops, no run of that
+/// recording starts its first half.
+pub struct Editing {
+    edits: Arc<Edits>,
+    k: PathBuf,
+}
+
+impl Drop for Editing {
+    fn drop(&mut self) {
+        let mut count = lock(&self.edits.count);
+        if let Some(n) = count.get_mut(&self.k) {
+            *n -= 1;
+            if *n == 0 {
+                count.remove(&self.k);
+            }
+        }
+        self.edits.ended.notify_all();
+    }
+}
+
+/// A recording whose run is `r` may be edited: no run, or its run has written the list (2j), which
+/// nothing later in the run replaces.
+fn may_edit(r: Option<&Progress>) -> bool {
+    r.is_none_or(|p| !p.phase.busy() || p.listed)
+}
+
+/// The message a panic carried, for the run's error.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown".into())
 }
 
 /// The key a recording's runs are kept under: its absolute path, as the project names it.
@@ -302,11 +353,43 @@ impl Analysis {
         self.progress(file).is_some_and(|p| p.phase.busy())
     }
 
-    /// `file`'s edit list may be edited: no run, or its run has written the list (2j), which
-    /// nothing later in the run replaces.
-    pub fn editable(&self, file: &Path) -> bool {
-        self.progress(file)
-            .is_none_or(|p| !p.phase.busy() || p.listed)
+    /// `file`'s edit list may be edited ([`may_edit`]); the app asks through [`Self::edit`], which
+    /// also holds a run off while the edit works (2m).
+    #[cfg(test)]
+    fn editable(&self, file: &Path) -> bool {
+        may_edit(self.progress(file).as_ref())
+    }
+
+    /// Marks an edit of `file` in progress, when it may be edited ([`may_edit`]); `None` when
+    /// not. While the mark is held a run of `file` asked for meanwhile waits, queued, before its
+    /// first half; once a run is queued no mark is given. The check and the count are one step
+    /// under `runs`, which a run is queued under, so the edit and the run's speakers stage never
+    /// overlap (2m: a pin enrolled just as a re-analysis started was read before it was written
+    /// and written over).
+    pub fn edit(&self, file: &Path) -> Option<Editing> {
+        let k = key(file);
+        let runs = lock(&self.runs);
+        if !may_edit(runs.get(&k)) {
+            return None;
+        }
+        *lock(&self.editing.count).entry(k.clone()).or_default() += 1;
+        drop(runs);
+        Some(Editing {
+            edits: self.editing.clone(),
+            k,
+        })
+    }
+
+    /// Blocks until no edit of `k` is in progress ([`Self::edit`]).
+    fn wait_for_edits(&self, k: &Path) {
+        let mut count = lock(&self.editing.count);
+        while count.contains_key(k) {
+            count = self
+                .editing
+                .ended
+                .wait(count)
+                .unwrap_or_else(|e| e.into_inner());
+        }
     }
 
     /// Analyses `file` in the background, keeping an edit list with the user's edits (a run resumed
@@ -442,7 +525,18 @@ impl Analysis {
 
     fn run(&self, p: &Project, notify: &Notify, keep_list: bool) {
         let k = p.file.clone();
-        let result = self.halves(p, notify, keep_list);
+        // A panic is a failure like any other (2m): unwound past the update below, it left the run
+        // busy for good, its recording refusing edits and re-analysis until a restart. What it
+        // shares survives the unwind: poison-tolerant locks, the lane's place a `Turn`.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.halves(p, notify, keep_list)
+        }))
+        .unwrap_or_else(|e| {
+            Err(format!(
+                "the analysis stopped on an internal error: {}",
+                panic_message(e.as_ref())
+            ))
+        });
         if let Err(e) = &result {
             eprintln!("junctur-app analysis failed: {e}");
         }
@@ -478,6 +572,9 @@ impl Analysis {
             );
             self.update(&k, notify, Change::Run, |r| r.line = Some(line.to_string()));
         };
+        // Before anything of the recording is read: an edit begun before this run was queued
+        // ends first (2m).
+        self.wait_for_edits(&k);
         let o = self.options(p, keep_list)?;
         let second = {
             let _turn = lock(&self.first);
@@ -835,6 +932,83 @@ mod tests {
             lock(&a.runs).insert(key(&k), run(phase, listed));
             assert_eq!(a.editable(&k), editable, "{phase:?}, listed {listed}");
         }
+    }
+
+    /// A pipeline whose transcription panics for recordings named `panic*` and ends at once for
+    /// any other.
+    fn panicking_halves<'a>(
+        p: &'a Project,
+        _: &'a PipelineOptions,
+        _: &mut dyn FnMut(&str),
+        _: Steps,
+    ) -> Result<Second<'a>, String> {
+        Ok(Box::new(move |_, _, transcribed, _| {
+            transcribed(300.0);
+            if p.file
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("panic")
+            {
+                panic!("Whisper fell over");
+            }
+            Ok(())
+        }))
+    }
+
+    #[test]
+    fn a_run_that_panics_ends_failed_and_frees_both_lanes() {
+        let d = std::env::temp_dir().join(format!("junctur-app-panic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let (bad, good) = (d.join("panic.mp4"), d.join("good.mp4"));
+        for f in [&bad, &good] {
+            std::fs::write(f, b"not a video").unwrap();
+        }
+        let mut a = Analysis::with_cache(d.join("cache"));
+        a.halves = panicking_halves;
+        let notify: Notify = Arc::new(|_: &Progress, _| {});
+        a.start(&bad, notify.clone()).unwrap();
+        wait_for("the panicked run ended", || !a.busy(&bad));
+        let p = a.progress(&bad).unwrap();
+        assert_eq!(p.phase, Phase::Failed);
+        assert!(
+            p.error.as_deref().unwrap().contains("Whisper fell over"),
+            "{:?}",
+            p.error
+        );
+        // Its pieces kept, as any run failing part way; editable and analysable again.
+        assert_eq!(p.transcribed, Some(300.0));
+        assert!(a.editable(&bad) && a.edit(&bad).is_some());
+        assert!(a.transcription().jobs.is_empty());
+        // Both lanes were handed on: another recording runs through to the end.
+        a.start(&good, notify).unwrap();
+        wait_for("the next run ended", || !a.busy(&good));
+        assert_eq!(a.progress(&good).unwrap().phase, Phase::Done);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_run_waits_for_an_edit_of_its_recording_and_refuses_new_ones() {
+        let d = std::env::temp_dir().join(format!("junctur-app-editing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join("rec.mp4");
+        std::fs::write(&file, b"not a video").unwrap();
+        let mut a = Analysis::with_cache(d.join("cache"));
+        a.halves = panicking_halves;
+        let notify: Notify = Arc::new(|_: &Progress, _| {});
+        // An enrollment passed the check and is working when a re-analysis is asked for.
+        let enrolling = a.edit(&file).expect("no run: editable");
+        a.start(&file, notify).unwrap();
+        assert!(a.edit(&file).is_none(), "queued: no new edit");
+        std::thread::sleep(Duration::from_millis(50));
+        let p = a.progress(&file).unwrap();
+        assert_eq!(p.phase, Phase::Queued, "the run waits for the edit");
+        drop(enrolling);
+        wait_for("the run ended", || !a.busy(&file));
+        assert_eq!(a.progress(&file).unwrap().phase, Phase::Done);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
