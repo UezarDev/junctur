@@ -13,6 +13,7 @@
   // never automatic.
   import { save } from "@tauri-apps/plugin-dialog";
   import * as api from "./api";
+  import { captionFace } from "./captionStyle";
 
   let {
     edit,
@@ -27,6 +28,7 @@
   const captions = $derived(edit?.captions ?? null);
   const speakers = $derived(edit?.speakers ?? []);
   const usable = $derived(!!edit?.editable && !!captions);
+  const face = $derived(captionFace(captions ?? { bold: false, italic: false }));
   let exported = $state<string[] | null>(null);
   let busy = $state(false);
 
@@ -170,8 +172,8 @@
         <div
           class="sample"
           style:color={s.color}
-          style:font-weight={captions.bold ? 700 : 600}
-          style:font-style={captions.italic ? "italic" : "normal"}
+          style:font-weight={face.weight}
+          style:font-style={face.style}
         >
           {s.name}: ¿qué tal? Hola a todos
         </div>

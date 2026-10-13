@@ -1,6 +1,6 @@
 /**
  * How a caption looks in the editor's preview over the picture (5d): the CSS for the caption
- * settings (the panel's sample lines take the same weight and slant).
+ * settings (the panel's sample lines take the same weight and slant, `captionFace`).
  *
  * Only bold and italic are the user's here, because they are the only styles an SRT carries into
  * DaVinci Resolve (5d's research). The rest imitates Resolve's default subtitle Track Style, which
@@ -14,15 +14,22 @@ import type { Captions } from "./api";
 /** Caption text height over picture height, near Resolve's default subtitle size on 1080p. */
 const SIZE = 0.045;
 
+/** The weight and slant the settings give: Resolve's default face is Semibold, bold is Bold. Shared
+ * with the Captions panel's speaker samples. */
+export function captionFace(c: Pick<Captions, "bold" | "italic">): { weight: number; style: string } {
+  return { weight: c.bold ? 700 : 600, style: c.italic ? "italic" : "normal" };
+}
+
 /** Inline CSS for a caption block over a picture `pictureHeight` pixels tall. */
 export function captionStyle(c: Pick<Captions, "bold" | "italic">, pictureHeight: number): string {
   const px = Math.max(10, Math.round(pictureHeight * SIZE));
+  const face = captionFace(c);
   return [
     `font-family: "Open Sans", "Segoe UI", system-ui, sans-serif`,
     `font-size: ${px}px`,
     `line-height: 1.2`,
-    `font-weight: ${c.bold ? 700 : 600}`,
-    `font-style: ${c.italic ? "italic" : "normal"}`,
+    `font-weight: ${face.weight}`,
+    `font-style: ${face.style}`,
     `text-shadow: 0 0 3px #000, 0 1px 2px #000`,
     `margin-bottom: ${Math.round(pictureHeight * 0.06)}px`,
   ].join("; ");

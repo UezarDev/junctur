@@ -24,16 +24,24 @@
   const on = $derived(!!captions?.preview && !!edit?.editable);
 
   // The cues, sorted and never overlapping (the export's `settle`), so a binary search finds the one
-  // on screen. Asked again whenever the edit state is replaced (an edit, a re-cut, new speakers or
-  // settings, the transcript arriving); a request that comes back after a newer one is dropped.
+  // on screen. Asked again only when something that shapes them changes: the kept ranges, the frame
+  // rate, how cues are cut, who says what (`speakersKey`: the turns, which follow a new transcript
+  // or a re-hearing). Bold, italic, colours and names are drawn here from the edit state, so
+  // toggling them costs no new cutting of a long transcript. A reply older than a newer request is
+  // dropped.
+  const shape = $derived.by(() => {
+    if (!on || !edit || !captions) return null;
+    const fps = edit.fps ? `${edit.fps.num}/${edit.fps.den}` : "";
+    return `${edit.ranges.join(",")}|${fps}|${captions.chars}|${captions.lines}|${captions.seconds}|${edit.speakersKey}`;
+  });
   let cues = $state.raw<api.Cue[]>([]);
   let asked = 0;
   $effect(() => {
-    if (!on || !edit) {
+    if (shape == null) {
+      asked++;
       cues = [];
       return;
     }
-    void edit;
     const n = ++asked;
     api
       .captionCues()
@@ -71,7 +79,9 @@
   let logged = "";
   $effect(() => {
     const key = cue ? `${cue.start}-${cue.end}` : "";
-    if (cue && key !== logged) {
+    // Cleared between captions too, so coming back to the same one (after a cut) logs it again.
+    if (!cue) logged = "";
+    else if (key !== logged) {
       logged = key;
       const text = cue.parts.map((p) => `${p.speaker}:${p.lines.join(" / ")}`).join(" | ");
       void api.uiLog(`caption preview ${cue.start.toFixed(2)}-${cue.end.toFixed(2)}: ${text}`).catch(() => {});

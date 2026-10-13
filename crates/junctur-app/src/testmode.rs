@@ -101,10 +101,12 @@ enum Action {
 /// The frontend's log lines (`ui_log`), kept for the report.
 static UI_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-/// A line from the frontend: printed, and kept for the report in test mode.
+/// A line from the frontend: printed and kept for the report, in test mode only. Outside it the
+/// lines are dropped: the caption preview (5d) sends one per caption shown, which an ordinary
+/// session has no use for on stderr.
 pub fn ui_log(message: String) {
-    eprintln!("junctur-app ui: {message}");
     if seconds().is_some() {
+        eprintln!("junctur-app ui: {message}");
         lock(&UI_LOG).push(message);
     }
 }
