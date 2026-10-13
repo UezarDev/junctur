@@ -130,6 +130,8 @@ fn main() {
             commands::set_captions,
             commands::export_captions,
             commands::caption_cues,
+            commands::send_to_resolve,
+            commands::install_resolve_script,
             commands::voices,
             commands::enroll_voice,
             commands::forget_voice,

@@ -31,9 +31,10 @@
 use std::fmt::Write;
 use std::path::PathBuf;
 
+use super::captions_line;
 use super::{
-    check_fix, default_color, default_name, fixes, parse_color, Captions, CutSettings, EditList,
-    Fix, Range, SpeakerName, Speakers, Turn, Window,
+    check_fix, default_color, default_name, fixes, parse_color, CutSettings, EditList, Fix, Range,
+    SpeakerName, Speakers, Turn, Window,
 };
 
 /// The newest version this build writes (with fixed words, 5h); lists without them are written as
@@ -75,31 +76,8 @@ pub fn write(e: &EditList) -> String {
         let _ = writeln!(out, "keep {:.3} {:.3}", r.start, r.end);
     }
     if let Some(c) = &e.captions {
-        let _ = writeln!(
-            out,
-            "# captions <on|off> chars=<per line> lines=<per speaker> seconds=<longest> \
-             [preview=on] [bold=on] [italic=on] [underline=on]"
-        );
-        // 5d's switches and 5f's underline only when on, so a list that does not use them reads in
-        // 5a's builds.
-        let flags: String = [
-            ("preview", c.preview),
-            ("bold", c.bold),
-            ("italic", c.italic),
-            ("underline", c.underline),
-        ]
-        .iter()
-        .filter(|(_, on)| *on)
-        .map(|(k, _)| format!(" {k}=on"))
-        .collect();
-        let _ = writeln!(
-            out,
-            "captions {} chars={} lines={} seconds={}{flags}",
-            if c.on { "on" } else { "off" },
-            c.chars,
-            c.lines,
-            c.seconds
-        );
+        let _ = writeln!(out, "{}", captions_line::HELP);
+        let _ = writeln!(out, "{}", captions_line::write(c));
     }
     let sp = &e.speakers;
     if !sp.is_empty() {
@@ -243,36 +221,7 @@ pub fn parse(text: &str) -> Result<EditList, String> {
                 });
             }
             "captions" => {
-                let mut c = Captions::default();
-                let mut parts = rest.split_whitespace();
-                c.on = match parts.next() {
-                    Some("on") => true,
-                    Some("off") => false,
-                    _ => return Err(bad("expected `captions <on|off> ...`")),
-                };
-                for kv in parts {
-                    let (k, v) = kv
-                        .split_once('=')
-                        .ok_or_else(|| bad("expected key=value"))?;
-                    let whole = || v.parse::<u32>().map_err(|_| bad("not a whole number"));
-                    let flag = || match v {
-                        "on" => Ok(true),
-                        "off" => Ok(false),
-                        _ => Err(bad("expected on or off")),
-                    };
-                    match k {
-                        "chars" => c.chars = whole()?,
-                        "lines" => c.lines = whole()?,
-                        "seconds" => c.seconds = v.parse().map_err(|_| bad("not a number"))?,
-                        "preview" => c.preview = flag()?,
-                        "bold" => c.bold = flag()?,
-                        "italic" => c.italic = flag()?,
-                        "underline" => c.underline = flag()?,
-                        _ => return Err(bad("unknown caption setting")),
-                    }
-                }
-                c.check().map_err(|why| bad(&why))?;
-                e.captions = Some(c);
+                e.captions = Some(captions_line::parse(rest).map_err(|why| bad(&why))?);
             }
             "fix" => {
                 let mut parts = rest.splitn(3, ' ');
@@ -345,6 +294,7 @@ pub fn parse(text: &str) -> Result<EditList, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::edit::Captions;
 
     fn sample() -> EditList {
         EditList {
@@ -488,7 +438,10 @@ mod tests {
         assert!(parse(&format!("{head}captions on chars=42.9\n")).is_err());
         assert!(parse(&format!("{head}captions maybe\n")).is_err());
         assert!(parse(&format!("{head}captions on chars=500\n")).is_err());
-        assert!(parse(&format!("{head}captions on size=3\n")).is_err());
+        assert!(parse(&format!("{head}captions on shadow=3\n")).is_err());
+        // 5g made `size` a setting: 3 % is in range, 1 % is not.
+        assert!(parse(&format!("{head}captions on size=3\n")).is_ok());
+        assert!(parse(&format!("{head}captions on size=1\n")).is_err());
         assert!(parse(&format!("{head}captions on bold=yes\n")).is_err());
         assert!(parse(&format!("{head}captions on underline=yes\n")).is_err());
     }

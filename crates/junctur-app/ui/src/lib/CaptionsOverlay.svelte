@@ -2,8 +2,10 @@
   // The captions over the picture while the editor plays (5d): the Captions panel's "Preview
   // captions" toggle. It shows the cues the SRT export cuts (the `caption_cues` command runs the
   // same `srt::cues`), not a second cutting of the words here, so what is seen is what Resolve gets,
-  // cue for cue: people talking at once stacked in one caption a speaker per block (5e), each line in
-  // its speaker's colour, and the styling options as close as a browser draws Resolve's subtitles.
+  // cue for cue: people talking at once in one caption a speaker per block (5e), each line in its
+  // speaker's colour. Each block sits where the engine places it (5g, `export/layout.rs`: stacked,
+  // side by side or top and bottom, the protagonist kept in place), which is where the Resolve send
+  // puts that speaker's Text+, in the font, size and outline it gets.
   // Cues are on the edited (output) timeline, so the playhead's output time picks one; while the
   // whole recording plays, a cut stretch shows none, since it is not in the export.
   import * as api from "./api";
@@ -26,13 +28,17 @@
   // The cues, sorted and never overlapping (the export's `settle`), so a binary search finds the one
   // on screen. Asked again only when something that shapes them changes: the kept ranges, the frame
   // rate, how cues are cut, who says what (`speakersKey`: the turns, which follow a new transcript
-  // or a re-hearing), what words say (`fixesKey`: a word fixed in the transcript, 5h). Bold, italic, underline, colours and names are drawn here from the edit state, so
-  // toggling them costs no new cutting of a long transcript. A reply older than a newer request is
-  // dropped.
+  // or a re-hearing), what words say (`fixesKey`: a word fixed in the transcript, 5h), and where
+  // blocks go (size, position, layout, protagonist, 5g). Font, outline, bold, italic, underline,
+  // colours and names are drawn here from the edit state, so toggling them costs no new cutting of a
+  // long transcript. A reply older than a newer request is dropped.
   const shape = $derived.by(() => {
     if (!on || !edit || !captions) return null;
     const fps = edit.fps ? `${edit.fps.num}/${edit.fps.den}` : "";
-    return `${edit.ranges.join(",")}|${fps}|${captions.chars}|${captions.lines}|${captions.seconds}|${edit.speakersKey}|${edit.fixesKey}`;
+    // The picture's shape too: side by side, lines are wrapped to the columns' width.
+    const aspect = picture.w > 0 ? (picture.h / picture.w).toFixed(3) : "";
+    const place = `${captions.size}|${captions.position}|${captions.layout}|${captions.protagonist}|${aspect}`;
+    return `${edit.ranges.join(",")}|${fps}|${captions.chars}|${captions.lines}|${captions.seconds}|${edit.speakersKey}|${edit.fixesKey}|${place}`;
   });
   let cues = $state.raw<api.Cue[]>([]);
   let asked = 0;
@@ -44,7 +50,7 @@
     }
     const n = ++asked;
     api
-      .captionCues()
+      .captionCues(picture.w > 0 ? picture.h / picture.w : 9 / 16)
       .then((c) => {
         if (n === asked) cues = c;
       })
@@ -99,8 +105,8 @@
     style:height="{picture.h}px"
     aria-live="off"
   >
-    <div class="cue" style={style}>
-      {#each cue.parts as part, i (i)}
+    {#each cue.parts as part, i (i)}
+      <div class="part" style={style} style:left="{part.x * 100}%" style:top="{(1 - part.y) * 100}%">
         {#each part.lines as line, j (j)}
           <span
             class="line"
@@ -108,26 +114,25 @@
             style:text-decoration={decoration}>{line}</span
           >
         {/each}
-      {/each}
-    </div>
+      </div>
+    {/each}
   </div>
 {/if}
 
 <style>
   .captions {
     position: absolute;
-    display: flex;
-    align-items: flex-end;
-    justify-content: center;
     pointer-events: none;
     overflow: hidden;
   }
-  .cue {
+  /* Centred on the engine's point, as Text+ centres its text on Center. */
+  .part {
+    position: absolute;
+    transform: translate(-50%, -50%);
     display: flex;
     flex-direction: column;
     align-items: center;
     text-align: center;
-    max-width: 90%;
   }
   .line {
     white-space: pre;

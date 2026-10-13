@@ -88,7 +88,7 @@ fn models() -> Vec<ModelChoice> {
 fn from_config(c: &Config) -> Settings {
     Settings {
         whisper_model: c.whisper_model.unwrap_or_default().key().to_string(),
-        captions: c.captions.unwrap_or_default(),
+        captions: c.captions.clone().unwrap_or_default(),
         words: c.words.clone(),
     }
 }
@@ -101,7 +101,7 @@ fn to_config(s: &Settings) -> Result<Config, String> {
         .map_err(|e| format!("caption defaults: {e}"))?;
     Ok(Config {
         whisper_model: (model != ModelPref::Auto).then_some(model),
-        captions: (s.captions != Captions::default()).then_some(s.captions),
+        captions: (s.captions != Captions::default()).then(|| s.captions.clone()),
         words: wordlist::normalize(&s.words),
     })
 }

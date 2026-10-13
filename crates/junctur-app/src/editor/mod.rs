@@ -569,8 +569,8 @@ mod tests {
             on: true,
             ..Captions::default()
         };
-        let captioned = e.set_captions(&red, on).unwrap().unwrap().list;
-        assert_eq!(reread(&path).captions, Some(on));
+        let captioned = e.set_captions(&red, on.clone()).unwrap().unwrap().list;
+        assert_eq!(reread(&path).captions, Some(on.clone()));
         assert!(e
             .set_captions(&captioned, Captions { lines: 9, ..on })
             .is_err());

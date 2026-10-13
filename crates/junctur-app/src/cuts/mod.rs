@@ -208,7 +208,7 @@ impl EditState {
         status: &EditorStatus,
         defaults: &edit::Captions,
     ) -> Self {
-        let own = edit.list.as_ref().and_then(|l| l.captions);
+        let own = edit.list.as_ref().and_then(|l| l.captions.clone());
         let t = edit.timeline.as_deref();
         Self {
             skip,
@@ -244,7 +244,7 @@ impl EditState {
                 .list
                 .as_ref()
                 .map_or_else(String::new, |l| fixes_key(&l.fixes)),
-            captions: own.unwrap_or(*defaults),
+            captions: own.clone().unwrap_or_else(|| defaults.clone()),
             captions_own: own.is_some(),
         }
     }
@@ -338,7 +338,7 @@ mod tests {
         let s = EditState::new(&e, true, Some(FPS), &EditorStatus::default(), &defaults);
         assert_eq!(s.ranges, vec![30, 60]);
         // No `captions` line: the list follows the defaults (2i).
-        assert_eq!((s.captions, s.captions_own), (defaults, false));
+        assert_eq!((s.captions, s.captions_own), (defaults.clone(), false));
         assert_eq!((s.total_frames, s.output_frames), (300, 30));
         assert_eq!(s.summary.unwrap().ranges, 1);
 

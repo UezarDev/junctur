@@ -23,6 +23,7 @@ pub mod models;
 pub mod output;
 pub mod pipeline;
 pub mod render;
+pub mod resolve;
 pub mod runtime;
 pub mod separate;
 pub mod signal;

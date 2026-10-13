@@ -21,7 +21,7 @@ fn project(a: &Args) -> Result<Project, String> {
 /// the app shows them, so a render and an export cut the cues the app would. The config file is
 /// read only for a list without its own.
 fn captions(e: &EditList) -> Result<Captions, String> {
-    config::captions(e.captions, config::load).map_err(|e| e.to_string())
+    config::captions(e.captions.clone(), config::load).map_err(|e| e.to_string())
 }
 
 fn cut_settings(a: &Args) -> Result<CutSettings, String> {

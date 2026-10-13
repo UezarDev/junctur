@@ -1,10 +1,10 @@
 //! How captions are cut into cues and styled, as the edit list keeps it (5a, 5d). Colours are per
-//! speaker ([`super::SpeakerName::color`]); this is the rest of what shapes the caption file, and
-//! only what an SRT carries into DaVinci Resolve: text, timing, colour, bold, italic and underline
-//! (5f). 5d's research (`.planning/research/resolve-caption-styling.md`) found nothing else an SRT import
-//! keeps: size, font family, outline, shadow, background and position are Resolve's subtitle
-//! Track Style, which no import sets, and a position tag (`{\an8}`) shows as literal text. So they
-//! are not settings here; offering them would promise what Resolve drops.
+//! speaker ([`super::SpeakerName::color`]); this is the rest of what shapes the captions. The SRT
+//! carries only what Resolve's subtitle import keeps: text, timing, colour, bold, italic and
+//! underline (5d's research, `.planning/research/resolve-caption-styling.md`, and 5f). Font, size,
+//! position and outline reach Resolve only as Text+ clips sent through its scripting API (5g), so
+//! those fields drive that and the preview and the SRT ignores them, as it does the overlap layout
+//! and the protagonist (5g).
 //!
 //! Also the two switches (5d): export (`on`: a render writes the caption file) and the preview over
 //! the picture in the editor, which are separate so captions can be watched without being written.
@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 // value instead of failing (2i); `deny_unknown_fields`: a misspelt one is an error rather than
 // silently the default, as everywhere in the config file. The edit list's own `captions` line has
 // its own parser (`format.rs`), which refuses unknown keys too.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct Captions {
     /// Export: captions are optional; on, a render writes the caption file beside the video.
@@ -38,6 +38,56 @@ pub struct Captions {
     /// Every caption underlined (`<u>`, 5f): Uezar's import of 5d's test file showed Resolve
     /// underlines in the speaker's colour.
     pub underline: bool,
+    /// Font family of the Text+ captions and the preview (5g).
+    pub font: String,
+    /// Text height (the font's em) in % of the picture height (5g).
+    pub size: f64,
+    /// From the bottom of the picture to the bottom of the caption, in % of its height (5g).
+    pub position: f64,
+    /// An outline round the letters (5g), `outline_width` steps thick, in `outline_color`.
+    pub outline: bool,
+    pub outline_width: u32,
+    pub outline_color: String,
+    /// Where people talking at once sit (5g).
+    pub layout: Layout,
+    /// The speaker (by name) who always keeps the normal caption spot when people talk at once;
+    /// empty for none (5g). A name, not an id: ids differ per recording, while a remembered voice
+    /// names a person the same everywhere, so it works in the defaults too.
+    pub protagonist: String,
+    /// The Fusion Title clip in Resolve's media pool every caption is a copy of; empty for
+    /// Junctur's own Text+ (5g).
+    pub template: String,
+}
+
+/// Where the captions of people talking at once go (5g, Uezar: "stacked (up down) or sideways
+/// first, or one above and one below").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Layout {
+    /// Each later speaker above the one before.
+    #[default]
+    Stacked,
+    /// Side by side across the picture.
+    Side,
+    /// One at the bottom, the next at the top of the picture.
+    TopBottom,
+}
+
+impl Layout {
+    /// The word on the edit list's `captions` line, the same as in the config file.
+    pub fn word(self) -> &'static str {
+        match self {
+            Layout::Stacked => "stacked",
+            Layout::Side => "side",
+            Layout::TopBottom => "topBottom",
+        }
+    }
+
+    pub fn from_word(w: &str) -> Option<Self> {
+        [Layout::Stacked, Layout::Side, Layout::TopBottom]
+            .into_iter()
+            .find(|l| l.word() == w)
+    }
 }
 
 /// 42 characters and two lines is the common broadcast and streaming limit, readable at a glance;
@@ -53,6 +103,15 @@ impl Default for Captions {
             bold: false,
             italic: false,
             underline: false,
+            font: "Open Sans".into(),
+            size: 4.5,
+            position: 6.0,
+            outline: true,
+            outline_width: 2,
+            outline_color: "#000000".into(),
+            layout: Layout::Stacked,
+            protagonist: String::new(),
+            template: String::new(),
         }
     }
 }
@@ -60,6 +119,9 @@ impl Default for Captions {
 pub const CHARS: std::ops::RangeInclusive<u32> = 10..=80;
 pub const LINES: std::ops::RangeInclusive<u32> = 1..=3;
 pub const SECONDS: std::ops::RangeInclusive<f64> = 1.0..=15.0;
+pub const SIZE: std::ops::RangeInclusive<f64> = 2.0..=15.0;
+pub const POSITION: std::ops::RangeInclusive<f64> = 0.0..=45.0;
+pub const OUTLINE_WIDTH: std::ops::RangeInclusive<u32> = 1..=10;
 
 impl Captions {
     /// Why these settings cannot make sensible cues, if they cannot.
@@ -85,7 +147,59 @@ impl Captions {
                 SECONDS.end()
             ));
         }
+        if !SIZE.contains(&self.size) {
+            return Err(format!(
+                "caption size must be {} to {} % of the picture height",
+                SIZE.start(),
+                SIZE.end()
+            ));
+        }
+        if !POSITION.contains(&self.position) {
+            return Err(format!(
+                "caption position must be {} to {} % of the picture height",
+                POSITION.start(),
+                POSITION.end()
+            ));
+        }
+        if !OUTLINE_WIDTH.contains(&self.outline_width) {
+            return Err(format!(
+                "outline thickness must be {} to {}",
+                OUTLINE_WIDTH.start(),
+                OUTLINE_WIDTH.end()
+            ));
+        }
+        if parse_color(&self.outline_color).is_none() {
+            return Err(format!(
+                "{:?} is not a colour like #000000",
+                self.outline_color
+            ));
+        }
+        if self.font.trim().is_empty() {
+            return Err("a font is needed".into());
+        }
+        // Quoted on the edit list's line (format.rs), so a quote or a line break would end them.
+        for (what, s) in [
+            ("font", &self.font),
+            ("protagonist", &self.protagonist),
+            ("template", &self.template),
+        ] {
+            if s.contains('"') || s.chars().any(char::is_control) {
+                return Err(format!("the {what} name cannot hold quotes or line breaks"));
+            }
+        }
         Ok(())
+    }
+
+    /// The id of the speaker in `names` the protagonist names, if any (case and spaces aside).
+    pub fn protagonist_in(&self, names: &[super::SpeakerName]) -> Option<u32> {
+        let want = self.protagonist.trim().to_lowercase();
+        if want.is_empty() {
+            return None;
+        }
+        names
+            .iter()
+            .find(|n| n.name.trim().to_lowercase() == want)
+            .map(|n| n.id)
     }
 }
 
@@ -131,6 +245,58 @@ mod tests {
             seconds: 30.0,
             ..Default::default()
         }));
+        // 5g's look.
+        for c in [
+            Captions {
+                size: 1.0,
+                ..Default::default()
+            },
+            Captions {
+                position: 50.0,
+                ..Default::default()
+            },
+            Captions {
+                outline_width: 0,
+                ..Default::default()
+            },
+            Captions {
+                outline_color: "black".into(),
+                ..Default::default()
+            },
+            Captions {
+                font: " ".into(),
+                ..Default::default()
+            },
+            Captions {
+                protagonist: "Ana \"A\"".into(),
+                ..Default::default()
+            },
+            Captions {
+                template: "a\nb".into(),
+                ..Default::default()
+            },
+        ] {
+            assert!(bad(c));
+        }
+    }
+
+    #[test]
+    fn the_protagonist_is_found_by_name() {
+        let name = |id: u32, name: &str| super::super::SpeakerName {
+            id,
+            name: name.into(),
+            track: None,
+            color: "#FFFFFF".into(),
+        };
+        let names = [name(1, "Ana"), name(2, "Lucía")];
+        let c = |p: &str| Captions {
+            protagonist: p.into(),
+            ..Default::default()
+        };
+        assert_eq!(c("ana").protagonist_in(&names), Some(1));
+        assert_eq!(c(" LUCÍA ").protagonist_in(&names), Some(2));
+        assert_eq!(c("Bo").protagonist_in(&names), None);
+        assert_eq!(c("").protagonist_in(&names), None);
     }
 
     #[test]
@@ -157,5 +323,20 @@ mod tests {
         // 5f's underline beside them.
         let u: Captions = serde_json::from_str(r#"{"underline":true}"#).unwrap();
         assert!(u.underline && !u.bold);
+        // 5f's settings load 5g's look at its defaults; 5g's own fields read back.
+        assert_eq!(u.font, "Open Sans");
+        assert_eq!((u.size, u.position, u.outline), (4.5, 6.0, true));
+        assert_eq!(u.layout, Layout::Stacked);
+        let g: Captions = serde_json::from_str(
+            r##"{"font":"Noto Sans","size":6,"outlineWidth":3,"outlineColor":"#202020","layout":"topBottom","protagonist":"Ana","template":"My Title"}"##,
+        )
+        .unwrap();
+        assert_eq!(g.layout, Layout::TopBottom);
+        assert_eq!((g.size, g.outline_width), (6.0, 3));
+        assert_eq!(
+            (g.protagonist.as_str(), g.template.as_str()),
+            ("Ana", "My Title")
+        );
+        assert!(serde_json::from_str::<Captions>(r#"{"layout":"diagonal"}"#).is_err());
     }
 }

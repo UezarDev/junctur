@@ -6,6 +6,7 @@
 //! that can be rebuilt. The source itself is never touched.
 
 mod captions;
+mod captions_line;
 mod fixes;
 mod format;
 mod frames;
@@ -19,7 +20,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-pub use captions::{default_color, parse_color, Captions};
+pub use captions::{default_color, parse_color, Captions, Layout};
 pub use fixes::{check_fix, set_fix, Fix, Fixes, MAX_FIX};
 pub use format::{parse, FORMAT_VERSION};
 pub use frames::{frame_ranges, frame_span, frames_ceil, frames_floor};

@@ -3,6 +3,7 @@
 //! rendered video is the smart-render phase.
 
 pub mod fcpxml;
+pub mod layout;
 pub mod srt;
 
 use std::path::{Path, PathBuf};

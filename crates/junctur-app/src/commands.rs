@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use junctur_core::edit::Captions;
-use junctur_core::export::srt::Cue;
+use junctur_core::export::layout::Placed;
+use junctur_core::resolve::Sent;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -427,7 +428,7 @@ pub async fn recolor_speaker(app: State<'_, App>, id: u32, color: String) -> Res
 }
 
 /// Sets the caption settings: export and preview switches, bold, italic and underline, how cues are
-/// cut.
+/// cut, and 5g's look for Resolve's Text+ and the preview.
 #[tauri::command]
 pub async fn set_captions(app: State<'_, App>, captions: Captions) -> Result<(), String> {
     let e = app.editable()?;
@@ -454,10 +455,28 @@ pub async fn export_captions(app: State<'_, App>, path: String) -> Result<Export
 }
 
 /// The captions as the export cuts them, for the preview over the picture (5d): output seconds,
-/// each cue's parts a speaker's lines.
+/// each cue's parts a speaker's lines, placed where the Resolve send puts them (5g) on the
+/// preview's picture, `aspect` its height over its width.
 #[tauri::command]
-pub async fn caption_cues(app: State<'_, App>) -> Result<Vec<Cue>, String> {
-    app.core()?.caption_cues()
+pub async fn caption_cues(app: State<'_, App>, aspect: f64) -> Result<Vec<Placed>, String> {
+    app.core()?.caption_cues(aspect)
+}
+
+/// Sends the captions into DaVinci Resolve as Text+ clips (5g), through the Junctur script running
+/// there; installs or refreshes that script first. Off the async runtime: Resolve can take minutes
+/// over a long recording.
+#[tauri::command]
+pub async fn send_to_resolve(app: State<'_, App>) -> Result<Sent, String> {
+    let core = app.core()?;
+    tauri::async_runtime::spawn_blocking(move || core.send_to_resolve())
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Puts the Junctur script into Resolve's Scripts folder (5g) and says where.
+#[tauri::command]
+pub async fn install_resolve_script() -> Result<String, String> {
+    junctur_core::resolve::install().map(|i| i.script.display().to_string())
 }
 
 /// The voices Junctur remembers (5b).
@@ -631,7 +650,7 @@ pub async fn save_settings(
 ) -> Result<SettingsView, String> {
     let view = settings::save(&settings)?;
     if let Ok(core) = app.core() {
-        core.set_caption_defaults(view.settings.captions);
+        core.set_caption_defaults(view.settings.captions.clone());
     }
     Ok(view)
 }
@@ -644,7 +663,7 @@ pub async fn save_caption_defaults(
 ) -> Result<SettingsView, String> {
     let view = settings::save_caption_defaults(captions)?;
     if let Ok(core) = app.core() {
-        core.set_caption_defaults(view.settings.captions);
+        core.set_caption_defaults(view.settings.captions.clone());
     }
     Ok(view)
 }

@@ -523,7 +523,9 @@ mod tests {
 
     /// The test list's own caption settings, which these tests always set.
     fn own(e: &EditList) -> Captions {
-        e.captions.expect("the test lists have their own captions")
+        e.captions
+            .clone()
+            .expect("the test lists have their own captions")
     }
 
     fn edit(keep: &[(f64, f64)], captions: Captions) -> EditList {
@@ -967,7 +969,8 @@ mod tests {
             underline: true,
             ..Default::default()
         };
-        assert!(styled(only, true).contains("\r\n<u><font color=\"#F2B33D\">hola</font></u>\r\n"));
+        assert!(styled(only.clone(), true)
+            .contains("\r\n<u><font color=\"#F2B33D\">hola</font></u>\r\n"));
         assert!(styled(only, false).contains("\r\n<u>hola</u>\r\n"));
         let bold = Captions {
             bold: true,
