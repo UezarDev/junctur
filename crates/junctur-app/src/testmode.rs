@@ -15,8 +15,8 @@
 //! captions over the picture; each caption it shows is a `caption preview` line in `ui`),
 //! `enroll=<first>-<last>:<name>` (5b: remember a voice from transcript words) and `forget=<name>`. Set `JUNCTUR_VOICES` to a
 //! scratch file for these, or they change the user's own voices. `reanalyse` (2d) analyses the open
-//! recording again, replacing user edits (a recording without an edit list is analysed as it
-//! opens); the report's `analysis` is the open recording's analysis progress and `outdated` what
+//! recording again as its Re-analyse button does, keeping user edits (5s; a recording without an
+//! edit list is analysed as it opens); the report's `analysis` is the open recording's analysis progress and `outdated` what
 //! the project panel would offer a re-analysis for. Set `JUNCTUR_RECENT` and `JUNCTUR_CACHE_DIR` to
 //! scratch places too. `mute=<n>` / `unmute=<n>` (2e) mute or unmute audio track n (from 1, as
 //! the play bar numbers them); each step's report and the final one add the mutes (`mixer`) and
@@ -246,7 +246,7 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
         let notify = crate::commands::notifier(app.clone());
         let r = state
             .analysis
-            .reanalyse(std::path::Path::new(&file), true, notify)?;
+            .reanalyse(std::path::Path::new(&file), false, false, notify)?;
         eprintln!(
             "junctur-app test: reanalyse started: {}",
             r.progress.is_some()

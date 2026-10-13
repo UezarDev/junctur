@@ -137,9 +137,10 @@ pub struct PipelineOptions {
     pub no_speakers: bool,
     /// Enrolled voices to label speakers by (5b; the caller reads the voices file).
     pub voices: Vec<Voice>,
-    /// An edit list holding the user's edits is kept as it is instead of re-cut (2j: the app
-    /// resuming a run the user edited during, now that the list comes before the transcript). Off
-    /// for `junctur analyze` and the app's explicit re-analysis, which replace it and keep a backup.
+    /// An edit list holding the user's edits is kept instead of re-cut, taking only the speakers
+    /// the run found (2j: the app resuming a run the user edited during, now that the list comes
+    /// before the transcript; 5s: the app's Re-analyse). Off for `junctur analyze` and the app's
+    /// "Start over with a fresh cut", which replace it and keep a backup.
     pub keep_list: bool,
 }
 
@@ -195,7 +196,7 @@ pub fn run_with(
 
 /// A run's first half: tracks, speech, speakers and the edit list, written at its end without word
 /// counts (2j: nothing else in it needs the transcript, so the recording is editable before Whisper
-/// starts). With `opts.keep_list` a list holding the user's edits is kept as it is.
+/// starts). With `opts.keep_list` a list holding the user's edits is kept, with this run's speakers.
 pub fn prepare(
     p: &Project,
     opts: &PipelineOptions,
@@ -224,7 +225,7 @@ pub fn prepare(
     };
     let edit = jobs.stage(&p.dir, "edit", log, |log| {
         let d = draft(p, &report, &speech, speakers.as_ref(), None, &opts.cut);
-        keep_or_write(p, d, opts.keep_list, log)
+        keep_or_write(p, d, speakers.as_ref(), opts.keep_list, log)
     })?;
     Ok(Prepared {
         report,
@@ -287,19 +288,48 @@ pub fn finish(
     })
 }
 
-/// The `edit` stage's write: with `keep_list`, a list on disk holding the user's edits is kept as
-/// it is. Only one that parses: a list that does not (a run killed mid-write before 1d, a broken
-/// hand edit) is backed up and re-cut as before 2j, or the recording would never have a list.
+/// The `edit` stage's write: with `keep_list`, a list on disk holding the user's edits is kept, only
+/// its speakers replaced by the ones this run found (5s: the app's Re-analyse matches the speakers
+/// against the remembered voices again and puts them on top of the user's cut, names, fixes and
+/// caption settings). Only one that parses: a list that does not (a run killed mid-write before 1d,
+/// a broken hand edit) is backed up and re-cut as before 2j, or the recording would never have a
+/// list.
+///
+/// The speakers go in through [`edit::amend`], as the word counts do: one writer at a time, an app
+/// save saved again as the app would, and a list edited outside Junctur (comments, another layout)
+/// left whole rather than rewritten for its speakers. They are worked out from the list as amend reads
+/// it ([`speakers_for`]), so its names and colours carry over by what each speaker says.
 fn keep_or_write(
     p: &Project,
     d: Draft,
+    found: Option<&Found>,
     keep_list: bool,
     log: &mut dyn FnMut(&str),
 ) -> Result<EditList> {
     if keep_list && d.users {
-        if let Ok(kept) = p.edit() {
-            log("edit list: it holds your edits, kept as it is");
-            return Ok(kept);
+        let amended = edit::amend(&p.edit_path(), |e| {
+            if found.is_some() {
+                e.speakers = speakers_for(found, Some(&e.speakers));
+            }
+        })?;
+        match amended {
+            edit::Amended::Written(e) => {
+                log("edit list: it holds your edits, kept with the speakers matched again");
+                return Ok(e);
+            }
+            edit::Amended::Same(e) => {
+                log("edit list: it holds your edits, kept as it is");
+                return Ok(e);
+            }
+            edit::Amended::Left => {
+                if let Ok(kept) = p.edit() {
+                    log(
+                        "edit list: edited outside Junctur, kept as it is with the speakers it had",
+                    );
+                    return Ok(kept);
+                }
+            }
+            edit::Amended::Missing => {}
         }
     }
     write_draft(p, d)
@@ -1266,12 +1296,12 @@ mod tests {
         // The user cut while it transcribed, then the app closed: resumed, their list stays.
         let mine = list(CutSettings::default(), 2.0);
         std::fs::write(p.edit_path(), &mine).unwrap();
-        let kept = keep_or_write(&p, draft_over(&mine), true, &mut log).unwrap();
+        let kept = keep_or_write(&p, draft_over(&mine), None, true, &mut log).unwrap();
         assert_eq!(kept.keep[0].end, 2.0);
         assert_eq!(std::fs::read_to_string(p.edit_path()).unwrap(), mine);
         assert!(!p.dir.join("edit.junctur.bak").exists());
         // A re-analysis (not kept): backed up and re-cut.
-        let recut = keep_or_write(&p, draft_over(&mine), false, &mut log).unwrap();
+        let recut = keep_or_write(&p, draft_over(&mine), None, false, &mut log).unwrap();
         assert_eq!(recut.keep[0].end, 5.0);
         assert_eq!(
             std::fs::read_to_string(p.dir.join("edit.junctur.bak")).unwrap(),
@@ -1279,9 +1309,105 @@ mod tests {
         );
         // A list that does not parse is never kept, or the recording would never get one.
         std::fs::write(p.edit_path(), "junctur-edit 1\nkeep x\n").unwrap();
-        let recut = keep_or_write(&p, draft_over("junctur-edit 1\nkeep x\n"), true, &mut log);
+        let recut = keep_or_write(
+            &p,
+            draft_over("junctur-edit 1\nkeep x\n"),
+            None,
+            true,
+            &mut log,
+        );
         assert_eq!(recut.unwrap().keep[0].end, 5.0);
         assert!(p.dir.join("edit.junctur.bak2").exists());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_reanalysis_keeps_the_users_cut_names_and_fixes_and_takes_the_new_speakers() {
+        // 5s: Re-analyse keeps the list the user edited and puts on top of it only the speakers
+        // the run matched against the remembered voices.
+        let (d, p) = scratch_project("reanalyse-keeps");
+        let turn = |start: f64, speaker| edit::Turn {
+            start,
+            end: start + 1.0,
+            speaker,
+        };
+        // The user's list, saved by the app: their own cut, speaker 2 named Ana in a colour of
+        // their own, a word fixed and caption settings of their own.
+        let mut mine = edit::parse(&list(CutSettings::default(), 2.0)).unwrap();
+        mine.keep.push(edit::Range {
+            start: 3.5,
+            end: 4.5,
+        });
+        mine.speakers = Speakers::new(vec![turn(1.0, 1), turn(4.0, 2)], &[None, None], None);
+        mine.speakers.rename(2, "Ana");
+        mine.speakers.recolor(2, "#123456");
+        edit::set_fix(&mut mine.fixes, 0, 4.25, "anna", "Ana").unwrap();
+        mine.captions = Some(edit::Captions {
+            chars: 21,
+            ..Default::default()
+        });
+        edit::save(&p.edit_path(), &mine).unwrap();
+        let saved = std::fs::read_to_string(p.edit_path()).unwrap();
+        // The run's own cut, which a fresh cut would write.
+        let fresh = || edit::parse(&list(CutSettings::default(), 5.0)).unwrap();
+        let draft_over = |old: &str| Draft {
+            list: fresh(),
+            old: Some(old.to_string()),
+            users: true,
+        };
+        // Matched again: Ana's stretch is speaker 1 now (a remembered voice took the old
+        // numbering), and a third stretch was found.
+        let found = Found {
+            people: vec![],
+            heard: None,
+            known: vec![],
+            method: Method::Voices,
+            tracks: vec![None, None],
+            turns: vec![turn(4.0, 1), turn(1.0, 2), turn(7.0, 2)],
+            speech: String::new(),
+            pins: vec![],
+        };
+        let mut log = |_: &str| {};
+        let kept = keep_or_write(&p, draft_over(&saved), Some(&found), true, &mut log).unwrap();
+        assert_eq!(kept.keep, mine.keep, "the user's cut, not the fresh one");
+        assert_eq!(kept.fixes, mine.fixes);
+        assert_eq!(kept.captions, mine.captions);
+        assert_eq!(kept.settings, mine.settings);
+        assert_eq!(
+            kept.speakers.name(1),
+            Some("Ana"),
+            "the name follows her stretch"
+        );
+        assert_eq!(kept.speakers.color(1), Some("#123456"));
+        assert_eq!(kept.speakers.name(2), Some("Speaker 2"));
+        let starts: Vec<(f64, u32)> = kept
+            .speakers
+            .turns
+            .iter()
+            .map(|t| (t.start, t.speaker))
+            .collect();
+        assert_eq!(starts, [(1.0, 2), (4.0, 1), (7.0, 2)]);
+        // Written as the app saves, and no backup: nothing of the user's was replaced.
+        let text = std::fs::read_to_string(p.edit_path()).unwrap();
+        assert_ne!(edit::unstamped(&text), text, "stamped");
+        assert_eq!(edit::parse(edit::unstamped(&text)).unwrap(), kept);
+        assert!(!p.dir.join("edit.junctur.bak").exists());
+        // Run again with nothing new: the same list, untouched.
+        let again = keep_or_write(&p, draft_over(&text), Some(&found), true, &mut log).unwrap();
+        assert_eq!(again, kept);
+        assert_eq!(std::fs::read_to_string(p.edit_path()).unwrap(), text);
+        // No speakers this time (the stage failed): the list keeps the ones it has.
+        let none = keep_or_write(&p, draft_over(&text), None, true, &mut log).unwrap();
+        assert_eq!(none, kept);
+        // A list edited outside Junctur (a comment of the user's) is left whole, speakers and all,
+        // rather than rewritten without the comment.
+        let by_hand = format!("# my notes\n{}", mine.to_text());
+        std::fs::write(p.edit_path(), &by_hand).unwrap();
+        let left = keep_or_write(&p, draft_over(&by_hand), Some(&found), true, &mut log).unwrap();
+        assert_eq!(left.speakers, mine.speakers);
+        assert_eq!(left.keep, mine.keep);
+        assert_eq!(std::fs::read_to_string(p.edit_path()).unwrap(), by_hand);
+        assert!(!p.dir.join("edit.junctur.bak").exists());
         std::fs::remove_dir_all(&d).unwrap();
     }
 

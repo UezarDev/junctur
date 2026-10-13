@@ -337,7 +337,7 @@ export interface Transcription {
 
 export interface Reanalysed {
   progress: Progress | null;
-  /** Nothing started: the edit list holds the user's edits, so ask first. */
+  /** A fresh cut was asked for and nothing started: the edit list holds the user's edits, so ask first. */
   handEdited: boolean;
 }
 
@@ -347,9 +347,13 @@ export const openFile = (path: string) => invoke<Opened>("open_file", { path });
 export const recent = () => invoke<Recent[]>("recent");
 export const forgetRecent = (path: string) => invoke<void>("forget_recent", { path });
 export const analysis = (path: string) => invoke<Progress | null>("analysis", { path });
-/** Analyses `path` again; without `replace`, an edit list with the user's edits starts nothing. */
-export const reanalyse = (path: string, replace: boolean) =>
-  invoke<Reanalysed>("reanalyse", { path, replace });
+/**
+ * Analyses `path` again (5s): the user's edit list is kept, with the speakers matched again against
+ * the remembered voices. With `fresh` the list is re-cut instead; then, without `replace`, a list with
+ * the user's edits starts nothing.
+ */
+export const reanalyse = (path: string, fresh: boolean, replace: boolean) =>
+  invoke<Reanalysed>("reanalyse", { path, fresh, replace });
 export const transcription = () => invoke<Transcription>("transcription");
 /** Pauses or resumes the transcription lane, from any recording (2k). */
 export const pauseTranscription = (paused: boolean) =>

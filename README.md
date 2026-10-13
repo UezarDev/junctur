@@ -147,8 +147,10 @@ the background with `junctur analyze`'s defaults (model from the config file, re
 project panel shows each stage as it runs, and the transcript and edit list fill in when it is done. An
 analysed recording opens straight away; when the config file now asks for another Whisper model than the
 transcript was made with, the panel says so and offers Re-analyse (never on its own). Re-analyse reruns
-only what the settings changed and re-cuts; when the edit list holds your own edits it asks first, and
-keeps them as `edit.junctur.bak*`. `npm run tauri dev` / `build` build the app with `--features cuda` when
+only what the settings changed, matches the speakers against the remembered voices again and puts them
+into your edit list, keeping your cut, speaker names and colours, fixed words and caption settings.
+"Start over with a fresh cut" under it re-cuts instead; when the edit list holds your own edits it asks
+first, and keeps them as `edit.junctur.bak*` (as `junctur analyze` does). `npm run tauri dev` / `build` build the app with `--features cuda` when
 the CUDA 13 toolkit is installed (`CUDA_PATH_V13_0`), so it analyses on the GPU; `JUNCTUR_CPU=1` builds
 a CPU one. Plain `cargo build` is always CPU-only.
 
