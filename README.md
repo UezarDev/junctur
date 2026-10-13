@@ -157,6 +157,8 @@ words and press Delete to cut them (K keeps), restore a folded cut, or nudge a r
 above the timeline (shift-drag on the timeline selects a stretch). Boundaries snap into the pauses the way
 `junctur cut` places them, every edit is saved to `edit.junctur` at once, Ctrl+Z / Ctrl+Y undo and redo,
 and a list the app did not write itself is first kept as `edit.junctur.bak` (then `.bak2`, ...).
+Double-click a misheard word to fix its spelling: the fix is a `fix` line in `edit.junctur`, shown in the
+transcript, the caption preview and the SRT, and the spelling joins the word list (below).
 
 Setup, once (Node.js 20+ for the frontend):
 
@@ -199,8 +201,14 @@ To change the default, create `junctur/config.json` in the OS config folder (`%A
 title bar) writes the same file:
 
 ```json
-{ "whisper_model": "large-v3", "captions": { "on": true, "chars": 32 } }
+{ "whisper_model": "large-v3", "words": ["Uezar", "Tsunheto"], "captions": { "on": true, "chars": 32 } }
 ```
+
+`words` is the word list: names and terms (speaker names, recurring jargon) Whisper is told before every
+stretch it hears, so they come out spelled that way. It applies to the next transcription; a finished one
+is not redone or called out of date. A list too long for Whisper's prompt (about 220 tokens) is cut from
+the end, and the log says what was left out. The app edits it in Settings and adds every word you fix at
+the top of the list, so a newly fixed word is always told to Whisper.
 
 `captions` holds the caption defaults: what a recording whose edit list has no `captions` line of its own
 cuts its captions with (`on`, `chars` per line, `lines` per speaker, `words` per speaker with 0 for no

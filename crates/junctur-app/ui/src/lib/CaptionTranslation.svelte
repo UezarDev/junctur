@@ -14,7 +14,7 @@
   }: {
     captions: api.Captions;
     source: string | null;
-    /** What the sentences depend on besides the language: the kept ranges and who says what. */
+    /** What the sentences depend on besides the language: the kept ranges, who says what, and the words fixed (5h). */
     cuts: string;
     onError: (message: string) => void;
   } = $props();

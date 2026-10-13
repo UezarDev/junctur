@@ -666,6 +666,27 @@ impl Core {
         stopped
     }
 
+    /// Fixes the spelling of transcript word `index` (5h) in the edit list and saves it; returns the
+    /// heard text and the fixed one, for the word list. Not an undo step, like a rename.
+    pub fn fix_word(
+        &self,
+        file: Option<&str>,
+        index: usize,
+        text: &str,
+    ) -> Result<(String, String), String> {
+        self.prepare();
+        let words = lock(&self.editor)
+            .words
+            .clone()
+            .ok_or("this recording has no transcript")?;
+        let (Some(word), Some(&track)) = (words.list.get(index), words.tracks.get(index)) else {
+            return Err("no such word in the transcript".into());
+        };
+        let fixed = junctur_core::edit::check_fix(text)?;
+        self.change(file, |ed, list, _| ed.fix_word(list, track, word, &fixed))?;
+        Ok((word.text.clone(), fixed))
+    }
+
     /// Sets the edit list's caption settings and saves them.
     pub fn set_captions(&self, file: Option<&str>, captions: Captions) -> Result<(), String> {
         self.change(file, |ed, list, _| ed.set_captions(list, captions))
@@ -689,19 +710,17 @@ impl Core {
     }
 
     /// The captions of the list in play as the SRT export cuts them (5d's preview over the
-    /// picture), each speaker placed as the Resolve send places them (5g): the same cues on the same
-    /// output timeline, so the preview shows what Resolve will, cue for cue. Translated captions
-    /// (5k) show what is translated so far, the rest as said.
-    pub fn caption_cues(&self) -> Result<Vec<Placed>, String> {
-        let (list, captions, words, fps) = self.caption_source()?;
-        let tracked = words.tracks.iter().copied().zip(words.list.iter());
-        let tr = self.translations();
-        let cues = srt::cues(&list, &captions, tracked, fps.num, fps.den, Some(&*tr));
-        Ok(layout::place(&cues, &list, &captions))
+    /// picture), each speaker placed as the Resolve send places them (5g) on a picture `aspect`
+    /// (height over width) in shape: the same cues on the same output timeline, so the preview
+    /// shows what Resolve will, cue for cue. Translated captions (5k) show what is translated so
+    /// far, the rest as said.
+    pub fn caption_cues(&self, aspect: f64) -> Result<Vec<Placed>, String> {
+        let (list, captions, cues) = self.cut_captions()?;
+        Ok(layout::place(&cues, &list, &captions, aspect))
     }
 
-    /// Sends the captions of the list in play into DaVinci Resolve as Text+ clips (5g): the same
-    /// placed cues the preview draws, to the Junctur script running in Resolve. Blocks until Resolve
+    /// Sends the captions of the list in play into DaVinci Resolve as Text+ clips (5g), laid out
+    /// for the Resolve timeline's shape, to the Junctur script running there. Blocks until Resolve
     /// answers (minutes for a long recording), so the command runs it off the async runtime.
     /// Refused, like the export, while translated captions are not all translated (5k).
     pub fn send_to_resolve(&self) -> Result<junctur_core::resolve::Sent, String> {
@@ -724,8 +743,17 @@ impl Core {
             fps.den,
             Some(&*tr),
         );
-        let placed = layout::place(&cues, &list, &captions);
-        junctur_core::resolve::send(&placed, &list, &captions)
+        junctur_core::resolve::send(&cues, &list, &captions)
+    }
+
+    /// The list in play, its caption settings and its cues as the SRT export cuts them, with what
+    /// is translated so far (5k): what the preview lays out.
+    fn cut_captions(&self) -> Result<(Arc<EditList>, Captions, Vec<srt::Cue>), String> {
+        let (list, captions, words, fps) = self.caption_source()?;
+        let tracked = words.tracks.iter().copied().zip(words.list.iter());
+        let tr = self.translations();
+        let cues = srt::cues(&list, &captions, tracked, fps.num, fps.den, Some(&*tr));
+        Ok((list, captions, cues))
     }
 
     /// The open recording's translations (5k), from its project folder: the background run writes
@@ -904,7 +932,8 @@ impl Core {
         let list = lock(&self.ctl).edit.list.clone();
         let none = Speakers::default();
         let speakers = list.as_deref().map_or(&none, |l| &l.speakers);
-        Some(TranscriptView::new(&words, speakers))
+        let fixes = list.as_deref().map_or(&[][..], |l| &l.fixes);
+        Some(TranscriptView::new(&words, speakers, fixes))
     }
 
     /// Keeps the right-hand `right`, bottom `bottom` and top `top` shares of the window (0..1) free

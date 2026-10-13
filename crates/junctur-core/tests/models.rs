@@ -306,3 +306,27 @@ fn captions_translate_between_languages() {
     );
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// 5h: the word list reaches Whisper as prompt tokens, a long list cut to the prompt's room from
+/// the end, and a chunk decodes with it (no panic on the tokenizer's count, no failure). Turbo, on
+/// the CPU: about 1.6 GB downloaded on a first run.
+#[test]
+#[ignore = "downloads models"]
+fn whisper_takes_the_word_list_and_cuts_a_long_one() {
+    use junctur_core::runtime::Device;
+    use junctur_core::transcribe::Whisper;
+    let m = models::ensure(&models::WHISPER_LARGE_V3_TURBO, &cache::default_dir()).unwrap();
+    let mut w = Whisper::open(&m, Device::Cpu).unwrap();
+    let long: Vec<String> = (0..400).map(|i| format!("Tsunheto{i}")).collect();
+    let p = w.set_prompt(&long);
+    assert!(p.kept > 5 && p.kept < 400, "{}", p.kept);
+    assert_eq!(p.left_out.first(), Some(&format!("Tsunheto{}", p.kept)));
+    let p = w.set_prompt(&["Uezar".to_string(), "Delay".into()]);
+    assert_eq!((p.text.as_str(), p.kept), ("Uezar, Delay", 2));
+    // Two seconds of a quiet tone: whatever it hears, it decodes with the prompt set.
+    let x: Vec<f32> = (0..32_000)
+        .map(|i| 0.01 * (i as f32 * 0.05).sin())
+        .collect();
+    w.transcribe(&x, "en").unwrap();
+    assert_eq!(w.set_prompt(&[]).kept, 0);
+}

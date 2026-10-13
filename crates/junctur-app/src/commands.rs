@@ -403,6 +403,26 @@ pub async fn rename_speaker(app: State<'_, App>, id: u32, name: String) -> Resul
     e.rename_speaker(e.file(), id, &name)
 }
 
+/// Fixes the spelling of transcript word `index` (5h) and adds the fixed spelling to the word list
+/// (no prompt, never twice); resolves to the entry added, if one was. A word list that cannot be
+/// saved does not undo the fix: it is logged.
+#[tauri::command]
+pub async fn fix_word(
+    app: State<'_, App>,
+    index: usize,
+    text: String,
+) -> Result<Option<String>, String> {
+    let e = app.editable()?;
+    let (heard, fixed) = e.fix_word(e.file(), index, &text)?;
+    match settings::learn(&heard, &fixed) {
+        Ok(added) => Ok(added),
+        Err(err) => {
+            eprintln!("junctur-app: adding {fixed:?} to the word list: {err}");
+            Ok(None)
+        }
+    }
+}
+
 /// Sets speaker `id`'s caption colour (`#RRGGBB`).
 #[tauri::command]
 pub async fn recolor_speaker(app: State<'_, App>, id: u32, color: String) -> Result<(), String> {
@@ -440,10 +460,11 @@ pub async fn export_captions(app: State<'_, App>, path: String) -> Result<Export
 }
 
 /// The captions as the export cuts them, for the preview over the picture (5d): output seconds,
-/// each cue's parts a speaker's lines, placed where the Resolve send puts them (5g).
+/// each cue's parts a speaker's lines, placed where the Resolve send puts them (5g) on the
+/// preview's picture, `aspect` its height over its width.
 #[tauri::command]
-pub async fn caption_cues(app: State<'_, App>) -> Result<Vec<Placed>, String> {
-    app.core()?.caption_cues()
+pub async fn caption_cues(app: State<'_, App>, aspect: f64) -> Result<Vec<Placed>, String> {
+    app.core()?.caption_cues(aspect)
 }
 
 /// Sends the captions into DaVinci Resolve as Text+ clips (5g), through the Junctur script running

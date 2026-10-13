@@ -39,25 +39,69 @@ pub struct Placed {
     pub parts: Vec<PlacedPart>,
 }
 
-/// Places every cue's speakers by the caption settings' size, position, layout and protagonist.
-pub fn place(cues: &[Cue], edit: &EditList, c: &Captions) -> Vec<Placed> {
+/// An average glyph's advance over the em, for guessing a line's width: the layout cannot measure
+/// the font (the preview and Text+ draw it), so side-by-side columns are kept with room to spare.
+const GLYPH: f64 = 0.5;
+/// Side by side round a protagonist: each column's width (the gap between [`BESIDE`]'s centres).
+const BESIDE_COLUMN: f64 = 0.3;
+/// Fewest characters a side-by-side line is narrowed to, so a tiny column still holds a word.
+const MIN_CHARS: usize = 6;
+
+/// Places every cue's speakers by the caption settings' size, position, layout and protagonist,
+/// on a picture `aspect` (height over width) in shape: side by side, each speaker's lines are
+/// wrapped again to fit their column, and every block is kept inside the picture.
+pub fn place(cues: &[Cue], edit: &EditList, c: &Captions, aspect: f64) -> Vec<Placed> {
     let protagonist = c.protagonist_in(&edit.speakers.names);
+    let aspect = if aspect.is_finite() && aspect > 0.0 {
+        aspect
+    } else {
+        9.0 / 16.0
+    };
     cues.iter()
-        .map(|cue| place_one(cue, protagonist, c))
+        .map(|cue| place_one(cue, protagonist, c, aspect))
         .collect()
 }
 
-fn place_one(cue: &Cue, protagonist: Option<u32>, c: &Captions) -> Placed {
+fn place_one(cue: &Cue, protagonist: Option<u32>, c: &Captions, aspect: f64) -> Placed {
     let em = c.size / 100.0;
     let bottom = c.position / 100.0;
-    let height = |i: usize| cue.parts[i].lines.len().max(1) as f64 * em * LINE;
+    // One character's width in picture widths.
+    let glyph = em * aspect * GLYPH;
     // Who keeps the normal spot: the protagonist when they talk in this caption, else whoever
     // started first; the others follow in the order they started.
     let mut order: Vec<usize> = (0..cue.parts.len()).collect();
-    if let Some(p) = protagonist.and_then(|id| cue.parts.iter().position(|q| q.speaker == id)) {
+    let keeps = protagonist.and_then(|id| cue.parts.iter().position(|q| q.speaker == id));
+    if let Some(p) = keeps {
         order.remove(p);
         order.insert(0, p);
     }
+    // Side by side, a block wider than its column would run into the next: its words are wrapped
+    // again to the column.
+    let column = match (c.layout, cue.parts.len()) {
+        (Layout::Side, n) if n > 1 && keeps.is_some() => Some(BESIDE_COLUMN),
+        (Layout::Side, n) if n > 1 => Some(1.0 / n as f64),
+        _ => None,
+    };
+    let lines: Vec<Vec<String>> = cue
+        .parts
+        .iter()
+        .map(|p| match column {
+            Some(w) => {
+                let chars = ((w * 0.9 / glyph) as usize).max(MIN_CHARS);
+                rewrap(&p.lines, chars)
+            }
+            None => p.lines.clone(),
+        })
+        .collect();
+    let height = |i: usize| lines[i].len().max(1) as f64 * em * LINE;
+    let width = |i: usize| {
+        lines[i]
+            .iter()
+            .map(|l| l.chars().count())
+            .max()
+            .unwrap_or(0) as f64
+            * glyph
+    };
     let mut at = vec![(0.5, 0.0); cue.parts.len()];
     // A stack from `bottom` up through `ids`, each centred at `x`.
     let stack = |ids: &[usize], x: f64, at: &mut Vec<(f64, f64)>| {
@@ -93,21 +137,57 @@ fn place_one(cue: &Cue, protagonist: Option<u32>, c: &Captions) -> Placed {
             }
         }
     }
+    let sizes: Vec<(f64, f64)> = (0..cue.parts.len())
+        .map(|i| (width(i), height(i)))
+        .collect();
+    // Inside the picture: a tall stack or a wide block near an edge is pushed back in.
+    let inside = |v: f64, size: f64| {
+        if size >= 1.0 {
+            0.5
+        } else {
+            v.clamp(size / 2.0, 1.0 - size / 2.0)
+        }
+    };
     Placed {
         start: cue.start,
         end: cue.end,
         parts: cue
             .parts
             .iter()
+            .zip(lines)
             .zip(at)
-            .map(|(p, (x, y))| PlacedPart {
+            .enumerate()
+            .map(|(i, ((p, lines), (x, y)))| PlacedPart {
                 speaker: p.speaker,
-                lines: p.lines.clone(),
-                x,
-                y,
+                x: inside(x, sizes[i].0),
+                y: inside(y, sizes[i].1),
+                lines,
             })
             .collect(),
     }
+}
+
+/// `lines`' words wrapped again, greedily, at `chars` characters a line; lines already that
+/// short are kept as they are.
+fn rewrap(lines: &[String], chars: usize) -> Vec<String> {
+    if lines.iter().all(|l| l.chars().count() <= chars) {
+        return lines.to_vec();
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for word in lines.iter().flat_map(|l| l.split_whitespace()) {
+        if !cur.is_empty() && cur.chars().count() + 1 + word.chars().count() > chars {
+            out.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(word);
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -147,6 +227,7 @@ mod tests {
                 turns: Vec::new(),
             },
             captions: None,
+            fixes: Vec::new(),
             windows: Vec::new(),
         }
     }
@@ -163,7 +244,7 @@ mod tests {
     }
 
     fn spots(cue: &Cue, c: &Captions) -> Vec<(u32, f64, f64)> {
-        place(std::slice::from_ref(cue), &edit(), c)[0]
+        place(std::slice::from_ref(cue), &edit(), c, 9.0 / 16.0)[0]
             .parts
             .iter()
             .map(|p| {
@@ -239,5 +320,81 @@ mod tests {
             ),
             [(1, 0.5, 0.87), (2, 0.5, 0.13), (3, 0.5, 0.205)]
         );
+    }
+
+    #[test]
+    fn side_by_side_wraps_each_block_to_its_column() {
+        let long = "una frase bastante larga que llena la línea";
+        let cue = Cue {
+            start: 1.0,
+            end: 2.0,
+            parts: [1, 2]
+                .map(|speaker| Part {
+                    speaker,
+                    lines: vec![long.into()],
+                })
+                .to_vec(),
+        };
+        // 5 % text on 16:9: a character is about 0.014 of the width, half the picture holds 32.
+        let placed = &place(
+            std::slice::from_ref(&cue),
+            &edit(),
+            &settings(Layout::Side, ""),
+            9.0 / 16.0,
+        )[0];
+        for p in &placed.parts {
+            assert!(p.lines.len() > 1, "{:?}", p.lines);
+            assert!(
+                p.lines.iter().all(|l| l.chars().count() <= 32),
+                "{:?}",
+                p.lines
+            );
+            assert_eq!(p.lines.join(" "), long);
+        }
+        // Two lines tall now: the bottom edge stays at the position.
+        assert!((placed.parts[0].y - (0.1 + 0.06)).abs() < 1e-9);
+        // Stacked, the lines are the cue's own.
+        let stacked = &place(&[cue], &edit(), &settings(Layout::Stacked, ""), 9.0 / 16.0)[0];
+        assert_eq!(stacked.parts[0].lines, [long]);
+        assert_eq!(rewrap(&["a b".into(), "c".into()], 3), ["a b", "c"]);
+    }
+
+    #[test]
+    fn blocks_stay_inside_the_picture() {
+        // Three speakers of three lines at 15 %: the stack would run off the top.
+        let big = Captions {
+            size: 15.0,
+            ..settings(Layout::Stacked, "")
+        };
+        for p in &place(&[cue(&[(1, 3), (2, 3), (3, 3)])], &edit(), &big, 9.0 / 16.0)[0].parts {
+            let h = 3.0 * 0.15 * LINE;
+            assert!(
+                p.y - h / 2.0 >= -1e-9 && p.y + h / 2.0 <= 1.0 + 1e-9,
+                "{}",
+                p.y
+            );
+        }
+        // A wide line beside a protagonist is pulled in from the edge.
+        let wide = Cue {
+            start: 1.0,
+            end: 2.0,
+            parts: vec![
+                Part {
+                    speaker: 1,
+                    lines: vec!["extraordinariamente".into()],
+                },
+                Part {
+                    speaker: 2,
+                    lines: vec!["x".into()],
+                },
+            ],
+        };
+        let c = Captions {
+            size: 15.0,
+            ..settings(Layout::Side, "Bo")
+        };
+        let p = &place(&[wide], &edit(), &c, 9.0 / 16.0)[0].parts[0];
+        let w = 19.0 * 0.15 * (9.0 / 16.0) * GLYPH;
+        assert!((p.x - (1.0 - w / 2.0)).abs() < 1e-9, "{}", p.x);
     }
 }

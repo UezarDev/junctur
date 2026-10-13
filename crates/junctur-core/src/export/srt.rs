@@ -25,7 +25,7 @@ use serde::Serialize;
 
 use super::caption_text;
 use super::translated::{self, Shown};
-use crate::edit::{frame_ranges, frames_ceil, Captions, EditList, Labeller};
+use crate::edit::{frame_ranges, frames_ceil, Captions, EditList, Fixes, Labeller};
 use crate::transcribe::Word;
 use crate::translate::{Sentence, Translations};
 
@@ -186,7 +186,7 @@ pub fn cues<'a>(
 ) -> Vec<Cue> {
     let tl = Timeline::new(edit, num, den);
     let label = edit.speakers.labeller();
-    let kept = kept(&tl, words);
+    let kept = kept(&tl, edit, words);
     let shown = match translations.filter(|_| !c.translate.is_empty()) {
         Some(t) => {
             let s = sentence_words(&kept, &tl, &label);
@@ -227,8 +227,15 @@ pub fn cues<'a>(
 }
 
 /// The kept words, in time order, each in its kept range and cleaned (a word left empty is kept
-/// here, so a phrase around it does not match, and dropped as a unit).
-fn kept<'a>(tl: &Timeline, words: impl IntoIterator<Item = (usize, &'a Word)>) -> Vec<Shown> {
+/// here, so a phrase around it does not match, and dropped as a unit). A word the user fixed
+/// shows as fixed (5h), here and so in the preview, every export, and the sentences translated
+/// (5k), before the text options (5j) and the word limit (5i).
+fn kept<'a>(
+    tl: &Timeline,
+    edit: &EditList,
+    words: impl IntoIterator<Item = (usize, &'a Word)>,
+) -> Vec<Shown> {
+    let fixes = Fixes::new(&edit.fixes);
     let mut words: Vec<(usize, &Word)> = words.into_iter().collect();
     words.sort_by(|a, b| a.1.start.total_cmp(&b.1.start));
     words
@@ -239,7 +246,7 @@ fn kept<'a>(tl: &Timeline, words: impl IntoIterator<Item = (usize, &'a Word)>) -
                 track,
                 start: (r, w.start),
                 end: (r, w.end),
-                text: clean(&w.text),
+                text: clean(fixes.text(track, w)),
             })
         })
         .collect()
@@ -267,7 +274,7 @@ pub fn sentences<'a>(
 ) -> Vec<Sentence> {
     let tl = Timeline::new(edit, num, den);
     let label = edit.speakers.labeller();
-    let kept = kept(&tl, words);
+    let kept = kept(&tl, edit, words);
     sentence_words(&kept, &tl, &label)
         .iter()
         .map(|s| Sentence {
@@ -694,8 +701,43 @@ mod tests {
                 None,
             ),
             captions: Some(captions),
+            fixes: vec![],
             windows: vec![],
         }
+    }
+
+    #[test]
+    fn a_fixed_word_shows_as_fixed_on_its_own_track() {
+        let mut e = two_tracks(Captions::default());
+        e.fixes = vec![crate::edit::Fix {
+            track: 3,
+            start: 10.6,
+            text: "Uezar".into(),
+        }];
+        let one = [word(10.6, 10.9, "Wezar"), word(11.0, 11.3, "hola")];
+        let two = [word(10.6, 10.9, "Wezar")];
+        let words = one.iter().map(|w| (0, w)).chain(two.iter().map(|w| (3, w)));
+        let c = cues(&e, &own(&e), words, 30, 1, None);
+        // Only track 3's word was fixed; track 0's at the same moment is another word.
+        assert_eq!(
+            parts(&c[0]),
+            vec![(1, "Wezar hola".into()), (2, "Uezar".into())]
+        );
+    }
+
+    #[test]
+    fn a_fixed_word_is_translated_as_fixed() {
+        // The sentences sent to translation (5k) read the fix (5h), as the captions do.
+        let mut e = two_tracks(Captions::default());
+        e.fixes = vec![crate::edit::Fix {
+            track: 0,
+            start: 10.6,
+            text: "Uezar".into(),
+        }];
+        let one = [word(10.6, 10.9, "Wezar"), word(11.0, 11.3, "hola")];
+        let s = sentences(&e, one.iter().map(|w| (0, w)), 30, 1);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].text, "Uezar hola");
     }
 
     #[test]

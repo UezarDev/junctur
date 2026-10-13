@@ -122,6 +122,9 @@ impl Project {
 pub struct PipelineOptions {
     pub device: DevicePref,
     pub model: ModelPref,
+    /// The word list Whisper is told (5h; the caller reads the config file). Not part of what makes
+    /// a transcript up to date: a changed list applies to the next transcription only.
+    pub words: Vec<String>,
     pub languages: Languages,
     pub cut: CutSettings,
     /// Redo every stage instead of reusing results.
@@ -636,6 +639,7 @@ fn transcribe_stage(
         device: opts.device,
         languages: opts.languages.clone(),
         force: opts.force,
+        words: opts.words.clone(),
     };
     let src: Vec<Source> = speech
         .tracks
@@ -736,6 +740,8 @@ fn draft(
     let old = std::fs::read_to_string(p.edit_path()).ok();
     let parsed = old.as_deref().and_then(|t| edit::parse(t).ok());
     let previous = parsed.as_ref().map(|e| e.speakers.clone());
+    // Fixed words too (5h): a re-cut changes what is kept, not what a word says.
+    let fixes = parsed.as_ref().map_or_else(Vec::new, |e| e.fixes.clone());
     // Caption settings are the user's, like the names: a re-cut keeps them.
     // None stays None: a list that followed the user's defaults still does (2i).
     let captions = parsed.and_then(|e| e.captions);
@@ -747,6 +753,7 @@ fn draft(
         keep: edit::keep_ranges(&regions, &env, report.duration, settings),
         speakers: speakers.clone(),
         captions: captions.clone(),
+        fixes: fixes.clone(),
         windows: edit::windows(&regions, starts, report.duration, settings.window),
     };
     let list = make(settings, &starts);
@@ -821,7 +828,7 @@ pub fn outdated(p: &Project, opts: &PipelineOptions) -> Vec<String> {
         model: opts.model,
         device: opts.device,
         languages: opts.languages.clone(),
-        force: false,
+        ..Default::default()
     };
     match transcribe::made_with(&p.dir) {
         None => vec!["There is no transcript yet.".to_string()],
@@ -920,6 +927,7 @@ mod tests {
             }],
             speakers: Default::default(),
             captions: Default::default(),
+            fixes: Vec::new(),
             windows: vec![],
         }
         .to_text()

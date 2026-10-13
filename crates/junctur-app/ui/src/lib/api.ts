@@ -67,6 +67,8 @@ export interface EditState {
   speakers: Speaker[];
   /** Changes when the words' speaker labels would (turns changed on disk), not on a rename. */
   speakersKey: string;
+  /** Changes when the list's fixed words do (5h): the words' text is fetched again. */
+  fixesKey: string;
   /** Caption settings: the edit list's `captions` line, else the user's defaults (2i). */
   captions: Captions;
   /** The list has its own caption settings; without, it follows the defaults. */
@@ -182,6 +184,8 @@ export interface Sent {
   removed: number;
   failed: number;
   firstError: string | null;
+  /** Text+ inputs the template did not take (a user's own title may lack some). */
+  unstyled: string[];
   timeline: string;
 }
 
@@ -197,6 +201,8 @@ export interface Settings {
   whisperModel: string;
   /** The caption settings a recording without its own starts from. */
   captions: Captions;
+  /** The word list Whisper is told (5h), first entries first. */
+  words: string[];
 }
 
 export interface SettingsView {
@@ -368,14 +374,18 @@ export const editFrames = (start: number, end: number, keep: boolean) =>
 /** Renames speaker `id` in the edit list (saved at once, not an undo step). */
 export const renameSpeaker = (id: number, name: string) =>
   invoke<void>("rename_speaker", { id, name });
+/** Fixes the spelling of word `index` (5h; empty or the heard text again removes the fix); resolves
+ * to the entry it added to the word list, if any. Saved at once, not an undo step. */
+export const fixWord = (index: number, text: string) => invoke<string | null>("fix_word", { index, text });
 /** Sets speaker `id`'s caption colour (`#RRGGBB`). */
 export const recolorSpeaker = (id: number, color: string) =>
   invoke<void>("recolor_speaker", { id, color });
 export const setCaptions = (captions: Captions) => invoke<void>("set_captions", { captions });
 /** Writes the captions as one SRT at `path`, people talking at once stacked in one caption (5e). */
 export const exportCaptions = (path: string) => invoke<Exported>("export_captions", { path });
-/** The captions as the export cuts them, for the preview over the picture (5d). */
-export const captionCues = () => invoke<Cue[]>("caption_cues");
+/** The captions as the export cuts them, for the preview over the picture (5d), placed on a
+ * picture `aspect` (height over width) in shape (5g). */
+export const captionCues = (aspect: number) => invoke<Cue[]>("caption_cues", { aspect });
 /** Sends the captions into DaVinci Resolve as Text+ clips through the Junctur script there (5g). */
 export const sendToResolve = () => invoke<Sent>("send_to_resolve");
 /** A caption translation run in the background (5k, src/translation.rs). */
