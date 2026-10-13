@@ -185,7 +185,7 @@ impl Editor {
         })
     }
 
-    /// Sets the caption settings (on/off and how cues are cut) and saves.
+    /// Sets the caption settings (switches, style, how cues are cut) and saves.
     pub fn set_captions(
         &mut self,
         list: &EditList,

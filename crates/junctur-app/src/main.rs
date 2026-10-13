@@ -124,6 +124,7 @@ fn main() {
             commands::recolor_speaker,
             commands::set_captions,
             commands::export_captions,
+            commands::caption_cues,
             commands::voices,
             commands::enroll_voice,
             commands::forget_voice,

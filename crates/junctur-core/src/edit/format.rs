@@ -70,11 +70,22 @@ pub fn write(e: &EditList) -> String {
     if *c != Captions::default() {
         let _ = writeln!(
             out,
-            "# captions <on|off> chars=<per line> lines=<per caption> seconds=<longest>"
+            "# captions <on|off> chars=<per line> lines=<per speaker> seconds=<longest> \
+             [preview=on] [bold=on] [italic=on]"
         );
+        // 5d's switches only when on, so a list that does not use them reads in 5a's builds.
+        let flags: String = [
+            ("preview", c.preview),
+            ("bold", c.bold),
+            ("italic", c.italic),
+        ]
+        .iter()
+        .filter(|(_, on)| *on)
+        .map(|(k, _)| format!(" {k}=on"))
+        .collect();
         let _ = writeln!(
             out,
-            "captions {} chars={} lines={} seconds={}",
+            "captions {} chars={} lines={} seconds={}{flags}",
             if c.on { "on" } else { "off" },
             c.chars,
             c.lines,
@@ -223,10 +234,18 @@ pub fn parse(text: &str) -> Result<EditList, String> {
                         .split_once('=')
                         .ok_or_else(|| bad("expected key=value"))?;
                     let whole = || v.parse::<u32>().map_err(|_| bad("not a whole number"));
+                    let flag = || match v {
+                        "on" => Ok(true),
+                        "off" => Ok(false),
+                        _ => Err(bad("expected on or off")),
+                    };
                     match k {
                         "chars" => c.chars = whole()?,
                         "lines" => c.lines = whole()?,
                         "seconds" => c.seconds = v.parse().map_err(|_| bad("not a number"))?,
+                        "preview" => c.preview = flag()?,
+                        "bold" => c.bold = flag()?,
+                        "italic" => c.italic = flag()?,
                         _ => return Err(bad("unknown caption setting")),
                     }
                 }
@@ -373,6 +392,7 @@ mod tests {
                 chars: 32,
                 lines: 1,
                 seconds: 4.5,
+                ..Captions::default()
             },
             ..sample()
         };
@@ -406,6 +426,29 @@ mod tests {
         assert!(parse(&format!("{head}captions maybe\n")).is_err());
         assert!(parse(&format!("{head}captions on chars=500\n")).is_err());
         assert!(parse(&format!("{head}captions on size=3\n")).is_err());
+        assert!(parse(&format!("{head}captions on bold=yes\n")).is_err());
+    }
+
+    #[test]
+    fn caption_switches_and_styles_round_trip() {
+        // Each written only when on, after 5a's settings; off by hand reads as off.
+        let c = EditList {
+            captions: Captions {
+                preview: true,
+                italic: true,
+                ..Captions::default()
+            },
+            ..sample()
+        };
+        let text = c.to_text();
+        assert!(
+            text.contains("captions off chars=42 lines=2 seconds=6 preview=on italic=on\n"),
+            "{text}"
+        );
+        assert_eq!(parse(&text).unwrap(), c);
+        let head = "junctur-edit 2\nsource x.mp4\n";
+        let e = parse(&format!("{head}captions on bold=on preview=off\n")).unwrap();
+        assert!(e.captions.on && e.captions.bold && !e.captions.preview && !e.captions.italic);
     }
 
     #[test]

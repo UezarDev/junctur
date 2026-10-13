@@ -115,10 +115,24 @@ export interface RecordingInfo {
 
 /** How the caption file is cut (src: junctur-core edit/captions.rs). */
 export interface Captions {
+  /** Export: a render writes the SRT beside the video. */
   on: boolean;
+  /** Show the captions over the picture as it plays (5d). */
+  preview: boolean;
   chars: number;
   lines: number;
   seconds: number;
+  /** Every caption bold / italic in the SRT (5d: Resolve's import applies both). */
+  bold: boolean;
+  italic: boolean;
+}
+
+/** A caption as the SRT export cuts it (junctur-core export/srt.rs), output seconds; one part per
+ * speaker talking in it, so several only where people talk at once (5e). */
+export interface Cue {
+  start: number;
+  end: number;
+  parts: { speaker: number; lines: string[] }[];
 }
 
 /** A voice Junctur remembers (5b), used to name speakers in every recording. */
@@ -255,6 +269,8 @@ export const recolorSpeaker = (id: number, color: string) =>
 export const setCaptions = (captions: Captions) => invoke<void>("set_captions", { captions });
 /** Writes the captions as one SRT at `path`, people talking at once stacked in one caption (5e). */
 export const exportCaptions = (path: string) => invoke<Exported>("export_captions", { path });
+/** The captions as the export cuts them, for the preview over the picture (5d). */
+export const captionCues = () => invoke<Cue[]>("caption_cues");
 export const voices = () => invoke<Voice[]>("voices");
 /** Remembers `name`'s voice from words `first..=last` and relabels the speakers; resolves to a line for the user. */
 export const enrollVoice = (first: number, last: number, name: string) =>

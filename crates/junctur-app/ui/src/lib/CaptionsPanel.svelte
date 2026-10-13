@@ -1,9 +1,11 @@
 <script lang="ts">
-  // The caption styling panel (5a): captions on or off, each speaker's colour and name with a
-  // sample of how it reads, how cues are cut, and exporting the SRT. Everything is saved to
-  // edit.junctur at once (the `captions` and `speaker` lines), so it is readable and survives a
-  // re-cut. Only what an SRT carries into DaVinci Resolve is offered: text, timing and colour.
-  // Size, font and position are set in Resolve (an SRT import drops them). Export writes one file
+  // The caption styling panel (5a, 5d): exporting captions with a render, previewing them over the
+  // picture (two switches since 5d), each speaker's colour and name with a sample of how it reads,
+  // bold and italic, how cues are cut, and exporting the SRT. Everything is saved to edit.junctur
+  // at once (the `captions` and `speaker` lines), so it is readable and survives a re-cut. Only
+  // what an SRT carries into DaVinci Resolve is offered: text, timing, colour, bold and italic
+  // (5d's research). Size, font, outline, shadow, background and position are Resolve's subtitle
+  // Track Style, which no import sets; the note says so rather than offering settings Resolve drops. Export writes one file
   // (5e): a Resolve subtitle track shows one caption at a time, so people talking at once share one
   // caption, a line each; 5b's per-speaker files left beside it are listed. The remembered voices
   // are listed with Forget, and the speakers can be analysed again from the audio (5c), the seconds
@@ -11,6 +13,7 @@
   // never automatic.
   import { save } from "@tauri-apps/plugin-dialog";
   import * as api from "./api";
+  import { captionFace } from "./captionStyle";
 
   let {
     edit,
@@ -25,6 +28,7 @@
   const captions = $derived(edit?.captions ?? null);
   const speakers = $derived(edit?.speakers ?? []);
   const usable = $derived(!!edit?.editable && !!captions);
+  const face = $derived(captionFace(captions ?? { bold: false, italic: false }));
   let exported = $state<string[] | null>(null);
   let busy = $state(false);
 
@@ -128,23 +132,29 @@
 <section class="panel">
   <header>
     <span>Captions</span>
-    {#if captions}
-      <label class="toggle" title="On: rendering also writes the captions beside the video">
-        <input
-          type="checkbox"
-          checked={captions.on}
-          disabled={!usable}
-          onchange={(e) => setCaptions({ on: (e.currentTarget as HTMLInputElement).checked })}
-        />
-        {captions.on ? "On" : "Off"}
-      </label>
-    {/if}
   </header>
 
   <div class="body">
     {#if !usable || !captions}
       <p class="note">Open a recording with an edit list to set up its captions.</p>
     {:else}
+      <label class="check" title="On: rendering also writes the captions (.srt) beside the video">
+        <input
+          type="checkbox"
+          checked={captions.on}
+          onchange={(e) => setCaptions({ on: (e.currentTarget as HTMLInputElement).checked })}
+        />
+        Export captions
+      </label>
+      <label class="check" title="Shows the captions over the video as it plays, as the export cuts them">
+        <input
+          type="checkbox"
+          checked={captions.preview}
+          onchange={(e) => setCaptions({ preview: (e.currentTarget as HTMLInputElement).checked })}
+        />
+        Preview captions
+      </label>
+
       <h3>Speakers</h3>
       {#if speakers.length === 0}
         <p class="note">No speakers in this edit list yet; captions will be white. Run the pipeline to tell them apart.</p>
@@ -159,8 +169,40 @@
           />
           <input class="name" value={s.name} maxlength="60" aria-label="Name of speaker {s.id}" onchange={(e) => rename(s.id, e)} />
         </div>
-        <div class="sample" style:color={s.color}>{s.name}: ¿qué tal? Hola a todos</div>
+        <div
+          class="sample"
+          style:color={s.color}
+          style:font-weight={face.weight}
+          style:font-style={face.style}
+        >
+          {s.name}: ¿qué tal? Hola a todos
+        </div>
       {/each}
+
+      <h3>Style</h3>
+      <label class="check">
+        <input
+          type="checkbox"
+          checked={captions.bold}
+          onchange={(e) => setCaptions({ bold: (e.currentTarget as HTMLInputElement).checked })}
+        />
+        Bold
+      </label>
+      <label class="check">
+        <input
+          type="checkbox"
+          checked={captions.italic}
+          onchange={(e) => setCaptions({ italic: (e.currentTarget as HTMLInputElement).checked })}
+        />
+        Italic
+      </label>
+      <p class="note">
+        Colour, bold and italic are all an SRT brings into Resolve. Font, size, outline, shadow, background and
+        position are the subtitle track's style in Resolve (select the track, Inspector &gt; Track): set them there
+        once for every caption. Resolve has been reported to give bold or italic captions their own style rather
+        than the track's: if a Track Style change then misses them, turn these off. The preview shows Resolve's
+        default look.
+      </p>
 
       <h3>How captions are cut</h3>
       <label class="field">
@@ -193,8 +235,8 @@
         Cues follow the edited timeline, like the render and the FCPXML. When people talk at once, one caption
         holds them all, each speaker on their own line in their colour; the line limit applies to each speaker.
         In DaVinci Resolve import the file (File &gt; Import &gt; Subtitle) onto one subtitle track at the start
-        of the timeline; the colours come through. An SRT carries no size or position: set those
-        in Resolve. Premiere Pro is untested and likely shows its default style.
+        of the timeline; the colours, bold and italic come through. An SRT carries no size or position: set
+        those in Resolve. Premiere Pro is untested and likely shows its default style.
       </p>
 
       <h3>Remembered voices</h3>
@@ -243,11 +285,11 @@
     font-weight: 600;
     border-bottom: 1px solid var(--line);
   }
-  .toggle {
+  .check {
     display: flex;
-    gap: 6px;
+    gap: 8px;
     align-items: center;
-    font-weight: 400;
+    margin: 8px 0 0;
   }
   .body {
     flex: 1;
