@@ -59,6 +59,26 @@ fn extend_path() {
     }
 }
 
+/// whisper.cpp's one imported CUDA DLL; the name `build.rs` delay-loads.
+#[cfg(windows)]
+const WHISPER_DLL: &str = "cublas64_13.dll";
+
+/// [`WHISPER_DLL`] when it is neither beside the executable nor on PATH (after [`prepare`]), the
+/// places the delay-load looks besides the system folders, where the CUDA installer never puts it.
+#[cfg(windows)]
+pub fn whisper_dll_missing() -> Option<&'static str> {
+    prepare();
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf));
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let found = exe
+        .into_iter()
+        .chain(std::env::split_paths(&path))
+        .any(|d| d.join(WHISPER_DLL).is_file());
+    (!found).then_some(WHISPER_DLL)
+}
+
 /// `<root>\v9.x\bin\13.x` folders of a cuDNN install, newest first.
 fn cudnn_dirs(root: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();

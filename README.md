@@ -34,10 +34,13 @@ Early. These pieces work:
 - For `render`: an NVIDIA GPU and an ffmpeg build with NVENC/NVDEC (`h264_nvenc`, `-hwaccel cuda`).
 - Optional, for GPU: an NVIDIA GPU with CUDA 13 and cuDNN 9 installed, and a build with `--features cuda`.
   Without it, or when the GPU cannot start, everything runs on CPU. Whisper runs large-v3-turbo on the
-  GPU when 2.1 GB of VRAM is free, else on CPU, and says so.
+  GPU when 2.1 GB of VRAM is free, else on CPU, and says so (also when the build has no GPU support, or
+  the CUDA 13 runtime's `cublas64_13.dll` is not installed). A CUDA build starts on a PC without CUDA:
+  it finds the CUDA DLLs through `CUDA_PATH` (or `JUNCTUR_CUDA_DIR`, `JUNCTUR_CUDNN_DIR`) when needed.
   Building whisper.cpp's CUDA kernels: with several CUDA versions installed set `CUDAToolkit_ROOT` to the
   CUDA 13 folder; CMake 4.0 does not know Visual Studio 2026, so set `CMAKE_GENERATOR` to an older
-  installed one (e.g. `Visual Studio 16 2019`) if it picks that.
+  installed one (e.g. `Visual Studio 16 2019`) if it picks that. The app's `npm run tauri` sets both
+  when they are unset.
 
 ## Build and use
 
@@ -108,7 +111,9 @@ project panel shows each stage as it runs, and the transcript and edit list fill
 analysed recording opens straight away; when the config file now asks for another Whisper model than the
 transcript was made with, the panel says so and offers Re-analyse (never on its own). Re-analyse reruns
 only what the settings changed and re-cuts; when the edit list holds your own edits it asks first, and
-keeps them as `edit.junctur.bak*`. Build the app with `--features cuda` to analyse on the GPU.
+keeps them as `edit.junctur.bak*`. `npm run tauri dev` / `build` build the app with `--features cuda` when
+the CUDA 13 toolkit is installed (`CUDA_PATH_V13_0`), so it analyses on the GPU; `JUNCTUR_CPU=1` builds
+a CPU one. Plain `cargo build` is always CPU-only.
 
 Play/pause, seek, pick the audio track, and see the recording's project state (stages, transcript, edit
 list), read from the same folder `junctur status` uses. Video is played by

@@ -57,6 +57,20 @@ pub fn prepare_cuda() {
     cuda::prepare();
 }
 
+/// The CUDA DLL whisper.cpp delay-loads (see `build.rs`) when it is nowhere it would be loaded from.
+/// whisper.cpp does not fail on a missing cuBLAS, the process dies, so Whisper must not be put on
+/// the GPU then. Only Windows CUDA builds delay-load; everywhere else nothing is ever missing.
+pub fn whisper_cuda_missing() -> Option<&'static str> {
+    #[cfg(all(feature = "cuda", windows))]
+    {
+        cuda::whisper_dll_missing()
+    }
+    #[cfg(not(all(feature = "cuda", windows)))]
+    {
+        None
+    }
+}
+
 fn backends(pref: DevicePref) -> Vec<Box<dyn Backend>> {
     let mut list: Vec<Box<dyn Backend>> = Vec::new();
     #[cfg(feature = "cuda")]
