@@ -71,6 +71,22 @@ local function list(t)
     return {}
 end
 
+-- A title's name as Junctur compares it (5m): spaces, tabs and line breaks round it dropped, the
+-- rule Junctur's own `title_name` (edit/captions.rs) applies to the names it lists and sends, so a
+-- title listed in the picker is the one a send finds.
+local function title_name(clip)
+    local ok, name = pcall(function() return clip:GetClipProperty("Clip Name") end)
+    if not ok then return "" end
+    return (tostring(name or ""):gsub("^[ \t\n\r\f]+", ""):gsub("[ \t\n\r\f]+$", ""))
+end
+
+-- A Fusion Title (a Text+ dragged into the media pool), by the clip type auto-subs lists them by
+-- (5m): only these are templates, in the picker's list and when a send looks one up by name.
+local function is_title(clip)
+    local ok, kind = pcall(function() return clip:GetClipProperty("Type") end)
+    return ok and tostring(kind or ""):lower() == "fusion title"
+end
+
 local function each_clip(folder, f)
     for _, sub in ipairs(list(folder:GetSubFolderList())) do
         if each_clip(sub, f) then return true end
@@ -140,15 +156,18 @@ local function template(pool, name, animated)
     local root = pool:GetRootFolder()
     if name ~= "" then
         local found
+        -- Fusion Titles only, as the picker lists them: a video clip or a still of the same name
+        -- earlier in the walk is no template. Both names trimmed by one rule (`title_name`).
+        name = name:gsub("^[ \t\n\r\f]+", ""):gsub("[ \t\n\r\f]+$", "")
         each_clip(root, function(clip)
-            if clip:GetClipProperty("Clip Name") == name then
+            if is_title(clip) and title_name(clip) == name then
                 found = clip
                 return true
             end
         end)
         if found then return found end
-        return nil, "No clip called \"" .. name .. "\" in Resolve's media pool: drag your Text+ "
-            .. "title into the media pool and give it that name, or leave the template empty"
+        return nil, "No Text+ title called \"" .. name .. "\" in Resolve's media pool: drag your "
+            .. "Text+ into the media pool and give it that name, or pick Junctur's own"
     end
     local bin = sub_named(root, BIN)
     local found = bin and own(bin, animated)
@@ -425,12 +444,9 @@ function handlers.templates()
     if not project then return { error = "No project is open in Resolve" } end
     local out, seen, n = {}, {}, 0
     each_clip(project:GetMediaPool():GetRootFolder(), function(clip)
-        local ok, kind, name = pcall(function()
-            return clip:GetClipProperty("Type"), clip:GetClipProperty("Clip Name")
-        end)
-        name = ok and tostring(name or "") or ""
-        if ok and tostring(kind or ""):lower() == "fusion title" and name ~= ""
-            and name ~= TEMPLATE_NAME and name ~= ANIMATED_NAME and not seen[name] then
+        local name = title_name(clip)
+        if is_title(clip) and name ~= "" and name ~= TEMPLATE_NAME and name ~= ANIMATED_NAME
+            and not seen[name] then
             seen[name] = true
             n = n + 1
             out["t" .. n] = name

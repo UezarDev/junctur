@@ -69,4 +69,7 @@ pub fn templates() -> Result<Vec<String>, String> {
 /// A script started before this Junctur does not know its newer requests or fields; installing
 /// the new one does not change the loop already running, but starting it again takes over
 /// (`junctur.lua`'s owner token).
-const OLDER_SCRIPT: &str = "The Junctur script running in Resolve is from an older Junctur: in      Resolve choose Workspace > Scripts > Junctur again, then try again";
+const OLDER_SCRIPT: &str = concat!(
+    "The Junctur script running in Resolve is from an older Junctur: in Resolve choose ",
+    "Workspace > Scripts > Junctur again, then try again"
+);

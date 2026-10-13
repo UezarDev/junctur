@@ -696,6 +696,39 @@ check(w.m.handlers.info({ template = "" }).script == "5m", "the script says whic
 -- No project open: an error, not an empty list.
 check(world({ no_project = true }).m.handlers.templates().error ~= nil, "no project")
 
+-- 5m repair: one name rule on both sides. A title named with spaces round it is listed trimmed,
+-- and a send naming it trimmed (as Junctur sends it) finds it; "A" and "A " are listed once.
+w = world()
+local spaced = w.Clip(" Spaced title  ")
+w.theirs.clips = { spaced, w.Clip("Spaced title") }
+list = w.m.handlers.templates()
+names = {}
+for k = 1, list.count do names[k] = list["t" .. k] end
+check(table.concat(names, ",") == "Spaced title", "trimmed once: " .. table.concat(names, ","))
+info = w.m.handlers.info({ template = "Spaced title" })
+check(info.error == nil and info.template == " Spaced title  ", "found by its trimmed name: "
+    .. tostring(info.error))
+
+-- 5m repair: a video clip or a still of the template's name, earlier in the lookup's walk, is not
+-- taken for it: the Fusion Title of that name is.
+w = world()
+local clash = w.Folder("Footage", "8")
+local footage = w.Clip("Lower third")
+footage.kind = "Video"
+clash.clips = { footage }
+table.insert(w.root.subs, 1, clash)
+local title = w.Clip("Lower third")
+table.insert(w.theirs.clips, title)
+r = w.m.handlers.place(request({ clip(1, 86400, "hola") }, { template = "Lower third" }))
+check(r.placed == 1 and r.failed == 0, "shadowed title: " .. tostring(r.firstError or r.error))
+check(w.tracks[2].items[1].template == title, "the title, not the video clip of its name")
+-- Only a clip that is no title by that name: not found, said so.
+w = world()
+footage = w.Clip("Only footage")
+footage.kind = "Still"
+table.insert(w.theirs.clips, footage)
+check(w.m.handlers.info({ template = "Only footage" }).error ~= nil, "a still is no template")
+
 -- 5m: a picked template whose look is kept: only the text and the speaker's colour are set.
 w = world()
 local styled = w.Clip("Styled")

@@ -294,7 +294,7 @@
   >
     <input
       type="checkbox"
-      checked={value.keepLook}
+      checked={value.keepLook && !!value.template}
       disabled={disabled || !value.template}
       onchange={(e) => onChange({ ...value, keepLook: (e.currentTarget as HTMLInputElement).checked })}
     />

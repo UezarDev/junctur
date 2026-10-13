@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 use super::lua::Value;
 use super::reply::Timeline;
-use crate::edit::{parse_color, Captions, EditList};
+use crate::edit::{parse_color, title_name, Captions, EditList};
 use crate::export::layout::{Placed, WordSpan};
 
 /// Text+ outline thickness per step of `outline_width`: the bundled template's is 0.05, so the
@@ -109,7 +109,7 @@ pub fn recording_key(edit: &EditList) -> String {
 
 /// The template the settings name, as both requests send it: empty for Junctur's own.
 pub fn template(c: &Captions) -> &str {
-    c.template.trim()
+    title_name(&c.template)
 }
 
 /// Each speaker's track name: their id keeps two speakers with one name (or none) apart, their

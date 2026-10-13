@@ -152,9 +152,10 @@ pub fn sent(a: &HashMap<String, String>, timeline: &str) -> Sent {
 }
 
 /// The Fusion Titles a `templates` request found in the media pool (5m), in the script's order
-/// (`count`, then `t1..tN`). A name the template setting could not hold (a quote or a control
-/// character, refused by [`crate::edit::Captions::check`]) is left out rather than offered and then
-/// refused.
+/// (`count`, then `t1..tN`), each trimmed by the rule the script and the send use
+/// ([`crate::edit::title_name`]). A name the template setting could not hold (a quote, a `|` or a
+/// control character, refused by [`crate::edit::Captions::check`]) is left out rather than
+/// offered and then refused.
 pub fn templates(a: &HashMap<String, String>) -> Vec<String> {
     let count: usize = a
         .get("count")
@@ -162,8 +163,8 @@ pub fn templates(a: &HashMap<String, String>) -> Vec<String> {
         .unwrap_or(0);
     (1..=count)
         .filter_map(|k| a.get(&format!("t{k}")))
-        .map(|n| n.trim().to_string())
-        .filter(|n| !n.is_empty() && !n.contains('"') && !n.chars().any(char::is_control))
+        .map(|n| crate::edit::title_name(n).to_string())
+        .filter(|n| !n.is_empty() && !n.contains(['"', '|']) && !n.chars().any(char::is_control))
         .collect()
 }
 
@@ -245,14 +246,15 @@ mod tests {
     fn the_templates_found_are_read_in_order_and_unusable_names_dropped() {
         let text = format!(
             "JuncturReply = \"7:{}\"",
-            hex("count	4
-t1	Lower third
-t2	Say \"hi\"
-t3	Título grande
-t4	 ")
+            hex("count\t5\nt1\tLower third \nt2\tSay \"hi\"\nt3\tTítulo grande\nt4\t \nt5\ta|b")
         );
         let a = answer(&text, "7").unwrap();
         assert_eq!(templates(&a), ["Lower third", "Título grande"]);
+        // ASCII spaces only, as the script trims a clip's name: the listed one is the one it finds.
+        assert_eq!(
+            crate::edit::title_name("\u{a0}Lower third \t"),
+            "\u{a0}Lower third"
+        );
         let none: HashMap<String, String> = [("count".to_string(), "0".to_string())].into();
         assert!(templates(&none).is_empty());
         assert!(templates(&HashMap::new()).is_empty());

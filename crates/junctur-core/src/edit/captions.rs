@@ -161,6 +161,14 @@ impl Layout {
     }
 }
 
+/// A Resolve title's name as Junctur compares it (5m): spaces, tabs and line breaks round it
+/// dropped, ASCII only. The Junctur script in Resolve trims a clip's name by the very same rule
+/// (`junctur.lua`'s `title_name`), so a title listed in the picker is the one a send finds;
+/// Rust's own `trim` also drops Unicode spaces, which Lua's patterns do not know.
+pub fn title_name(s: &str) -> &str {
+    s.trim_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c'))
+}
+
 /// 42 characters and two lines is the common broadcast and streaming limit, readable at a glance;
 /// 6 s keeps a long sentence from sitting on screen after it is said.
 impl Default for Captions {
@@ -296,6 +304,11 @@ impl Captions {
                 return Err(format!("the {what} name cannot hold quotes or line breaks"));
             }
         }
+        // A clip's tag carries the template's name between `|`s (5m, `resolve::job`): one inside
+        // it could make two different tags read alike.
+        if self.template.contains('|') {
+            return Err("the template name cannot hold a |".into());
+        }
         if !self.translate.is_empty() && !crate::translate::known(&self.translate) {
             return Err(format!(
                 "captions cannot be translated into {:?}",
@@ -307,7 +320,7 @@ impl Captions {
 
     /// Whether the template's own look is kept (5m): only with a template of the user's named.
     pub fn keeps_look(&self) -> bool {
-        self.keep_look && !self.template.trim().is_empty()
+        self.keep_look && !title_name(&self.template).is_empty()
     }
 
     /// Whether Resolve needs the animated caption template (5l).
@@ -425,6 +438,12 @@ mod tests {
             },
             Captions {
                 template: "a\nb".into(),
+                ..Default::default()
+            },
+            // 5m: a `|` would let two clip tags read alike ("x|keep" with the look not kept,
+            // "x" with it kept).
+            Captions {
+                template: "x|keep".into(),
                 ..Default::default()
             },
         ] {
