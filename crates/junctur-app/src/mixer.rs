@@ -55,6 +55,9 @@ pub struct Track {
     pub muted: bool,
     /// The user set this track's mute: the roles' defaults no longer move it.
     pub set: bool,
+    /// Soloed (2g): while any track is, only the soloed ones are heard, muted or not. Playback only
+    /// and never remembered: a recording opens with no solo.
+    pub solo: bool,
     /// The role of the distinct track this is, when the analysis got that far.
     pub role: Option<Role>,
     /// The track this one decodes the same as (or nearly), when it is a copy.
@@ -133,6 +136,7 @@ impl Mixer {
                     index,
                     muted: index > 0,
                     set: false,
+                    solo: false,
                     role: None,
                     copy_of: None,
                 })
@@ -216,6 +220,16 @@ impl Mixer {
         Ok(self.memory())
     }
 
+    /// Solos or unsolos track `index` (2g); nothing is remembered.
+    pub fn set_solo(&mut self, index: usize, on: bool) -> Result<(), String> {
+        let t = self
+            .tracks
+            .get_mut(index)
+            .ok_or_else(|| format!("no audio track {}", index + 1))?;
+        t.solo = on;
+        Ok(())
+    }
+
     /// The mutes as [`FILE`] holds them.
     pub fn memory(&self) -> Option<Memory> {
         let dir = &self.project.as_ref()?.dir;
@@ -229,12 +243,21 @@ impl Mixer {
         })
     }
 
-    /// amix's `weights`: 1 for a track heard, 0 for a muted one.
+    /// amix's `weights`: 1 for a track heard, 0 for one that is not. With a solo, the soloed tracks
+    /// are heard whatever their mute (soloing a muted mic is how to hear it alone; a solo that kept
+    /// the mutes would play nothing where only the mix is heard); without, the unmuted ones.
     pub fn weights(&self) -> String {
+        let solo = self.tracks.iter().any(|t| t.solo);
         let w: Vec<&str> = self
             .tracks
             .iter()
-            .map(|t| if t.muted { "0" } else { "1" })
+            .map(|t| {
+                if (solo && t.solo) || (!solo && !t.muted) {
+                    "1"
+                } else {
+                    "0"
+                }
+            })
             .collect();
         w.join(" ")
     }
@@ -555,6 +578,42 @@ mod tests {
         std::fs::write(p.dir.join(FILE), br#"{"muted":[true,false,true]}"#).unwrap();
         let old = Mixer::new(3, Some(&separate), Some(p.clone()));
         assert_eq!(muted(&old), [true, false, true]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_solo_hears_the_soloed_tracks_muted_or_not_and_is_not_remembered() {
+        let (d, p) = project("solo");
+        let r = report(vec![
+            logical(&[0], Role::Mix),
+            logical(&[1], Role::Voice),
+            logical(&[2], Role::Voice),
+        ]);
+        let mut m = Mixer::new(3, Some(&r), Some(p.clone()));
+        assert_eq!(m.weights(), "1 0 0");
+        // Track 2 is muted (only the mix plays); soloing it hears it alone.
+        m.set_solo(1, true).unwrap();
+        assert_eq!(m.weights(), "0 1 0");
+        m.set_solo(2, true).unwrap();
+        assert_eq!(m.weights(), "0 1 1");
+        assert_eq!(
+            muted(&m),
+            [false, true, true],
+            "the mutes stay as they were"
+        );
+        assert!(m.set_solo(3, true).is_err());
+        // A mute saved meanwhile carries no solo, and the next open has none.
+        remember(&mut m, 0, true);
+        let again = Mixer::new(3, Some(&r), Some(p));
+        assert!(again.state().tracks.iter().all(|t| !t.solo));
+        assert_eq!(again.weights(), "0 0 0");
+        m.set_solo(1, false).unwrap();
+        m.set_solo(2, false).unwrap();
+        assert_eq!(
+            m.weights(),
+            "0 0 0",
+            "back to the mutes: the mix was muted meanwhile"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 

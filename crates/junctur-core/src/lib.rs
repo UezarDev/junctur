@@ -30,6 +30,7 @@ pub mod tracks;
 pub mod transcribe;
 pub mod vad;
 pub mod voices;
+pub mod waves;
 
 pub use error::{Error, Result};
 pub use separate::{separate, SeparateOptions, Stems};

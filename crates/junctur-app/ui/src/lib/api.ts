@@ -29,6 +29,11 @@ export interface PlayerState {
   outputFrame: number | null;
   /** The source position is inside a cut (only while the whole file plays). */
   inCut: boolean;
+  /** The picture as shown (rotation applied); null without video. */
+  width: number | null;
+  height: number | null;
+  /** Width over height: below 1 the editor lays out for portrait (2g). */
+  aspect: number | null;
 }
 
 export interface Fps {
@@ -71,6 +76,41 @@ export interface Speaker {
   name: string;
   /** Caption colour, `#RRGGBB`. */
   color: string;
+  /** Their audio track (0-based) when speakers were told apart by track. */
+  track: number | null;
+}
+
+/** Who talks when (source seconds, speaker ids from 1), sorted by start; turns of different
+ * speakers overlap. */
+export interface Turns {
+  start: number[];
+  end: number[];
+  speaker: number[];
+}
+
+/** How far the open recording's waveforms are (src/waves.rs). */
+export interface WavesState {
+  file: string;
+  tracks: number;
+  seconds: number;
+  duration: number | null;
+  done: boolean;
+  error: string | null;
+}
+
+/** Each track's peak per column (0..255 for -60..0 dBFS), track by track. */
+export interface WavesView {
+  state: WavesState;
+  columns: number;
+  peaks: number[];
+}
+
+/** A recent recording's length and analysis (src/project.rs). */
+export interface RecordingInfo {
+  duration: number | null;
+  ranges: number | null;
+  stagesDone: number;
+  stages: number;
 }
 
 /** How the caption file is cut (src: junctur-core edit/captions.rs). */
@@ -152,6 +192,8 @@ export interface MixTrack {
   role: Role | null;
   /** The track this one is a copy of. */
   copyOf: number | null;
+  /** Soloed (2g): while any track is, only the soloed ones are heard. Not remembered. */
+  solo: boolean;
 }
 
 /** Every track plays at once (2e); where the mutes came from. */
@@ -221,8 +263,22 @@ export const enrollVoice = (first: number, last: number, name: string) =>
 export const forgetVoice = (name: string) => invoke<void>("forget_voice", { name });
 export const undo = () => invoke<void>("undo");
 export const redo = () => invoke<void>("redo");
-/** The share of the window's width (0..1) on the right to keep free of video. */
-export const setVideoMargin = (right: number) => invoke<void>("set_video_margin", { right });
+/** The shares of the window (0..1) on the right and at the bottom to keep free of video. */
+export const setVideoMargins = (right: number, bottom: number) =>
+  invoke<void>("set_video_margins", { right, bottom });
+export const setSolo = (track: number, on: boolean) => invoke<void>("set_solo", { track, on });
+export const turns = () => invoke<Turns>("turns");
+export const wavesState = () => invoke<WavesState | null>("waves_state");
+/** Each track's peak in `columns` equal stretches of `[from, to)` seconds. */
+export const waves = (from: number, to: number, columns: number) =>
+  invoke<WavesView | null>("waves", { from, to, columns });
+export const recentInfo = (path: string) => invoke<RecordingInfo>("recent_info", { path });
+/** The recording's still, JPEG bytes. */
+export const thumbnail = (path: string) => invoke<ArrayBuffer>("thumbnail", { path });
+/** Opens the open recording's project folder in the file manager. */
+export const reveal = () => invoke<void>("reveal");
+export const setMenuCheck = (id: "panel" | "talking", checked: boolean) =>
+  invoke<void>("set_menu_check", { id, checked });
 export const uiLog = (message: string) => invoke<void>("ui_log", { message });
 
 export const onPlayerState = (f: (s: PlayerState) => void): Promise<UnlistenFn> =>
@@ -240,3 +296,10 @@ export const onMixer = (f: (s: MixerState) => void): Promise<UnlistenFn> =>
 /** Each track's peak in dBFS, about 20 times a second while playing (none while paused). */
 export const onLevels = (f: (levels: (number | null)[]) => void): Promise<UnlistenFn> =>
   listen<{ levels: (number | null)[] }>("levels", (e) => f(e.payload.levels));
+
+export const onWaves = (f: (s: WavesState) => void): Promise<UnlistenFn> =>
+  listen<WavesState>("waves", (e) => f(e.payload));
+
+/** A menu item chosen (src/menu.rs): `open`, `panel`, `talking`. */
+export const onMenu = (f: (id: string) => void): Promise<UnlistenFn> =>
+  listen<string>("menu", (e) => f(e.payload));

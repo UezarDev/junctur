@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 use junctur_core::edit::{Captions, EditList, Speakers};
 use junctur_core::export::{self, CaptionFiles};
 use junctur_core::pipeline::{self, Found};
+use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 use crate::cuts::{self, edl, watch, Edit, EditState, EditorStatus, Form, Fps, Load};
@@ -647,15 +648,29 @@ impl Core {
         Some(TranscriptView::new(&words, speakers))
     }
 
-    /// Keeps the right-hand `share` of the window (0..1) free of video, for a panel there.
-    pub fn set_video_margin(&self, share: f64) -> Result<(), String> {
-        let share = if share.is_finite() {
-            share.clamp(0.0, 0.8)
-        } else {
-            0.0
+    /// Keeps the right-hand `right` and bottom `bottom` shares of the window (0..1) free of video,
+    /// for the side panel and for the play bar and track lanes under the picture (2g); mpv centres
+    /// the picture in what is left.
+    pub fn set_video_margins(&self, right: f64, bottom: f64) -> Result<(), String> {
+        let share = |x: f64| {
+            if x.is_finite() {
+                x.clamp(0.0, 0.9)
+            } else {
+                0.0
+            }
         };
         self.mpv
-            .set_string("video-margin-ratio-right", &format!("{share:.4}"))
+            .set_string("video-margin-ratio-right", &format!("{:.4}", share(right)))?;
+        self.mpv.set_string(
+            "video-margin-ratio-bottom",
+            &format!("{:.4}", share(bottom)),
+        )
+    }
+
+    /// The edit list's speaker turns, for the Speakers lane (2g).
+    pub fn turns(&self) -> TurnsView {
+        let list = lock(&self.ctl).edit.list.clone();
+        list.map_or_else(TurnsView::default, |l| TurnsView::new(&l.speakers))
     }
 
     /// The edit list's path and the list in play (test mode compares them).
@@ -735,6 +750,17 @@ impl Core {
                 .map_err(|e| format!("muted in the preview, but not {e}")),
             None => Ok(()),
         }
+    }
+
+    /// Solos or unsolos audio track `track` (0-based) at once (2g). Playback only and not remembered.
+    pub fn set_solo(&self, track: usize, on: bool) -> Result<(), String> {
+        {
+            let mut m = lock(&self.mixer);
+            m.set_solo(track, on)?;
+            send_weights(&self.mpv, &m);
+        }
+        self.emit_mixer();
+        Ok(())
     }
 
     /// The analysis of `file` (absolute) has its `tracks` stage done (2d): the mixer takes the
@@ -836,6 +862,27 @@ impl Core {
 
 /// Sends `m`'s mutes to the graph playing. It fails when there is none (no file, no audio, or a
 /// load whose chain is not up yet); the next `playback-restart` sends them again.
+/// Who talks when, as three arrays (source seconds, speaker ids from 1), sorted by start: a 30 h
+/// recording has thousands of turns, sent once per change of `speakersKey`.
+#[derive(Debug, Default, Serialize, PartialEq)]
+pub struct TurnsView {
+    pub start: Vec<f64>,
+    pub end: Vec<f64>,
+    pub speaker: Vec<u32>,
+}
+
+impl TurnsView {
+    pub fn new(s: &Speakers) -> Self {
+        let mut v = Self::default();
+        for t in &s.turns {
+            v.start.push(t.start);
+            v.end.push(t.end);
+            v.speaker.push(t.speaker);
+        }
+        v
+    }
+}
+
 fn send_weights(mpv: &Mpv, m: &Mixer) {
     if m.len() > 0 {
         let w = m.weights();

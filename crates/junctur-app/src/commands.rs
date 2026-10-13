@@ -3,7 +3,7 @@
 //! The player's commands are `async` so Tauri runs them on its async runtime rather than the main
 //! thread: an mpv command blocks until mpv takes it, and a dragged seek bar sends many.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use junctur_core::edit::Captions;
@@ -15,11 +15,12 @@ use crate::cuts::EditState;
 use crate::editor::{Op, Step, TranscriptView};
 use crate::lock::lock;
 use crate::mixer::MixerState;
-use crate::player::{Core, Player};
-use crate::project::{self, ProjectStatus};
+use crate::player::{Core, Player, TurnsView};
+use crate::project::{self, ProjectStatus, RecordingInfo};
 use crate::recent::{self, Recent};
 use crate::state::PlayerState;
 use crate::voices::VoiceView;
+use crate::waves::{self, WavesState, WavesView};
 use junctur_core::pipeline::StageState;
 
 /// The player, or why it could not start (libmpv missing, no GL): the window still opens and
@@ -27,6 +28,8 @@ use junctur_core::pipeline::StageState;
 pub struct App {
     pub player: Mutex<Result<Player, String>>,
     pub analysis: Analysis,
+    /// The open recording's waveforms (2g).
+    pub waves: waves::Store,
 }
 
 impl App {
@@ -126,6 +129,16 @@ pub async fn open_file(
     let edit_path = status.as_ref().ok().map(|s| s.edit_path.clone());
     app.with(|p| p.open(&path, edit_path))?;
     recent::add(file);
+    let absolute = std::path::absolute(file).unwrap_or_else(|_| file.to_path_buf());
+    let dir = status.as_ref().ok().map(|s| PathBuf::from(&s.dir));
+    let h = handle.clone();
+    app.waves.open(
+        &absolute,
+        dir,
+        Arc::new(move |s: &WavesState| {
+            let _ = h.emit(waves::EVENT, s);
+        }),
+    );
     let mut analysis = app.analysis.progress(file);
     let mut outdated = Vec::new();
     if let Ok(s) = &status {
@@ -362,10 +375,83 @@ pub async fn redo(app: State<'_, App>) -> Result<(), String> {
     app.editable()?.edit(Step::Redo)
 }
 
-/// The share of the window's width the transcript panel covers, kept free of video.
+/// The shares of the window on the right (the side panel) and at the bottom (play bar and lanes)
+/// kept free of video.
 #[tauri::command]
-pub async fn set_video_margin(app: State<'_, App>, right: f64) -> Result<(), String> {
-    app.core()?.set_video_margin(right)
+pub async fn set_video_margins(app: State<'_, App>, right: f64, bottom: f64) -> Result<(), String> {
+    app.core()?.set_video_margins(right, bottom)
+}
+
+/// Solos or unsolos audio track `track` (0-based) in the preview; not remembered (2g).
+#[tauri::command]
+pub async fn set_solo(app: State<'_, App>, track: usize, on: bool) -> Result<(), String> {
+    app.core()?.set_solo(track, on)
+}
+
+/// The open recording's speaker turns (2g's Speakers lane).
+#[tauri::command]
+pub async fn turns(app: State<'_, App>) -> Result<TurnsView, String> {
+    Ok(app.core()?.turns())
+}
+
+/// How far the open recording's waveforms are.
+#[tauri::command]
+pub async fn waves_state(app: State<'_, App>) -> Result<Option<WavesState>, String> {
+    Ok(app.waves.state())
+}
+
+/// Each track's peak per column of `[from, to)` seconds, for the lanes to draw.
+#[tauri::command]
+pub async fn waves(
+    app: State<'_, App>,
+    from: f64,
+    to: f64,
+    columns: usize,
+) -> Result<Option<WavesView>, String> {
+    Ok(app.waves.columns(from, to, columns))
+}
+
+/// A recent recording's length and where its analysis stands (the start window, 2g). Off the
+/// async runtime: it opens the project and may start ffprobe.
+#[tauri::command]
+pub async fn recent_info(path: String) -> Result<RecordingInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || project::info(Path::new(&path), None))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// A recent recording's still, as JPEG bytes (made once into its project folder).
+#[tauri::command]
+pub async fn thumbnail(path: String) -> Result<tauri::ipc::Response, String> {
+    let bytes =
+        tauri::async_runtime::spawn_blocking(move || project::thumbnail(Path::new(&path), None))
+            .await
+            .map_err(|e| e.to_string())??;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// Opens the open recording's project folder in the file manager. Takes no path, so the page can
+/// open nothing else.
+#[tauri::command]
+pub async fn reveal(app: State<'_, App>) -> Result<(), String> {
+    let file = app.core()?.file().ok_or("no recording is open")?;
+    let dir = project::status(Path::new(&file), None)?.dir;
+    let opener = if cfg!(windows) {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(opener)
+        .arg(&dir)
+        .spawn()
+        .map(drop)
+        .map_err(|e| format!("opening {dir}: {e}"))
+}
+
+/// The page's side of a View menu check mark (a toggle by key rather than by the menu).
+#[tauri::command]
+pub fn set_menu_check(handle: AppHandle, id: String, checked: bool) -> Result<(), String> {
+    crate::menu::set_check(&handle, &id, checked)
 }
 
 /// A line from the frontend for the app's log (timings test mode reports).

@@ -19,7 +19,10 @@
 //! the project panel would offer a re-analysis for. Set `JUNCTUR_RECENT` and `JUNCTUR_CACHE_DIR` to
 //! scratch places too. `mute=<n>` / `unmute=<n>` (2e) mute or unmute audio track n (from 1, as
 //! the play bar numbers them); each step's report and the final one add the mutes (`mixer`) and
-//! the levels read then (`levels`: each track's meter and what is heard, in dBFS). Each step's
+//! the levels read then (`levels`: each track's meter and what is heard, in dBFS); `solo=<n>` /
+//! `unsolo=<n>` (2g) solo or unsolo one, and `menu=<id>` chooses a menu item as a click on it does
+//! (`menu=talking` shows the overlay of who is talking). The final report adds how far the waveforms are (`waves`);
+//! the picture's shape is in the `state` (`width`, `height`, `aspect`). Each step's
 //! report adds the edit state it left, and the final report re-reads `edit.junctur` from disk
 //! (`disk`: does it parse, and is it the list in play), counts the loads asked of mpv (a save must
 //! not come back as a second reload) and lists the frontend's log lines (`ui`).
@@ -86,6 +89,10 @@ enum Action {
     Reanalyse,
     /// Audio track (0-based) and whether to mute it.
     Mute(usize, bool),
+    /// Audio track (0-based) and whether to solo it (2g).
+    Solo(usize, bool),
+    /// A menu item chosen (2g), by id.
+    Menu(String),
 }
 
 /// The frontend's log lines (`ui_log`), kept for the report.
@@ -157,6 +164,11 @@ fn parse_steps(s: &str) -> Result<Vec<(f64, Action)>, String> {
                 let n: usize = v.trim().parse().map_err(|_| bad())?;
                 Action::Mute(n.checked_sub(1).ok_or_else(bad)?, kind == "mute")
             }
+            Some((kind @ ("solo" | "unsolo"), v)) => {
+                let n: usize = v.trim().parse().map_err(|_| bad())?;
+                Action::Solo(n.checked_sub(1).ok_or_else(bad)?, kind == "solo")
+            }
+            Some(("menu", id)) if !id.is_empty() => Action::Menu(id.to_string()),
             None if action == "pause" => Action::Pause,
             None if action == "undo" => Action::Edit(Step::Undo),
             None if action == "redo" => Action::Edit(Step::Redo),
@@ -196,6 +208,10 @@ fn analysis(app: &AppHandle) -> Option<crate::analysis::Progress> {
 }
 
 fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
+    if let Action::Menu(id) = a {
+        use tauri::Emitter;
+        return app.emit(crate::menu::EVENT, id).map_err(|e| e.to_string());
+    }
     if let Action::Reanalyse = a {
         let file = with_player(app, |p| p.file())?.ok_or("no file is open")?;
         let state = app.try_state::<App>().ok_or("app not set up")?;
@@ -235,7 +251,8 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
             .map(|line| eprintln!("junctur-app test: {line}")),
         Action::Forget(name) => p.forget_voice(name),
         Action::Mute(track, muted) => p.set_muted(*track, *muted),
-        Action::Reanalyse => unreachable!("run above"),
+        Action::Solo(track, on) => p.set_solo(*track, *on),
+        Action::Reanalyse | Action::Menu(_) => unreachable!("run above"),
     })?
 }
 
@@ -385,6 +402,7 @@ pub fn arm(app: AppHandle, seconds: f64, trace: Option<Arc<Trace>>) {
                 "outdated": with_player(&app, |p| p.file()).ok().flatten()
                     .map(|f| crate::analysis::outdated(std::path::Path::new(&f))),
                 "mixer": mixer(&app),
+                "waves": app.try_state::<App>().and_then(|a| a.waves.state()),
                 "ui": lock(&UI_LOG).clone(),
             }),
             Err(e) => json!({ "verdict": "error", "error": e }),
@@ -475,6 +493,15 @@ mod tests {
             vec![(1.0, Action::Mute(1, true)), (2.0, Action::Mute(0, false))]
         );
         assert!(parse_steps("1:mute=0").is_err(), "tracks count from 1");
+        assert_eq!(
+            parse_steps("1:solo=2;2:unsolo=2").unwrap(),
+            vec![(1.0, Action::Solo(1, true)), (2.0, Action::Solo(1, false))]
+        );
+        assert!(parse_steps("1:solo=0").is_err());
+        assert_eq!(
+            parse_steps("3:menu=talking").unwrap(),
+            vec![(3.0, Action::Menu("talking".into()))]
+        );
         assert!(parse_steps("1:mute=x").is_err());
         assert!(parse_steps("1:enroll=10:Ana").is_err());
         assert!(parse_steps("1:forget=").is_err());

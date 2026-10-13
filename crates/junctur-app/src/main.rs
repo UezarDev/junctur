@@ -9,6 +9,7 @@ mod commands;
 mod cuts;
 mod editor;
 mod lock;
+mod menu;
 mod mixer;
 mod mpv;
 mod player;
@@ -20,6 +21,7 @@ mod trace;
 #[cfg(windows)]
 mod video;
 mod voices;
+mod waves;
 
 use std::sync::Mutex;
 
@@ -52,6 +54,7 @@ fn main() {
                 .inner_size(1280.0, 800.0)
                 .min_inner_size(640.0, 400.0)
                 .background_color(BACKGROUND);
+
             if test.is_some() {
                 // Built hidden and moved before it is shown, so it never flashes on screen.
                 builder = builder.visible(false).focused(false).skip_taskbar(true);
@@ -67,12 +70,21 @@ fn main() {
             };
             let trace = testmode::trace();
             let player = Player::start(app.handle().clone(), &window, extra, trace.clone());
+            // The menu goes on once the video surface exists: built with the window, it left the
+            // picture invisible in every launch check (the surface was there and drawing). It
+            // takes its height from the client area without a resize event, so the surface is fitted
+            // to what is left by hand.
+            window.set_menu(menu::build(app.handle())?)?;
+            if let (Ok(p), Ok(size)) = (&player, window.inner_size()) {
+                p.resize(size.width, size.height);
+            }
             if let Err(e) = &player {
                 eprintln!("junctur-app: no player: {e}");
             }
             app.manage(App {
                 player: Mutex::new(player),
                 analysis: Default::default(),
+                waves: Default::default(),
             });
             if let Some(secs) = test {
                 testmode::arm(app.handle().clone(), secs, trace);
@@ -117,7 +129,15 @@ fn main() {
             commands::forget_voice,
             commands::undo,
             commands::redo,
-            commands::set_video_margin,
+            commands::set_video_margins,
+            commands::set_solo,
+            commands::turns,
+            commands::waves_state,
+            commands::waves,
+            commands::recent_info,
+            commands::thumbnail,
+            commands::reveal,
+            commands::set_menu_check,
             commands::ui_log,
         ])
         .build(tauri::generate_context!())

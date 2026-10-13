@@ -1,13 +1,24 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  // The editor (2g): the video area, the play bar under it and the track lanes under that, the
+  // side panel on the right (Transcript, Captions, Properties); in portrait, mixer strips and large
+  // avatars beside the picture. Where everything goes comes from layout.ts; this places it, tells
+  // mpv the margins, and holds what several parts share (the selection, the lanes' window, who is
+  // talking).
+  import { onMount, untrack } from "svelte";
   import { ask, open } from "@tauri-apps/plugin-dialog";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import * as api from "./lib/api";
   import Transport from "./lib/Transport.svelte";
-  import ProjectPanel from "./lib/ProjectPanel.svelte";
+  import PropertiesPanel from "./lib/PropertiesPanel.svelte";
   import StartWindow from "./lib/StartWindow.svelte";
   import TranscriptPanel from "./lib/TranscriptPanel.svelte";
   import CaptionsPanel from "./lib/CaptionsPanel.svelte";
+  import Lanes from "./lib/Lanes.svelte";
+  import Strips from "./lib/Strips.svelte";
+  import Avatars from "./lib/Avatars.svelte";
+  import ActionBar from "./lib/ActionBar.svelte";
+  import { layout } from "./lib/layout";
+  import { Talk, same } from "./lib/talking";
   import * as sel from "./lib/selection";
   import { words as toWords, type Words } from "./lib/transcript";
 
@@ -16,11 +27,17 @@
   let player = $state.raw<api.PlayerState | null>(null);
   let opened = $state<api.Opened | null>(null);
   let edit = $state.raw<api.EditState | null>(null);
-  // Every track's mute and role (2e); the meters come straight to the mixer.
+  // Every track's mute, solo and role (2e, 2g); the meters go straight to the bars (meters.ts).
   let mixer = $state.raw<api.MixerState | null>(null);
   // The open recording's analysis (2d): its stages' states replace the ones read at opening.
   let analysis = $state.raw<api.Progress | null>(null);
-  // The project panel shows the edit list as last read (it reloads when the file changes).
+  // The waveforms' read (2g); `wavesVersion` moves each time more of them is there to draw.
+  let waves = $state.raw<api.WavesState | null>(null);
+  let wavesVersion = $state(0);
+  // Who talks when, and who is talking at the playhead.
+  let talk = $state.raw(new Talk(null));
+  let talking = $state.raw(new Set<number>());
+  // The Properties tab shows the edit list as last read (it reloads when the file changes).
   const project = $derived.by(() => {
     const p = analysis?.project ?? opened?.project ?? null;
     return p && edit ? { ...p, edit: edit.summary, editError: edit.summary ? null : edit.error } : p;
@@ -28,32 +45,136 @@
   // Set when the player could not start (e.g. libmpv missing) or a command failed.
   let failure = $state<string | null>(null);
   let dragging = $state(false);
+  // Until the page knows whether the app was started with a file: the start window is not drawn
+  // for a recording about to open (its rows would start a still and a probe each for nothing).
+  let starting = $state(true);
 
-  // The transcript and what is selected in it (or on the timeline).
+  // The transcript and what is selected in it (or on the lanes or timeline).
   let words = $state.raw<Words | null>(null);
   let wordsLoading = $state(false);
   let selection = $state<sel.Selection | null>(null);
   let panelOpen = $state(true);
   // Which side panel shows. The transcript stays mounted while hidden: laying out a 30 h
   // transcript again on every switch would cost a noticeable moment.
-  let tab = $state<"transcript" | "captions">("transcript");
+  let tab = $state<"transcript" | "captions" | "properties">("transcript");
+  // The LV3 overlay: off by default, a viewer's preference kept in this page's storage.
+  const OVERLAY_KEY = "junctur.talkingOverlay";
+  let overlay = $state(readOverlay());
   let windowWidth = $state(window.innerWidth);
+  let windowHeight = $state(window.innerHeight);
   const PANEL = 400;
-  const panelWidth = $derived(player?.path && panelOpen ? Math.min(PANEL, windowWidth * 0.45) : 0);
+  const loaded = $derived(!!player?.path);
+  const panelWidth = $derived(loaded && panelOpen ? Math.min(PANEL, windowWidth * 0.45) : 0);
   const span = $derived(sel.seconds(selection, words, edit?.fps ?? null));
+  const speakers = $derived(edit?.speakers ?? []);
+  const L = $derived(
+    layout({
+      width: windowWidth,
+      height: windowHeight,
+      panel: panelWidth,
+      aspect: player?.aspect ?? null,
+      tracks: mixer?.tracks.length ?? 0,
+      speakers: speakers.length,
+    }),
+  );
 
-  // The panel is opaque; mpv keeps the picture out from under it. Sent once a window resize
-  // settles, and only when the share really changed (each is a blocking mpv call).
-  let sentShare = -1;
+  function readOverlay(): boolean {
+    try {
+      return localStorage.getItem(OVERLAY_KEY) === "on";
+    } catch {
+      return false;
+    }
+  }
+  function setOverlay(on: boolean) {
+    overlay = on;
+    try {
+      localStorage.setItem(OVERLAY_KEY, on ? "on" : "off");
+    } catch {
+      // A preference only: it is simply not kept.
+    }
+    void api.setMenuCheck("talking", on).catch(() => {});
+  }
+  function togglePanel() {
+    panelOpen = !panelOpen;
+    void api.setMenuCheck("panel", panelOpen).catch(() => {});
+  }
+
+  // The side panel, play bar and lanes are opaque; mpv keeps the picture out from under them. Sent
+  // once a window resize settles, and only when the shares really changed (each is a blocking mpv
+  // call).
+  let sent = "";
   let marginTimer = 0;
   $effect(() => {
-    const share = windowWidth > 0 ? Math.round((panelWidth / windowWidth) * 1000) / 1000 : 0;
+    const m = loaded ? L.margins : { right: 0, bottom: 0 };
+    const r = Math.round(m.right * 1000) / 1000;
+    const b = Math.round(m.bottom * 1000) / 1000;
     clearTimeout(marginTimer);
     marginTimer = window.setTimeout(() => {
-      if (share === sentShare) return;
-      sentShare = share;
-      api.setVideoMargin(share).catch(() => (sentShare = -1));
+      const key = `${r} ${b}`;
+      if (key === sent) return;
+      sent = key;
+      api.setVideoMargins(r, b).catch(() => (sent = ""));
     }, 100);
+  });
+
+  // The window the lanes show, in source seconds: three minutes (or the whole of a shorter
+  // recording) until the user zooms.
+  const DEFAULT_VIEW = 180;
+  let view = $state.raw({ start: 0, len: DEFAULT_VIEW });
+  const duration = $derived(player?.duration ?? 0);
+  function setView(start: number, len: number) {
+    const d = duration || len;
+    const l = Math.min(d, Math.max(5, len));
+    view = { start: Math.min(Math.max(0, start), Math.max(0, d - l)), len: l };
+  }
+  function zoom(by: number | "whole") {
+    if (by === "whole") return setView(0, duration);
+    const at = player?.position ?? view.start + view.len / 2;
+    const len = view.len * by;
+    setView(at - ((at - view.start) / view.len) * len, len);
+  }
+  // A new recording (or its length first known) starts on the default window.
+  let viewFor = "";
+  $effect(() => {
+    const key = `${player?.path ?? ""}|${duration > 0}`;
+    if (key === viewFor) return;
+    viewFor = key;
+    untrack(() => setView(0, DEFAULT_VIEW));
+  });
+  // The playhead leaving the window (playing on, or a seek elsewhere) pages the window to it.
+  $effect(() => {
+    const pos = player?.position;
+    if (pos == null) return;
+    untrack(() => {
+      if (pos < view.start || pos > view.start + view.len) setView(pos - view.len * 0.05, view.len);
+    });
+  });
+
+  // Who is talking at the playhead: replaced only when that changes, so the avatars do not
+  // redraw on every position.
+  $effect(() => {
+    const now = talk.at(player?.position ?? -1);
+    untrack(() => {
+      if (!same(now, talking)) talking = now;
+    });
+  });
+
+  // The speaker turns, fetched again when they change on disk (speakersKey), not on a rename.
+  let turnsFor = "";
+  $effect(() => {
+    const key = `${player?.path ?? ""}|${edit?.speakersKey ?? ""}`;
+    if (key === turnsFor) return;
+    turnsFor = key;
+    if (!player?.path) {
+      talk = new Talk(null);
+      return;
+    }
+    api.turns().then(
+      (t) => {
+        if (turnsFor === key) talk = new Talk(t);
+      },
+      (e) => (failure = String(e)),
+    );
   });
 
   // The edit state's speakers key the words' labels were made with: when it moves (an outside
@@ -114,6 +235,11 @@
         analysis = now;
         if (now.phase === "done") opened = { ...o, outdated: [] };
       }
+      const w = await api.wavesState();
+      if (w && w.file === o.file) {
+        waves = w;
+        wavesVersion++;
+      }
       await loadTranscript();
     } catch (e) {
       failure = String(e);
@@ -135,6 +261,23 @@
       void loadTranscript();
     }
   }
+
+  // What the chip on the picture says while the open recording is analysed (mock L).
+  const STEP: Record<string, string> = {
+    tracks: "Reading tracks",
+    speech: "Finding speech",
+    speakers: "Telling speakers apart",
+    transcribe: "Transcribing",
+    edit: "Cutting",
+  };
+  const chip = $derived.by(() => {
+    if (!busy(analysis)) return null;
+    if (analysis!.phase === "queued") return "Waiting for another analysis";
+    const running = analysis!.project?.stages.find((s) => s.state === "running");
+    const m = analysis!.line?.match(/^transcribing .*\((\d+)%\)/);
+    const name = running ? (STEP[running.name] ?? running.name) : "Analysing";
+    return running?.name === "transcribe" && m ? `${name} · ${m[1]}%` : `${name}…`;
+  });
 
   // Re-analyse: the pipeline with the settings now, in the background. When the edit list holds
   // the user's edits, ask before they are replaced (they are kept as a backup).
@@ -199,14 +342,36 @@
     if (e.code === "Escape") {
       selection = null;
     } else if (e.code === "KeyT" && !ctrl && player?.path) {
-      panelOpen = !panelOpen;
+      togglePanel();
     } else if (e.code === "Space" && player?.path) {
       e.preventDefault();
       run(api.togglePause);
-    } else if (e.code === "KeyS" && player?.path && edit?.ranges.length) {
+    } else if (e.code === "KeyS" && !ctrl && player?.path && edit?.ranges.length) {
       run(() => api.setSkip(!edit?.skip));
     }
   }
+
+  function onMenu(id: string) {
+    if (id === "open") void pick();
+    else if (id === "panel") {
+      // The menu flipped its own check mark.
+      if (player?.path) panelOpen = !panelOpen;
+      else void api.setMenuCheck("panel", panelOpen).catch(() => {});
+    } else if (id === "talking") setOverlay(!overlay);
+    else if ((id === "transcript" || id === "captions" || id === "properties") && player?.path) {
+      tab = id;
+      if (!panelOpen) togglePanel();
+    }
+  }
+
+  // Where the floating edit actions go: at the selection, else at the playhead, along the lanes.
+  const actionsAt = $derived.by(() => {
+    const left = L.lanes.x + L.head + 1;
+    const w = Math.max(1, L.lanes.w - L.head - 1);
+    const t = span ? (span.start + span.end) / 2 : (player?.position ?? view.start);
+    const x = left + Math.min(1, Math.max(0, (t - view.start) / view.len)) * w;
+    return { x, min: left + 4, max: L.lanes.x + L.lanes.w - 4, bottom: windowHeight - (L.lanes.y + L.lanes.h) + 8 };
+  });
 
   onMount(() => {
     api.playerState().then(
@@ -216,14 +381,26 @@
         mixer = await api.mixer();
         const file = await api.startupFile();
         if (file) await load(file);
+        starting = false;
       },
-      (e) => (failure = String(e)),
+      (e) => {
+        failure = String(e);
+        starting = false;
+      },
     );
+    void api.setMenuCheck("talking", overlay).catch(() => {});
     const unlisten = [
       api.onPlayerState((s) => (player = s)),
       api.onEditState((s) => (edit = s)),
       api.onMixer((s) => (mixer = s)),
       api.onAnalysis(onProgress),
+      api.onWaves((w) => {
+        if (opened && w.file === opened.file) {
+          waves = w;
+          wavesVersion++;
+        }
+      }),
+      api.onMenu(onMenu),
       getCurrentWebview().onDragDropEvent((e) => {
         const p = e.payload;
         dragging = p.type === "enter" || p.type === "over";
@@ -234,25 +411,88 @@
   });
 </script>
 
-<svelte:window onkeydown={onKey} onresize={() => (windowWidth = window.innerWidth)} />
+<svelte:window
+  onkeydown={onKey}
+  onresize={() => {
+    windowWidth = window.innerWidth;
+    windowHeight = window.innerHeight;
+  }}
+/>
 
 <main class:dragging>
   {#if !player?.path}
-    <StartWindow ready={!!player} {dragging} onPick={pick} onOpen={load} onError={(e) => (failure = e)} />
-  {/if}
-
-  {#if opened}
-    <ProjectPanel
-      status={project}
-      error={opened.projectError}
-      {analysis}
-      outdated={opened.outdated}
-      onReanalyse={reanalyse}
-    />
+    {#if !starting}
+      <StartWindow ready={!!player} {dragging} onPick={pick} onOpen={load} onError={(e) => (failure = e)} />
+    {/if}
+  {:else}
+    {#if L.strips}
+      <div class="area" style:left="{L.strips.x}px" style:top="{L.strips.y}px" style:width="{L.strips.w}px" style:height="{L.strips.h}px">
+        <Strips {mixer} audio={player.audioTracks} {speakers} onError={(e) => (failure = e)} />
+      </div>
+    {/if}
+    {#if L.avatars}
+      <div class="area talking" style:left="{L.avatars.x}px" style:top="{L.avatars.y}px" style:width="{L.avatars.w}px" style:height="{L.avatars.h}px">
+        <h4>Talking now</h4>
+        <Avatars {speakers} {talking} {mixer} size="big" />
+      </div>
+    {/if}
+    {#if overlay && speakers.length}
+      <div class="overlay" style:left="{L.picture.x + 14}px" style:top="{L.picture.y + 14}px">
+        <Avatars {speakers} {talking} {mixer} size="pill" />
+      </div>
+    {/if}
+    {#if chip}
+      <div class="chip" style:right="{windowWidth - (L.picture.x + L.picture.w) + 14}px" style:top="{L.picture.y + 14}px">
+        <span class="spin" aria-hidden="true"></span>
+        <span>{chip}</span>
+        <button
+          onclick={() => {
+            tab = "properties";
+            if (!panelOpen) togglePanel();
+          }}>Details</button
+        >
+      </div>
+    {/if}
+    <div class="box" style:top="{L.bar.y}px" style:width="{L.bar.w}px" style:height="{L.bar.h}px">
+      <Transport
+        {player}
+        {edit}
+        {span}
+        view={{ start: view.start, end: view.start + view.len }}
+        onZoom={zoom}
+        onSelect={(s) => (selection = s)}
+        onError={(e) => (failure = e)}
+      />
+    </div>
+    {#if L.lanes.h > 0}
+      <div class="box" style:top="{L.lanes.y}px" style:width="{L.lanes.w}px" style:height="{L.lanes.h}px">
+        <Lanes
+          {player}
+          {edit}
+          {mixer}
+          {talk}
+          {talking}
+          {view}
+          row={L.row}
+          speakersRow={L.speakersRow}
+          head={L.head}
+          thin={L.portrait}
+          {wavesVersion}
+          {span}
+          onView={setView}
+          onSelect={(s) => (selection = s)}
+          onError={(e) => (failure = e)}
+        />
+      </div>
+    {/if}
+    <ActionBar {player} {edit} {selection} at={actionsAt} onSelect={(s) => (selection = s)} onError={(e) => (failure = e)} />
   {/if}
 
   {#if failure || player?.error}
-    <div class="failure" role="alert">{failure ?? player?.error}</div>
+    <div class="failure" role="alert" style:left="{L.video.w / 2}px">
+      {failure ?? player?.error}
+      <button class="x" onclick={() => (failure = null)} aria-label="Dismiss">×</button>
+    </div>
   {/if}
 
   {#if panelWidth > 0}
@@ -263,6 +503,9 @@
         >
         <button role="tab" aria-selected={tab === "captions"} class:on={tab === "captions"} onclick={() => (tab = "captions")}
           >Captions</button
+        >
+        <button role="tab" aria-selected={tab === "properties"} class:on={tab === "properties"} onclick={() => (tab = "properties")}
+          >Properties</button
         >
       </div>
       <div class="pane" style:display={tab === "transcript" ? "block" : "none"}>
@@ -281,21 +524,24 @@
         <div class="pane">
           <CaptionsPanel {edit} source={player?.path ?? null} onError={(e) => (failure = e)} />
         </div>
+      {:else if tab === "properties" && opened}
+        <div class="pane">
+          <PropertiesPanel
+            {player}
+            {edit}
+            {mixer}
+            status={project}
+            error={opened.projectError}
+            {analysis}
+            outdated={opened.outdated}
+            {waves}
+            onReanalyse={reanalyse}
+            onError={(e) => (failure = e)}
+          />
+        </div>
       {/if}
     </div>
   {/if}
-
-  <Transport
-    {player}
-    {edit}
-    {mixer}
-    {selection}
-    {span}
-    right={panelWidth}
-    onSelect={(s) => (selection = s)}
-    onOpen={pick}
-    onError={(e) => (failure = e)}
-  />
 </main>
 
 <style>
@@ -309,6 +555,56 @@
   }
   main.dragging {
     outline-color: var(--accent);
+  }
+  .box,
+  .area {
+    position: absolute;
+    left: 0;
+  }
+  .talking {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+  }
+  .talking h4 {
+    margin: 0;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .overlay {
+    position: absolute;
+  }
+  .chip {
+    position: absolute;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 5px 6px 5px 12px;
+    border-radius: 8px;
+    background: rgba(16, 17, 20, 0.86);
+    border: 1px solid var(--line);
+  }
+  .chip button {
+    padding: 2px 8px;
+    color: var(--muted);
+  }
+  .spin {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 2px solid var(--accent);
+    border-right-color: transparent;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
   .side {
     position: absolute;
@@ -326,7 +622,7 @@
   }
   .tabs button {
     flex: 1;
-    padding: 6px 0;
+    padding: 8px 0;
     color: var(--muted);
     background: none;
     border: none;
@@ -343,14 +639,23 @@
   }
   .failure {
     position: absolute;
-    left: 50%;
+    z-index: 10;
     transform: translateX(-50%);
     top: 16px;
     max-width: 60%;
-    padding: 8px 12px;
+    padding: 8px 30px 8px 12px;
     border-radius: 6px;
     background: var(--panel);
     border: 1px solid var(--bad);
     color: var(--bad);
+  }
+  .failure .x {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    padding: 0 6px;
+    border: none;
+    background: none;
+    color: var(--muted);
   }
 </style>

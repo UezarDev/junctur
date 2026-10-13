@@ -1,10 +1,15 @@
 <script lang="ts">
-  // What the app shows with nothing open (2d), in the spirit of Resolve's project chooser: a place
-  // to drop or pick a recording, and the recordings opened before. Dropping works anywhere on the
-  // window (App.svelte listens); this only draws the target. A new recording opens straight into
-  // the editor and is analysed there; nothing here waits on analysis.
+  // What the app shows with nothing open (2d; laid out as 2g's mock S), in the spirit of Resolve's
+  // project chooser: the recordings opened before on the left, each with a still, its length and
+  // folder and where its analysis stands, and a place to drop or pick a recording on the right.
+  // Dropping works anywhere on the window (App.svelte listens); this only draws the target. A new
+  // recording opens straight into the editor and is analysed there; nothing here waits on analysis.
+  //
+  // The list is drawn from recent.json at once; each row then asks for its details and still in
+  // the background (`recent_info`, `thumbnail`), so twenty recordings never hold the list up.
   import { onMount } from "svelte";
   import * as api from "./api";
+  import { clock } from "./time";
 
   let {
     ready,
@@ -21,10 +26,52 @@
     onError: (e: string) => void;
   } = $props();
 
+  interface Row {
+    info?: api.RecordingInfo;
+    progress?: api.Progress | null;
+    still?: string;
+  }
+
   let recent = $state<api.Recent[]>([]);
+  let rows = $state<Record<string, Row>>({});
+  const urls: string[] = [];
+
+  function patch(path: string, r: Partial<Row>) {
+    rows = { ...rows, [path]: { ...rows[path], ...r } };
+  }
+
+  async function details(r: api.Recent) {
+    if (r.missing) return;
+    api.analysis(r.path).then((p) => patch(r.path, { progress: p }), () => {});
+    api.recentInfo(r.path).then((i) => patch(r.path, { info: i }), () => {});
+    try {
+      const bytes = await api.thumbnail(r.path);
+      const url = URL.createObjectURL(new Blob([bytes], { type: "image/jpeg" }));
+      urls.push(url);
+      patch(r.path, { still: url });
+    } catch {
+      // No still (no video stream, ffmpeg missing): the row shows without one.
+    }
+  }
+
+  const sameFile = (a: string, b: string) => a.replace(/\//g, "\\").toLowerCase() === b.replace(/\//g, "\\").toLowerCase();
 
   onMount(() => {
-    api.recent().then((r) => (recent = r), (e) => onError(String(e)));
+    api.recent().then(
+      (r) => {
+        recent = r;
+        r.forEach((x) => void details(x));
+      },
+      (e) => onError(String(e)),
+    );
+    const off = api.onAnalysis((p) => {
+      const hit = recent.find((r) => sameFile(r.path, p.file));
+      if (hit) patch(hit.path, { progress: p });
+    });
+    return () => {
+      off.then((f) => f());
+      urls.forEach((u) => URL.revokeObjectURL(u));
+    };
   });
 
   async function forget(path: string) {
@@ -36,117 +83,116 @@
     }
   }
 
-  /** "today 14:05", "yesterday", "3 Oct". */
-  function when(unix: number): string {
-    const d = new Date(unix * 1000);
-    const now = new Date();
-    const day = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
-    const days = Math.round((day(now) - day(d)) / 86_400_000);
-    if (days === 0) return `today ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
-    if (days === 1) return "yesterday";
-    return d.toLocaleDateString([], { day: "numeric", month: "short", year: d.getFullYear() === now.getFullYear() ? undefined : "numeric" });
+  const STEP: Record<string, string> = {
+    tracks: "Reading tracks",
+    speech: "Finding speech",
+    speakers: "Speakers",
+    transcribe: "Transcribing",
+    edit: "Cutting",
+  };
+
+  /** The badge: where the analysis stands. */
+  function badge(r: api.Recent, row: Row | undefined): { text: string; cls: string } {
+    if (r.missing) return { text: "Not found", cls: "bad" };
+    const p = row?.progress;
+    if (p?.phase === "queued") return { text: "Waiting to analyse", cls: "busy" };
+    if (p?.phase === "running") {
+      const stage = p.project?.stages.find((s) => s.state === "running");
+      const pct = p.line?.match(/^transcribing .*\((\d+)%\)/)?.[1];
+      const name = stage ? (STEP[stage.name] ?? stage.name) : "Analysing";
+      return { text: pct && stage?.name === "transcribe" ? `${name} ${pct}%` : name, cls: "busy" };
+    }
+    const i = row?.info;
+    if (!i) return { text: "…", cls: "muted" };
+    if (i.ranges === 0) return { text: "Ready · nothing kept", cls: "muted" };
+    if (i.ranges != null) return { text: `Ready · ${i.ranges} ${i.ranges === 1 ? "range" : "ranges"}`, cls: "good" };
+    if (i.stagesDone > 0) return { text: "Partly analysed", cls: "muted" };
+    return { text: "Not analysed", cls: "muted" };
   }
 </script>
 
 <div class="start">
-  <h1>Junctur</h1>
-  <div class="columns">
-    <button class="drop" class:dragging onclick={onPick} disabled={!ready}>
-      <span class="big">Drop a recording here</span>
-      <span class="small">or click to choose one. It opens at once and is analysed in the background.</span>
-    </button>
-    <section class="recent">
-      <h2>Recent</h2>
-      {#if recent.length === 0}
-        <p class="none">Recordings you open show here.</p>
-      {:else}
-        <ul>
-          {#each recent as r (r.path)}
-            <li class:missing={r.missing}>
-              <button
-                class="open"
-                disabled={!ready || r.missing}
-                title={r.missing ? `${r.path} (not found)` : r.path}
-                onclick={() => onOpen(r.path)}
-              >
+  <section class="left">
+    <h1>Junctur</h1>
+    <p class="tag">Cut long recordings down before Resolve.</p>
+    <h2>Recent</h2>
+    {#if recent.length === 0}
+      <p class="none">Recordings you open show here.</p>
+    {:else}
+      <ul>
+        {#each recent as r (r.path)}
+          {@const row = rows[r.path]}
+          {@const b = badge(r, row)}
+          <li class:missing={r.missing}>
+            <button
+              class="open"
+              disabled={!ready || r.missing}
+              title={r.missing ? `${r.path} (not found)` : r.path}
+              onclick={() => onOpen(r.path)}
+            >
+              <span class="still">
+                {#if row?.still}<img src={row.still} alt="" />{/if}
+              </span>
+              <span class="what">
                 <span class="name">{r.name}</span>
-                <span class="folder">{r.missing ? "not found: " : ""}{r.folder}</span>
-              </button>
-              <span class="when">{when(r.opened)}</span>
-              <button class="x" title="Remove from the list" aria-label="Remove {r.name} from the list" onclick={() => forget(r.path)}
-                >×</button
-              >
-            </li>
-          {/each}
-        </ul>
-      {/if}
-    </section>
-  </div>
+                <span class="meta mono">{row?.info?.duration ? clock(row.info.duration) : "--:--"} · {r.folder}</span>
+              </span>
+              <span class="badge {b.cls}"><span class="dot"></span>{b.text}</span>
+            </button>
+            <button class="x" title="Remove from the list" aria-label="Remove {r.name} from the list" onclick={() => forget(r.path)}
+              >×</button
+            >
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  </section>
+  <section class="right">
+    <button class="drop" class:dragging onclick={onPick} disabled={!ready}>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 20h16" /></svg>
+      <span class="big">Drop a recording here</span>
+      <span class="small">MKV, MP4, MOV… multi-track OBS files work best</span>
+      <span class="cta">Open recording…</span>
+    </button>
+    <p class="note">The editor opens at once; analysis runs in the background and fills in as it goes.</p>
+  </section>
 </div>
 
 <style>
   .start {
     position: absolute;
-    inset: 0 0 64px 0;
+    inset: 0;
+    display: flex;
+    gap: 40px;
+    padding: 36px 48px 28px;
+    box-sizing: border-box;
+    background: var(--panel-solid);
+  }
+  .left {
+    flex: 1.15;
+    min-width: 0;
     display: flex;
     flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 20px;
-    padding: 24px;
-    box-sizing: border-box;
   }
   h1 {
     margin: 0;
+    font-size: 26px;
     font-weight: 600;
-    letter-spacing: 0.02em;
   }
-  .columns {
-    display: flex;
-    gap: 20px;
-    width: min(900px, 100%);
-    height: min(420px, 70vh);
-  }
-  .drop {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    border: 2px dashed var(--line);
-    border-radius: 10px;
-    background: var(--panel);
-  }
-  .drop.dragging {
-    border-color: var(--accent);
-  }
-  .big {
-    font-size: 16px;
-  }
-  .small {
+  .tag {
+    margin: 4px 0 26px;
     color: var(--muted);
-    max-width: 260px;
-    text-align: center;
-  }
-  .recent {
-    flex: 1.3;
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    border: 1px solid var(--line);
-    border-radius: 10px;
-    background: var(--panel);
-    padding: 10px 0 6px;
+    font-size: 13px;
   }
   h2 {
-    margin: 0 14px 6px;
-    font-size: 13px;
+    margin: 0 0 8px;
+    font-size: 11px;
     font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
     color: var(--muted);
   }
   .none {
-    margin: 8px 14px;
     color: var(--muted);
   }
   ul {
@@ -156,44 +202,148 @@
     overflow-y: auto;
   }
   li {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 0 8px 0 4px;
+    position: relative;
   }
   li.missing {
     opacity: 0.5;
   }
   .open {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 8px 40px 8px 8px;
+    text-align: left;
+    border: none;
+    border-radius: 8px;
+    background: none;
+  }
+  .open:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.05);
+  }
+  .still {
+    flex: none;
+    width: 128px;
+    height: 72px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.05);
+    overflow: hidden;
+  }
+  .still img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  .what {
     flex: 1;
     min-width: 0;
     display: flex;
     flex-direction: column;
-    align-items: flex-start;
-    text-align: left;
-    border: none;
-    background: none;
-    padding: 6px 10px;
+    gap: 3px;
   }
   .name,
-  .folder {
-    max-width: 100%;
+  .meta {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .folder,
-  .when {
-    color: var(--muted);
+  .meta {
     font-size: 12px;
+    color: var(--muted);
   }
-  .when {
-    white-space: nowrap;
+  .badge {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 9px;
+    border-radius: 999px;
+    font-size: 12px;
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--muted);
+  }
+  .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+  .badge.good {
+    color: var(--good);
+    background: rgba(127, 201, 138, 0.1);
+  }
+  .badge.busy {
+    color: var(--accent);
+    background: rgba(242, 179, 61, 0.1);
+  }
+  .badge.bad {
+    color: var(--bad);
   }
   .x {
+    position: absolute;
+    right: 6px;
+    top: 50%;
+    transform: translateY(-50%);
     border: none;
     background: none;
     color: var(--muted);
-    padding: 2px 6px;
+    padding: 2px 8px;
+    opacity: 0;
+  }
+  li:hover .x,
+  .x:focus-visible {
+    opacity: 1;
+  }
+  .right {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .drop {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    border: 2px dashed rgba(242, 179, 61, 0.45);
+    border-radius: 14px;
+    background: rgba(242, 179, 61, 0.025);
+  }
+  .drop.dragging {
+    border-color: var(--accent);
+    background: rgba(242, 179, 61, 0.08);
+  }
+  .drop svg {
+    width: 34px;
+    height: 34px;
+    fill: none;
+    stroke: var(--accent);
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .big {
+    font-size: 17px;
+  }
+  .small {
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .cta {
+    margin-top: 6px;
+    padding: 6px 16px;
+    border-radius: 6px;
+    background: var(--accent);
+    color: #101114;
+    font-weight: 600;
+  }
+  .note {
+    margin: 0;
+    color: var(--muted);
+    font-size: 12px;
   }
 </style>

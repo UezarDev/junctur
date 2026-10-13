@@ -46,31 +46,12 @@ pub fn decode_windows(
         return Ok(Vec::new());
     }
     let path = file.to_string_lossy();
-    let (ss, t, rate) = (
-        format!("{start:.3}"),
-        format!("{len:.3}"),
-        ANALYSIS_RATE.to_string(),
-    );
-    let mut args = vec!["-v", "error", "-nostdin", "-ss", &ss, "-t", &t, "-i", &path];
-    let (map, graph);
-    if n == 1 {
-        map = format!("0:a:{}", tracks[0]);
-        args.extend(["-map", &map, "-ac", "1", "-ar", &rate]);
-    } else {
-        let mut g = String::new();
-        for (i, t) in tracks.iter().enumerate() {
-            g += &format!(
-                "[0:a:{t}]aformat=sample_fmts=flt:sample_rates={ANALYSIS_RATE}:channel_layouts=mono[a{i}];"
-            );
-        }
-        for i in 0..n {
-            g += &format!("[a{i}]");
-        }
-        g += &format!("amerge=inputs={n}[out]");
-        graph = g;
-        args.extend(["-filter_complex", &graph, "-map", "[out]"]);
-    }
-    args.extend(["-f", "f32le", "-"]);
+    let (ss, t) = (format!("{start:.3}"), format!("{len:.3}"));
+    let mut args: Vec<String> = ["-v", "error", "-nostdin", "-ss", &ss, "-t", &t, "-i", &path]
+        .map(String::from)
+        .to_vec();
+    args.extend(merge_args(tracks, ANALYSIS_RATE));
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let all = samples(&run("ffmpeg", &args)?);
     let mut out = vec![Vec::with_capacity(all.len() / n); n];
     for frame in all.chunks_exact(n) {
@@ -79,6 +60,31 @@ pub fn decode_windows(
         }
     }
     Ok(out)
+}
+
+/// The output side of an ffmpeg that decodes `tracks` (at least one) as mono f32 at `rate`, laid
+/// side by side as channels in that order: `aformat` per track (the conversion `-ac 1 -ar` makes)
+/// then `amerge`, or a plain map for one track. Every track comes out as long as the shortest.
+fn merge_args(tracks: &[usize], rate: u32) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+    if let [t] = tracks {
+        args.extend(["-map".into(), format!("0:a:{t}"), "-ac".into(), "1".into()]);
+        args.extend(["-ar".into(), rate.to_string()]);
+    } else {
+        let mut g = String::new();
+        for (i, t) in tracks.iter().enumerate() {
+            g += &format!(
+                "[0:a:{t}]aformat=sample_fmts=flt:sample_rates={rate}:channel_layouts=mono[a{i}];"
+            );
+        }
+        for i in 0..tracks.len() {
+            g += &format!("[a{i}]");
+        }
+        g += &format!("amerge=inputs={}[out]", tracks.len());
+        args.extend(["-filter_complex".into(), g, "-map".into(), "[out]".into()]);
+    }
+    args.extend(["-f".into(), "f32le".into(), "-".into()]);
+    args
 }
 
 /// A section of a file to read: `start` seconds in, `len` seconds long (None = to the end).
@@ -127,6 +133,24 @@ impl PcmReader {
             out,
             rate,
             channels,
+        })
+    }
+
+    /// Every one of `tracks` (at least one) from the start, mono at `rate`, interleaved one sample
+    /// per track in that order (`channels` is their count): one decode for all, as
+    /// [`decode_windows`] does, streamed for a pass over a whole recording (2g's waveforms).
+    pub fn merged(file: &Path, tracks: &[usize], rate: u32) -> Result<Self> {
+        let mut cmd = Command::new("ffmpeg");
+        cmd.args(["-v", "error", "-nostdin", "-i"])
+            .arg(file)
+            .args(merge_args(tracks, rate));
+        let mut proc = Process::spawn(&mut cmd, Stdio::null(), Stdio::piped())?;
+        let out = proc.child.stdout.take().expect("piped stdout");
+        Ok(Self {
+            proc,
+            out,
+            rate,
+            channels: tracks.len() as u32,
         })
     }
 

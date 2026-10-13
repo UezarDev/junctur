@@ -15,18 +15,25 @@ use crate::mpv::{audio_tracks, AudioTrack, EndReason, Event, Format, Value};
 
 /// The properties the player observes, with the ids mpv echoes back in its change events. Not
 /// `path`: in EDL form it is the whole EDL (a megabyte at 30 h); the file comes from the load.
-pub const OBSERVED: [(u64, &str, Format); 5] = [
+pub const OBSERVED: [(u64, &str, Format); 8] = [
     (TIME_POS, "time-pos", Format::Double),
     (DURATION, "duration", Format::Double),
     (PAUSE, "pause", Format::Flag),
     (TRACK_LIST, "track-list", Format::Str),
     (HWDEC, "hwdec-current", Format::Str),
+    // The picture's shape (2g: the editor's layout follows it); integers read as doubles.
+    (VIDEO_W, "video-params/dw", Format::Double),
+    (VIDEO_H, "video-params/dh", Format::Double),
+    (ROTATE, "video-params/rotate", Format::Double),
 ];
 const TIME_POS: u64 = 2;
 const DURATION: u64 = 3;
 const PAUSE: u64 = 4;
 const TRACK_LIST: u64 = 5;
 const HWDEC: u64 = 6;
+const VIDEO_W: u64 = 7;
+const VIDEO_H: u64 = 8;
+const ROTATE: u64 = 9;
 
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -55,6 +62,13 @@ pub struct PlayerState {
     pub output_frame: Option<u64>,
     /// The source position is inside a cut (only when the whole file plays).
     pub in_cut: bool,
+    /// The picture as shown: display size (pixel aspect applied) and its width over height, both
+    /// turned for a rotated recording (a phone's 90 degrees). `None` without video.
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub aspect: Option<f64>,
+    #[serde(skip)]
+    video: (Option<f64>, Option<f64>, f64),
     #[serde(skip)]
     mpv_pos: Option<f64>,
     #[serde(skip)]
@@ -155,6 +169,9 @@ impl PlayerState {
                 return Change::Position;
             }
             HWDEC => self.hwdec = text(value),
+            VIDEO_W => self.picture(|v| v.0 = num(value)),
+            VIDEO_H => self.picture(|v| v.1 = num(value)),
+            ROTATE => self.picture(|v| v.2 = num(value).unwrap_or(0.0)),
             DURATION => {
                 self.mpv_duration = num(value);
                 self.derive();
@@ -172,6 +189,18 @@ impl PlayerState {
             _ => return Change::None,
         }
         Change::Other
+    }
+
+    /// Folds a change of the picture's size or rotation into its shape.
+    fn picture(&mut self, f: impl FnOnce(&mut (Option<f64>, Option<f64>, f64))) {
+        f(&mut self.video);
+        let (w, h, rotate) = self.video;
+        let size = w.zip(h).filter(|&(w, h)| w >= 1.0 && h >= 1.0);
+        let turned = (rotate.round() as i64).rem_euclid(180) == 90;
+        let size = size.map(|(w, h)| if turned { (h, w) } else { (w, h) });
+        self.width = size.map(|s| s.0.round() as u32);
+        self.height = size.map(|s| s.1.round() as u32);
+        self.aspect = size.map(|(w, h)| w / h);
     }
 
     /// The two clocks from mpv's raw position and the timeline in play.
@@ -258,6 +287,18 @@ mod tests {
         s.apply(&prop(TRACK_LIST, Value::Str(tracks.into())));
         s.apply(&prop(HWDEC, Value::Str("nvdec".into())));
         assert_eq!(s.hwdec.as_deref(), Some("nvdec"));
+        assert_eq!(s.aspect, None, "no picture yet");
+        s.apply(&prop(VIDEO_W, Value::Double(1920.0)));
+        assert_eq!(s.aspect, None, "half a size is none");
+        s.apply(&prop(VIDEO_H, Value::Double(1080.0)));
+        assert!((s.aspect.unwrap() - 16.0 / 9.0).abs() < 1e-9);
+        assert_eq!((s.width, s.height), (Some(1920), Some(1080)));
+        // A phone recording stored landscape and rotated: portrait.
+        s.apply(&prop(ROTATE, Value::Double(270.0)));
+        assert_eq!((s.width, s.height), (Some(1080), Some(1920)));
+        assert!(s.aspect.unwrap() < 1.0);
+        s.apply(&prop(VIDEO_W, Value::None));
+        assert_eq!(s.aspect, None, "the video went away");
         assert_eq!(s.path.as_deref(), Some("C:/a.mp4"));
         assert_eq!(s.duration, Some(12.5));
         assert!(s.paused);
