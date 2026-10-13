@@ -245,7 +245,7 @@ mod tests {
             chars: 30,
             ..Default::default()
         };
-        assert_eq!(c.captions, Some(want));
+        assert_eq!(c.captions, Some(want.clone()));
         assert!(
             parse(br#"{"captions":{"chars":500}}"#).is_err(),
             "out of limits"
@@ -261,7 +261,7 @@ mod tests {
             ..Default::default()
         };
         // A list's own settings win, and never read the config.
-        assert_eq!(captions(Some(own), broken).unwrap(), own);
+        assert_eq!(captions(Some(own.clone()), broken).unwrap(), own);
         assert_eq!(captions(None, || Ok(c.clone())).unwrap(), want);
         assert_eq!(
             captions(None, || Ok(Config::default())).unwrap(),

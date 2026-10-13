@@ -746,7 +746,7 @@ fn draft(
         settings: *settings,
         keep: edit::keep_ranges(&regions, &env, report.duration, settings),
         speakers: speakers.clone(),
-        captions,
+        captions: captions.clone(),
         windows: edit::windows(&regions, starts, report.duration, settings.window),
     };
     let list = make(settings, &starts);
