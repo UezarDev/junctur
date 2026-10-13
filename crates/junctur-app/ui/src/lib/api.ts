@@ -123,6 +123,8 @@ export interface Captions {
   preview: boolean;
   chars: number;
   lines: number;
+  /** Most words per speaker in a caption, 0 for no limit, 1 for one word at a time (5i). */
+  words: number;
   seconds: number;
   /** Every caption bold / italic in the SRT (5d: Resolve's import applies both). */
   bold: boolean;

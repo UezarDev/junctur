@@ -22,6 +22,10 @@ pub fn write(c: &Captions) -> String {
         c.lines,
         c.seconds
     );
+    // 5i's word limit only when set.
+    if c.words != 0 {
+        out.push_str(&format!(" words={}", c.words));
+    }
     // 5d's switches and 5f's underline only when on.
     for (k, on) in [
         ("preview", c.preview),
@@ -91,6 +95,7 @@ pub fn parse(rest: &str) -> Result<Captions, String> {
         match k {
             "chars" => c.chars = whole()?,
             "lines" => c.lines = whole()?,
+            "words" => c.words = whole()?,
             "seconds" => c.seconds = number()?,
             "preview" => c.preview = flag()?,
             "bold" => c.bold = flag()?,
@@ -190,6 +195,22 @@ mod tests {
              protagonist=\"Ana María\" template=\"My Title\""
         );
         assert_eq!(parse(line.strip_prefix("captions ").unwrap()).unwrap(), c);
+    }
+
+    #[test]
+    fn the_word_limit_is_written_only_when_set() {
+        let c = Captions {
+            on: true,
+            words: 1,
+            ..Default::default()
+        };
+        let line = write(&c);
+        assert_eq!(line, "captions on chars=42 lines=2 seconds=6 words=1");
+        assert_eq!(parse(line.strip_prefix("captions ").unwrap()).unwrap(), c);
+        assert_eq!(parse("on words=0").unwrap().words, 0);
+        for bad in ["on words=21", "on words=-1", "on words=two"] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

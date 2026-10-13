@@ -90,7 +90,8 @@ begin and end, reusing every other stage; it takes about as long as the speakers
 
 `export --srt <out.srt>` writes the captions: the transcript's kept words on the edited timeline (the
 same frames as the render and the FCPXML), each cue as `<font color>` in its speaker's colour, cut by the
-`captions` line (`chars=` per line, `lines=` per speaker in a caption, `seconds=` longest; set in the
+`captions` line (`chars=` per line, `lines=` per speaker in a caption, `seconds=` longest, and
+`words=` per speaker in a caption, left out for no limit, `words=1` for one word at a time; set in the
 app's Captions panel or by hand). It is one file for one Resolve subtitle track, which shows one caption
 at a time: when people talk at once (on separate voice tracks, or where `analyze` heard two voices on
 the mix), one caption holds them all, each speaker on their own line(s) in their colour, lasting until
@@ -191,7 +192,8 @@ title bar) writes the same file:
 ```
 
 `captions` holds the caption defaults: what a recording whose edit list has no `captions` line of its own
-cuts its captions with (`on`, `chars` per line, `lines` per speaker, `seconds` at most), in the app and in
+cuts its captions with (`on`, `chars` per line, `lines` per speaker, `words` per speaker with 0 for no
+limit, `seconds` at most), in the app and in
 `render` and `export --srt`. A key left out keeps its built-in value.
 
 `--model` on the command line wins over the config file. A config file that does not parse, names an

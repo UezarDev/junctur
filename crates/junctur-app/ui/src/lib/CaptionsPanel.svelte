@@ -239,7 +239,7 @@
       {/if}
       <p class="note">
         Cues follow the edited timeline, like the render and the FCPXML. When people talk at once, one caption
-        holds them all, each speaker on their own line in their colour; the line limit applies to each speaker.
+        holds them all, each speaker on their own line in their colour; the line and word limits apply to each speaker.
         In DaVinci Resolve import the file (File &gt; Import &gt; Subtitle) onto one subtitle track at the start
         of the timeline; the colours, bold, italic and underline come through. An SRT carries no size or position: set
         those in Resolve. Premiere Pro is untested and likely shows its default style.

@@ -29,6 +29,9 @@ pub struct Captions {
     pub chars: u32,
     /// Most lines in one cue, per speaker: people talking at once each get this many (5e).
     pub lines: u32,
+    /// Most words in one cue, per speaker like `lines`; 0 for no limit, 1 for one word at a time
+    /// (5i, short-form clips).
+    pub words: u32,
     /// Longest a cue stays on screen, in seconds.
     pub seconds: f64,
     /// Every caption bold (`<b>`), which Resolve's SRT import applies and its own export writes.
@@ -99,6 +102,7 @@ impl Default for Captions {
             preview: false,
             chars: 42,
             lines: 2,
+            words: 0,
             seconds: 6.0,
             bold: false,
             italic: false,
@@ -118,6 +122,9 @@ impl Default for Captions {
 
 pub const CHARS: std::ops::RangeInclusive<u32> = 10..=80;
 pub const LINES: std::ops::RangeInclusive<u32> = 1..=3;
+/// Words per speaker when limited (0 is no limit): 20 is about three full lines, past which the
+/// line limit cuts first.
+pub const WORDS: std::ops::RangeInclusive<u32> = 1..=20;
 pub const SECONDS: std::ops::RangeInclusive<f64> = 1.0..=15.0;
 pub const SIZE: std::ops::RangeInclusive<f64> = 2.0..=15.0;
 pub const POSITION: std::ops::RangeInclusive<f64> = 0.0..=45.0;
@@ -138,6 +145,13 @@ impl Captions {
                 "lines per speaker must be {} to {}",
                 LINES.start(),
                 LINES.end()
+            ));
+        }
+        if self.words != 0 && !WORDS.contains(&self.words) {
+            return Err(format!(
+                "words per caption must be {} to {}, or 0 for no limit",
+                WORDS.start(),
+                WORDS.end()
             ));
         }
         if !SECONDS.contains(&self.seconds) {
@@ -242,6 +256,16 @@ mod tests {
             ..Default::default()
         }));
         assert!(bad(Captions {
+            words: 21,
+            ..Default::default()
+        }));
+        assert!(Captions {
+            words: 1,
+            ..Default::default()
+        }
+        .check()
+        .is_ok());
+        assert!(bad(Captions {
             seconds: 30.0,
             ..Default::default()
         }));
@@ -338,5 +362,9 @@ mod tests {
             ("Ana", "My Title")
         );
         assert!(serde_json::from_str::<Captions>(r#"{"layout":"diagonal"}"#).is_err());
+        // 5g's settings load 5i's word limit off; its own value reads back.
+        assert_eq!(g.words, 0);
+        let i: Captions = serde_json::from_str(r#"{"words":1}"#).unwrap();
+        assert_eq!(i.words, 1);
     }
 }
