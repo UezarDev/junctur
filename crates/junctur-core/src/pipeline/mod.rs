@@ -5,6 +5,7 @@
 //! card another app already fills would only make both fall back to CPU. `jobs.json` records what
 //! each stage did, for `junctur status`; the stage results themselves are the source of truth.
 
+mod adopt;
 mod jobs;
 mod speakers;
 mod speech;
@@ -51,14 +52,13 @@ impl Project {
                 .join(cache::key(file, "project1")?),
         };
         std::fs::create_dir_all(&dir)?;
-        // 2f: a run started by a packaged app (Claude desktop) wrote into a hidden copy of the cache.
-        // Its results come in only while this folder has no run of its own (no `jobs.json`), so one
-        // analysis is never mixed with another's stage files; its track reports always (keyed, so a
-        // missing one is never a conflict).
+        // 2f: a run started by a packaged app (Claude desktop) may have analysed this recording into
+        // a hidden copy of the cache ([`adopt`]). Its track reports are keyed by file and settings, so
+        // a missing one is taken alone, once per process.
         if in_cache {
-            hidden::adopt_copies(&dir, |d| !d.join(jobs::FILE).exists());
+            adopt::project(&dir);
         }
-        hidden::adopt_copies(&cache_dir.join("tracks"), |_| true);
+        hidden::adopt_files_once(&cache_dir.join("tracks"), |_| true);
         Ok(Self {
             // Absolute: the edit list and the FCPXML name the source, and must work from anywhere.
             // Not `canonicalize`, whose `\\?\` form Resolve cannot open.

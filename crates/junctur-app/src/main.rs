@@ -34,6 +34,10 @@ use player::Player;
 const BACKGROUND: Color = Color(16, 17, 20, 0);
 
 fn main() {
+    // 2f: settings, voices and recent recordings a Claude-launched run saved in a hidden copy of the
+    // config folder (a file pointed elsewhere by its variable, as in launch checks, is not taken).
+    let [config, voices] = junctur_core::config::FILES;
+    junctur_core::config::adopt_hidden(&[config, voices, ("recent.json", recent::ENV)]);
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {

@@ -44,6 +44,8 @@ const USAGE: &str = "usage:
 cut flags: [--pad-before <s>] [--pad-after <s>] [--merge-gap <s>] [--crossfade <ms>]";
 
 fn main() -> ExitCode {
+    // 2f: settings and voices a Claude-launched run saved in a hidden copy of the config folder.
+    junctur_core::config::adopt_hidden(&junctur_core::config::FILES);
     match run(std::env::args().skip(1).collect()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

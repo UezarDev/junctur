@@ -26,17 +26,36 @@ pub struct Config {
 
 /// The user's Junctur folder in the OS config folder (`%APPDATA%\junctur`), where the config file,
 /// the voices (5b) and the app's recent recordings (2d) live; `None` when there is no config folder.
-/// The first call in a process takes the files a packaged app's hidden copy of it has and it lacks
-/// (2f, [`hidden`]), so settings and voices saved from a Claude-launched run are not lost to the app.
 pub fn folder() -> Option<PathBuf> {
-    static ADOPTED: std::sync::Once = std::sync::Once::new();
-    let folder = std::env::var_os("APPDATA")
+    std::env::var_os("APPDATA")
         .or_else(|| std::env::var_os("XDG_CONFIG_HOME"))
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .map(|b| b.join("junctur"))?;
-    ADOPTED.call_once(|| hidden::adopt_copies(&folder, |_| true));
-    Some(folder)
+        .map(|b| b.join("junctur"))
+}
+
+/// The files of [`folder`] core reads, each with the variable that points it elsewhere.
+pub const FILES: [(&str, &str); 2] = [
+    ("config.json", "JUNCTUR_CONFIG"),
+    ("voices.json", voices::ENV),
+];
+
+/// Takes into [`folder`] those of `files` (name, overriding variable) that a packaged app's hidden copy
+/// of it holds and it lacks (2f, [`hidden`]), so settings and voices saved from a Claude-launched run
+/// reach every run. A file whose variable is set is not the folder's and is left alone. Called once at
+/// startup by the CLI and the app, never by a path lookup.
+pub fn adopt_hidden(files: &[(&str, &str)]) {
+    let Some(folder) = folder() else {
+        return;
+    };
+    let wanted: Vec<&str> = files
+        .iter()
+        .filter(|(_, var)| std::env::var_os(var).is_none())
+        .map(|(name, _)| *name)
+        .collect();
+    if !wanted.is_empty() {
+        hidden::adopt_files_once(&folder, |rel| wanted.iter().any(|w| rel == Path::new(w)));
+    }
 }
 
 /// Read the config file this environment points at.
