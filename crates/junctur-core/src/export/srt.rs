@@ -24,8 +24,10 @@ use std::fmt::Write;
 use serde::Serialize;
 
 use super::caption_text;
-use crate::edit::{frame_ranges, frames_ceil, Captions, EditList};
+use super::translated::{self, Shown};
+use crate::edit::{frame_ranges, frames_ceil, Captions, EditList, Labeller};
 use crate::transcribe::Word;
+use crate::translate::{Sentence, Translations};
 
 /// A new cue after a pause this long in the edited timeline, even mid-sentence.
 const PAUSE_S: f64 = 1.0;
@@ -165,7 +167,11 @@ fn clean(text: &str) -> String {
 /// last line on screen in the next ([`Open::after`]).
 ///
 /// Before cutting, the kept words go through the text options ([`caption_text`], 5j): a word is
-/// shown as they make it, and a replaced phrase is one unit, one word for the word limit.
+/// shown as they make it, and a replaced phrase is one unit, one word for the word limit. Before
+/// those, with `c.translate` set, each sentence with a translation in `translated` is shown
+/// translated ([`translated`], 5k); one without is shown as said, so the preview can show what is
+/// translated so far, and a caller writing a file checks first that none is missing
+/// ([`missing`]).
 ///
 /// `c` is the caption settings to cut with, resolved by the caller: the list's own, else the
 /// user's defaults (2i, `config::captions`). Taken apart from `edit`, whose `captions` may be
@@ -176,32 +182,31 @@ pub fn cues<'a>(
     words: impl IntoIterator<Item = (usize, &'a Word)>,
     num: u64,
     den: u64,
+    translations: Option<&Translations>,
 ) -> Vec<Cue> {
     let tl = Timeline::new(edit, num, den);
     let label = edit.speakers.labeller();
-    let mut words: Vec<(usize, &Word)> = words.into_iter().collect();
-    words.sort_by(|a, b| a.1.start.total_cmp(&b.1.start));
-
-    // The kept words with their range, then as the text options show them (5j): a unit is one
-    // word, or a replaced phrase spanning several.
-    let kept: Vec<(usize, &Word, usize)> = words
-        .into_iter()
-        .filter_map(|(track, w)| Some((track, w, tl.range_of((w.start + w.end) / 2.0)?)))
-        .collect();
-    let texts: Vec<(usize, String)> = kept.iter().map(|&(t, w, _)| (t, clean(&w.text))).collect();
+    let kept = kept(&tl, words);
+    let shown = match translations.filter(|_| !c.translate.is_empty()) {
+        Some(t) => {
+            let s = sentence_words(&kept, &tl, &label);
+            translated::apply(kept, &s, |text| t.get(&c.translate, text), clean)
+        }
+        None => kept,
+    };
+    let texts: Vec<(usize, String)> = shown.iter().map(|w| (w.track, w.text.clone())).collect();
 
     let mut out: Vec<Cue> = Vec::new();
     let mut open: Option<Open> = None;
     for unit in caption_text::units(&texts, c) {
-        let (track, first, i) = kept[unit.first];
-        let (_, last, j) = kept[unit.last];
+        let (first, last) = (&shown[unit.first], &shown[unit.last]);
         let text = unit.text;
         let said = Said {
-            track,
-            start: tl.map(i, first.start),
-            end: tl.map(j, last.end),
+            track: first.track,
+            start: tl.map(first.start.0, first.start.1),
+            end: tl.map(last.end.0, last.end.1),
             // Its speaker first, then anyone else whose overlap turn holds it (5b).
-            speakers: label.speakers_of_word(track, first.start, last.end),
+            speakers: label.speakers_of_word(first.track, first.start.1, last.end.1),
         };
         if open.as_mut().is_some_and(|o| o.take(&said, &text, c)) {
             continue;
@@ -219,6 +224,70 @@ pub fn cues<'a>(
     let floor = if c.words == 0 { READABLE_S } else { 0.0 };
     settle(&mut out, c.seconds, floor, tl.total());
     out
+}
+
+/// The kept words, in time order, each in its kept range and cleaned (a word left empty is kept
+/// here, so a phrase around it does not match, and dropped as a unit).
+fn kept<'a>(tl: &Timeline, words: impl IntoIterator<Item = (usize, &'a Word)>) -> Vec<Shown> {
+    let mut words: Vec<(usize, &Word)> = words.into_iter().collect();
+    words.sort_by(|a, b| a.1.start.total_cmp(&b.1.start));
+    words
+        .into_iter()
+        .filter_map(|(track, w)| {
+            let r = tl.range_of((w.start + w.end) / 2.0)?;
+            Some(Shown {
+                track,
+                start: (r, w.start),
+                end: (r, w.end),
+                text: clean(&w.text),
+            })
+        })
+        .collect()
+}
+
+/// The sentences of the kept words ([`translated::sentences`]), cut at [`PAUSE_S`] like cues.
+fn sentence_words(kept: &[Shown], tl: &Timeline, label: &Labeller) -> Vec<Vec<usize>> {
+    translated::sentences(
+        kept,
+        |w| label.of_word(w.track, w.start.1, w.end.1).unwrap_or(0),
+        |(r, t)| tl.map(r, t),
+        PAUSE_S,
+    )
+}
+
+/// The sentences captions would translate (5k): the kept words' sentences as said, each with its
+/// track and start, which find the language it was said in. The words, frame rate and edit are as
+/// for [`cues`]; the caption settings play no part, so changing them never asks for a
+/// translation again, while a cut that changes a sentence's words does.
+pub fn sentences<'a>(
+    edit: &EditList,
+    words: impl IntoIterator<Item = (usize, &'a Word)>,
+    num: u64,
+    den: u64,
+) -> Vec<Sentence> {
+    let tl = Timeline::new(edit, num, den);
+    let label = edit.speakers.labeller();
+    let kept = kept(&tl, words);
+    sentence_words(&kept, &tl, &label)
+        .iter()
+        .map(|s| Sentence {
+            track: kept[s[0]].track,
+            start: kept[s[0]].start.1,
+            text: translated::text(&kept, s),
+        })
+        .filter(|s| !s.text.is_empty())
+        .collect()
+}
+
+/// How many of `sentences` have no translation into `c.translate` yet; 0 when captions are not
+/// translated.
+pub fn missing(c: &Captions, sentences: &[Sentence], translations: &Translations) -> usize {
+    if c.translate.is_empty() {
+        return 0;
+    }
+    translations
+        .missing(&c.translate, sentences.iter().map(|s| s.text.as_str()))
+        .len()
 }
 
 /// A kept word on the output timeline.
@@ -598,7 +667,7 @@ mod tests {
             word(30.2, 30.6, "qué"),
             word(30.7, 31.0, "tal"),
         ];
-        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1);
+        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1, None);
         assert_eq!(c.len(), 2, "{c:?}");
         assert_eq!(parts(&c[0]), vec![(1, "hola amigos".into())]);
         assert!((c[0].start - 0.5).abs() < 1e-9);
@@ -621,7 +690,7 @@ mod tests {
         let mut e = edit(&keep, Captions::default());
         e.duration = 200.0;
         let last = word(199.0 * 0.9 + 0.1, 199.0 * 0.9 + 0.3, "fin");
-        let c = cues(&e, &own(&e), [(0, &last)], 30, 1);
+        let c = cues(&e, &own(&e), [(0, &last)], 30, 1, None);
         let frames = frame_ranges(&e.keep, 30, 1, frames_ceil(200.0, 30, 1));
         let before: u64 = frames[..199].iter().map(|(a, b)| b - a).sum();
         let (a, _) = frames[199];
@@ -653,7 +722,7 @@ mod tests {
             word(19.0, 19.5, "a"),
             word(20.5, 20.8, "b"), // speaker 2: new cue
         ];
-        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1);
+        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1, None);
         assert_eq!(
             solo(&c),
             vec!["uno dos tres", "cuatro", "cinco seis", "siete", "a", "b"]
@@ -671,7 +740,7 @@ mod tests {
         let w: Vec<Word> = (0..20)
             .map(|k| word(k as f64 * 0.3, k as f64 * 0.3 + 0.25, "la"))
             .collect();
-        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1);
+        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1, None);
         assert!(c.len() >= 3);
         assert!(c.iter().all(|c| c.end - c.start <= 2.0 + 1e-9), "{c:?}");
     }
@@ -692,7 +761,7 @@ mod tests {
                     ..Default::default()
                 },
             );
-            cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1)
+            cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1, None)
         };
         // No limit: as before 5i, one cue.
         assert_eq!(solo(&with(0)), vec!["a b c d e f g"]);
@@ -709,6 +778,61 @@ mod tests {
     }
 
     #[test]
+    fn translated_captions_are_cut_and_styled_as_the_translation() {
+        use crate::edit::{Case, Replace};
+        // Two sentences, the second after a cut (5..10 s cut out).
+        let w = [
+            word(0.0, 0.4, "Hola,"),
+            word(0.4, 0.8, "¿qué"),
+            word(0.8, 1.2, "tal?"),
+            word(10.5, 11.0, "Muy"),
+            word(11.0, 11.5, "bien."),
+        ];
+        let c = Captions {
+            translate: "en".into(),
+            ..Default::default()
+        };
+        let e = edit(&[(0.0, 5.0), (10.0, 40.0)], c.clone());
+        let words = || w.iter().map(|w| (0, w));
+        let s = sentences(&e, words(), 30, 1);
+        let texts: Vec<&str> = s.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, ["Hola, ¿qué tal?", "Muy bien."]);
+        assert_eq!((s[1].track, s[1].start), (0, 10.5));
+        let mut t = Translations::default();
+        t.insert("en", "Hola, ¿qué tal?", "Hi, how are you doing?");
+        assert_eq!(missing(&c, &s, &t), 1);
+        assert_eq!(missing(&Captions::default(), &s, &t), 0, "not translated");
+        // A sentence not translated yet is shown as said.
+        let got = cues(&e, &c, words(), 30, 1, Some(&t));
+        assert_eq!(solo(&got), ["Hi, how are you doing?", "Muy bien."]);
+        assert!((got[0].start, got[1].start) == (0.0, 5.5), "{got:?}");
+        assert!(
+            (got[0].end - 1.2).abs() < 1e-9,
+            "the first ends with its sentence"
+        );
+        t.insert("en", "Muy bien.", "Very good.");
+        assert_eq!(missing(&c, &s, &t), 0);
+        // Not asked for (no setting, or no translations given): the words as said.
+        let plain = solo(&cues(&e, &Captions::default(), words(), 30, 1, Some(&t)));
+        assert_eq!(plain, ["Hola, ¿qué tal?", "Muy bien."]);
+        assert_eq!(solo(&cues(&e, &c, words(), 30, 1, None)), plain);
+        // The text options and the word limit apply to the translated words.
+        let styled = Captions {
+            case: Case::Upper,
+            words: 2,
+            replace: vec![Replace {
+                from: "how are you".into(),
+                to: "sup".into(),
+            }],
+            ..c.clone()
+        };
+        assert_eq!(
+            solo(&cues(&e, &styled, words(), 30, 1, Some(&t))),
+            ["HI, SUP", "DOING?", "VERY GOOD."]
+        );
+    }
+
+    #[test]
     fn text_options_change_what_is_wrapped_and_a_phrase_is_one_word() {
         use crate::edit::{Case, Replace};
         let pair = |from: &str, to: &str| Replace {
@@ -722,7 +846,7 @@ mod tests {
             .collect();
         let with = |c: Captions| {
             let e = edit(&[(0.0, 40.0)], c);
-            solo(&cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1))
+            solo(&cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1, None))
         };
         let short = Captions {
             chars: 12,
@@ -744,7 +868,7 @@ mod tests {
         // One word at a time: the phrase is one caption, from when its first word is said.
         let one = {
             let e = edit(&[(0.0, 40.0)], Captions { words: 1, ..c });
-            cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1)
+            cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1, None)
         };
         assert_eq!(solo(&one).last().map(String::as_str), Some("NYC"));
         assert!((one.last().unwrap().start - 1.5).abs() < 1e-9, "{one:?}");
@@ -764,7 +888,10 @@ mod tests {
         // "sí" runs past the new cue's start, so it is carried on and counts as one of two.
         let two = [word(0.5, 0.9, "sí"), word(0.95, 1.2, "no")];
         let words = one.iter().map(|w| (0, w)).chain(two.iter().map(|w| (3, w)));
-        let got: Vec<_> = cues(&e, &own(&e), words, 30, 1).iter().map(parts).collect();
+        let got: Vec<_> = cues(&e, &own(&e), words, 30, 1, None)
+            .iter()
+            .map(parts)
+            .collect();
         assert_eq!(
             got,
             vec![
@@ -788,7 +915,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1);
+        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1, None);
         assert_eq!(c.len(), 100, "{c:?}");
         for (c, w) in c.iter().zip(&w) {
             assert!((c.start - w.start).abs() < 1e-9, "{c:?} for {w:?}");
@@ -808,7 +935,7 @@ mod tests {
             },
         );
         let (a, b) = (word(9.90, 9.94, "a"), word(9.95, 9.99, "b"));
-        let c = cues(&e, &own(&e), [(0, &a), (0, &b)], 30, 1);
+        let c = cues(&e, &own(&e), [(0, &a), (0, &b)], 30, 1, None);
         assert_eq!(solo(&c), vec!["a", "b"]);
         assert!(
             (c[1].start - 9.95).abs() < 1e-9 && (c[1].end - 10.0).abs() < 1e-9,
@@ -839,7 +966,10 @@ mod tests {
             word(1.0, 1.2, "ya"),
         ];
         let words = one.iter().map(|w| (0, w)).chain(two.iter().map(|w| (3, w)));
-        let got: Vec<_> = cues(&e, &own(&e), words, 30, 1).iter().map(parts).collect();
+        let got: Vec<_> = cues(&e, &own(&e), words, 30, 1, None)
+            .iter()
+            .map(parts)
+            .collect();
         assert_eq!(
             got,
             vec![
@@ -855,7 +985,7 @@ mod tests {
         // "sí", one speaker after the other, not at once.
         let e = edit(&[(0.0, 40.0)], Captions::default());
         let (a, b) = (word(19.9, 20.0, "sí"), word(20.0, 20.2, "no"));
-        let c = cues(&e, &own(&e), [(0, &a), (0, &b)], 30, 1);
+        let c = cues(&e, &own(&e), [(0, &a), (0, &b)], 30, 1, None);
         assert_eq!(solo(&c), vec!["sí", "no"]);
         assert!((c[0].end - c[0].start - READABLE_S).abs() < 1e-9, "{c:?}");
         assert!((c[1].start - c[0].end).abs() < 1e-9);
@@ -867,7 +997,7 @@ mod tests {
         // Kept 0-10 s; a last word at 9.8-9.9 would be held to 10.6.
         let e = edit(&[(0.0, 10.0)], Captions::default());
         let w = word(9.8, 9.9, "fin");
-        let c = cues(&e, &own(&e), [(0, &w)], 30, 1);
+        let c = cues(&e, &own(&e), [(0, &w)], 30, 1, None);
         assert!((c[0].end - 10.0).abs() < 1e-9, "{c:?}");
     }
 
@@ -880,7 +1010,7 @@ mod tests {
             word(20.0, 20.4, "no"),
             word(25.0, 25.1, "ya"),
         ];
-        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1);
+        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1, None);
         assert_eq!(c.len(), 3);
         for p in c.windows(2) {
             assert!(p[0].end <= p[1].start + 1e-9, "{c:?}");
@@ -911,7 +1041,7 @@ mod tests {
         // "sí" starts before "qué" ends: at once. "vale" comes after a pause of speaker 2's own.
         let two = [word(10.6, 10.9, "sí"), word(12.0, 12.3, "vale")];
         let words = one.iter().map(|w| (0, w)).chain(two.iter().map(|w| (3, w)));
-        let c = cues(&e, &own(&e), words, 30, 1);
+        let c = cues(&e, &own(&e), words, 30, 1, None);
         assert_eq!(c.len(), 2, "{c:?}");
         assert_eq!(
             parts(&c[0]),
@@ -931,7 +1061,7 @@ mod tests {
         );
         // One after the other on two tracks is not at once: a cue each.
         let (a, b) = (word(20.0, 20.4, "ya"), word(20.5, 20.8, "no"));
-        let c = cues(&e, &own(&e), [(0, &a), (3, &b)], 30, 1);
+        let c = cues(&e, &own(&e), [(0, &a), (3, &b)], 30, 1, None);
         assert_eq!(c.len(), 2, "{c:?}");
     }
 
@@ -952,7 +1082,7 @@ mod tests {
         // "sí" runs to 1.3 s, past the new cue's start at 1.2 s.
         let two = [word(0.5, 1.3, "sí"), word(1.4, 1.7, "claro")];
         let words = one.iter().map(|w| (0, w)).chain(two.iter().map(|w| (3, w)));
-        let c = cues(&e, &own(&e), words, 30, 1);
+        let c = cues(&e, &own(&e), words, 30, 1, None);
         let got: Vec<_> = c.iter().map(parts).collect();
         assert_eq!(
             got,
@@ -986,7 +1116,7 @@ mod tests {
             .map(|k| word(k as f64 * 0.3 + 0.15, k as f64 * 0.3 + 0.4, "sí"))
             .collect();
         let words = one.iter().map(|w| (0, w)).chain(two.iter().map(|w| (3, w)));
-        let c = cues(&e, &own(&e), words, 30, 1);
+        let c = cues(&e, &own(&e), words, 30, 1, None);
         assert!(c.len() >= 3, "{c:?}");
         for cue in &c {
             assert!(cue.end - cue.start <= 2.0 + 1e-9, "{c:?}");
@@ -1010,7 +1140,7 @@ mod tests {
             end: 10.0,
         }];
         let (a, b) = (word(9.6, 9.7, "a"), word(9.75, 9.9, "b"));
-        let c = cues(&e, &own(&e), [(0, &a), (3, &b)], 30, 1);
+        let c = cues(&e, &own(&e), [(0, &a), (3, &b)], 30, 1, None);
         assert_eq!(c.len(), 1, "{c:?}");
         assert_eq!(parts(&c[0]), vec![(1, "a".into()), (2, "b".into())]);
         assert!((c[0].end - 10.0).abs() < 1e-9, "{c:?}");
@@ -1034,7 +1164,7 @@ mod tests {
             word(5.45, 5.8, "mira"),
             word(8.0, 8.3, "vale"), // speaker 1 alone again, after a pause
         ];
-        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1);
+        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1, None);
         let got: Vec<_> = c.iter().map(parts).collect();
         assert_eq!(
             got,
@@ -1065,11 +1195,11 @@ mod tests {
             word(1.7, 1.8, "dos\r\nlíneas"),
             word(1.9, 2.0, "a<b"),
         ];
-        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1);
+        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1, None);
         assert_eq!(parts(&c[0]), vec![(0, "hey vale dos líneas ab".into())]);
         let text = write(&c, &e, &own(&e));
         assert!(!text.contains("<font"), "no speaker, no colour");
-        assert!(cues(&e, &own(&e), [], 30, 1).is_empty());
+        assert!(cues(&e, &own(&e), [], 30, 1, None).is_empty());
         assert_eq!(stamp(3723.4567), "01:02:03,457");
     }
 
@@ -1086,7 +1216,7 @@ mod tests {
                 },
             );
             write(
-                &cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1),
+                &cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1, None),
                 &e,
                 &own(&e),
             )
@@ -1112,7 +1242,7 @@ mod tests {
         );
         e.speakers = Speakers::default();
         let text = write(
-            &cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1),
+            &cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1, None),
             &e,
             &own(&e),
         );
@@ -1129,7 +1259,7 @@ mod tests {
                 e.speakers = Speakers::default();
             }
             write(
-                &cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1),
+                &cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1, None),
                 &e,
                 &own(&e),
             )

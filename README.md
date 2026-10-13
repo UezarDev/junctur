@@ -103,7 +103,13 @@ change what every caption output shows (the SRT, Send to Resolve, the preview), 
 `replace="gonna>going to|um>"` finds whole words or phrases, case aside, and shows the text after `>`
 (nothing removes them), then `case=upper|lower|title`, `punctuation=off`, and `censor="word|..."`
 masks whole words or phrases from the user's own list, `f**k`, or `****` with `censor_style=whole`.
-Captions are
+`translate=fr` (any of the 100 languages of the local translation model, by code) shows the captions
+in another language, translated on this machine a sentence at a time and spread over the time it was
+said, so timing, speakers and cuts carry over; the text options then apply to the translated words. The
+model (MIT, about 630 MB) is downloaded on first use, translations are kept in the project folder
+(`translations.json`), and `export --srt` and `render` translate what is missing first (about a
+quarter of a second a sentence on the CPU); the app translates in the background, and its export and
+"Send to Resolve" wait until every sentence is done. Captions are
 optional: with `captions on`, `render` also writes the file beside the video.
 Checked in DaVinci Resolve (File > Import > Subtitle keeps the colours); Premiere Pro is unverified and
 likely shows its default caption style. SRT carries no size or position.
@@ -199,7 +205,8 @@ title bar) writes the same file:
 `captions` holds the caption defaults: what a recording whose edit list has no `captions` line of its own
 cuts its captions with (`on`, `chars` per line, `lines` per speaker, `words` per speaker with 0 for no
 limit, `seconds` at most, and the text options: `case`, `punctuation`, `censor` as a list of
-words, `censorStyle`, `replace` as a list of `{"from": .., "to": ..}`), in the app and in
+words, `censorStyle`, `replace` as a list of `{"from": .., "to": ..}`, and `translate`, a language code
+or empty), in the app and in
 `render` and `export --srt`. A key left out keeps its built-in value.
 
 `--model` on the command line wins over the config file. A config file that does not parse, names an

@@ -22,6 +22,7 @@ use crate::project::{self, ProjectStatus, RecordingInfo};
 use crate::recent::{self, Recent};
 use crate::settings::{self, Settings, SettingsView};
 use crate::state::PlayerState;
+use crate::translation::{Run, Translation};
 use crate::voices::VoiceView;
 use crate::waves::{self, WavesState};
 use junctur_core::pipeline::StageState;
@@ -34,6 +35,8 @@ pub struct App {
     pub analysis: Analysis,
     /// The open recording's waveforms (2g).
     pub waves: waves::Store,
+    /// The caption translation running in the background (5k).
+    pub translation: Translation,
 }
 
 impl App {
@@ -409,7 +412,8 @@ pub async fn recolor_speaker(app: State<'_, App>, id: u32, color: String) -> Res
 
 /// Sets the caption settings: export and preview switches, bold, italic and underline, how cues are
 /// cut (with 5i's words per caption), 5g's look for Resolve's Text+ and the preview, and 5j's text
-/// options (case, punctuation, censoring, find and replace), which change only what captions show.
+/// options (case, punctuation, censoring, find and replace), which change only what captions show,
+/// and 5k's `translate`, the language they are shown in ([`translate_captions`] makes it).
 #[tauri::command]
 pub async fn set_captions(app: State<'_, App>, captions: Captions) -> Result<(), String> {
     let e = app.editable()?;
@@ -451,6 +455,65 @@ pub async fn send_to_resolve(app: State<'_, App>) -> Result<Sent, String> {
     tauri::async_runtime::spawn_blocking(move || core.send_to_resolve())
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// Translates the open recording's captions in the background (5k), into the language its caption
+/// settings name: the sentences no translation is kept for yet. Progress comes as `translation`
+/// events. Gathering the sentences reads the whole transcript, so off the async runtime.
+#[tauri::command]
+pub async fn translate_captions(app: State<'_, App>, handle: AppHandle) -> Result<Run, String> {
+    let core = app.core()?;
+    let job = tauri::async_runtime::spawn_blocking(move || core.translation_job())
+        .await
+        .map_err(|e| e.to_string())??;
+    Ok(app.translation.start(handle, job))
+}
+
+/// Stops the caption translation after the sentences in hand; those done are kept.
+#[tauri::command]
+pub async fn cancel_translation(app: State<'_, App>) -> Result<(), String> {
+    app.translation.cancel();
+    Ok(())
+}
+
+/// The latest translation run, and how much of the open recording's captions is left to
+/// translate.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranslationStatus {
+    pub run: Run,
+    pub missing: usize,
+    pub sentences: usize,
+}
+
+#[tauri::command]
+pub async fn translation_status(app: State<'_, App>) -> Result<TranslationStatus, String> {
+    let core = app.core()?;
+    let (missing, sentences) = tauri::async_runtime::spawn_blocking(move || core.untranslated())
+        .await
+        .map_err(|e| e.to_string())??;
+    Ok(TranslationStatus {
+        run: app.translation.run(),
+        missing,
+        sentences,
+    })
+}
+
+#[derive(Serialize)]
+pub struct Language {
+    pub code: &'static str,
+    pub name: &'static str,
+}
+
+/// The languages captions can be translated into (5k), by English name.
+#[tauri::command]
+pub async fn translation_languages() -> Vec<Language> {
+    let mut l: Vec<Language> = junctur_core::translate::LANGUAGES
+        .iter()
+        .map(|&(code, name)| Language { code, name })
+        .collect();
+    l.sort_by_key(|l| l.name);
+    l
 }
 
 /// Puts the Junctur script into Resolve's Scripts folder (5g) and says where.

@@ -171,9 +171,30 @@ fn write_captions(
 ) -> Result<(), String> {
     let t = transcribe::load(&p.dir)
         .ok_or("captions need a transcript: run `junctur analyze` on this file first")?;
-    let files = export::write_srt(e, c, &t, out).map_err(|e| e.to_string())?;
+    let tr = translations(p, e, c, &t)?;
+    let files = export::write_srt(e, c, &t, &tr, out).map_err(|e| e.to_string())?;
     print_captions(out, &files);
     Ok(())
+}
+
+/// The translations captions set to be translated need (5k), made first where missing, with a
+/// progress line; the model is fetched on first use.
+fn translations(
+    p: &Project,
+    e: &EditList,
+    c: &Captions,
+    t: &transcribe::Transcript,
+) -> Result<junctur_core::translate::Translations, String> {
+    let mut last = None;
+    export::translate_captions(e, c, t, &p.dir, &p.cache_dir, &mut |done, todo| {
+        // A line per tenth, not per sentence.
+        let tenth = (done * 10).checked_div(todo);
+        if todo > 0 && tenth != last {
+            last = tenth;
+            eprintln!("junctur: translating captions: {done} of {todo} sentences");
+        }
+    })
+    .map_err(|e| e.to_string())
 }
 
 fn print_captions(out: &std::path::Path, files: &export::CaptionFiles) {
@@ -199,7 +220,8 @@ pub fn render(a: Args) -> Result<(), String> {
         junctur_core::output::refuse_source(&e.source, &srt).map_err(|e| e.to_string())?;
         let t = transcribe::load(&p.dir)
             .ok_or("captions are on but there is no transcript: run `junctur analyze` first")?;
-        Some((srt, t))
+        let tr = translations(&p, &e, &c, &t)?;
+        Some((srt, t, tr))
     } else {
         None
     };
@@ -229,8 +251,8 @@ pub fn render(a: Args) -> Result<(), String> {
         r.seconds
     );
     // Captions are an optional toggle in the edit list; on, they go beside the video.
-    if let Some((srt, t)) = captions {
-        let files = export::write_srt(&e, &c, &t, &srt).map_err(|e| e.to_string())?;
+    if let Some((srt, t, tr)) = captions {
+        let files = export::write_srt(&e, &c, &t, &tr, &srt).map_err(|e| e.to_string())?;
         print_captions(&srt, &files);
     }
     Ok(())

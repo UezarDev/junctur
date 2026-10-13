@@ -1,10 +1,11 @@
 <script lang="ts">
-  // The caption text options (5j), `CaptionRules`' `text` part: case, punctuation, censored words and
-  // find-and-replace pairs. A component of its own because the two lists are edited as text, one
-  // entry per line, with their own parsing. They change only what the captions show (the SRT, Send to
+  // The caption text options (5j), `CaptionRules`' `text` part: the language captions are shown in
+  // (5k: translated on this machine; the Captions panel runs the translation), case, punctuation,
+  // censored words and find-and-replace pairs, which apply to the translated words. A component of
+  // its own because the two lists are edited as text, one entry per line, with their own parsing. They change only what the captions show (the SRT, Send to
   // Resolve, the preview), never the transcript. A list commits when the box loses focus; a line
   // the engine would refuse (core edit/caption_text.rs) is reported and the box snaps back.
-  import type { CaptionCase, Captions, CensorStyle } from "./api";
+  import { translationLanguages, type CaptionCase, type Captions, type CensorStyle, type Language } from "./api";
 
   let {
     value,
@@ -17,6 +18,11 @@
     onChange: (c: Captions) => void;
     onError: (message: string) => void;
   } = $props();
+
+  let languages = $state<Language[]>([]);
+  translationLanguages()
+    .then((l) => (languages = l))
+    .catch(() => (languages = []));
 
   const CASES: { key: CaptionCase; label: string }[] = [
     { key: "asSpoken", label: "As spoken" },
@@ -71,6 +77,20 @@
     pairs.map((p) => `${p.from} > ${p.to}`).join("\n");
 </script>
 
+<label class="field" title="Captions in another language, translated on this machine; the transcript stays as spoken">
+  <span>Translate to</span>
+  <select
+    value={value.translate}
+    {disabled}
+    onchange={(e) => onChange({ ...value, translate: (e.currentTarget as HTMLSelectElement).value })}
+  >
+    <option value="">As spoken (no translation)</option>
+    {#if value.translate && !languages.some((l) => l.code === value.translate)}
+      <option value={value.translate}>{value.translate}</option>
+    {/if}
+    {#each languages as l (l.code)}<option value={l.code}>{l.name}</option>{/each}
+  </select>
+</label>
 <label class="field">
   <span>Case</span>
   <select

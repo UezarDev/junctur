@@ -14,7 +14,7 @@ pub const HELP: &str =
      [position=<% from bottom>] [outline=off] [outline_width=<1-10>] [outline_color=#RRGGBB] \
      [layout=stacked|side|topBottom] [protagonist=\"<speaker>\"] [template=\"<Resolve title>\"] \
      [words=<per speaker>] [case=upper|lower|title] [punctuation=off] [censor=\"word|..\"] \
-     [censor_style=whole] [replace=\"from>to|..\"]";
+     [censor_style=whole] [replace=\"from>to|..\"] [translate=<language code>]";
 
 pub fn write(c: &Captions) -> String {
     let d = Captions::default();
@@ -94,6 +94,11 @@ pub fn write(c: &Captions) -> String {
         !pairs.is_empty(),
         format!("replace=\"{}\"", pairs.join(&ENTRY_SEP.to_string())),
     );
+    // 5k's translation only when set.
+    put(
+        !c.translate.is_empty(),
+        format!("translate={}", c.translate),
+    );
     out
 }
 
@@ -162,6 +167,7 @@ pub fn parse(rest: &str) -> Result<Captions, String> {
                     })
                     .collect::<Result<_, String>>()?;
             }
+            "translate" => c.translate = v.to_string(),
             _ => return Err("unknown caption setting".into()),
         }
     }
@@ -300,6 +306,20 @@ mod tests {
         ] {
             assert!(parse(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn the_translation_is_written_only_when_set() {
+        let c = Captions {
+            on: true,
+            translate: "fr".into(),
+            ..Default::default()
+        };
+        let line = write(&c);
+        assert_eq!(line, "captions on chars=42 lines=2 seconds=6 translate=fr");
+        assert_eq!(parse(line.strip_prefix("captions ").unwrap()).unwrap(), c);
+        assert_eq!(parse("on translate=").unwrap().translate, "");
+        assert!(parse("on translate=xx").is_err());
     }
 
     #[test]

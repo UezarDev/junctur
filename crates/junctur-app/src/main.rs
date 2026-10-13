@@ -19,6 +19,7 @@ mod settings;
 mod state;
 mod testmode;
 mod trace;
+mod translation;
 #[cfg(windows)]
 mod video;
 mod voices;
@@ -87,6 +88,7 @@ fn main() {
                 player: Mutex::new(player),
                 analysis: Default::default(),
                 waves: Default::default(),
+                translation: Default::default(),
             });
             if let Some(secs) = test {
                 testmode::arm(app.handle().clone(), secs, trace);
@@ -130,6 +132,10 @@ fn main() {
             commands::export_captions,
             commands::caption_cues,
             commands::send_to_resolve,
+            commands::translate_captions,
+            commands::cancel_translation,
+            commands::translation_status,
+            commands::translation_languages,
             commands::install_resolve_script,
             commands::voices,
             commands::enroll_voice,

@@ -29,6 +29,8 @@ use junctur_core::export::layout::{self, Placed};
 use junctur_core::export::srt;
 use junctur_core::export::{self, CaptionFiles};
 use junctur_core::pipeline::{self, Found};
+use junctur_core::transcribe;
+use junctur_core::translate::Translations;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
@@ -39,6 +41,7 @@ use crate::mixer::{self, Mixer, MixerState};
 use crate::mpv::{self, Event, Events, Mpv};
 use crate::state::{Change, PlayerState, OBSERVED};
 use crate::trace::Trace;
+use crate::translation;
 use crate::voices;
 
 pub const STATE_EVENT: &str = "player-state";
@@ -662,8 +665,9 @@ impl Core {
     }
 
     /// Writes the captions of the list in play to `out` as one SRT (5a, 5e), on the edited timeline
-    /// at the frame rate the player rounds to. Read and written outside the locks once the words
-    /// and the list are in hand.
+    /// at the frame rate the player rounds to; translated (5k) when set, refused while the
+    /// translation is not all made. Read and written outside the locks once the words and the
+    /// list are in hand.
     pub fn export_captions(&self, out: &Path) -> Result<CaptionFiles, String> {
         let (list, captions, words, fps) = self.caption_source()?;
         let tracked: Vec<_> = words
@@ -672,30 +676,98 @@ impl Core {
             .copied()
             .zip(words.list.iter())
             .collect();
-        export::write_captions(&list, &captions, &tracked, fps.num, fps.den, out)
+        let tr = self.translations();
+        export::write_captions(&list, &captions, &tracked, fps.num, fps.den, &tr, out)
             .map_err(|e| format!("writing {}: {e}", out.display()))
     }
 
     /// The captions of the list in play as the SRT export cuts them (5d's preview over the
     /// picture), each speaker placed as the Resolve send places them (5g): the same cues on the same
-    /// output timeline, so the preview shows what Resolve will, cue for cue.
+    /// output timeline, so the preview shows what Resolve will, cue for cue. Translated captions
+    /// (5k) show what is translated so far, the rest as said.
     pub fn caption_cues(&self) -> Result<Vec<Placed>, String> {
         let (list, captions, words, fps) = self.caption_source()?;
         let tracked = words.tracks.iter().copied().zip(words.list.iter());
-        let cues = srt::cues(&list, &captions, tracked, fps.num, fps.den);
+        let tr = self.translations();
+        let cues = srt::cues(&list, &captions, tracked, fps.num, fps.den, Some(&tr));
         Ok(layout::place(&cues, &list, &captions))
     }
 
     /// Sends the captions of the list in play into DaVinci Resolve as Text+ clips (5g): the same
     /// placed cues the preview draws, to the Junctur script running in Resolve. Blocks until Resolve
     /// answers (minutes for a long recording), so the command runs it off the async runtime.
+    /// Refused, like the export, while translated captions are not all translated (5k).
     pub fn send_to_resolve(&self) -> Result<junctur_core::resolve::Sent, String> {
         let (list, captions, words, fps) = self.caption_source()?;
         captions.check()?;
-        let tracked = words.tracks.iter().copied().zip(words.list.iter());
-        let cues = srt::cues(&list, &captions, tracked, fps.num, fps.den);
+        let tracked: Vec<_> = words
+            .tracks
+            .iter()
+            .copied()
+            .zip(words.list.iter())
+            .collect();
+        let tr = self.translations();
+        export::untranslated(&list, &captions, &tracked, fps.num, fps.den, &tr)
+            .map_err(|e| e.to_string())?;
+        let cues = srt::cues(
+            &list,
+            &captions,
+            tracked.iter().copied(),
+            fps.num,
+            fps.den,
+            Some(&tr),
+        );
         let placed = layout::place(&cues, &list, &captions);
         junctur_core::resolve::send(&placed, &list, &captions)
+    }
+
+    /// The open recording's translations (5k), read from its project folder each time: the
+    /// background run writes them as it goes.
+    fn translations(&self) -> Translations {
+        let dir = lock(&self.editor).project_dir().map(PathBuf::from);
+        dir.map_or_else(Translations::default, |d| Translations::load(&d))
+    }
+
+    /// What translating the captions of the list in play needs (5k): its sentences as said, the
+    /// transcript's segments (the language each was said in) and where to keep the result.
+    /// While the recording transcribes, the sentences so far.
+    pub fn translation_job(&self) -> Result<translation::Job, String> {
+        let (list, captions, words, fps) = self.caption_source()?;
+        if captions.translate.is_empty() {
+            return Err("the captions are not set to be translated (Translate to)".into());
+        }
+        let project = lock(&self.editor)
+            .project_dir()
+            .map(PathBuf::from)
+            .ok_or("no project for this recording")?;
+        let file = self.file().ok_or("no recording open")?;
+        let tracked = words.tracks.iter().copied().zip(words.list.iter());
+        let sentences = srt::sentences(&list, tracked, fps.num, fps.den);
+        let segments = transcribe::load(&project)
+            .map(|t| t.segments)
+            .or_else(|| transcribe::so_far(&project))
+            .unwrap_or_default();
+        Ok(translation::Job {
+            file,
+            to: captions.translate,
+            project,
+            cache_dir: junctur_core::cache::default_dir(),
+            sentences,
+            segments,
+        })
+    }
+
+    /// How many of the list in play's caption sentences have no translation yet, of how many
+    /// (5k); `(0, 0)` when its captions are not translated.
+    pub fn untranslated(&self) -> Result<(usize, usize), String> {
+        let (list, captions, words, fps) = self.caption_source()?;
+        if captions.translate.is_empty() {
+            return Ok((0, 0));
+        }
+        let tracked = words.tracks.iter().copied().zip(words.list.iter());
+        let sentences = srt::sentences(&list, tracked, fps.num, fps.den);
+        let missing = srt::missing(&captions, &sentences, &self.translations());
+        Ok((missing, sentences.len()))
     }
 
     /// What a caption file is cut from: the list in play, its caption settings (its own, else the

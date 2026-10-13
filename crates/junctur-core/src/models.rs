@@ -77,6 +77,32 @@ pub const WHISPER_LARGE_V3_Q5: Model = Model {
     license: "MIT",
 };
 
+/// M2M100 418M (MIT, Meta), the caption translation model (5k): one many-to-many model for 100
+/// languages. Xenova's ONNX export with its weights quantised to 8 bits, 288 MB of encoder and
+/// 344 MB of decoder (the decoder with and without its key/value cache merged in one file), pinned
+/// to a commit; the full-precision files are 1.1 and 1.3 GB.
+pub const TRANSLATE_ENCODER: Model = Model {
+    file: "m2m100_418m_encoder_int8.onnx",
+    url: "https://huggingface.co/Xenova/m2m100_418M/resolve/9c374f0b7aca709787cea97b047bfbbd1559d177/onnx/encoder_model_quantized.onnx",
+    sha256: "13a94e354a9140764eb81102d77d3ec6952d796e6f113c651eeb3c3443da0386",
+    license: "MIT",
+};
+
+pub const TRANSLATE_DECODER: Model = Model {
+    file: "m2m100_418m_decoder_int8.onnx",
+    url: "https://huggingface.co/Xenova/m2m100_418M/resolve/9c374f0b7aca709787cea97b047bfbbd1559d177/onnx/decoder_model_merged_quantized.onnx",
+    sha256: "007654bcabb6cea6fd3bde34ce933137b431330b3755781145d7b6906270b45a",
+    license: "MIT",
+};
+
+/// Its SentencePiece vocabulary as a Hugging Face `tokenizer.json` (8 MB), from the same commit.
+pub const TRANSLATE_TOKENIZER: Model = Model {
+    file: "m2m100_418m_tokenizer.json",
+    url: "https://huggingface.co/Xenova/m2m100_418M/resolve/9c374f0b7aca709787cea97b047bfbbd1559d177/tokenizer.json",
+    sha256: "03d9e111731c2d71f39a2c2a88499743e4c251385d07f0384b4349a23ba54363",
+    license: "MIT",
+};
+
 pub fn dir(cache_dir: &Path) -> PathBuf {
     cache_dir.join("models")
 }

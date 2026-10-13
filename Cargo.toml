@@ -16,3 +16,6 @@ sha2 = "0.11"
 whisper-rs = "0.16"
 same-file = "1.0"
 bytemuck = "1.25"
+# The translation model's tokenizer (5k); no default features: no download client, no progress bar,
+# the C++ suffix array is only for training, and the pure-Rust regex engine rather than a C one.
+tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }

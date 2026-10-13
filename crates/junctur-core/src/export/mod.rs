@@ -1,17 +1,20 @@
 //! Turning an edit list into something another program opens: an FCPXML timeline and SRTs of
 //! captions (5a; overlapping speakers stacked in one caption since 5e), both for Resolve; the
-//! rendered video is the smart-render phase.
+//! rendered video is the smart-render phase. Captions may be shown translated (5k,
+//! [`translated`]).
 
 pub mod caption_text;
 pub mod fcpxml;
 pub mod layout;
 pub mod srt;
+mod translated;
 
 use std::path::{Path, PathBuf};
 
 use crate::edit::{Captions, EditList};
 use crate::transcribe::{Transcript, Word};
-use crate::{ffmpeg, output, Result};
+use crate::translate::Translations;
+use crate::{ffmpeg, output, Error, Result};
 
 /// Write `edit` as an FCPXML timeline to `out`, probing the source for its frame rate. Any `out`
 /// but the source itself is replaced.
@@ -45,11 +48,13 @@ pub struct CaptionFiles {
 /// each speaker's lines in their colour, people talking at once stacked in one cue, cut by the
 /// caption settings `captions` (resolved by the caller: the list's own, else the user's defaults,
 /// 2i). The frame rate is the source's, as for the FCPXML, so cues land on the frames the render and
-/// the timeline have. Any `out` but the source itself is replaced.
+/// the timeline have. Translated captions (5k) take their translations from `translations`. Any
+/// `out` but the source itself is replaced.
 pub fn write_srt(
     edit: &EditList,
     captions: &Captions,
     transcript: &Transcript,
+    translations: &Translations,
     out: &Path,
 ) -> Result<CaptionFiles> {
     output::refuse_source(&edit.source, out)?;
@@ -59,7 +64,40 @@ pub fn write_srt(
         .iter()
         .flat_map(|s| s.words.iter().map(move |w| (s.track, w)))
         .collect();
-    write_captions(edit, captions, &words, num, den, out)
+    write_captions(edit, captions, &words, num, den, translations, out)
+}
+
+/// Makes the translations `captions` need (5k) for `edit`'s captions from `transcript`, kept in
+/// the `project` folder, the model fetched into `cache_dir` on first use; `progress` hears
+/// `(done, to do)` sentences. Nothing to do (captions not translated, or every sentence done)
+/// returns at once. Returns the project's translations, for [`write_srt`].
+pub fn translate_captions(
+    edit: &EditList,
+    captions: &Captions,
+    transcript: &Transcript,
+    project: &Path,
+    cache_dir: &Path,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Result<Translations> {
+    if !captions.translate.is_empty() {
+        let (num, den) =
+            ffmpeg::probe_video(&edit.source)?.map_or((30, 1), |v| (v.fps_num, v.fps_den));
+        let words = transcript
+            .segments
+            .iter()
+            .flat_map(|s| s.words.iter().map(move |w| (s.track, w)));
+        let sentences = srt::sentences(edit, words, num, den);
+        crate::translate::run(
+            project,
+            cache_dir,
+            &captions.translate,
+            &sentences,
+            &transcript.segments,
+            progress,
+            &std::sync::atomic::AtomicBool::new(false),
+        )?;
+    }
+    Ok(Translations::load(project))
 }
 
 /// [`write_srt`] from words already in hand (the app holds them) at a known frame rate.
@@ -69,15 +107,48 @@ pub fn write_captions(
     words: &[(usize, &Word)],
     num: u64,
     den: u64,
+    translations: &Translations,
     out: &Path,
 ) -> Result<CaptionFiles> {
     output::refuse_source(&edit.source, out)?;
-    let cues = srt::cues(edit, captions, words.iter().copied(), num, den);
+    untranslated(edit, captions, words, num, den, translations)?;
+    let cues = srt::cues(
+        edit,
+        captions,
+        words.iter().copied(),
+        num,
+        den,
+        Some(translations),
+    );
     std::fs::write(out, srt::write(&cues, edit, captions))?;
     Ok(CaptionFiles {
         cues: cues.len(),
         stale: stale_files(out),
     })
+}
+
+/// Refuses captions to be translated whose translation is not all made yet (5k): a file or a
+/// send with some sentences in the spoken language would look finished and not be. The preview
+/// shows what there is instead.
+pub fn untranslated(
+    edit: &EditList,
+    captions: &Captions,
+    words: &[(usize, &Word)],
+    num: u64,
+    den: u64,
+    translations: &Translations,
+) -> Result<()> {
+    if captions.translate.is_empty() {
+        return Ok(());
+    }
+    let sentences = srt::sentences(edit, words.iter().copied(), num, den);
+    match srt::missing(captions, &sentences, translations) {
+        0 => Ok(()),
+        n => Err(Error::Edit(format!(
+            "{n} of {} caption sentences are not translated yet: translate the captions first",
+            sentences.len()
+        ))),
+    }
 }
 
 /// `<stem> (…).srt` files beside `out`.

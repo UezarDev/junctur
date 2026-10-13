@@ -5,7 +5,8 @@
 //! position and outline reach Resolve only as Text+ clips sent through its scripting API (5g), so
 //! those fields drive that and the preview and the SRT ignores them, as it does the overlap layout
 //! and the protagonist (5g). The text options (5j: case, punctuation, censoring, find and replace)
-//! change the words every output shows, the SRT included, never the transcript.
+//! and the translation (5k) change the words every output shows, the SRT included, never the
+//! transcript.
 //!
 //! Also the two switches (5d): export (`on`: a render writes the caption file) and the preview over
 //! the picture in the editor, which are separate so captions can be watched without being written.
@@ -72,6 +73,10 @@ pub struct Captions {
     pub censor_style: CensorStyle,
     /// Find and replace, applied before case and censoring.
     pub replace: Vec<Replace>,
+    /// The language captions are shown in (5k, [`crate::translate`]), a code of
+    /// [`crate::translate::LANGUAGES`]; empty (the default) for the language spoken. The text
+    /// options above apply to the translated words.
+    pub translate: String,
 }
 
 /// Where the captions of people talking at once go (5g, Uezar: "stacked (up down) or sideways
@@ -133,6 +138,7 @@ impl Default for Captions {
             censor: Vec::new(),
             censor_style: CensorStyle::Middle,
             replace: Vec::new(),
+            translate: String::new(),
         }
     }
 }
@@ -217,6 +223,12 @@ impl Captions {
             if s.contains('"') || s.chars().any(char::is_control) {
                 return Err(format!("the {what} name cannot hold quotes or line breaks"));
             }
+        }
+        if !self.translate.is_empty() && !crate::translate::known(&self.translate) {
+            return Err(format!(
+                "captions cannot be translated into {:?}",
+                self.translate
+            ));
         }
         caption_text::check(&self.censor, &self.replace)
     }
@@ -398,6 +410,13 @@ mod tests {
         assert_eq!(j.replace[0].to, "going to");
         assert!(j.check().is_ok());
         let bad: Captions = serde_json::from_str(r#"{"censor":["a|b"]}"#).unwrap();
+        assert!(bad.check().is_err());
+        // 5j's settings load 5k's captions untranslated; its own value reads back and is checked.
+        assert_eq!(j.translate, "");
+        let k: Captions = serde_json::from_str(r#"{"translate":"fr"}"#).unwrap();
+        assert_eq!(k.translate, "fr");
+        assert!(k.check().is_ok());
+        let bad: Captions = serde_json::from_str(r#"{"translate":"klingon"}"#).unwrap();
         assert!(bad.check().is_err());
     }
 }

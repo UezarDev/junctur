@@ -12,7 +12,7 @@
   // are listed with Forget, and the speakers can be analysed again from the audio (5c), the seconds
   // picked for each voice cutting the windows; that reads the recording again, so it is a button,
   // never automatic. The caption settings' own fields (export, preview, style, the text options of
-  // 5j, how cues are cut) are
+  // 5j and the translation of 5k, whose run `CaptionTranslation` shows, how cues are cut) are
   // `CaptionRules`, shared with Settings (2i); a list without
   // its own settings follows the user's defaults, and "Save as default" makes this recording's the
   // defaults.
@@ -20,6 +20,7 @@
   import * as api from "./api";
   import { captionFace, captionFont } from "./captionStyle";
   import CaptionRules from "./CaptionRules.svelte";
+  import CaptionTranslation from "./CaptionTranslation.svelte";
 
   let {
     edit,
@@ -222,9 +223,11 @@
 
       <h3>Caption text</h3>
       <CaptionRules value={captions} part="text" onChange={(c) => setCaptions(c)} {onError} />
+      <CaptionTranslation {captions} {source} {onError} />
       <p class="note">
         What the captions show, in the SRT, in Resolve and in the preview; the transcript keeps the words as
-        spoken, so clearing one brings them back. Find and replace runs first, then case, punctuation and censoring.
+        spoken, so clearing one brings them back. A translation is made first, a sentence at a time on this
+        machine, then find and replace, case, punctuation and censoring apply to the translated words.
       </p>
 
       <h3>How captions are cut</h3>
