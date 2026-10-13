@@ -47,7 +47,7 @@ impl Captions {
         }
         if !LINES.contains(&self.lines) {
             return Err(format!(
-                "lines per caption must be {} to {}",
+                "lines per speaker must be {} to {}",
                 LINES.start(),
                 LINES.end()
             ));

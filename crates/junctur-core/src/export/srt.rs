@@ -155,7 +155,8 @@ fn clean(text: &str) -> String {
 /// in the cue joins it only when talking at once with someone in it ([`Open::at_once`]); otherwise
 /// the cue closes, so plain turn-taking stays one speaker per cue as in 5a, and a stacked cue ends
 /// when the last of the overlapping speakers stops. An overlap longer than the limits allow becomes
-/// several stacked cues, each within them.
+/// several stacked cues, each within them; a speaker still mid-word when one closes keeps their
+/// last line on screen in the next ([`Open::after`]).
 pub fn cues<'a>(
     edit: &EditList,
     words: impl IntoIterator<Item = (usize, &'a Word)>,
@@ -188,8 +189,14 @@ pub fn cues<'a>(
         if open.as_mut().is_some_and(|o| o.take(&said, &text, c)) {
             continue;
         }
-        out.extend(open.take().map(Open::close));
-        open = Some(Open::new(&said, text));
+        open = Some(match open.take() {
+            Some(o) => {
+                let next = o.after(&said, text);
+                out.push(o.close());
+                next
+            }
+            None => Open::new(&said, text),
+        });
     }
     out.extend(open.map(Open::close));
     settle(&mut out, c.seconds, tl.total());
@@ -262,6 +269,36 @@ impl Open {
             start: w.start,
             end: w.end,
             parts: vec![OpenPart::new(w, text)],
+        }
+    }
+
+    /// The cue that follows this one, opened by `w` (showing as `text`), which this one refused.
+    /// Cues cannot overlap, so this one ends where the next starts; a speaker whose word on
+    /// another track is still running at `w`'s start (talking at once when a part ran out of
+    /// lines or the cue out of seconds) would vanish mid-word, so their last line is carried into
+    /// the new cue, and their next words go on after it. Parts keep their order.
+    fn after(&self, w: &Said, text: String) -> Open {
+        let speaker = w.speaker();
+        let mut fresh = Some(OpenPart::new(w, text));
+        let mut parts: Vec<OpenPart> = Vec::new();
+        for p in &self.parts {
+            if p.speaker == speaker {
+                parts.extend(fresh.take());
+            } else if p.track != w.track && w.start < p.end {
+                parts.push(OpenPart {
+                    speaker: p.speaker,
+                    lines: p.lines.last().cloned().into_iter().collect(),
+                    track: p.track,
+                    end: p.end,
+                    with: p.with.clone(),
+                });
+            }
+        }
+        parts.extend(fresh);
+        Open {
+            start: w.start,
+            end: parts.iter().map(|p| p.end).fold(w.end, f64::max),
+            parts,
         }
     }
 
@@ -350,7 +387,7 @@ fn wrap_onto(mut lines: Vec<String>, w: &str, chars: usize) -> Vec<String> {
 /// two at once), all within the edited timeline's `total` seconds. Each cue lasts at least
 /// [`READABLE_S`]: a next cue starting sooner (a quick turn) waits that long. Then
 /// each ends by the next one's start, held to [`MIN_S`] where there is room, never past the
-/// longest a cue may last. A cue pushed past the end of the timeline is dropped.
+/// longest a cue may last. A cue pushed past the end of the timeline joins the one before.
 fn settle(cues: &mut Vec<Cue>, longest: f64, total: f64) {
     cues.sort_by(|a, b| a.start.total_cmp(&b.start));
     for i in 0..cues.len() {
@@ -366,7 +403,24 @@ fn settle(cues: &mut Vec<Cue>, longest: f64, total: f64) {
         let want = c.end.max(c.start + MIN_S).min(c.start + longest);
         c.end = want.min(next).min(total);
     }
-    cues.retain(|c| c.end > c.start);
+    // A cue pushed past the end of the timeline has no time left; its words go into the cue
+    // before it rather than being lost (a part per speaker, as in any cue).
+    let mut kept: Vec<Cue> = Vec::with_capacity(cues.len());
+    for c in cues.drain(..) {
+        match kept.last_mut() {
+            Some(prev) if c.end <= c.start => {
+                for part in c.parts {
+                    match prev.parts.iter_mut().find(|p| p.speaker == part.speaker) {
+                        Some(p) => p.lines.extend(part.lines),
+                        None => prev.parts.push(part),
+                    }
+                }
+            }
+            _ if c.end <= c.start => {}
+            _ => kept.push(c),
+        }
+    }
+    *cues = kept;
 }
 
 /// `HH:MM:SS,mmm`.
@@ -651,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn line_limits_hold_per_speaker_and_a_long_overlap_splits() {
+    fn line_limits_hold_per_speaker_and_a_speaker_mid_word_stays_on_screen() {
         let e = two_tracks(Captions {
             chars: 12,
             lines: 1,
@@ -664,6 +718,7 @@ mod tests {
             word(0.8, 1.1, "tres"),
             word(1.2, 1.5, "cuatro"), // a second line for speaker 1: a new cue
         ];
+        // "sí" runs to 1.3 s, past the new cue's start at 1.2 s.
         let two = [word(0.5, 1.3, "sí"), word(1.4, 1.7, "claro")];
         let words = one.iter().map(|w| (0, w)).chain(two.iter().map(|w| (3, w)));
         let c = cues(&e, words, 30, 1);
@@ -672,12 +727,62 @@ mod tests {
             got,
             vec![
                 vec![(1, "uno dos tres".into()), (2, "sí".into())],
-                vec![(1, "cuatro".into()), (2, "claro".into())],
+                // Speaker 2's line is carried on, and their next word goes after it.
+                vec![(1, "cuatro".into()), (2, "sí claro".into())],
             ]
         );
         for p in c.windows(2) {
             assert!(p[0].end <= p[1].start + 1e-9, "{c:?}");
         }
+        // Speaker 2 is on screen without a gap from "sí" until "claro" ends.
+        assert!((c[0].end - c[1].start).abs() < 1e-9, "{c:?}");
+        assert!(c[1].end >= 1.7 - 1e-9, "{c:?}");
+    }
+
+    #[test]
+    fn a_long_overlap_splits_at_the_longest_cue_both_speakers_kept() {
+        let e = two_tracks(Captions {
+            chars: 80,
+            lines: 3,
+            seconds: 2.0,
+            ..Default::default()
+        });
+        // Both talk without a pause for 4.5 s, their words interleaved.
+        let one: Vec<Word> = (0..15)
+            .map(|k| word(k as f64 * 0.3, k as f64 * 0.3 + 0.25, "la"))
+            .collect();
+        let two: Vec<Word> = (0..15)
+            .map(|k| word(k as f64 * 0.3 + 0.15, k as f64 * 0.3 + 0.4, "sí"))
+            .collect();
+        let words = one.iter().map(|w| (0, w)).chain(two.iter().map(|w| (3, w)));
+        let c = cues(&e, words, 30, 1);
+        assert!(c.len() >= 3, "{c:?}");
+        for cue in &c {
+            assert!(cue.end - cue.start <= 2.0 + 1e-9, "{c:?}");
+            let who: Vec<u32> = cue.parts.iter().map(|p| p.speaker).collect();
+            assert_eq!(who, vec![1, 2], "{c:?}");
+        }
+        for p in c.windows(2) {
+            assert!(p[0].end <= p[1].start + 1e-9, "{c:?}");
+        }
+        // The last cue lasts until the last word ends.
+        assert!((c.last().unwrap().end - 4.6).abs() < 1e-9, "{c:?}");
+    }
+
+    #[test]
+    fn a_cue_pushed_past_the_end_joins_the_one_before() {
+        // Kept 0-10 s. "b" follows "a" on another track, not at once: its own cue, which waits
+        // for "a" to be readable and so would start at 10.1 s, past the end.
+        let mut e = two_tracks(Captions::default());
+        e.keep = vec![Range {
+            start: 0.0,
+            end: 10.0,
+        }];
+        let (a, b) = (word(9.6, 9.7, "a"), word(9.75, 9.9, "b"));
+        let c = cues(&e, [(0, &a), (3, &b)], 30, 1);
+        assert_eq!(c.len(), 1, "{c:?}");
+        assert_eq!(parts(&c[0]), vec![(1, "a".into()), (2, "b".into())]);
+        assert!((c[0].end - 10.0).abs() < 1e-9, "{c:?}");
     }
 
     #[test]
@@ -709,8 +814,13 @@ mod tests {
             ]
         );
         // Every word once.
-        let all: usize = c.iter().flat_map(|c| &c.parts).map(|p| p.lines.len()).sum();
-        assert_eq!(all, 4);
+        let all: usize = c
+            .iter()
+            .flat_map(|c| &c.parts)
+            .flat_map(|p| &p.lines)
+            .map(|l| l.split_whitespace().count())
+            .sum();
+        assert_eq!(all, w.len());
     }
 
     #[test]
