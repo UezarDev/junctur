@@ -204,7 +204,7 @@ pub fn transcribe(
         })
         .collect();
     let left = todo.iter().flatten().filter(|&&t| t).count();
-    let mut reached = Reached::new(sources, &work, &done, total);
+    let mut reached = Reached::new(sources, &groups, &todo);
     for (track, at) in reached.all() {
         reach(track, at);
     }
@@ -429,12 +429,13 @@ impl<'a> Progress<'a> {
 }
 
 /// How far each track's transcript reaches: the start of its earliest chunk not transcribed yet
-/// (everything before it is done, silence included), or `total` once its last chunk is. Not the
-/// latest chunk's end: a resumed run can have later chunks done than earlier ones, and a track that
-/// goes quiet at 80 % would never read more than 80 %. Not a chunk count: a chunk is 1 to 28 s.
+/// (everything before it is done, silence included), or [`f64::INFINITY`] once its last chunk is,
+/// meaning the end of the track: only the caller knows the track's own length, which can differ
+/// from the recording's. Not the latest chunk's end: a resumed run can have later chunks done than
+/// earlier ones, and a track that goes quiet at 80 % would never read more than 80 %. Not a chunk
+/// count: a chunk is 1 to 28 s.
 struct Reached {
     tracks: Vec<TrackChunks>,
-    total: f64,
 }
 
 /// One track's chunks for [`Reached`]: their starts in time order, whether each is done, and the
@@ -446,25 +447,22 @@ struct TrackChunks {
 }
 
 impl TrackChunks {
-    fn position(&self, total: f64) -> f64 {
-        self.chunks.get(self.first).map_or(total, |c| c.0)
+    fn position(&self) -> f64 {
+        self.chunks.get(self.first).map_or(f64::INFINITY, |c| c.0)
     }
 }
 
 impl Reached {
-    fn new(sources: &[Source], work: &[(usize, Chunk)], done: &[Segment], total: f64) -> Self {
+    /// From the run's own plan: `todo` says, per group's chunk, whether it still needs Whisper.
+    fn new(sources: &[Source], groups: &[Group], todo: &[Vec<bool>]) -> Self {
         let tracks = sources
             .iter()
             .map(|s| {
-                let mut chunks: Vec<(f64, bool)> = work
+                let mut chunks: Vec<(f64, bool)> = groups
                     .iter()
-                    .filter(|(t, _)| *t == s.track)
-                    .map(|(_, c)| {
-                        let finished = done
-                            .iter()
-                            .any(|d| d.track == s.track && d.start == c.start);
-                        (c.start, finished)
-                    })
+                    .zip(todo)
+                    .filter(|(g, _)| g.track == s.track)
+                    .flat_map(|(g, t)| g.chunks.iter().zip(t).map(|(c, &t)| (c.start, !t)))
                     .collect();
                 chunks.sort_by(|a, b| a.0.total_cmp(&b.0));
                 let first = chunks.iter().take_while(|c| c.1).count();
@@ -475,29 +473,28 @@ impl Reached {
                 }
             })
             .collect();
-        Self { tracks, total }
+        Self { tracks }
     }
 
     /// Every track and how far it reaches.
     fn all(&self) -> Vec<(usize, f64)> {
         self.tracks
             .iter()
-            .map(|t| (t.track, t.position(self.total)))
+            .map(|t| (t.track, t.position()))
             .collect()
     }
 
     /// Marks `track`'s chunk at `start` done; how far the track reaches now, when it moved.
     fn finish(&mut self, track: usize, start: f64) -> Option<f64> {
-        let total = self.total;
         let t = self.tracks.iter_mut().find(|t| t.track == track)?;
-        let before = t.position(total);
+        let before = t.position();
         if let Some(c) = t.chunks.iter_mut().find(|c| c.0 == start) {
             c.1 = true;
         }
         while t.chunks.get(t.first).is_some_and(|c| c.1) {
             t.first += 1;
         }
-        let now = t.position(total);
+        let now = t.position();
         (now != before).then_some(now)
     }
 }
@@ -633,14 +630,6 @@ mod tests {
             start,
             end: start + 10.0,
         };
-        let seg = |track, start| Segment {
-            track,
-            start,
-            end: start + 10.0,
-            lang: "es".into(),
-            model: "m".into(),
-            words: vec![],
-        };
         let source = |track| Source {
             track,
             regions: vec![],
@@ -653,18 +642,19 @@ mod tests {
             (0, chunk(200.0)),
             (1, chunk(30.0)),
         ];
-        let mut r = Reached::new(
-            &[source(0), source(1), source(2)],
-            &work,
-            &[seg(0, 50.0)],
-            300.0,
-        );
-        assert_eq!(r.all(), vec![(0, 0.0), (1, 30.0), (2, 300.0)]);
+        let groups = audio::groups(&work);
+        let todo: Vec<Vec<bool>> = groups
+            .iter()
+            .map(|g| g.chunks.iter().map(|c| c.start != 50.0).collect())
+            .collect();
+        let mut r = Reached::new(&[source(0), source(1), source(2)], &groups, &todo);
+        let end = f64::INFINITY;
+        assert_eq!(r.all(), vec![(0, 0.0), (1, 30.0), (2, end)]);
         // The first chunk done: the silence after it and the resumed chunk are behind us too.
         assert_eq!(r.finish(0, 0.0), Some(200.0));
         // The last one: the whole track, though its speech ended at 210 s.
-        assert_eq!(r.finish(0, 200.0), Some(300.0));
-        assert_eq!(r.finish(1, 30.0), Some(300.0));
+        assert_eq!(r.finish(0, 200.0), Some(end));
+        assert_eq!(r.finish(1, 30.0), Some(end));
         // A chunk of a track not asked for, or done twice, moves nothing.
         assert_eq!(r.finish(5, 0.0), None);
         assert_eq!(r.finish(1, 30.0), None);

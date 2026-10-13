@@ -10,7 +10,7 @@ use junctur_core::edit::Captions;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::analysis::{self, Analysis, Notify, Progress, Reanalysed};
+use crate::analysis::{self, Analysis, Change, Notify, Progress, Reanalysed};
 use crate::cuts::EditState;
 use crate::editor::{Op, Step, TranscriptView};
 use crate::lock::lock;
@@ -66,7 +66,13 @@ impl App {
 /// edit list, a new transcript) if that recording is open: the page fetches the transcript again
 /// on this event, and must not get the words read before the run.
 pub fn notifier(handle: AppHandle) -> Notify {
-    Arc::new(move |p: &Progress| {
+    Arc::new(move |p: &Progress, change| {
+        // A step only moves a bar (2h): reading the track roles on each of the ~hundred per track
+        // and stage would read the tracks report from disk every time.
+        if change == Change::Steps {
+            let _ = handle.emit(analysis::EVENT, p);
+            return;
+        }
         if let Some(core) = handle.try_state::<App>().and_then(|a| a.core().ok()) {
             // The track roles come from a run's first stage: the mutes follow them as soon as it
             // is done, not when Whisper is (2e). Read on each line from then on, which is cheap

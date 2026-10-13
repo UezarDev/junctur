@@ -67,13 +67,28 @@ pub struct Reanalysed {
     pub hand_edited: bool,
 }
 
+/// What moved in a run's progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change {
+    /// Its phase, log line or stages: the app looks at the project again (the track roles, a
+    /// finished run's results).
+    Run,
+    /// Only a track's step (2h): the page redraws a bar, nothing else needs reading.
+    Steps,
+}
+
 /// Told of every change of a run's progress (the app sends it to the page).
-pub type Notify = Arc<dyn Fn(&Progress) + Send + Sync>;
+pub type Notify = Arc<dyn Fn(&Progress, Change) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct Analysis {
     runs: Arc<Mutex<HashMap<PathBuf, Progress>>>,
     gate: Arc<Mutex<()>>,
+    /// Held from taking a snapshot of a run until `notify` has it, so snapshots reach the page in
+    /// the order they were taken: the speech stage reports from a thread per track, and an older
+    /// snapshot sent last would move a bar back (79 % after 100 %). Not `runs` itself: the app's
+    /// handler asks the analysis about runs ([`Analysis::busy`]).
+    order: Arc<Mutex<()>>,
     /// The cache the projects live in; `None` is the default one (the CLI's).
     cache_dir: Option<PathBuf>,
     /// The user's options a run starts from ([`user_options`]); tests pass their own, so they
@@ -86,6 +101,7 @@ impl Default for Analysis {
         Self {
             runs: Default::default(),
             gate: Default::default(),
+            order: Default::default(),
             cache_dir: None,
             user: user_options,
         }
@@ -182,14 +198,14 @@ impl Analysis {
             runs.insert(k.clone(), r.clone());
             r
         };
-        notify(&first);
+        notify(&first, Change::Run);
         let me = self.clone();
         let spawned = std::thread::Builder::new()
             .name("analysis".into())
             .spawn(move || me.run(&p, &notify));
         if let Err(e) = spawned {
             let e = format!("could not start the analysis: {e}");
-            self.update(&k, &|_| {}, |r| {
+            self.update(&k, &|_, _| {}, |r| {
                 r.phase = Phase::Failed;
                 r.error = Some(e.clone());
             });
@@ -255,8 +271,9 @@ impl Analysis {
     }
 
     /// Changes `k`'s progress, reads its project status again and tells `notify` (outside the
-    /// lock: the app's handler takes the player's).
-    fn update(&self, k: &Path, notify: &dyn Fn(&Progress), f: impl FnOnce(&mut Progress)) {
+    /// `runs` lock: the app's handler takes the player's; in order, under [`Self::order`]).
+    fn update(&self, k: &Path, notify: &dyn Fn(&Progress, Change), f: impl FnOnce(&mut Progress)) {
+        let _order = lock(&self.order);
         let status = self.status(k);
         let now = {
             let mut runs = lock(&self.runs);
@@ -267,14 +284,15 @@ impl Analysis {
             r.project = status.or(r.project.take());
             r.clone()
         };
-        notify(&now);
+        notify(&now, Change::Run);
     }
 
     /// Takes a track's step and tells `notify` only when its stage or whole percentage moved: at
     /// most a hundred events per track and stage however long the recording, where the speech
     /// stage reports every minute of audio. The project status is not read again (stage changes
     /// come through the log lines, [`Self::update`]).
-    fn step(&self, k: &Path, s: Step, notify: &dyn Fn(&Progress)) {
+    fn step(&self, k: &Path, s: Step, notify: &dyn Fn(&Progress, Change)) {
+        let _order = lock(&self.order);
         let now = {
             let mut runs = lock(&self.runs);
             let Some(r) = runs.get_mut(k) else {
@@ -295,7 +313,7 @@ impl Analysis {
             }
             r.clone()
         };
-        notify(&now);
+        notify(&now, Change::Steps);
     }
 
     fn status(&self, file: &Path) -> Option<ProjectStatus> {
@@ -320,7 +338,7 @@ mod tests {
         let a = Analysis::with_cache(d.join("cache"));
         let (tx, rx) = mpsc::channel();
         let tx = Mutex::new(tx);
-        let notify: Notify = Arc::new(move |p: &Progress| {
+        let notify: Notify = Arc::new(move |p: &Progress, _| {
             let _ = lock(&tx).send(p.clone());
         });
         // Hold the gate so the run waits, queued, and a second request finds it.
@@ -368,7 +386,10 @@ mod tests {
             },
         );
         let sent = Mutex::new(Vec::<Vec<Step>>::new());
-        let notify = |p: &Progress| lock(&sent).push(p.steps.clone());
+        let notify = |p: &Progress, c| {
+            assert_eq!(c, Change::Steps);
+            lock(&sent).push(p.steps.clone());
+        };
         let step = |stage, track, at| Step {
             stage,
             track,
@@ -393,8 +414,59 @@ mod tests {
         a.step(
             &PathBuf::from("other.mp4"),
             step("speech", 0, 500.0),
-            &|_| panic!("no run"),
+            &|_, _| panic!("no run"),
         );
+    }
+
+    #[test]
+    fn steps_from_two_threads_reach_notify_in_the_order_taken() {
+        let a = Analysis::with_cache(std::env::temp_dir().join("junctur-app-order-unused"));
+        let k = PathBuf::from("rec.mp4");
+        lock(&a.runs).insert(
+            k.clone(),
+            Progress {
+                file: "rec.mp4".into(),
+                phase: Phase::Running,
+                line: None,
+                error: None,
+                project: None,
+                steps: Vec::new(),
+            },
+        );
+        let sent = Mutex::new(Vec::<Vec<Step>>::new());
+        let notify = |p: &Progress, _| {
+            // Widen the gap between snapshot and send, where an unordered send would overtake.
+            std::thread::yield_now();
+            lock(&sent).push(p.steps.clone());
+        };
+        std::thread::scope(|scope| {
+            for track in 0..2 {
+                let (a, k, notify) = (&a, &k, &notify);
+                scope.spawn(move || {
+                    for at in 0..=1000 {
+                        let s = Step {
+                            stage: "speech",
+                            track,
+                            at: at as f64,
+                            of: 1000.0,
+                        };
+                        a.step(k, s, notify);
+                    }
+                });
+            }
+        });
+        let sent = lock(&sent).clone();
+        for track in 0..2 {
+            let ats: Vec<f64> = sent
+                .iter()
+                .filter_map(|v| v.iter().find(|s| s.track == track).map(|s| s.at))
+                .collect();
+            assert!(
+                ats.windows(2).all(|w| w[0] <= w[1]),
+                "track {track} went back"
+            );
+            assert_eq!(ats.last(), Some(&1000.0));
+        }
     }
 
     #[test]
@@ -409,13 +481,13 @@ mod tests {
         // A hand edit: asked first, nothing started.
         std::fs::write(p.edit_path(), "junctur-edit 1\nkeep x\n").unwrap();
         let r = a
-            .reanalyse(&file, false, Arc::new(|_: &Progress| {}))
+            .reanalyse(&file, false, Arc::new(|_: &Progress, _| {}))
             .unwrap();
         assert!(r.hand_edited && r.progress.is_none());
         assert!(!a.busy(&file));
         // Told to replace it: started.
         let r = a
-            .reanalyse(&file, true, Arc::new(|_: &Progress| {}))
+            .reanalyse(&file, true, Arc::new(|_: &Progress, _| {}))
             .unwrap();
         assert!(!r.hand_edited && r.progress.is_some());
         // Wait for it to end before removing its folder.

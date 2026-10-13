@@ -50,7 +50,8 @@ pub fn track_length(report: &TrackReport, track: usize) -> f64 {
         .unwrap_or(report.duration)
 }
 
-/// `at` seconds into `track` for `stage`, clamped to the track's length.
+/// `at` seconds into `track` for `stage`, clamped to the track's length (so `f64::INFINITY` is
+/// the whole track).
 pub fn step(report: &TrackReport, stage: &'static str, track: usize, at: f64) -> Step {
     let of = track_length(report, track);
     Step {
