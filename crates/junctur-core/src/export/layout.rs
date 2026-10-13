@@ -31,15 +31,16 @@ pub struct PlacedPart {
     /// Centre of the block, fractions of the picture: x from the left, y from the bottom.
     pub x: f64,
     pub y: f64,
-    /// Where each unit sits on `lines` and when it was said (5l), only with the highlight on.
+    /// Where each word sits on `lines` and when it is lit (5l), only with the highlight on.
     pub words: Vec<WordSpan>,
 }
 
-/// A unit's characters on one placed line: `from..to` in Unicode scalar values (a unit wrapped over
-/// two lines has a span on each, with the same `word` and times).
+/// A word's characters on its placed line: `from..to` in Unicode scalar values, which is how the
+/// animated caption counts them too (its `utf8len` counts every byte that does not continue a
+/// UTF-8 sequence).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct WordSpan {
-    /// Which unit of the part, in order.
+    /// Which word of the part, in order.
     pub word: usize,
     pub line: usize,
     pub from: usize,
@@ -191,9 +192,19 @@ fn place_one(cue: &Cue, protagonist: Option<u32>, c: &Captions, aspect: f64) -> 
     }
 }
 
-/// Where `words` sit on `lines`: their whitespace-separated pieces walked through the lines' own, so
-/// a re-wrap (side by side) is followed. Nothing when they do not line up, which they always
-/// should: no highlight rather than the wrong word lit.
+/// Whitespace as Lua's `%s` has it (C's `isspace`): the animated caption splits its text into
+/// words with `%S+`, so the words here are cut the same way, and a no-break space stays inside one.
+pub fn is_lua_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\x0B' | '\x0C' | '\r')
+}
+
+/// Where `words` sit on `lines`, a span per word as the animated caption counts words (its text
+/// split at whitespace): a unit of several words (a phrase 5j's find and replace made one, or one
+/// re-wrapped over two lines) has a span for each, splitting the unit's time evenly in turn, since
+/// the macro lights one word at a time and re-counts its words from the text whenever the text is
+/// set (its `UpdateTextContent`). The pieces are walked through the lines' own, so a re-wrap (side
+/// by side) is followed. Nothing when they do not line up, which they always should: no highlight
+/// rather than the wrong word lit.
 fn spans(lines: &[String], words: &[Spoken]) -> Vec<WordSpan> {
     // Every piece of the lines, as (line, from, to, text).
     let mut pieces = Vec::new();
@@ -201,7 +212,7 @@ fn spans(lines: &[String], words: &[Spoken]) -> Vec<WordSpan> {
         let chars: Vec<char> = line.chars().collect();
         let mut from = None;
         for i in 0..=chars.len() {
-            let blank = chars.get(i).is_none_or(|c| c.is_whitespace());
+            let blank = chars.get(i).is_none_or(|&c| is_lua_space(c));
             match (blank, from) {
                 (false, None) => from = Some(i),
                 (true, Some(f)) => {
@@ -214,25 +225,29 @@ fn spans(lines: &[String], words: &[Spoken]) -> Vec<WordSpan> {
     }
     let mut out: Vec<WordSpan> = Vec::new();
     let mut next = pieces.into_iter();
-    for (n, w) in words.iter().enumerate() {
-        for text in w.text.split_whitespace() {
+    for w in words {
+        let texts: Vec<&str> = w
+            .text
+            .split(is_lua_space)
+            .filter(|t| !t.is_empty())
+            .collect();
+        let step = (w.end - w.start).max(0.0) / texts.len().max(1) as f64;
+        for (i, text) in texts.into_iter().enumerate() {
             let Some((line, from, to, piece)) = next.next() else {
                 return Vec::new();
             };
             if piece != text {
                 return Vec::new();
             }
-            match out.last_mut() {
-                Some(s) if s.word == n && s.line == line => s.to = to,
-                _ => out.push(WordSpan {
-                    word: n,
-                    line,
-                    from,
-                    to,
-                    start: w.start,
-                    end: w.end,
-                }),
-            }
+            let start = w.start + step * i as f64;
+            out.push(WordSpan {
+                word: out.len(),
+                line,
+                from,
+                to,
+                start,
+                end: start + step,
+            });
         }
     }
     if next.next().is_some() {
@@ -482,25 +497,34 @@ mod tests {
             start,
             end: start + 0.4,
         };
-        // A replaced phrase is one unit; "¿qué tal?" sits on one line, "a todos" on two after a
-        // re-wrap.
-        let lines = vec!["hola ¿qué tal? a".to_string(), "todos".to_string()];
+        // A replaced phrase is one unit, but the animated caption lights a word at a time:
+        // "¿qué tal?" is two words sharing its time, "a todos" two, re-wrapped over two lines.
+        // Indices count characters, "¿" and "é" one each. A no-break space is not Lua's
+        // whitespace, so "10 %" with one stays one word, as the macro counts it.
+        let lines = vec![
+            "hola ¿qué tal? a".to_string(),
+            "todos 10\u{a0}%".to_string(),
+        ];
         let words = [
             said("hola", 1.0),
-            said("¿qué tal?", 1.5),
+            said("¿qué tal?", 1.6),
             said("a todos", 2.0),
+            said("10\u{a0}%", 3.0),
         ];
+        let ms = |t: f64| (t * 1000.0).round() as i64;
         let got: Vec<_> = spans(&lines, &words)
             .iter()
-            .map(|s| (s.word, s.line, s.from, s.to, s.start))
+            .map(|s| (s.word, s.line, s.from, s.to, ms(s.start), ms(s.end)))
             .collect();
         assert_eq!(
             got,
             [
-                (0, 0, 0, 4, 1.0),
-                (1, 0, 5, 14, 1.5),
-                (2, 0, 15, 16, 2.0),
-                (2, 1, 0, 5, 2.0)
+                (0, 0, 0, 4, 1000, 1400),
+                (1, 0, 5, 9, 1600, 1800),
+                (2, 0, 10, 14, 1800, 2000),
+                (3, 0, 15, 16, 2000, 2200),
+                (4, 1, 0, 5, 2200, 2400),
+                (5, 1, 6, 10, 3000, 3400),
             ]
         );
         // Units that do not match the lines give nothing rather than the wrong word lit.

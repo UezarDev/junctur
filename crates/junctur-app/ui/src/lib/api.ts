@@ -189,9 +189,9 @@ export interface Cue {
   parts: { speaker: number; lines: string[]; x: number; y: number; words: WordSpan[] }[];
 }
 
-/** Where a unit of a caption sits on its lines and when it was said (5l, export/layout.rs), only
- * with the highlight on: `from..to` in characters (code points) of line `line`; a unit wrapped over
- * two lines has a span on each with the same `word`. */
+/** Where a word of a caption sits on its lines and when it is lit (5l, export/layout.rs), only with
+ * the highlight on: `from..to` in characters (code points) of line `line`, a word as the animated
+ * caption counts them (a phrase made one by find and replace is a word each, sharing its time). */
 export interface WordSpan {
   word: number;
   line: number;

@@ -18,6 +18,185 @@ local function check(cond, what)
     if not cond then error("FAILED: " .. what, 2) end
 end
 
+-- The bundled macro's own word timing code, as it is in caption-bin.drb (auto-subs, MIT,
+-- tmoroney/auto-subs: see src/resolve/LICENSE-auto-subs): what it does with the WordTiming
+-- Junctur hands it whenever the text is set.
+UPDATE_TEXT_CONTENT = [==[
+					return function(comp, tool, text)
+						local function utf8len(s)
+							local _, count = s:gsub("[^\128-\191]", "")
+							return count
+						end
+
+						-- Split text into words
+						local words = {}
+						for word in text:gmatch("%S+") do
+							table.insert(words, word)
+						end
+
+						local wordTiming = tool:GetData("WordTiming")
+						if not wordTiming then return end
+
+						local oldWordCount = #wordTiming
+						local newWordCount = #words
+						local hasExistingWords = oldWordCount > 0
+
+						-- Determine a frames-per-character rate to dynamically estimate new word durations.
+						local defaultFrameRate = tonumber(comp:GetPrefs("Comp.FrameFormat.Rate")) or 30
+						-- Default speaking speed: ~15 characters per second
+						local defaultFramesPerChar = defaultFrameRate / 15
+						local framesPerChar = defaultFramesPerChar
+
+						-- Calculate pacing from existing words if available
+						if hasExistingWords then
+							local totalFrames = 0
+							local totalChars = 0
+							-- Sum up the durations and lengths of existing words to analyze the speaker's true pacing.
+							for j = 1, oldWordCount do
+								local duration = wordTiming[j].endFrame - wordTiming[j].startFrame
+								local length = wordTiming[j].endIndex - wordTiming[j].startIndex + 1
+								-- Only average words with valid timings and non-zero character counts.
+								if duration > 0 and length > 0 then
+									totalFrames = totalFrames + duration
+									totalChars = totalChars + length
+								end
+							end
+							
+							-- If we have valid historical pacing data, use it.
+							if totalChars > 0 then
+								framesPerChar = totalFrames / totalChars
+							end
+						end
+
+						-- If words were removed, delete their corresponding timing data from the end of the list first.
+						if newWordCount < oldWordCount then
+							for i = oldWordCount, newWordCount + 1, -1 do
+								table.remove(wordTiming, i)
+							end
+						end
+
+						-- Traverse all words to add new timings and recompute absolute character indices.
+						local currentFrame = hasExistingWords and wordTiming[oldWordCount].endFrame or 0
+						local charIndex = 0
+
+						for i = 1, newWordCount do
+							local wordText = words[i]
+							-- Reconstruct spaces between words to match the combined subtitle text structure.
+							if i > 1 then
+								wordText = " " .. wordText
+							end
+
+							-- Use UTF-8 safe length to accurately handle multi-byte characters and map index boundaries.
+							local length = utf8len(wordText)
+
+							if i > oldWordCount then
+								-- Estimate timing for newly added words scaled by their character length.
+								local startFrame = currentFrame
+								local wordLength = utf8len(words[i])
+								local duration = math.max(1, math.floor(wordLength * framesPerChar))
+								local endFrame = startFrame + duration
+
+								table.insert(wordTiming, {
+									["startIndex"] = charIndex,
+									["endIndex"] = charIndex + length - 1,
+									["startFrame"] = startFrame,
+									["endFrame"] = endFrame,
+								})
+								
+								currentFrame = endFrame
+							else
+								-- Update character boundaries for existing words.
+								wordTiming[i].startIndex = charIndex
+								wordTiming[i].endIndex = charIndex + length - 1
+							end
+
+							-- Advance the character playhead for the next word.
+							charIndex = charIndex + length
+						end
+
+						-- Scale the rebuilt timing to fit the composition end without collapsing
+						-- word boundaries, so markers and highlights remain in sync.
+						wordTiming = loadstring(tool:GetData("ScaleWordTiming"))()(comp, wordTiming)
+
+						loadstring(tool:GetData("ApplyWordTiming"))()(comp, tool, wordTiming)
+					end
+				
+]==]
+SCALE_WORD_TIMING = [==[
+					return function(comp, wordTiming, force)
+						if not wordTiming or #wordTiming == 0 then
+							return wordTiming
+						end
+
+						local compositionEndFrame = comp:GetAttrs("COMPN_RenderEnd") or 1000
+						local maxEndFrame = math.max(1, compositionEndFrame - 1)
+
+						local n = #wordTiming
+						local lastEndFrame = wordTiming[n].endFrame
+						if lastEndFrame <= maxEndFrame and not force then
+							return wordTiming
+						end
+
+						-- More words than available frames: merge trailing words into the last
+						-- keepable interval so every remaining marker/highlight is on a
+						-- distinct, in-range frame.
+						if n > maxEndFrame then
+							local keep = math.max(1, maxEndFrame)
+							wordTiming[keep].endIndex = wordTiming[n].endIndex
+							for i = n, keep + 1, -1 do
+								table.remove(wordTiming, i)
+							end
+							n = keep
+						end
+
+						-- Scale the remaining timing to fit the composition. Each word gets a
+						-- distinct, non-overlapping integer interval.
+						lastEndFrame = wordTiming[n].endFrame
+						local scale = math.min(maxEndFrame / lastEndFrame, 1)
+						local prevEnd = 0
+						for i, word in ipairs(wordTiming) do
+							local targetStart = math.floor(word.startFrame * scale)
+							local targetEnd = math.floor(word.endFrame * scale)
+							local startFrame = math.max(0, math.max(targetStart, prevEnd))
+							local endFrame = math.max(startFrame + 1, targetEnd)
+
+							if endFrame > maxEndFrame then
+								endFrame = maxEndFrame
+								if startFrame >= endFrame then
+									startFrame = math.max(0, endFrame - 1)
+								end
+							end
+
+							word.startFrame = startFrame
+							word.endFrame = endFrame
+							prevEnd = endFrame
+						end
+
+						-- Tighten the sequence: each word must start after the previous one,
+						-- end before the composition end, and stay in a valid interval.
+						for i = 2, n do
+							if wordTiming[i].startFrame <= wordTiming[i - 1].startFrame then
+								wordTiming[i].startFrame = wordTiming[i - 1].startFrame + 1
+							end
+							wordTiming[i].endFrame = math.max(wordTiming[i].endFrame, wordTiming[i].startFrame + 1)
+							if wordTiming[i].endFrame > maxEndFrame then
+								wordTiming[i].endFrame = maxEndFrame
+								if wordTiming[i].startFrame >= wordTiming[i].endFrame then
+									wordTiming[i].startFrame = math.max(0, wordTiming[i].endFrame - 1)
+								end
+							end
+							if wordTiming[i].endFrame < wordTiming[i - 1].endFrame then
+								wordTiming[i].endFrame = wordTiming[i - 1].endFrame
+							end
+						end
+
+						wordTiming[n].endFrame = maxEndFrame
+
+						return wordTiming
+					end
+				
+]==]
+
 local function world(opts)
     opts = opts or {}
     local w = { prefs = {}, tracks = { { name = "Video 1", items = {} } }, imports = 0 }
@@ -27,37 +206,80 @@ local function world(opts)
     function fusion:SavePrefs() end
     function fusion:GetPrefs(k) return w.prefs[k] end
 
-    -- A Text+ tool; inputs in `lacks` are not there (set does nothing, get gives nil).
-    local function Tool(lacks)
+    -- A Text+ tool; inputs in `lacks` are not there (set does nothing, get gives nil), and with
+    -- `known` only those inputs are there.
+    local function Tool(lacks, known)
         local t = { inputs = {}, data = {} }
-        function t:SetInput(k, v) if not (lacks and lacks[k]) then self.inputs[k] = v end end
+        function t:SetInput(k, v)
+            if not (lacks and lacks[k]) and not (known and not known[k]) then self.inputs[k] = v end
+        end
         function t:GetInput(k) return self.inputs[k] end
         function t:GetData(k) return self.data[k] end
         function t:SetData(k, v) self.data[k] = v end
         return t
     end
-    -- The animated caption's macro (5l): its helper records the settings it is handed, and the
-    -- Text+ records what word timing the macro held when its Text was set.
+    -- The animated caption's macro (5l): its published inputs only (the bundled macro's
+    -- InputKeys), its SetInputValues helper recording the settings it is handed (and counting how
+    -- often it is compiled), and, as the bundled macro's own `Text` control does when the text
+    -- changes, its real `UpdateTextContent` and `ScaleWordTiming` (below) re-counting the word
+    -- timing from the text. Its Text+ has only the inputs Junctur may set on it.
     local HELPER = [[
+        _G.COMPILES = (_G.COMPILES or 0) + 1
         return function(comp, tool, settings)
             for k, v in pairs(settings) do tool:SetInput(k, v) end
             tool.applied = (tool.applied or 0) + 1
         end
     ]]
+    local APPLY = [[
+        return function(comp, tool, wordTiming)
+            tool:SetData("WordTiming", wordTiming)
+            tool.recounted = wordTiming
+        end
+    ]]
+    local function set_of(keys)
+        local out = {}
+        for _, k in ipairs(keys) do out[k] = true end
+        return out
+    end
+    local MACRO_INPUTS = set_of({ "Font", "Style", "TextSize", "TextPosition", "FadeEnabled",
+        "PopInEnabled", "SlideUpEnabled", "AnimationLength", "AnimationLevel", "AnimationMode",
+        "HighlightExtendHorizontal", "HighlightExtendVertical", "HighlightRound",
+        "HighlightColorRed", "HighlightColorGreen", "HighlightColorBlue", "FillEnabled",
+        "FillColorRed", "FillColorGreen", "FillColorBlue", "OutlineEnabled", "OutlineThickness",
+        "OutlineColorRed", "OutlineColorGreen", "OutlineColorBlue", "ShadowEnabled",
+        "ShadowColorRed", "ShadowColorGreen", "ShadowColorBlue", "HighlightStyle",
+        "HighlightEnabled", "WrapEnabled", "WrapBoxWidth" })
     local function Item(info)
-        local tool = Tool(info.mediaPoolItem.lacks)
         local comp = {}
-        local macro, cls
+        local tool, macro, cls
         if info.mediaPoolItem.macro then
-            macro = Tool()
+            tool = Tool(nil, set_of(opts.no_text_control and { "StyledText", "Underline" }
+                or { "Text", "StyledText", "Underline" }))
+            macro = Tool(nil, MACRO_INPUTS)
             cls = Tool()
             if not opts.no_helper then macro.data.SetInputValues = HELPER end
+            macro.data.UpdateTextContent = UPDATE_TEXT_CONTENT
+            macro.data.ScaleWordTiming = SCALE_WORD_TIMING
+            macro.data.ApplyWordTiming = APPLY
+            if opts.no_data then
+                function macro:SetData() error("no data here") end
+            end
             local set = tool.SetInput
             function tool:SetInput(k, v)
-                if k == "Text" then self.timing = macro.data.WordTiming end
+                local before = self.inputs[k]
                 set(self, k, v)
+                if k == "Text" and self.inputs.Text == v then
+                    self.timing = macro.data.WordTiming
+                    if before ~= v then
+                        assert(loadstring(macro.data.UpdateTextContent))()(comp, macro, v)
+                    end
+                end
             end
+        else
+            tool = Tool(info.mediaPoolItem.lacks)
         end
+        function comp:GetAttrs(k) if k == "COMPN_RenderEnd" then return info.endFrame end end
+        function comp:GetPrefs(k) if k == "Comp.FrameFormat.Rate" then return 24 end end
         function comp:FindTool(n)
             if n == "Template" then return tool end
             if n == "AutoSubs" then return macro end
@@ -106,7 +328,11 @@ local function world(opts)
             if k == "Clip Name" then return self.name elseif k == "FPS" then return "24" end
             if k == "Type" then return self.kind or "Fusion Title" end
         end
-        function c:SetClipProperty(_, v) self.name = v return true end
+        function c:SetClipProperty(_, v)
+            if opts.no_rename then return false end
+            self.name = v
+            return true
+        end
         return c
     end
     local function Folder(name, id)
@@ -195,8 +421,12 @@ local function world(opts)
     end
 
     local chunk = assert(loadfile(SCRIPT))
+    -- `no_compile`: a script runner without loadstring or load.
     setfenv(chunk, setmetatable({ JUNCTUR_TEST = true, fusion = fusion, resolve = resolve },
-        { __index = _G }))
+        { __index = function(_, k)
+            if opts.no_compile and (k == "loadstring" or k == "load") then return nil end
+            return _G[k]
+        end }))
     w.m = chunk()
     w.Folder, w.Clip = Folder, Clip
     return w
@@ -323,7 +553,7 @@ local function animated(track, start, text, extra)
     c.key = c.key .. "|highlight"
     c.base, c.highlight = { 1, 1, 1 }, { 1, 0, 0 }
     c.words = { { startIndex = 0, endIndex = 3, startFrame = 0, endFrame = 12 },
-        { startIndex = 4, endIndex = 9, startFrame = 12, endFrame = 24 } }
+        { startIndex = 4, endIndex = 9, startFrame = 12, endFrame = 23 } }
     for k, v in pairs(extra or {}) do c[k] = v end
     return c
 end
@@ -360,6 +590,37 @@ check(m.OutlineThickness == 0.04 and m.WrapEnabled == 0, "outline, no wrap")
 check(it.tool.inputs.Underline == 1, "underline on the Text+")
 check(it.tool.data.JuncturKey == "Junctur 1 Ana|86400|86424|highlight", "tagged")
 
+-- The macro re-counted the word timing from the text when it was set, and it is unchanged:
+-- Junctur counts as it does.
+local function same(a, b)
+    if #a ~= #b then return false end
+    for k = 1, #a do
+        for _, f in ipairs({ "startIndex", "endIndex", "startFrame", "endFrame" }) do
+            if a[k][f] ~= b[k][f] then return false end
+        end
+    end
+    return true
+end
+check(it.macro.recounted ~= nil and same(it.macro.recounted, animated(1, 0, "").words),
+    "the macro's re-count kept the word timing")
+check(_G.COMPILES == 1, "the helper compiled once")
+
+-- Characters beyond ASCII and a line break: the macro's utf8len counts "¿" and "é" as one each,
+-- as Junctur does, so the ranges survive its re-count.
+local accented = animated(2, 86400, "¿qué tal\ntodos", { key = "Junctur 2 Bo|86400|86424|highlight",
+    words = { { startIndex = 0, endIndex = 3, startFrame = 0, endFrame = 8 },
+        { startIndex = 4, endIndex = 7, startFrame = 8, endFrame = 16 },
+        { startIndex = 8, endIndex = 13, startFrame = 16, endFrame = 23 } } })
+local two = animated(1, 86450, "hola todos", { key = "Junctur 1 Ana|86450|86474|highlight" })
+_G.COMPILES = 0
+local w2 = world()
+r = w2.m.handlers.place(request({ animated(1, 86400, "hola todos"), accented, two },
+    { look = moving, animated = true }))
+check(r.placed == 3 and r.failed == 0, "accented: " .. tostring(r.firstError))
+local bo = w2.tracks[3].items[1]
+check(same(bo.macro.recounted, accented.words), "accented ranges kept by the macro's re-count")
+check(_G.COMPILES == 1, "one compile a send, not one a caption: " .. tostring(_G.COMPILES))
+
 -- Sent again: restyled in place through the macro.
 moving.animation = "fade"
 r = w.m.handlers.place(request({ animated(1, 86400, "hola amigos") }, { look = moving, animated = true }))
@@ -377,6 +638,32 @@ r = w.m.handlers.place(request({ animated(1, 87000, "x") },
     { template = "My Title", recording = "own2", look = moving, animated = true }))
 check(r.placed == 1 and r.unstyled == "Underline, animation, word highlight",
     "own template: " .. tostring(r.unstyled))
+
+-- A macro whose Text+ has no Text control: the caption still shows (StyledText), and the reply
+-- says it is neither lit nor animated.
+w = world({ no_text_control = true })
+r = w.m.handlers.place(request({ animated(1, 86400, "a") }, { look = moving, animated = true }))
+check(r.placed == 1 and r.unstyled == "animation, word highlight", "no Text: " .. tostring(r.unstyled))
+check(w.tracks[2].items[1].tool.inputs.StyledText == "a", "shown through StyledText")
+
+-- A macro that does not keep the word timing: placed, the highlight said not to apply.
+w = world({ no_data = true })
+r = w.m.handlers.place(request({ animated(1, 86400, "a") }, { look = moving, animated = true }))
+check(r.placed == 1 and r.unstyled == "word highlight", "no data: " .. tostring(r.unstyled))
+
+-- No loadstring or load: the caption fails, and the reason says what to do.
+w = world({ no_compile = true })
+r = w.m.handlers.place(request({ animated(1, 86400, "a") }, { look = moving, animated = true }))
+check(r.failed == 1 and r.firstError:find("cannot compile") ~= nil and r.firstError:find("turn") ~= nil,
+    "no compile: " .. tostring(r.firstError))
+
+-- The import's renames did not take: the animated caption is still never the plain template.
+w = world({ no_rename = true })
+info = w.m.handlers.info({ template = "" })
+check(info.template == "Basic Template", "plain, unrenamed: " .. tostring(info.template))
+info = w.m.handlers.info({ template = "", animated = true })
+check(info.template == "AutoSubs Caption 2026-09-16" and w.imports == 1,
+    "animated, unrenamed: " .. tostring(info.template))
 
 -- A macro that lost its helper: that caption fails, said so.
 w = world({ no_helper = true })

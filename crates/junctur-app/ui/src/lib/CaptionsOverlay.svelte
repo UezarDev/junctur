@@ -111,14 +111,17 @@
 
   type Part = api.Cue["parts"][number];
 
-  /** The unit lit at output second `t`: the last one said by then, held until the next (5l). */
+  /** The word lit at output second `t` (5l), as the animated caption lights it: its highlight is
+   * a stepped spline with a key where each word starts, so a word stays lit until the next one
+   * starts (its own end does not unlight it), the last until the caption ends, and the first is
+   * lit from the caption's start, a spline holding its first key before it. */
   function lit(part: Part, t: number): number | null {
-    let w: number | null = null;
+    let w: number | null = part.words.length > 0 ? part.words[0].word : null;
     for (const s of part.words) if (s.start <= t) w = s.word;
     return w;
   }
 
-  /** A line cut into runs, each lit or not, by the lit unit's spans on it. */
+  /** A line cut into runs, each lit or not, by the lit word's span on it. */
   function runs(part: Part, j: number, word: number | null): { text: string; on: boolean }[] {
     const line = part.lines[j];
     const spans = word == null ? [] : part.words.filter((s) => s.word === word && s.line === j);
@@ -136,8 +139,12 @@
   }
 
   const highlighting = $derived(!!captions?.highlight);
+  // With no animation the blocks' style is fixed: worked out without reading the playhead, so it
+  // is not redone on every tick.
+  const still = animationStyle({ animation: "none" }, 1);
   const motion = $derived.by(() => {
-    if (!captions || !cue || player?.output == null) return animationStyle({ animation: "none" }, 1);
+    if (!captions || captions.animation === "none") return still;
+    if (!cue || player?.output == null) return still;
     return animationStyle(captions, animationProgress(captions, cue.start, cue.end, player.output));
   });
   const style = $derived(captions ? captionStyle(captions, picture.h) : "");

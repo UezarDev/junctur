@@ -210,24 +210,36 @@
     Highlight the word being said
   </label>
   {#if value.highlight}
-    <label class="field" title="Empty: the speaker's own colour lights the word and the caption is white">
-      <span>Highlight colour{value.highlightColor ? "" : ": the speaker's"}</span>
+    <!-- Empty means each speaker's own colour, which no single swatch can show: then the field
+         says so in words and offers a colour to pick instead (yellow, the colourless speaker's). -->
+    <div class="field" title="Each speaker's own colour lights the word on white text, unless one colour is picked">
+      <span>Highlight colour</span>
       <span class="pair">
-        <input
-          type="color"
-          value={value.highlightColor || "#FFD400"}
-          {disabled}
-          onchange={(e) =>
-            onChange({ ...value, highlightColor: (e.currentTarget as HTMLInputElement).value.toUpperCase() })}
-        />
-        <button
-          class="small"
-          disabled={disabled || !value.highlightColor}
-          title="Light the word in each speaker's own colour"
-          onclick={() => onChange({ ...value, highlightColor: "" })}>Speaker's</button
-        >
+        {#if value.highlightColor}
+          <input
+            type="color"
+            value={value.highlightColor}
+            {disabled}
+            onchange={(e) =>
+              onChange({ ...value, highlightColor: (e.currentTarget as HTMLInputElement).value.toUpperCase() })}
+          />
+          <button
+            class="small"
+            {disabled}
+            title="Light the word in each speaker's own colour"
+            onclick={() => onChange({ ...value, highlightColor: "" })}>Speaker's</button
+          >
+        {:else}
+          <span class="muted">Each speaker's</span>
+          <button
+            class="small"
+            {disabled}
+            title="Light every speaker's words in one colour you pick"
+            onclick={() => onChange({ ...value, highlightColor: "#FFD400" })}>Pick one</button
+          >
+        {/if}
       </span>
-    </label>
+    </div>
   {/if}
   <label class="field" title="How each caption comes in and goes out, in Resolve and the preview">
     <span>Animation</span>
@@ -363,6 +375,9 @@
   .small {
     font-size: 11px;
     padding: 2px 6px;
+  }
+  .muted {
+    opacity: 0.7;
   }
   .field input[type="color"] {
     width: 40px;

@@ -103,17 +103,30 @@ local function folder_ids(root)
     return ids
 end
 
--- The Junctur bin's template of a kind: the animated caption by its name; the plain one by its
--- name, else the first clip there that is not the animated one (a Text+ of the user's dropped
--- into the bin, as 5g says to do).
+-- Whether a clip name is the animated caption's: Junctur's name for it, or the bundled bin's own
+-- ("AutoSubs Caption <date>") when renaming it did not take.
+local function is_animated(n)
+    n = tostring(n or "")
+    return n == ANIMATED_NAME or n:sub(1, 16) == "AutoSubs Caption"
+end
+
+-- The Junctur bin's template of a kind: the animated caption by its name (either of them); the
+-- plain one by its name, else the first clip there that is not an animated one (a Text+ of the
+-- user's dropped into the bin, as 5g says to do).
 local function own(bin, animated)
-    local first
+    local first, named
     for _, clip in ipairs(list(bin:GetClipList())) do
         local n = clip:GetClipProperty("Clip Name")
-        if n == (animated and ANIMATED_NAME or TEMPLATE_NAME) then return clip end
-        if not animated and n ~= ANIMATED_NAME then first = first or clip end
+        if animated then
+            if n == ANIMATED_NAME then return clip end
+            if is_animated(n) then named = named or clip end
+        elseif n == TEMPLATE_NAME then
+            return clip
+        elseif not is_animated(n) then
+            first = first or clip
+        end
     end
-    return first
+    return named or first
 end
 
 -- The user's Fusion Title when one is named; else the Junctur bin's template of the kind asked
@@ -225,27 +238,71 @@ local function set(tool, key, value)
     return ok and got ~= nil, got
 end
 
+-- Lua source compiled as the macro's own controls compile theirs (`loadstring`), or by `load` on a
+-- Lua that only has that.
+local compile = loadstring or function(src)
+    if load then return load(src) end
+    return nil, "this Lua has neither loadstring nor load"
+end
+
+-- What a send works out once instead of for every caption: each macro helper compiled, and
+-- whether the macro's inputs have been read back yet. Reset by each `place`.
+local per_send = { helpers = {} }
+
+-- The animated caption's helper `name` (its Lua source is kept in the macro's data), compiled.
+local function helper(macro, name)
+    local src = macro:GetData(name)
+    if type(src) ~= "string" then
+        return nil, "the animated caption has no " .. name .. " helper (edited in Fusion?): delete \""
+            .. ANIMATED_NAME .. "\" and its captions, and send again; Junctur puts it back"
+    end
+    local fn = per_send.helpers[src]
+    if fn then return fn end
+    local chunk, why = compile(src)
+    if not chunk then
+        return nil, "Resolve's script runner here cannot compile the animated caption's helpers ("
+            .. tostring(why) .. "), so the word highlight and animation cannot be applied: turn "
+            .. "them off to send plain captions"
+    end
+    local ok, made = pcall(chunk)
+    if not ok or type(made) ~= "function" then
+        return nil, "the animated caption's " .. name .. " helper did not load: " .. tostring(made)
+    end
+    per_send.helpers[src] = made
+    return made
+end
+
 -- Styles an animated caption (5l) as auto-subs does: the word timing set on the macro before the
--- Text+'s Text (setting the Text turns it into the highlight's keyframes, by the macro's own
--- ExecuteOnChange), the macro's CharacterLevelStyling given the text too, then every published
+-- Text+'s Text (the macro's own Text control turns it into the highlight's keyframes when the
+-- text changes), the macro's CharacterLevelStyling given the text too, then every published
 -- input through the macro's own SetInputValues helper, which also runs its highlight and
--- animation helpers. Each input is read back off the macro; one not taken goes into `missing`.
+-- animation helpers. The inputs are read back off the macro once a send; one not taken goes into
+-- `missing`, as does the highlight when the macro did not keep the word timing.
 local function restyle_macro(comp, macro, tool, look, c, missing)
-    pcall(function() macro:SetData("WordTiming", c.words) end)
+    local apply, why = helper(macro, "SetInputValues")
+    if not apply then error(why) end
+    local timed = pcall(function() macro:SetData("WordTiming", c.words) end)
+    if timed then
+        local ok, got = pcall(function() return macro:GetData("WordTiming") end)
+        timed = ok and type(got) == "table" and #got == #c.words
+    end
+    if look.highlight and not timed then missing["word highlight"] = true end
+    -- The macro's Text+ takes its text through its own `Text` control: its StyledText is wired to
+    -- the macro's Follower, which draws the highlight and the animation. A copy without the
+    -- control gets StyledText, so its caption shows, unlit and still.
     local took, text = set(tool, "Text", c.text)
     if not took or tostring(text) ~= c.text then
-        error("the animated caption's Text+ did not take the caption's text")
+        local plain, got = set(tool, "StyledText", c.text)
+        if not plain or tostring(got) ~= c.text then
+            error("the animated caption's Text+ did not take the caption's text")
+        end
+        if look.highlight then missing["word highlight"] = true end
+        if look.animation and look.animation ~= "none" then missing.animation = true end
     end
     pcall(function()
         local cls = comp:FindTool("CharacterLevelStyling1")
         if cls then cls:SetInput("Text", c.text) end
     end)
-    local helper = macro:GetData("SetInputValues")
-    local make = type(helper) == "string" and loadstring(helper)
-    if not make then
-        error("the animated caption has lost its SetInputValues helper: delete it from the "
-            .. "Junctur bin and send again")
-    end
     local anim = look.animation
     local on = function(b) return b and 1 or 0 end
     local settings = {
@@ -284,11 +341,15 @@ local function restyle_macro(comp, macro, tool, look, c, missing)
             settings.OutlineColorBlue = look.outlineColor[3]
         end
     end
-    local ok, e = pcall(function() make()(comp, macro, settings) end)
+    local ok, e = pcall(apply, comp, macro, settings)
     if not ok then error("the animated caption's SetInputValues failed: " .. tostring(e)) end
-    for key in pairs(settings) do
-        local read, got = pcall(function() return macro:GetInput(key) end)
-        if not read or got == nil then missing[key] = true end
+    -- Every clip of a send is the same macro with the same inputs: read back on the first only.
+    if not per_send.checked then
+        per_send.checked = true
+        for key in pairs(settings) do
+            local read, got = pcall(function() return macro:GetInput(key) end)
+            if not read or got == nil then missing[key] = true end
+        end
     end
     if not look.keep and not set(tool, "Underline", on(look.underline)) then
         missing.Underline = true
@@ -398,6 +459,7 @@ function handlers.place(req)
     local pool = project:GetMediaPool()
     local clip, err = template(pool, req.template or "", req.animated == true)
     if not clip then return { error = err } end
+    per_send = { helpers = {} }
 
     -- Each speaker's track, by name, added when missing.
     local index = {}

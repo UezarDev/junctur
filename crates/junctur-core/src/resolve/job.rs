@@ -47,7 +47,8 @@ pub struct Clip {
     /// `Center`: fractions of the frame, y up from the bottom.
     pub x: f64,
     pub y: f64,
-    /// When each unit of `text` is said (5l), with the highlight on.
+    /// When each word of `text` (as the macro splits it, at whitespace) is lit (5l), with the
+    /// highlight on.
     pub words: Vec<WordTiming>,
 }
 
@@ -189,9 +190,10 @@ pub fn build(placed: &[Placed], edit: &EditList, c: &Captions, timeline: &Timeli
             last_end = end;
             let length = in_template(end - start).round().max(1.0) as i64;
             let at = |s: f64| in_template(frame(s) - start).floor() as i64;
+            let words = word_timing(&part.words, length, at);
             clips.push(Clip {
                 track: t + 1,
-                key: format!("{}|{start}|{end}{kind}", tracks[t]),
+                key: format!("{}|{start}|{end}{kind}{}", tracks[t], timing_tag(&words)),
                 start,
                 end,
                 length,
@@ -202,7 +204,7 @@ pub fn build(placed: &[Placed], edit: &EditList, c: &Captions, timeline: &Timeli
                 highlight,
                 x: part.x,
                 y: part.y,
-                words: word_timing(&part.lines, &part.words, length, at),
+                words,
             });
         }
     }
@@ -229,48 +231,49 @@ pub fn build(placed: &[Placed], edit: &EditList, c: &Captions, timeline: &Timeli
     }
 }
 
-/// The animated caption's `WordTiming` for a clip whose text is `lines` joined by line breaks:
-/// `spans` (layout's, on those lines) merged per unit into character ranges that follow one
-/// another, and their seconds made clip frames by `at`, held inside the clip's `length` frames
-/// and never going back (the macro lights them in order).
-fn word_timing(
-    lines: &[String],
-    spans: &[WordSpan],
-    length: i64,
-    at: impl Fn(f64) -> i64,
-) -> Vec<WordTiming> {
-    // Where each line starts in the joined text: its characters and a line break before the next.
-    let mut offset = Vec::with_capacity(lines.len());
-    let mut total = 0;
-    for l in lines {
-        offset.push(total);
-        total += l.chars().count() + 1;
-    }
-    let mut out: Vec<WordTiming> = Vec::new();
-    let mut word = None;
+/// The animated caption's `WordTiming` for a clip: one entry per span (a word, as layout cuts them),
+/// its character range counted exactly as the macro's own `UpdateTextContent` re-counts it each
+/// time the text is set (the first word from 0, each later one from just after the one before,
+/// one separator ahead of it, characters by `utf8len`), so the entries survive that re-count
+/// unchanged; its seconds made clip frames by `at`, never going back (the macro lights words in
+/// order), the start inside the clip and the end before its last frame, since the macro's
+/// `ScaleWordTiming` squeezes every word when the last one ends past the comp's last frame.
+fn word_timing(spans: &[WordSpan], length: i64, at: impl Fn(f64) -> i64) -> Vec<WordTiming> {
+    let last = (length - 1).max(1);
+    let mut out: Vec<WordTiming> = Vec::with_capacity(spans.len());
+    let mut index = 0;
     for s in spans {
-        let Some(&line) = offset.get(s.line) else {
-            continue;
-        };
-        let end = line + s.to;
-        if word == Some(s.word) {
-            if let Some(w) = out.last_mut() {
-                w.to = end.saturating_sub(1).max(w.from);
-            }
-            continue;
-        }
-        word = Some(s.word);
-        let from = out.last().map_or(0, |w| w.to + 1);
+        let chars = s.to.saturating_sub(s.from).max(1) + usize::from(!out.is_empty());
         let prev = out.last().map_or(0, |w| w.start);
-        let start = at(s.start).clamp(0, (length - 1).max(0)).max(prev);
+        let start = at(s.start).clamp(0, last - 1).max(prev);
         out.push(WordTiming {
-            from,
-            to: end.saturating_sub(1).max(from),
+            from: index,
+            to: index + chars - 1,
             start,
-            end: at(s.end).clamp(start + 1, length.max(start + 1)),
+            end: at(s.end).clamp(start + 1, last),
         });
+        index += chars;
     }
     out
+}
+
+/// A short tag of a clip's word timing for its key (5l repair): a resend whose words moved but
+/// whose frames and text did not would otherwise restyle the clip, and the macro only rebuilds its
+/// word keyframes when its text changes. Empty without words, so other keys stay as they were.
+fn timing_tag(words: &[WordTiming]) -> String {
+    if words.is_empty() {
+        return String::new();
+    }
+    // FNV-1a: stable across builds and platforms, unlike the standard library's hasher.
+    let mut h: u32 = 0x811c_9dc5;
+    for w in words {
+        for v in [w.from as i64, w.to as i64, w.start, w.end] {
+            for b in v.to_le_bytes() {
+                h = (h ^ b as u32).wrapping_mul(0x0100_0193);
+            }
+        }
+    }
+    format!("|w{h:08x}")
 }
 
 /// Text+ `Size` for the caption size (a share of the picture height): Fusion sizes text against the
@@ -598,12 +601,13 @@ mod tests {
             start,
             end: start + 0.5,
         };
-        // "hola a" / "todos" at 1 s: "a todos" is one unit wrapped over both lines.
-        let mut cue = placed(1.0, 3.0, &[(1, "hola a/todos")]);
+        // "¿qué tal" / "todos" from 1 s, a word each as layout cuts them; "¿" and "é" are one
+        // character each, as the macro's `utf8len` counts them.
+        let mut cue = placed(1.0, 3.0, &[(1, "¿qué tal/todos")]);
         cue.parts[0].words = vec![
             span(0, 0, 0, 4, 1.0),
-            span(1, 0, 5, 6, 1.5),
-            span(1, 1, 0, 5, 1.5),
+            span(1, 0, 5, 8, 1.25),
+            span(2, 1, 0, 5, 1.5),
         ];
         let c = Captions {
             highlight: true,
@@ -618,33 +622,27 @@ mod tests {
         let j = build(&[cue.clone()], &edit(), &c, &t);
         assert!(j.animated);
         let clip = &j.clips[0];
-        // Ana's colour lights the word; the text is white. The key says the clip is animated.
+        // Ana's colour lights the word; the text is white. The key says the clip is highlighted,
+        // and carries its word timing's tag.
         assert_eq!(clip.base, [1.0, 1.0, 1.0]);
         assert_eq!(clip.highlight, [1.0, 0.0, 0.0]);
         // A plain Text+ (a user's own template) keeps the speaker's colour.
         assert_eq!(clip.fill, [1.0, 0.0, 0.0]);
-        assert!(clip.key.ends_with("|86424|86472|highlight"), "{}", clip.key);
-        // 2 s of a 48 fps template; "a todos" runs from the space after "hola" through the line
-        // break to the end, and starts 0.5 s (24 template frames) in.
-        assert_eq!(clip.length, 96);
-        assert_eq!(
-            clip.words,
-            [
-                WordTiming {
-                    from: 0,
-                    to: 3,
-                    start: 0,
-                    end: 24
-                },
-                WordTiming {
-                    from: 4,
-                    to: 11,
-                    start: 24,
-                    end: 48
-                },
-            ]
+        assert!(
+            clip.key.contains("|86424|86472|highlight|w"),
+            "{}",
+            clip.key
         );
-        assert_eq!(clip.text.chars().count(), 12);
+        // 2 s of a 48 fps template. Each later word's range starts at the separator before it (a
+        // space, then a line break), and the last ends on the text's last character.
+        assert_eq!(clip.length, 96);
+        let got: Vec<_> = clip
+            .words
+            .iter()
+            .map(|w| (w.from, w.to, w.start, w.end))
+            .collect();
+        assert_eq!(got, [(0, 3, 0, 24), (4, 7, 12, 36), (8, 13, 24, 48)]);
+        assert_eq!(clip.text.chars().count(), 14);
         assert_eq!(
             (
                 j.look.highlight,
@@ -656,15 +654,24 @@ mod tests {
         let text = super::super::lua::chunk(&Value::Table(j.to_lua()));
         assert!(text.contains("[\"animated\"] = true"), "{text}");
         assert!(
-            text.contains("{[\"startIndex\"] = 4, [\"endIndex\"] = 11, [\"startFrame\"] = 24, [\"endFrame\"] = 48}"),
+            text.contains("{[\"startIndex\"] = 4, [\"endIndex\"] = 7, [\"startFrame\"] = 12, [\"endFrame\"] = 36}"),
             "{text}"
         );
+        // The same words at other times are another key (the macro only re-keys its highlight
+        // when its text changes); the same times, the same key.
+        let mut moved = cue.clone();
+        moved.parts[0].words[1].start = 1.3;
+        assert_ne!(build(&[moved], &edit(), &c, &t).clips[0].key, clip.key);
+        assert_eq!(
+            build(&[cue.clone()], &edit(), &c, &t).clips[0].key,
+            clip.key
+        );
         // A word said before the clip (a cue pushed later) starts at its first frame; one past its
-        // end is held inside it; frames never go back.
+        // end is held inside it, ending before the clip's last frame; frames never go back.
         let mut late = cue.clone();
-        late.parts[0].words = vec![span(0, 0, 0, 4, 0.2), span(1, 0, 5, 6, 9.0)];
+        late.parts[0].words = vec![span(0, 0, 0, 4, 0.2), span(1, 0, 5, 8, 9.0)];
         let w = &build(&[late], &edit(), &c, &t).clips[0].words;
-        assert_eq!((w[0].start, w[1].start, w[1].end), (0, 95, 96));
+        assert_eq!((w[0].start, w[0].end, w[1].start, w[1].end), (0, 1, 94, 95));
         // An animation alone makes the clips animated, with no word timing and the speaker's
         // colour; neither, and the key is 5g's.
         let anim = Captions {
