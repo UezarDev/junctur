@@ -9,12 +9,12 @@ mod commands;
 mod cuts;
 mod editor;
 mod lock;
-mod menu;
 mod mixer;
 mod mpv;
 mod player;
 mod project;
 mod recent;
+mod settings;
 mod state;
 mod testmode;
 mod trace;
@@ -22,6 +22,7 @@ mod trace;
 mod video;
 mod voices;
 mod waves;
+mod window;
 
 use std::sync::Mutex;
 
@@ -48,9 +49,16 @@ fn main() {
             // under it shows through; the window itself stays opaque (tao fills it with the RGB).
             // Rejected: `.transparent(true)`, which makes the whole window see-through (DWM
             // blur-behind): the desktop showed through, and the GL surface never did.
+            // Frameless (2i): the page draws the title bar (`TitleBar.svelte`); Tauri keeps the
+            // edges resizable, and mpv keeps the picture below the bar. No shadow: Tauri's
+            // undecorated shadow keeps a hidden frame around the client area, and with it every
+            // launch check's capture of the window came back blank, page and picture alike;
+            // without it the page shows as it does in a decorated window.
             let test = testmode::seconds();
             let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
                 .title("Junctur")
+                .decorations(false)
+                .shadow(false)
                 .inner_size(1280.0, 800.0)
                 .min_inner_size(640.0, 400.0)
                 .background_color(BACKGROUND);
@@ -70,16 +78,9 @@ fn main() {
             };
             let trace = testmode::trace();
             let player = Player::start(app.handle().clone(), &window, extra, trace.clone());
-            // The menu goes on once the video surface exists: built with the window, it left the
-            // picture invisible in every launch check (the surface was there and drawing). It
-            // takes its height from the client area without a resize event, so the surface is fitted
-            // to what is left by hand.
-            window.set_menu(menu::build(app.handle())?)?;
-            if let (Ok(p), Ok(size)) = (&player, window.inner_size()) {
-                p.resize(size.width, size.height);
-            }
-            if let Err(e) = &player {
-                eprintln!("junctur-app: no player: {e}");
+            match &player {
+                Ok(p) => p.set_caption_defaults(settings::caption_defaults()),
+                Err(e) => eprintln!("junctur-app: no player: {e}"),
             }
             app.manage(App {
                 player: Mutex::new(player),
@@ -139,7 +140,12 @@ fn main() {
             commands::recent_info,
             commands::thumbnail,
             commands::reveal,
-            commands::set_menu_check,
+            commands::close_file,
+            commands::settings,
+            commands::save_settings,
+            commands::save_caption_defaults,
+            commands::outdated,
+            commands::snap_layouts,
             commands::ui_log,
         ])
         .build(tauri::generate_context!())

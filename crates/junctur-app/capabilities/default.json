@@ -1,7 +1,17 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "What the main window's page may call: Tauri's core events, the open and save dialogs, and the yes/no question before a re-analysis replaces edits.",
+  "description": "What the main window's page may call: Tauri's core events, the open and save dialogs, the yes/no question before a re-analysis replaces edits, and what its own title bar does to the window (2i: drag, double-click to maximise, minimise, maximise, close).",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open", "dialog:allow-save", "dialog:allow-ask"]
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "dialog:allow-ask",
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close"
+  ]
 }

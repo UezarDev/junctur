@@ -109,6 +109,17 @@ impl PlayerState {
         self.derive();
     }
 
+    /// The recording was closed (2i): nothing plays. The decoder in use, the pause state and the
+    /// playlist entry stay what mpv last said; mpv's events after its `stop` clear the rest anyway.
+    pub fn close(&mut self) {
+        *self = Self {
+            hwdec: self.hwdec.take(),
+            paused: self.paused,
+            entry: self.entry,
+            ..Self::default()
+        };
+    }
+
     /// A load or seek is going to source time `s`.
     pub fn expect(&mut self, s: f64) {
         self.pending = Some((s, Instant::now()));
@@ -311,6 +322,24 @@ mod tests {
         assert!(s.audio_tracks[1].selected);
         // No edit list: no output clock.
         assert_eq!((s.output, s.cuts, s.in_cut), (None, false, false));
+    }
+
+    #[test]
+    fn closing_leaves_nothing_playing() {
+        let mut s = PlayerState::default();
+        s.start(source("C:/a.mp4"));
+        s.apply(&prop(TIME_POS, Value::Double(3.0)));
+        s.apply(&prop(DURATION, Value::Double(12.5)));
+        s.apply(&prop(VIDEO_W, Value::Double(1920.0)));
+        s.apply(&prop(VIDEO_H, Value::Double(1080.0)));
+        s.apply(&prop(HWDEC, Value::Str("nvdec".into())));
+        s.close();
+        assert_eq!(s.path, None, "the start window shows");
+        assert_eq!((s.position, s.duration, s.aspect), (None, None, None));
+        assert_eq!(s.hwdec.as_deref(), Some("nvdec"));
+        // mpv's own events after `stop` keep it empty.
+        s.apply(&prop(TIME_POS, Value::None));
+        assert_eq!((s.path, s.position), (None, None));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! The user's settings: the optional config file (the file named by `JUNCTUR_CONFIG`, else
 //! `junctur/config.json` in the OS config folder) and the pipeline options `junctur analyze` and the
-//! app both start from ([`analysis_options`]). A missing default file means defaults; a broken file,
+//! app both start from ([`analysis_options`]); the app's Settings dialog writes it ([`save`], 2i), the
+//! CLI only reads it. A missing default file means defaults; a broken file,
 //! or a `JUNCTUR_CONFIG` that names nothing, is an error, so a typo never silently falls back to a
 //! different model.
 //!
@@ -11,17 +12,22 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
+use crate::edit::Captions;
 use crate::pipeline::PipelineOptions;
 use crate::transcribe::ModelPref;
 use crate::{hidden, voices, Error, Result};
 
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// Whisper model used when the command line names none (`auto` when this is unset too).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub whisper_model: Option<ModelPref>,
+    /// The caption settings of a recording whose edit list has none of its own (2i, [`captions`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub captions: Option<Captions>,
 }
 
 /// The user's Junctur folder in the OS config folder (`%APPDATA%\junctur`), where the config file,
@@ -63,6 +69,42 @@ pub fn load() -> Result<Config> {
     match locate(std::env::var_os("JUNCTUR_CONFIG"), folder())? {
         Some((path, named)) => load_from(&path, named),
         None => Ok(Config::default()),
+    }
+}
+
+/// Where the config file this environment points at is (whether or not it exists yet), for saving.
+pub fn path() -> Result<PathBuf> {
+    locate(std::env::var_os("JUNCTUR_CONFIG"), folder())?
+        .map(|(p, _)| p)
+        .ok_or_else(|| {
+            Error::Config("no config folder to keep settings in (set JUNCTUR_CONFIG)".into())
+        })
+}
+
+/// Writes `c` as the whole config file this environment points at; returns where.
+pub fn save(c: &Config) -> Result<PathBuf> {
+    let path = path()?;
+    save_to(&path, c)?;
+    Ok(path)
+}
+
+fn save_to(path: &Path, c: &Config) -> Result<()> {
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut text = serde_json::to_vec_pretty(c)?;
+    text.push(b'\n');
+    crate::output::write_replacing(path, text)?;
+    Ok(())
+}
+
+/// The caption settings a list cuts its cues with: its own (`own`), else the config file's
+/// defaults, else the built-in ones. `cfg` is called only for a list without its own, so a broken
+/// config file cannot block one that has them.
+pub fn captions(own: Option<Captions>, cfg: impl FnOnce() -> Result<Config>) -> Result<Captions> {
+    match own {
+        Some(c) => Ok(c),
+        None => Ok(cfg()?.captions.unwrap_or_default()),
     }
 }
 
@@ -128,8 +170,14 @@ fn load_from(path: &Path, named: bool) -> Result<Config> {
 }
 
 /// A UTF-8 byte order mark is skipped: Windows PowerShell 5.1's `Out-File`/`Set-Content` write one.
-fn parse(bytes: &[u8]) -> std::result::Result<Config, serde_json::Error> {
-    serde_json::from_slice(bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes))
+/// Caption defaults are held to the edit list's own limits.
+fn parse(bytes: &[u8]) -> std::result::Result<Config, String> {
+    let c: Config = serde_json::from_slice(bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes))
+        .map_err(|e| e.to_string())?;
+    if let Some(cap) = &c.captions {
+        cap.check().map_err(|e| format!("captions: {e}"))?;
+    }
+    Ok(c)
 }
 
 #[cfg(test)]
@@ -161,7 +209,14 @@ mod tests {
 
     #[test]
     fn model_flag_beats_config_beats_auto() {
-        let cfg = |m: Option<ModelPref>| move || Ok(Config { whisper_model: m });
+        let cfg = |m: Option<ModelPref>| {
+            move || {
+                Ok(Config {
+                    whisper_model: m,
+                    ..Default::default()
+                })
+            }
+        };
         let broken = || Err(Error::Config("bad config".into()));
         assert_eq!(
             whisper_model(Some("turbo"), cfg(Some(ModelPref::LargeV3))).unwrap(),
@@ -179,6 +234,66 @@ mod tests {
         assert_eq!(whisper_model(None, cfg(None)).unwrap(), ModelPref::Auto);
         assert!(whisper_model(None, broken).is_err());
         assert!(whisper_model(Some("large-v4"), cfg(None)).is_err());
+    }
+
+    #[test]
+    fn caption_defaults_are_read_checked_and_resolved() {
+        let c = parse(br#"{"captions":{"on":true,"chars":30}}"#).unwrap();
+        // A field the file leaves out (as an older file lacks a newer one) is the built-in value.
+        let want = Captions {
+            on: true,
+            chars: 30,
+            ..Default::default()
+        };
+        assert_eq!(c.captions, Some(want));
+        assert!(
+            parse(br#"{"captions":{"chars":500}}"#).is_err(),
+            "out of limits"
+        );
+        let e = parse(br#"{"captions":{"chrs":30}}"#).unwrap_err();
+        assert!(
+            e.contains("chrs"),
+            "a misspelt caption setting is an error: {e}"
+        );
+        let broken = || Err(Error::Config("bad config".into()));
+        let own = Captions {
+            lines: 1,
+            ..Default::default()
+        };
+        // A list's own settings win, and never read the config.
+        assert_eq!(captions(Some(own), broken).unwrap(), own);
+        assert_eq!(captions(None, || Ok(c.clone())).unwrap(), want);
+        assert_eq!(
+            captions(None, || Ok(Config::default())).unwrap(),
+            Captions::default()
+        );
+        assert!(captions(None, broken).is_err());
+    }
+
+    #[test]
+    fn saves_what_it_reads_with_canonical_names() {
+        let d = std::env::temp_dir().join(format!("junctur-config-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let path = d.join("junctur").join("config.json");
+        let c = parse(br#"{"whisper_model":"best"}"#).unwrap();
+        save_to(&path, &c).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(r#""whisper_model": "large-v3""#), "{text}");
+        assert!(
+            !text.contains("captions"),
+            "unset keys are not written: {text}"
+        );
+        assert_eq!(load_from(&path, true).unwrap(), c);
+        let c = Config {
+            whisper_model: None,
+            captions: Some(Captions {
+                on: true,
+                ..Default::default()
+            }),
+        };
+        save_to(&path, &c).unwrap();
+        assert_eq!(load_from(&path, true).unwrap(), c);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
