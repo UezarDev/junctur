@@ -141,6 +141,11 @@ pub async fn open_file(
             let _ = h.emit(waves::EVENT, s);
         }),
     );
+    // Closed while this was opening (2i): `close_file` closes the player first and the waveforms
+    // after, so either it stopped this read or the player no longer has the file and it stops here.
+    if app.core()?.file().as_deref() != Some(path.as_str()) {
+        app.waves.close_for(&absolute);
+    }
     let mut analysis = app.analysis.progress(file);
     let mut outdated = Vec::new();
     if let Ok(s) = &status {
@@ -469,8 +474,10 @@ pub async fn reveal(app: State<'_, App>) -> Result<(), String> {
 /// recording shows where it is.
 #[tauri::command]
 pub async fn close_file(app: State<'_, App>) -> Result<(), String> {
+    // The player first: an open on its way checks it after starting its waveforms (`open_file`).
+    let closed = app.core()?.close();
     app.waves.close();
-    app.core()?.close()
+    closed
 }
 
 /// The Settings dialog's contents (2i).

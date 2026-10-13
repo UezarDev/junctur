@@ -14,9 +14,11 @@
 use serde::{Deserialize, Serialize};
 
 // `default`: a settings file or a command missing a field (one a later round adds) takes the built-in
-// value instead of failing (2i).
+// value instead of failing (2i); `deny_unknown_fields`: a misspelt one is an error rather than
+// silently the default, as everywhere in the config file. The edit list's own `captions` line has
+// its own parser (`format.rs`), which refuses unknown keys too.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct Captions {
     /// Export: captions are optional; on, a render writes the caption file beside the video.
     pub on: bool,

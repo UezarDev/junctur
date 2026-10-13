@@ -59,8 +59,12 @@ export const MENUS: Menu[] = [
 /** What the menus show checked and enabled. */
 export interface MenuState {
   loaded: boolean;
+  /** A recording is open or opening: Close recording works on both. */
+  closable: boolean;
   panel: boolean;
   talking: boolean;
+  /** A dialog is open (Settings is modal): the menus wait, the window buttons do not. */
+  locked: boolean;
 }
 
 export function checked(item: MenuItem, s: MenuState): boolean {
@@ -68,5 +72,6 @@ export function checked(item: MenuItem, s: MenuState): boolean {
 }
 
 export function enabled(item: MenuItem, s: MenuState): boolean {
+  if (item.id === "close") return s.closable;
   return !item.needsFile || s.loaded;
 }

@@ -117,6 +117,20 @@ impl Store {
         }
     }
 
+    /// [`Store::close`], only while the waveforms are `file`'s (absolute): an open that lost to a
+    /// close stops its own read, never a later recording's.
+    pub fn close_for(&self, file: &Path) {
+        let mut current = lock(&self.current);
+        let theirs = current
+            .as_ref()
+            .is_some_and(|s| lock(&s.state).file == file.display().to_string());
+        if theirs {
+            if let Some(old) = current.take() {
+                old.stop.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
     pub fn state(&self) -> Option<WavesState> {
         lock(&self.current).as_ref().map(|s| lock(&s.state).clone())
     }
@@ -223,6 +237,22 @@ fn compute(file: &Path, dir: Option<&Path>, shared: &Shared, notify: &Notify) {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn closing_for_a_recording_leaves_a_later_ones_waveforms() {
+        let store = Store::default();
+        let quiet: Notify = Arc::new(|_: &WavesState| {});
+        let (a, b) = (Path::new("C:/none/a.mp4"), Path::new("C:/none/b.mp4"));
+        store.open(b, None, quiet.clone());
+        // The open of `a` lost to a close after `b` opened: `b`'s read stays.
+        store.close_for(a);
+        assert_eq!(store.state().map(|s| s.file), Some(b.display().to_string()));
+        store.close_for(b);
+        assert!(store.state().is_none(), "its own read stops");
+        store.open(a, None, quiet);
+        store.close();
+        assert!(store.state().is_none());
+    }
 
     fn wait_done(rx: &mpsc::Receiver<WavesState>) -> WavesState {
         loop {

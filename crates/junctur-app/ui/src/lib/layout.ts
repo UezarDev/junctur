@@ -12,7 +12,8 @@
  * nothing but the right and bottom margins is ever sent.
  */
 
-/** The title bar (2i, TitleBar.svelte): the editor is laid out in the window below it. */
+/** The title bar's height (2i): TitleBar.svelte is drawn this tall and the editor is laid out in
+ * the window below it, so the two cannot disagree. */
 export const TITLE = 34;
 export const BAR = 52;
 export const RULER = 22;

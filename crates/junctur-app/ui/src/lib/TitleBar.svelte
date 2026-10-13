@@ -11,6 +11,7 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import icon from "../../../icons/32x32.png";
   import * as api from "./api";
+  import { TITLE } from "./layout";
   import { MENUS, checked, enabled, type Menu, type MenuId, type MenuState } from "./menus";
 
   let { menu, onMenu }: { menu: MenuState; onMenu: (id: MenuId) => void } = $props();
@@ -19,6 +20,11 @@
   let open = $state<Menu["id"] | null>(null);
   let maximized = $state(false);
   let bar: HTMLElement;
+
+  // A modal dialog took over: an open dropdown goes.
+  $effect(() => {
+    if (menu.locked) open = null;
+  });
 
   function choose(id: MenuId) {
     open = null;
@@ -61,7 +67,7 @@
   });
 </script>
 
-<header class="bar" bind:this={bar} data-tauri-drag-region>
+<header class="bar" bind:this={bar} style:height="{TITLE}px" data-tauri-drag-region>
   <img class="icon" src={icon} alt="" data-tauri-drag-region />
   {#each MENUS as m (m.id)}
     <div class="menu">
@@ -72,6 +78,7 @@
         aria-label={m.label}
         aria-haspopup="menu"
         aria-expanded={open === m.id}
+        disabled={menu.locked}
         onclick={() => (open = open === m.id ? null : m.id)}
         onpointerenter={() => {
           // Like a menu bar: with one open, pointing at the other opens it instead.
@@ -112,7 +119,13 @@
       {/if}
     </div>
   {/each}
-  <button class="tool" title="Settings (Ctrl+,)" aria-label="Settings" onclick={() => choose("settings")}>
+  <button
+    class="tool"
+    title="Settings (Ctrl+,)"
+    aria-label="Settings"
+    disabled={menu.locked}
+    onclick={() => choose("settings")}
+  >
     <svg viewBox="0 0 16 16" aria-hidden="true"
       ><circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.2" /><path
         d="M8 1.5v2 M8 12.5v2 M1.5 8h2 M12.5 8h2 M3.4 3.4l1.4 1.4 M11.2 11.2l1.4 1.4 M3.4 12.6l1.4-1.4 M11.2 4.8l1.4-1.4"
@@ -158,7 +171,6 @@
     display: flex;
     align-items: center;
     gap: 2px;
-    height: 34px;
     padding-left: 8px;
     background: var(--panel-solid);
     border-bottom: 1px solid var(--line);

@@ -68,6 +68,12 @@
   let windowWidth = $state(window.innerWidth);
   let windowHeight = $state(window.innerHeight);
   let settingsOpen = $state(false);
+  // Each open counts one up, and so does a close (2i): an open's answers that arrive after a close,
+  // or after a newer open, are dropped. `closedAt` is the count a close left, so an open that lost
+  // to a close (nothing opened since) closes again what the player opened meanwhile.
+  let loadGen = 0;
+  let closedAt = -1;
+  let opening = $state(false);
   const PANEL = 400;
   const loaded = $derived(!!player?.path);
   const panelWidth = $derived(loaded && panelOpen ? Math.min(PANEL, windowWidth * 0.45) : 0);
@@ -197,6 +203,7 @@
   let labelledWith = "";
 
   async function loadTranscript() {
+    const gen = loadGen;
     words = null;
     selection = null;
     wordsLoading = true;
@@ -205,6 +212,7 @@
       labelledWith = edit?.speakersKey ?? "";
       const view = await api.transcript();
       const t1 = performance.now();
+      if (gen !== loadGen) return;
       words = view ? toWords(view) : null;
       const n = words?.text.length ?? 0;
       void api.uiLog(
@@ -236,28 +244,40 @@
   const VIDEO = ["mp4", "mkv", "mov", "flv", "ts", "webm", "avi"];
 
   async function load(path: string) {
+    const gen = ++loadGen;
+    const stale = () => gen !== loadGen;
+    opening = true;
     try {
       failure = null;
       const o = await api.openFile(path);
+      if (stale()) {
+        // Closed while opening: the player may have opened it after the close went through.
+        if (closedAt === loadGen) void api.closeFile().catch(() => {});
+        return;
+      }
       opened = o;
       analysis = o.analysis;
       // Progress sent while the open was on its way was dropped (no `opened` yet to match it):
       // read where the run is now. A run that already ended needs nothing more, as the
       // transcript is read just below.
       const now = await api.analysis(o.file);
+      if (stale()) return;
       // Never back: an event handled meanwhile may already be further on than this answer.
       if (now && opened === o && rank(now) >= rank(analysis)) {
         analysis = now;
         if (now.phase === "done") opened = { ...o, outdated: [] };
       }
       const w = await api.wavesState();
+      if (stale()) return;
       if (w && w.file === o.file) {
         waves = w;
         wavesVersion++;
       }
       await loadTranscript();
     } catch (e) {
-      failure = String(e);
+      if (!stale()) failure = String(e);
+    } finally {
+      if (!stale()) opening = false;
     }
   }
 
@@ -318,7 +338,10 @@
   // Back to the start window (2i). The player stops and forgets the recording; what the page held
   // for it goes too. Edits were saved as they were made; an analysis of it goes on in the background.
   async function closeRecording() {
-    if (!player?.path) return;
+    // Also while a recording is still opening: the close wins (see `loadGen`).
+    if (!player?.path && !opening) return;
+    closedAt = ++loadGen;
+    opening = false;
     try {
       await api.closeFile();
     } catch (e) {
@@ -366,13 +389,14 @@
   function onKey(e: KeyboardEvent) {
     // The dialog has the keys while it is open (Escape closes it).
     if (settingsOpen) return;
+    // A field keeps every key, the title bar's shortcuts too (2i): Ctrl+W from a caption number
+    // not yet committed would close the recording before its change is saved.
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
     const ctrl = e.ctrlKey || e.metaKey;
-    // The title bar's shortcuts (2i), even from a field: a native menu's accelerators were.
     if (ctrl && !e.shiftKey && (e.code === "KeyO" || e.code === "KeyW" || e.code === "Comma")) {
       e.preventDefault();
       return onMenu(e.code === "KeyO" ? "open" : e.code === "KeyW" ? "close" : "settings");
     }
-    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
     if (edit?.editable && player?.path) {
       if (ctrl && (e.code === "KeyY" || (e.code === "KeyZ" && e.shiftKey))) {
         e.preventDefault();
@@ -473,7 +497,10 @@
 />
 
 <div class="frame">
-<TitleBar menu={{ loaded, panel: panelOpen, talking: overlay }} {onMenu} />
+<TitleBar
+  menu={{ loaded, closable: loaded || opening, panel: panelOpen, talking: overlay, locked: settingsOpen }}
+  {onMenu}
+/>
 <main class:dragging>
   {#if !player?.path}
     {#if !starting}

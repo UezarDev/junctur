@@ -250,6 +250,11 @@ mod tests {
             parse(br#"{"captions":{"chars":500}}"#).is_err(),
             "out of limits"
         );
+        let e = parse(br#"{"captions":{"chrs":30}}"#).unwrap_err();
+        assert!(
+            e.contains("chrs"),
+            "a misspelt caption setting is an error: {e}"
+        );
         let broken = || Err(Error::Config("bad config".into()));
         let own = Captions {
             lines: 1,

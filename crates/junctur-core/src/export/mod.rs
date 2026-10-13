@@ -7,7 +7,7 @@ pub mod srt;
 
 use std::path::{Path, PathBuf};
 
-use crate::edit::EditList;
+use crate::edit::{Captions, EditList};
 use crate::transcribe::{Transcript, Word};
 use crate::{ffmpeg, output, Result};
 
@@ -41,9 +41,15 @@ pub struct CaptionFiles {
 
 /// Write `edit`'s captions as one SRT at `out` (5a, 5e): the kept words on the edited timeline,
 /// each speaker's lines in their colour, people talking at once stacked in one cue, cut by the
-/// list's caption settings. The frame rate is the source's, as for the FCPXML, so cues land on the
-/// frames the render and the timeline have. Any `out` but the source itself is replaced.
-pub fn write_srt(edit: &EditList, transcript: &Transcript, out: &Path) -> Result<CaptionFiles> {
+/// caption settings `captions` (resolved by the caller: the list's own, else the user's defaults,
+/// 2i). The frame rate is the source's, as for the FCPXML, so cues land on the frames the render and
+/// the timeline have. Any `out` but the source itself is replaced.
+pub fn write_srt(
+    edit: &EditList,
+    captions: &Captions,
+    transcript: &Transcript,
+    out: &Path,
+) -> Result<CaptionFiles> {
     output::refuse_source(&edit.source, out)?;
     let (num, den) = ffmpeg::probe_video(&edit.source)?.map_or((30, 1), |v| (v.fps_num, v.fps_den));
     let words: Vec<(usize, &Word)> = transcript
@@ -51,20 +57,21 @@ pub fn write_srt(edit: &EditList, transcript: &Transcript, out: &Path) -> Result
         .iter()
         .flat_map(|s| s.words.iter().map(move |w| (s.track, w)))
         .collect();
-    write_captions(edit, &words, num, den, out)
+    write_captions(edit, captions, &words, num, den, out)
 }
 
 /// [`write_srt`] from words already in hand (the app holds them) at a known frame rate.
 pub fn write_captions(
     edit: &EditList,
+    captions: &Captions,
     words: &[(usize, &Word)],
     num: u64,
     den: u64,
     out: &Path,
 ) -> Result<CaptionFiles> {
     output::refuse_source(&edit.source, out)?;
-    let cues = srt::cues(edit, words.iter().copied(), num, den);
-    std::fs::write(out, srt::write(&cues, edit))?;
+    let cues = srt::cues(edit, captions, words.iter().copied(), num, den);
+    std::fs::write(out, srt::write(&cues, edit, captions))?;
     Ok(CaptionFiles {
         cues: cues.len(),
         stale: stale_files(out),

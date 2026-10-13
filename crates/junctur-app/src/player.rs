@@ -595,14 +595,17 @@ impl Core {
         c.edit = Edit::default();
         c.status = EditorStatus::default();
         c.requested = Form::Source;
-        // A load asked for but not begun must not start the recording again.
-        lock(&self.loads).waiting.clear();
-        let stopped = self.mpv.command(&["stop"]);
-        {
+        // A load asked for but not begun must not start the recording again; the loads stay locked
+        // until the state is closed, so mpv's `start-file` for one cannot land in between.
+        let stopped = {
+            let mut loads = lock(&self.loads);
+            loads.waiting.clear();
+            let stopped = self.mpv.command(&["stop"]);
             let mut s = lock(&self.state);
             s.set_reference(None);
             s.close();
-        }
+            stopped
+        };
         *lock(&self.mixer) = Mixer::default();
         self.emit_edit(&c);
         drop(c);
@@ -621,14 +624,14 @@ impl Core {
     /// at the frame rate the player rounds to. Read and written outside the locks once the words
     /// and the list are in hand.
     pub fn export_captions(&self, out: &Path) -> Result<CaptionFiles, String> {
-        let (list, words, fps) = self.caption_source()?;
+        let (list, captions, words, fps) = self.caption_source()?;
         let tracked: Vec<_> = words
             .tracks
             .iter()
             .copied()
             .zip(words.list.iter())
             .collect();
-        export::write_captions(&list, &tracked, fps.num, fps.den, out)
+        export::write_captions(&list, &captions, &tracked, fps.num, fps.den, out)
             .map_err(|e| format!("writing {}: {e}", out.display()))
     }
 
@@ -636,16 +639,15 @@ impl Core {
     /// picture): the same cues on the same output timeline, so the preview shows what Resolve
     /// will, cue for cue.
     pub fn caption_cues(&self) -> Result<Vec<Cue>, String> {
-        let (list, words, fps) = self.caption_source()?;
+        let (list, captions, words, fps) = self.caption_source()?;
         let tracked = words.tracks.iter().copied().zip(words.list.iter());
-        Ok(srt::cues(&list, tracked, fps.num, fps.den))
+        Ok(srt::cues(&list, &captions, tracked, fps.num, fps.den))
     }
 
-    /// What a caption file is cut from: the list in play, the words the editor holds (an `Arc`,
-    /// not a copy; each lock is held only to take its part) and the frame rate. A list without its
-    /// own caption settings is cut with the defaults it shows (2i), so export and preview agree
-    /// with the panel; it is copied only then.
-    fn caption_source(&self) -> Result<(Arc<EditList>, Arc<Words>, Fps), String> {
+    /// What a caption file is cut from: the list in play, its caption settings (its own, else the
+    /// defaults it shows, 2i, so export and preview agree with the panel), the words the editor
+    /// holds (an `Arc`, not a copy; each lock is held only to take its part) and the frame rate.
+    fn caption_source(&self) -> Result<(Arc<EditList>, Captions, Arc<Words>, Fps), String> {
         self.prepare();
         let words = lock(&self.editor)
             .words
@@ -656,14 +658,10 @@ impl Core {
             let list = c.edit.list.clone().ok_or("no edit list yet")?;
             (list, c.fps.ok_or("the frame rate is not known")?)
         };
-        let list = match list.captions {
-            Some(_) => list,
-            None => Arc::new(EditList {
-                captions: Some(*lock(&self.caption_defaults)),
-                ..(*list).clone()
-            }),
-        };
-        Ok((list, words, fps))
+        let captions = list
+            .captions
+            .unwrap_or_else(|| *lock(&self.caption_defaults));
+        Ok((list, captions, words, fps))
     }
 
     /// Takes any outside change on disk, lets `f` change and save the list in play, and plays
@@ -1130,7 +1128,11 @@ fn event_loop(events: &mut Events, shared: &Shared) {
                 continue;
             }
             Event::StartFile { entry } => {
-                let Some(load) = lock(&shared.loads).started(*entry) else {
+                // The state starts under the loads lock (taken before the state's, as `close`
+                // takes them): a close between taking the load and starting it would otherwise put
+                // a recording up with no file open (2i).
+                let mut loads = lock(&shared.loads);
+                let Some(load) = loads.started(*entry) else {
                     eprintln!(
                         "junctur-app: mpv started entry {entry}, which the player did not load"
                     );
@@ -1140,6 +1142,7 @@ fn event_loop(events: &mut Events, shared: &Shared) {
                     t.start(&load.form);
                 }
                 lock(state).start(load);
+                drop(loads);
                 Change::Other
             }
             e => {
