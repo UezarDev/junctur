@@ -26,6 +26,8 @@
 //! `menu=close`, back to the start window, and `menu=settings`, the Settings dialog). The final
 //! report adds how far the waveforms are (`waves`) and the settings the dialog shows (`settings`;
 //! set `JUNCTUR_CONFIG` to a scratch file before anything saves them);
+//! `speed=1.5`, `loop=<a>-<b>` (source seconds) and `unloop` (2o) drive review's speed and loop of
+//! one clip, each step's report adding what mpv has then (`speedLoop`: speed, `ab-loop-a`, `-b`);
 //! the picture's shape is in the `state` (`width`, `height`, `aspect`). Each step's
 //! report adds the edit state it left, and the final report re-reads `edit.junctur` from disk
 //! (`disk`: does it parse, and is it the list in play), counts the loads asked of mpv (a save must
@@ -102,6 +104,10 @@ enum Action {
     Solo(usize, bool),
     /// A menu item chosen (2g), by id.
     Menu(String),
+    /// 2o: playback speed, and review's loop of one clip (source seconds) or its end.
+    Speed(f64),
+    Loop(f64, f64),
+    Unloop,
 }
 
 /// The frontend's log lines (`ui_log`), kept for the report.
@@ -182,10 +188,19 @@ fn parse_steps(s: &str) -> Result<Vec<(f64, Action)>, String> {
                 Action::Solo(n.checked_sub(1).ok_or_else(bad)?, kind == "solo")
             }
             Some(("menu", id)) if !id.is_empty() => Action::Menu(id.to_string()),
+            Some(("speed", v)) => Action::Speed(v.trim().parse().map_err(|_| bad())?),
+            Some(("loop", v)) => {
+                let (a, b) = v.split_once('-').ok_or_else(bad)?;
+                Action::Loop(
+                    a.trim().parse().map_err(|_| bad())?,
+                    b.trim().parse().map_err(|_| bad())?,
+                )
+            }
             None if action == "pause" => Action::Pause,
             None if action == "undo" => Action::Edit(Step::Undo),
             None if action == "redo" => Action::Edit(Step::Redo),
             None if action == "reanalyse" => Action::Reanalyse,
+            None if action == "unloop" => Action::Unloop,
             _ => return Err(bad()),
         };
         steps.push((at, action));
@@ -280,6 +295,9 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
         }),
         Action::Mute(track, muted) => p.set_muted(*track, *muted),
         Action::Solo(track, on) => p.set_solo(*track, *on),
+        Action::Speed(x) => p.set_speed(*x),
+        Action::Loop(a, b) => p.play_between(*a, *b),
+        Action::Unloop => p.end_loop(),
         _ => unreachable!("run above"),
     })?
 }
@@ -329,6 +347,7 @@ impl Ran<'_> {
             "after": after,
             "edit": edit,
             "mixer": mixer(app),
+            "speedLoop": with_player(app, |p| p.looping()).ok(),
         })
     }
 }
@@ -534,6 +553,16 @@ mod tests {
             parse_steps("3:menu=talking").unwrap(),
             vec![(3.0, Action::Menu("talking".into()))]
         );
+        assert_eq!(
+            parse_steps("1:speed=1.5;2:loop=10.5-12;3:unloop").unwrap(),
+            vec![
+                (1.0, Action::Speed(1.5)),
+                (2.0, Action::Loop(10.5, 12.0)),
+                (3.0, Action::Unloop)
+            ]
+        );
+        assert!(parse_steps("1:loop=10").is_err());
+        assert!(parse_steps("1:speed=fast").is_err());
         assert!(parse_steps("1:mute=x").is_err());
         assert!(parse_steps("1:enroll=10:Ana").is_err());
         assert!(parse_steps("1:forget=").is_err());

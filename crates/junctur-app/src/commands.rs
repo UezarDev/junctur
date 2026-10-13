@@ -345,6 +345,24 @@ pub async fn toggle_pause(app: State<'_, App>) -> Result<(), String> {
     app.with(|p| p.toggle_pause())
 }
 
+/// Plays source seconds `start` to `end` on a loop (2o: review's one clip), from `start`.
+#[tauri::command]
+pub async fn play_between(app: State<'_, App>, start: f64, end: f64) -> Result<(), String> {
+    app.with(|p| p.play_between(start, end))
+}
+
+/// Stops `play_between`'s loop.
+#[tauri::command]
+pub async fn end_loop(app: State<'_, App>) -> Result<(), String> {
+    app.with(|p| p.end_loop())
+}
+
+/// Playback speed, a quarter to four times (2o).
+#[tauri::command]
+pub async fn set_speed(app: State<'_, App>, speed: f64) -> Result<(), String> {
+    app.with(|p| p.set_speed(speed))
+}
+
 /// Returns the source time the seek lands on (a cut lands on the next kept range while skipping).
 #[tauri::command]
 pub async fn seek(app: State<'_, App>, seconds: f64, exact: bool) -> Result<f64, String> {

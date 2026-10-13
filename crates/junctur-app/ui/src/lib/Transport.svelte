@@ -3,7 +3,8 @@
   // lanes. Play, the skip toggle, the clocks, the whole recording as an overview (outlining the
   // window the lanes show) and, at the right end, the lanes' zoom. The track controls that were
   // here (2a's track select, 2e's strips) live on the lanes and the portrait strips; editing
-  // sits over the lanes (ActionBar).
+  // sits over the lanes (ActionBar). Review (2o) goes through the clips one at a time; while it
+  // runs, Skip cuts stays off (review plays the cuts it judges).
   import * as api from "./api";
   import Timeline from "./Timeline.svelte";
   import Clocks from "./Clocks.svelte";
@@ -15,6 +16,8 @@
     span,
     view,
     onZoom,
+    reviewing,
+    onReview,
     onSelect,
     onError,
   }: {
@@ -26,6 +29,9 @@
     view: { start: number; end: number } | null;
     /** Zoom the lanes: a factor on the window's length, or `whole` for the whole recording. */
     onZoom: (by: number | "whole") => void;
+    /** Review mode is on (2o), and the toggle for it. */
+    reviewing: boolean;
+    onReview: () => void;
     onSelect: (s: Selection | null) => void;
     onError: (message: string) => void;
   } = $props();
@@ -33,6 +39,7 @@
   const loaded = $derived(!!player?.path);
   // Skipping needs an edit list that keeps something; otherwise the toggle says why not.
   const canSkip = $derived(loaded && !!edit?.fps && edit.ranges.length > 0);
+  const canReview = $derived(loaded && !!edit?.editable && !!edit.fps);
   const skipTitle = $derived(
     canSkip
       ? "Play only what the edit list keeps (S)"
@@ -66,11 +73,21 @@
     class="skip"
     class:on={canSkip && edit?.skip}
     onclick={() => call(() => api.setSkip(!edit?.skip))}
-    disabled={!canSkip}
+    disabled={!canSkip || reviewing}
     title={skipTitle}
     aria-pressed={canSkip && !!edit?.skip}
   >
     Skip cuts
+  </button>
+  <button
+    class="skip"
+    class:on={reviewing}
+    onclick={onReview}
+    disabled={!canReview && !reviewing}
+    title={canReview || reviewing ? "Go through the clips one at a time: Keep or Remove each (R)" : (edit?.error ?? "No edit list yet: it comes with the analysis")}
+    aria-pressed={reviewing}
+  >
+    Review
   </button>
   <Clocks {player} {edit} />
   <Timeline {player} {edit} {span} {view} {onSelect} {onError} />

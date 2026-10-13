@@ -19,6 +19,7 @@
   import Strips from "./lib/Strips.svelte";
   import Avatars from "./lib/Avatars.svelte";
   import ActionBar from "./lib/ActionBar.svelte";
+  import Review from "./lib/Review.svelte";
   import TrackSteps from "./lib/TrackSteps.svelte";
   import * as steps from "./lib/steps";
   import TitleBar from "./lib/TitleBar.svelte";
@@ -63,6 +64,9 @@
   let words = $state.raw<Words | null>(null);
   let wordsLoading = $state(false);
   let selection = $state<sel.Selection | null>(null);
+  // Review mode (2o): one clip at a time in the range toolbar's place; it takes the keys first.
+  let reviewing = $state(false);
+  let reviewer = $state<Review | null>(null);
   let panelOpen = $state(true);
   // Which side panel shows. The transcript stays mounted while hidden: laying out a 30 h
   // transcript again on every switch would cost a noticeable moment.
@@ -121,6 +125,19 @@
       // A preference only: it is simply not kept.
     }
   }
+  // Into review (on an editable list) or out of it; a selection would only sit under it unseen.
+  function toggleReview() {
+    if (reviewing) reviewing = false;
+    else if (edit?.editable && edit.fps && player?.path) {
+      selection = null;
+      reviewing = true;
+    }
+  }
+  // The recording closed or its list stopped being editable (a re-analysis): review ends.
+  $effect(() => {
+    if (reviewing && (!player?.path || !edit?.editable)) reviewing = false;
+  });
+
   function togglePanel() {
     panelOpen = !panelOpen;
   }
@@ -421,6 +438,10 @@
     // A field keeps every key, the title bar's shortcuts too (2i): Ctrl+W from a caption number
     // not yet committed would close the recording before its change is saved.
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+    if (reviewing && reviewer?.key(e)) {
+      e.preventDefault();
+      return;
+    }
     const ctrl = e.ctrlKey || e.metaKey;
     if (ctrl && !e.shiftKey && (e.code === "KeyO" || e.code === "KeyW" || e.code === "Comma")) {
       e.preventDefault();
@@ -454,6 +475,8 @@
       run(api.togglePause);
     } else if (e.code === "KeyS" && !ctrl && player?.path && edit?.ranges.length) {
       run(() => api.setSkip(!edit?.skip));
+    } else if (e.code === "KeyR" && !ctrl && !e.altKey) {
+      toggleReview();
     }
   }
 
@@ -471,7 +494,7 @@
     }
   }
 
-  // Where the edit actions go: one fixed place, centred over the lanes' tracks just above their
+  // Where the edit actions go (and review's bar, 2o): one fixed place, centred over the lanes' tracks just above their
   // bottom edge, with or without a selection. 2g put them at the selection, else at the playhead,
   // so the bar slid along while playing or scrubbing and was never where the hand left it (2n).
   const actionsAt = $derived.by(() => {
@@ -578,6 +601,8 @@
         {span}
         view={{ start: view.start, end: view.start + view.len }}
         onZoom={zoom}
+        {reviewing}
+        onReview={toggleReview}
         onSelect={(s) => (selection = s)}
         onError={(e) => (failure = e)}
       />
@@ -603,7 +628,11 @@
         />
       </div>
     {/if}
-    <ActionBar {player} {edit} {selection} at={actionsAt} onSelect={(s) => (selection = s)} onError={(e) => (failure = e)} />
+    {#if reviewing}
+      <Review bind:this={reviewer} {player} {edit} at={actionsAt} onDone={() => (reviewing = false)} onError={(e) => (failure = e)} />
+    {:else}
+      <ActionBar {player} {edit} {selection} at={actionsAt} onSelect={(s) => (selection = s)} onError={(e) => (failure = e)} />
+    {/if}
   {/if}
 
   {#if failure || player?.error}

@@ -1009,6 +1009,41 @@ impl Core {
         self.mpv.command(&["cycle", "pause"])
     }
 
+    /// Plays source seconds `start` to `end` over and over (2o's review of one clip): mpv's own
+    /// A-B loop, so it turns back on the exact frame and also at the end of the file, where
+    /// `keep-open` would otherwise pause. Source time, so for the whole file playing only (review
+    /// turns skipping off first); the next load clears it (`load`).
+    pub fn play_between(&self, start: f64, end: f64) -> Result<(), String> {
+        if !(start.is_finite() && end.is_finite() && start >= 0.0 && end > start) {
+            return Err(format!("no clip from {start} to {end}"));
+        }
+        // The seek first: one refused (no file playing yet) leaves no loop behind.
+        self.mpv
+            .command(&["seek", &format!("{start:.6}"), "absolute+exact"])?;
+        lock(&self.state).expect(start);
+        self.mpv.set_string("ab-loop-a", &format!("{start:.6}"))?;
+        self.mpv.set_string("ab-loop-b", &format!("{end:.6}"))?;
+        self.mpv.set_string("pause", "no")
+    }
+
+    /// Stops `play_between`'s loop; playback goes on from where it is.
+    pub fn end_loop(&self) -> Result<(), String> {
+        clear_loop(&self.mpv)
+    }
+
+    /// Playback speed (2o: review's speed control), with mpv's pitch correction.
+    pub fn set_speed(&self, speed: f64) -> Result<(), String> {
+        if !speed_ok(speed) {
+            return Err(format!("no playback speed {speed}"));
+        }
+        self.mpv.set_string("speed", &format!("{speed}"))
+    }
+
+    /// The speed and A-B loop mpv has now (test mode).
+    pub fn looping(&self) -> [Option<String>; 3] {
+        ["speed", "ab-loop-a", "ab-loop-b"].map(|p| self.mpv.get_string(p))
+    }
+
     /// Seeks to source time `seconds` and returns the source time it lands on: while kept ranges
     /// play, a time inside a cut lands on the next kept range (past the last one, on its last
     /// frame). `exact` lands on the frame (slower on long GOPs); without it mpv seeks to a
@@ -1127,6 +1162,8 @@ impl Core {
         };
         self.mpv
             .set_string("pause", if paused { "yes" } else { "no" })?;
+        // A review's loop (2o) was set in the times of the load it was set for.
+        clear_loop(&self.mpv)?;
         // The playlist index (-1: none) comes before per-file options since mpv 0.38. The mixer's
         // graphs go with each load, with the mutes as they are now.
         let mut options = format!("start={start:.6}");
@@ -1192,6 +1229,18 @@ fn send_weights(mpv: &Mpv, m: &Mixer) {
         let w = m.weights();
         let _ = mpv.command(&["af-command", mixer::MIX, "weights", &w, mixer::MIX_FILTER]);
     }
+}
+
+/// Clears mpv's A-B loop (2o: review's loop of one clip).
+fn clear_loop(mpv: &Mpv) -> Result<(), String> {
+    mpv.set_string("ab-loop-a", "no")?;
+    mpv.set_string("ab-loop-b", "no")
+}
+
+/// The speeds the player takes (2o): review offers 1x to 2x; mpv's pitch correction holds voices
+/// natural well past that, and outside a quarter to four times nothing is judged by ear.
+fn speed_ok(speed: f64) -> bool {
+    (0.25..=4.0).contains(&speed)
 }
 
 /// The meter reading, as mpv's JSON (see `mixer::levels`); `None` without an audio chain.
@@ -1375,6 +1424,15 @@ fn event_loop(events: &mut Events, shared: &Shared) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speeds_outside_a_quarter_to_four_times_are_refused() {
+        assert!(
+            speed_ok(1.0) && speed_ok(1.25) && speed_ok(2.0) && speed_ok(0.25) && speed_ok(4.0)
+        );
+        assert!(!speed_ok(0.0) && !speed_ok(-1.0) && !speed_ok(4.5) && !speed_ok(f64::NAN));
+        assert!(!speed_ok(f64::INFINITY));
+    }
 
     #[test]
     fn a_replaced_load_does_not_shift_later_ones() {
