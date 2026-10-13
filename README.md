@@ -183,7 +183,8 @@ title bar) writes the same file:
 `words` is the word list: names and terms (speaker names, recurring jargon) Whisper is told before every
 stretch it hears, so they come out spelled that way. It applies to the next transcription; a finished one
 is not redone or called out of date. A list too long for Whisper's prompt (about 220 tokens) is cut from
-the end, and the log says what was left out. The app edits it in Settings and adds every word you fix.
+the end, and the log says what was left out. The app edits it in Settings and adds every word you fix at
+the top of the list, so a newly fixed word is always told to Whisper.
 
 `captions` holds the caption defaults: what a recording whose edit list has no `captions` line of its own
 cuts its captions with (`on`, `chars` per line, `lines` per speaker, `seconds` at most), in the app and in

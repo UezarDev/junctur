@@ -26,13 +26,13 @@
   // The cues, sorted and never overlapping (the export's `settle`), so a binary search finds the one
   // on screen. Asked again only when something that shapes them changes: the kept ranges, the frame
   // rate, how cues are cut, who says what (`speakersKey`: the turns, which follow a new transcript
-  // or a re-hearing). Bold, italic, underline, colours and names are drawn here from the edit state, so
+  // or a re-hearing), what words say (`fixesKey`: a word fixed in the transcript, 5h). Bold, italic, underline, colours and names are drawn here from the edit state, so
   // toggling them costs no new cutting of a long transcript. A reply older than a newer request is
   // dropped.
   const shape = $derived.by(() => {
     if (!on || !edit || !captions) return null;
     const fps = edit.fps ? `${edit.fps.num}/${edit.fps.den}` : "";
-    return `${edit.ranges.join(",")}|${fps}|${captions.chars}|${captions.lines}|${captions.seconds}|${edit.speakersKey}`;
+    return `${edit.ranges.join(",")}|${fps}|${captions.chars}|${captions.lines}|${captions.seconds}|${edit.speakersKey}|${edit.fixesKey}`;
   });
   let cues = $state.raw<api.Cue[]>([]);
   let asked = 0;

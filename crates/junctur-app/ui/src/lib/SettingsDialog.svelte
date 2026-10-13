@@ -81,7 +81,7 @@
       <p class="note">
         Names and terms Whisper should spell this way, one per line, told to it before every stretch it hears. Used by
         the next transcription; recordings already transcribed are not redone. A word you fix in the transcript (double-click
-        it) is added here on its own. When the list is too long for Whisper the first entries win.
+        it) is added at the top on its own. When the list is too long for Whisper the first entries win.
       </p>
 
       <h3>Caption defaults</h3>

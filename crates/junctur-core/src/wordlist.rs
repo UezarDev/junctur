@@ -1,7 +1,8 @@
 //! The user's word list (5h): names and recurring terms Whisper is told before every chunk it hears,
 //! so they come out spelled the user's way. One list for every recording, kept in `config.json`
 //! ([`crate::config::Config::words`]); the app's Settings edits it and a word fixed in a transcript
-//! joins it ([`learned`]).
+//! joins it at the top ([`learned`], [`add_first`]): when the list is longer than Whisper's prompt
+//! the first entries win, so the word just fixed is one Whisper is told.
 //!
 //! A module of its own so the rules (what an entry is, what a fix adds, how a long list is cut to
 //! Whisper's prompt) are one place for the config file, the app and the transcriber, and testable
@@ -36,11 +37,13 @@ pub fn normalize(list: &[String]) -> Vec<String> {
     out
 }
 
-/// Adds `entry` at the end of `list` unless it is there already; whether it was added.
-pub fn add(list: &mut Vec<String>, raw: &str) -> bool {
+/// Adds `raw` at the top of `list` unless it is there already; whether it was added. At the top, not
+/// the end: [`prompt`] keeps the first entries, so a word added at the end of a full list would never
+/// reach Whisper. Entries the user types in Settings keep the order they are typed in.
+pub fn add_first(list: &mut Vec<String>, raw: &str) -> bool {
     match entry(raw) {
         Some(e) if !list.contains(&e) => {
-            list.push(e);
+            list.insert(0, e);
             true
         }
         _ => false,
@@ -53,11 +56,12 @@ fn bare(s: &str) -> &str {
 }
 
 /// What a word fixed from `heard` to `fixed` adds to the list: the fixed spelling without the
-/// punctuation around it; `None` when that is empty or only changes the case or punctuation of what
-/// was heard (no spelling Whisper needs to be told).
+/// punctuation around it; `None` when that is empty or the fix only changes the punctuation around
+/// what was heard. A change of case is learned: a name heard in lower case (`tsunheto`) is the
+/// commonest fix there is.
 pub fn learned(heard: &str, fixed: &str) -> Option<String> {
     let new = bare(fixed);
-    if new.is_empty() || new.to_lowercase() == bare(heard).to_lowercase() {
+    if new.is_empty() || new == bare(heard) {
         return None;
     }
     entry(new)
@@ -118,17 +122,29 @@ mod tests {
             list(&["Uezar", "Delay", "uezar"])
         );
         let mut l = list(&["Uezar"]);
-        assert!(!add(&mut l, " Uezar"));
-        assert!(add(&mut l, "Tsunheto"));
-        assert!(!add(&mut l, "   "));
-        assert_eq!(l, list(&["Uezar", "Tsunheto"]));
+        assert!(!add_first(&mut l, " Uezar"));
+        assert!(add_first(&mut l, "Tsunheto"));
+        assert!(!add_first(&mut l, "   "));
+        assert_eq!(l, list(&["Tsunheto", "Uezar"]), "a new word goes first");
+        // So it reaches Whisper even when the list is full: a later fix is told, the oldest is cut.
+        let chars = |s: &str| s.chars().count();
+        assert!(add_first(&mut l, "Delay"));
+        let p = prompt(&l, 15, chars);
+        assert_eq!(p.text, "Delay, Tsunheto");
+        assert_eq!(p.left_out, list(&["Uezar"]));
     }
 
     #[test]
     fn a_fix_adds_its_spelling_not_its_punctuation_or_case() {
         assert_eq!(learned("Wezar,", "Uezar,"), Some("Uezar".into()));
         assert_eq!(learned("tsun eto", "Tsunheto."), Some("Tsunheto".into()));
-        assert_eq!(learned("hola", "Hola."), None, "case and punctuation only");
+        assert_eq!(
+            learned("tsunheto", "Tsunheto"),
+            Some("Tsunheto".into()),
+            "case"
+        );
+        assert_eq!(learned("Uezar", "Uezar."), None, "punctuation only");
+        assert_eq!(learned(" Uezar,", "Uezar"), None, "punctuation only");
         assert_eq!(learned("eh", "..."), None, "nothing left");
         assert_eq!(learned("del ay", "Delay"), Some("Delay".into()));
     }

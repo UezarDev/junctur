@@ -124,8 +124,22 @@ pub fn read() -> SettingsView {
     view(config::load().map_err(|e| e.to_string()))
 }
 
+/// One reader-and-writer of the config file at a time in the app (5h repair): a word learned from a
+/// fix (read, add, save) and the Captions panel's "Save as default" (read, change, save) running
+/// together would each save over the other's change. Every write here holds it from the read on.
+static CONFIG: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn config_lock() -> std::sync::MutexGuard<'static, ()> {
+    CONFIG.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Writes `s` as the config file, whole (it holds nothing else), and returns what it now says.
 pub fn save(s: &Settings) -> Result<SettingsView, String> {
+    let _one = config_lock();
+    save_now(s)
+}
+
+fn save_now(s: &Settings) -> Result<SettingsView, String> {
     let c = to_config(s)?;
     config::save(&c).map_err(|e| e.to_string())?;
     Ok(view(Ok(c)))
@@ -134,22 +148,24 @@ pub fn save(s: &Settings) -> Result<SettingsView, String> {
 /// The Captions panel's "Save as default": only the caption defaults change. A config file that
 /// cannot be read is not replaced from here (the dialog says why and can replace it).
 pub fn save_caption_defaults(captions: Captions) -> Result<SettingsView, String> {
+    let _one = config_lock();
     let now = config::load().map_err(|e| e.to_string())?;
-    save(&Settings {
+    save_now(&Settings {
         captions,
         ..from_config(&now)
     })
 }
 
-/// Adds what fixing `heard` to `fixed` teaches ([`wordlist::learned`]) to the word list and saves
-/// it; the entry added, `None` when there is nothing to add or it is there already. A config file
+/// Adds what fixing `heard` to `fixed` teaches ([`wordlist::learned`]) at the top of the word list
+/// ([`wordlist::add_first`]) and saves it; the entry added, `None` when there is nothing to add or it is there already. A config file
 /// that cannot be read is not replaced from here.
 pub fn learn(heard: &str, fixed: &str) -> Result<Option<String>, String> {
     let Some(entry) = wordlist::learned(heard, fixed) else {
         return Ok(None);
     };
+    let _one = config_lock();
     let mut c = config::load().map_err(|e| e.to_string())?;
-    if !wordlist::add(&mut c.words, &entry) {
+    if !wordlist::add_first(&mut c.words, &entry) {
         return Ok(None);
     }
     config::save(&c).map_err(|e| e.to_string())?;

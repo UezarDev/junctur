@@ -180,6 +180,17 @@
     fixing = i;
     fixDraft = words.text[i];
   }
+  // The field's row can scroll out of the rendered window (the list is virtual) and take the field
+  // with it, without a blur: what was typed is saved then, as leaving the field does, so `fixing`
+  // never outlives its field (it holds the playhead follow).
+  function fixField(el: HTMLInputElement) {
+    focusInput(el);
+    return {
+      destroy() {
+        if (fixing != null) finishFix(true);
+      },
+    };
+  }
   function finishFix(save: boolean) {
     const i = fixing;
     fixing = null;
@@ -377,7 +388,7 @@
                   maxlength="100"
                   style:width="{Math.max(60, (wordWidth?.[t.i] ?? 0) + 24)}px"
                   bind:value={fixDraft}
-                  use:focusInput
+                  use:fixField
                   onpointerdown={(e) => e.stopPropagation()}
                   ondblclick={(e) => e.stopPropagation()}
                   onkeydown={(e) => {
