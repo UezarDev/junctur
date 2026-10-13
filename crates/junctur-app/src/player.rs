@@ -129,6 +129,8 @@ struct Ctl {
     edit: Edit,
     /// The user's toggle; on by default.
     skip: bool,
+    /// In review (2o): the toggle as it was before review set it off.
+    review: Option<bool>,
     /// The form of the last load asked for: what plays once in-flight loads land.
     requested: Form,
     watch: Option<watch::Watch>,
@@ -155,7 +157,7 @@ fn notice(e: &Edited) -> Option<String> {
             |n| n.to_string_lossy().into_owned(),
         )
     };
-    match (&e.saved.backup, e.saved.replaced_unreadable) {
+    let said = match (&e.saved.backup, e.saved.replaced_unreadable) {
         (Some(b), true) => Some(format!(
             "edit.junctur did not parse; it was kept as {} and replaced",
             name(b)
@@ -167,6 +169,18 @@ fn notice(e: &Edited) -> Option<String> {
                 .into(),
         ),
         _ => None,
+    };
+    // 2p repair: a several-stretch edit that left short stretches out says so.
+    let skipped = match e.skipped {
+        0 => None,
+        1 => Some("1 selected stretch is shorter than a frame and was left out".to_string()),
+        n => Some(format!(
+            "{n} selected stretches are shorter than a frame and were left out"
+        )),
+    };
+    match (said, skipped) {
+        (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+        (a, b) => a.or(b),
     }
 }
 
@@ -280,6 +294,7 @@ impl Player {
                 fps: None,
                 edit: Edit::default(),
                 skip: true,
+                review: None,
                 requested: Form::Source,
                 watch: None,
                 status: EditorStatus::default(),
@@ -329,6 +344,9 @@ impl Player {
         let mut ed = lock(&self.editor);
         ed.reset(edit_path.clone());
         let mut c = lock(&self.ctl);
+        // A review of the recording before ends with it (2o), its skip toggle back for this one; the
+        // load below clears the loop again anyway, so a failure here does not stop the open.
+        let _ = self.leave_review(&mut c);
         c.file = Some(path.to_string());
         c.fps = fps;
         c.edit = read.unwrap_or_default();
@@ -493,6 +511,22 @@ impl Core {
         self.change(file, |ed, list, fps| ed.edit(list, step, fps))
     }
 
+    /// Cuts (`keep` false) or keeps every run of transcript words in `runs` (`first..=last` each)
+    /// as one undo step (2p: a selection of several stretches). See [`Editor::edit_all`].
+    pub fn edit_words(
+        &self,
+        file: Option<&str>,
+        runs: &[(usize, usize)],
+        keep: bool,
+    ) -> Result<(), String> {
+        let ops: Vec<Op> = crate::editor::join_runs(runs)?
+            .into_iter()
+            .map(|(first, last)| Op::Words { first, last, keep })
+            .collect();
+        self.prepare();
+        self.change(file, |ed, list, fps| ed.edit_all(list, &ops, fps))
+    }
+
     /// Renames speaker `id` in the edit list and saves it (first taking any outside change). A
     /// speaker that is a remembered person renames the person (5b), in every recording.
     pub fn rename_speaker(&self, file: Option<&str>, id: u32, name: &str) -> Result<(), String> {
@@ -514,16 +548,19 @@ impl Core {
         }
     }
 
-    /// Remembers `name`'s voice from transcript words `first..=last` of the open recording (5b)
-    /// and labels its speakers again; returns a line for the user. Works from the windows the
-    /// speakers stage kept, so nothing is decoded and it takes a moment at most.
+    /// Remembers `name`'s voice from the runs of transcript words in `runs` (`first..=last` each)
+    /// of the open recording (5b; 2p: several runs, one selection of all of someone's lines, are
+    /// one enrolment and one line back) and labels its speakers again; returns a line for the user.
+    /// Works from the windows the speakers stage kept, so nothing is decoded and it takes a moment
+    /// at most.
     pub fn enroll_voice(
         &self,
         file: Option<&str>,
-        first: usize,
-        last: usize,
+        runs: &[(usize, usize)],
         name: &str,
     ) -> Result<String, String> {
+        // Joined first: overlapping runs would feed the same seconds into the voiceprint twice.
+        let runs = crate::editor::join_runs(runs)?;
         let file = file.ok_or("no recording is open")?;
         self.prepare();
         let words = lock(&self.editor)
@@ -534,10 +571,12 @@ impl Core {
         if self.file().as_deref() != Some(file) {
             return Err(OPENED_MEANWHILE.into());
         }
-        let stretch = words
-            .stretch(first, last)
+        let stretches = runs
+            .iter()
+            .map(|&(first, last)| words.stretch(first, last))
+            .collect::<Option<Vec<_>>>()
             .ok_or("no such words in the transcript")?;
-        let (found, line) = voices::enroll(file, name, stretch)?;
+        let (found, line) = voices::enroll(file, name, &stretches)?;
         self.respeak(Some(file), &found)?;
         Ok(line)
     }
@@ -639,6 +678,7 @@ impl Core {
         let mut ed = lock(&self.editor);
         ed.reset(None);
         let mut c = lock(&self.ctl);
+        let left = self.leave_review(&mut c);
         c.watch = None;
         c.file = None;
         c.edit_path = None;
@@ -663,7 +703,7 @@ impl Core {
         drop(ed);
         self.emit_state();
         self.emit_mixer();
-        stopped
+        stopped.and(left)
     }
 
     /// Fixes the spelling of transcript word `index` (5h) in the edit list and saves it; returns the
@@ -982,6 +1022,9 @@ impl Core {
 
     pub fn set_skip(&self, on: bool) -> Result<(), String> {
         let mut c = lock(&self.ctl);
+        if c.review.is_some() {
+            return Err("Skip cuts stays off while reviewing".into());
+        }
         c.skip = on;
         let want = c.wanted();
         let r = if c.file.is_some() && !same_form(&want, &c.requested) {
@@ -1007,6 +1050,84 @@ impl Core {
 
     pub fn toggle_pause(&self) -> Result<(), String> {
         self.mpv.command(&["cycle", "pause"])
+    }
+
+    /// Plays source seconds `start` to `end` over and over (2o's review of one clip): mpv's own
+    /// A-B loop, so it turns back on the exact frame and also at the end of the file, where
+    /// `keep-open` would otherwise pause. The loop is in source time and a cut clip is what is being
+    /// judged, so the first call puts the player in review: the whole file plays (the skip toggle
+    /// is remembered and set off, loading the whole file at `start` when only the kept ranges were
+    /// playing) until `end_review`, or until a recording opens or closes. Under the control lock, so
+    /// a review's start and end, and an open or close, never cross.
+    pub fn play_between(&self, start: f64, end: f64) -> Result<(), String> {
+        if !(start.is_finite() && end.is_finite() && start >= 0.0 && end > start) {
+            return Err(format!("no clip from {start} to {end}"));
+        }
+        let mut c = lock(&self.ctl);
+        if c.file.is_none() {
+            return Err("no file is open".into());
+        }
+        if c.review.is_none() {
+            c.review = Some(c.skip);
+            c.skip = false;
+            self.emit_edit(&c);
+        }
+        if same_form(&Form::Source, &c.requested) {
+            // The seek first: one refused leaves no loop behind.
+            self.mpv
+                .command(&["seek", &format!("{start:.6}"), "absolute+exact"])?;
+            lock(&self.state).expect(start);
+        } else {
+            // A seek sent while this load begins would be lost; the load starts at `start`.
+            self.load(&mut c, Form::Source, Some(start), false)?;
+        }
+        self.mpv.set_string("ab-loop-a", &format!("{start:.6}"))?;
+        self.mpv.set_string("ab-loop-b", &format!("{end:.6}"))?;
+        self.mpv.set_string("pause", "no")
+    }
+
+    /// Stops `play_between`'s loop and pauses, staying in review (2o: past the last clip).
+    pub fn pause_review(&self) -> Result<(), String> {
+        clear_loop(&self.mpv)?;
+        self.mpv.set_string("pause", "yes")
+    }
+
+    /// Leaves review (2o): no loop, speed 1x, the skip toggle as it was before. Nothing to do when
+    /// not reviewing (an open or close already ended it).
+    pub fn end_review(&self) -> Result<(), String> {
+        let mut c = lock(&self.ctl);
+        self.leave_review(&mut c)?;
+        let want = c.wanted();
+        let r = if c.file.is_some() && !same_form(&want, &c.requested) {
+            self.reload(&mut c, want)
+        } else {
+            Ok(())
+        };
+        self.emit_edit(&c);
+        r
+    }
+
+    /// Ends a review in `c`, if one is on, without reloading: the caller loads what it wants next.
+    fn leave_review(&self, c: &mut Ctl) -> Result<(), String> {
+        if let Some(skip) = c.review.take() {
+            c.skip = skip;
+            clear_loop(&self.mpv)?;
+            self.mpv.set_string("speed", "1")?;
+        }
+        Ok(())
+    }
+
+    /// Playback speed (2o: review's speed control), with mpv's pitch correction.
+    pub fn set_speed(&self, speed: f64) -> Result<(), String> {
+        if !speed_ok(speed) {
+            return Err(format!("no playback speed {speed}"));
+        }
+        self.mpv.set_string("speed", &format!("{speed}"))
+    }
+
+    /// The speed and A-B loop mpv has now (test mode).
+    pub fn looping(&self) -> [Option<String>; 3] {
+        ["speed", "ab-loop-a", "ab-loop-b"].map(|p| self.mpv.get_string(p))
     }
 
     /// Seeks to source time `seconds` and returns the source time it lands on: while kept ranges
@@ -1127,6 +1248,8 @@ impl Core {
         };
         self.mpv
             .set_string("pause", if paused { "yes" } else { "no" })?;
+        // A review's loop (2o) was set in the times of the load it was set for.
+        clear_loop(&self.mpv)?;
         // The playlist index (-1: none) comes before per-file options since mpv 0.38. The mixer's
         // graphs go with each load, with the mutes as they are now.
         let mut options = format!("start={start:.6}");
@@ -1192,6 +1315,18 @@ fn send_weights(mpv: &Mpv, m: &Mixer) {
         let w = m.weights();
         let _ = mpv.command(&["af-command", mixer::MIX, "weights", &w, mixer::MIX_FILTER]);
     }
+}
+
+/// Clears mpv's A-B loop (2o: review's loop of one clip).
+fn clear_loop(mpv: &Mpv) -> Result<(), String> {
+    mpv.set_string("ab-loop-a", "no")?;
+    mpv.set_string("ab-loop-b", "no")
+}
+
+/// The speeds the player takes (2o): review offers 1x to 2x; mpv's pitch correction holds voices
+/// natural well past that, and outside a quarter to four times nothing is judged by ear.
+fn speed_ok(speed: f64) -> bool {
+    (0.25..=4.0).contains(&speed)
 }
 
 /// The meter reading, as mpv's JSON (see `mixer::levels`); `None` without an audio chain.
@@ -1375,6 +1510,15 @@ fn event_loop(events: &mut Events, shared: &Shared) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speeds_outside_a_quarter_to_four_times_are_refused() {
+        assert!(
+            speed_ok(1.0) && speed_ok(1.25) && speed_ok(2.0) && speed_ok(0.25) && speed_ok(4.0)
+        );
+        assert!(!speed_ok(0.0) && !speed_ok(-1.0) && !speed_ok(4.5) && !speed_ok(f64::NAN));
+        assert!(!speed_ok(f64::INFINITY));
+    }
 
     #[test]
     fn a_replaced_load_does_not_shift_later_ones() {

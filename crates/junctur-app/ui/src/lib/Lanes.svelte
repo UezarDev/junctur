@@ -36,7 +36,7 @@
     head,
     thin,
     wavesVersion,
-    span,
+    spans,
     onView,
     onSelect,
     onError,
@@ -55,7 +55,8 @@
     thin: boolean;
     /** Moves when more of the waveforms has been read. */
     wavesVersion: number;
-    span: { start: number; end: number } | null;
+    /** The selection, a span per stretch (2p). */
+    spans: { start: number; end: number }[];
     onView: (start: number, len: number) => void;
     onSelect: (s: Selection | null) => void;
     onError: (message: string) => void;
@@ -331,7 +332,9 @@
 
   const position = $derived(player?.position ?? null);
   const headX = $derived(position == null ? null : x(position));
-  const sel = $derived(span ? { a: Math.max(0, x(span.start)), b: Math.min(width, x(span.end)) } : null);
+  const sel = $derived(
+    spans.map((s) => ({ a: Math.max(0, x(s.start)), b: Math.min(width, x(s.end)) })).filter((s) => s.b > s.a),
+  );
 
   onMount(() => {
     const ro = new ResizeObserver(() => {
@@ -390,9 +393,9 @@
     aria-valuenow={position ?? 0}
   >
     <canvas bind:this={canvas}></canvas>
-    {#if sel && sel.b > sel.a}
-      <div class="sel" style:left="{sel.a}px" style:width="{sel.b - sel.a}px"></div>
-    {/if}
+    {#each sel as s, k (k)}
+      <div class="sel" style:left="{s.a}px" style:width="{s.b - s.a}px"></div>
+    {/each}
     {#if headX != null && headX >= 0 && headX <= width}
       <div class="head" style:transform="translateX({headX}px)"></div>
     {/if}

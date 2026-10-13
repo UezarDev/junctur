@@ -5,13 +5,17 @@
   // (transcript.ts, one pass over the words); a resize or a fold toggle only repacks them into rows.
   // Where the speaker changes a name row comes first; click the name to rename the speaker (saved
   // to edit.junctur at once). Double-click a word to fix its spelling (5h): saved to edit.junctur at
-  // once, shown here, in the caption preview and the SRT, and added to the word list Whisper is told.
+  // once, shown here, in the caption preview and the SRT, and added to the word list Whisper is told
+  // (the header says so for a moment, 5t).
+  // A selection of words shows its actions at the bottom (WordBar, 2p): Cut, Keep, and the people
+  // with names as one-click buttons. Ctrl+click or Ctrl+drag adds another stretch to it.
   import { onMount } from "svelte";
   import { SvelteSet } from "svelte/reactivity";
   import * as api from "./api";
   import * as sel from "./selection";
   import { toSeconds } from "./time";
   import { pack, stamp, tokens, wordAt, type Stretch, type Token, type Words } from "./transcript";
+  import WordBar from "./WordBar.svelte";
 
   let {
     words,
@@ -24,6 +28,7 @@
     player,
     edit,
     selection,
+    reviewing = false,
     onSelect,
     onError,
   }: {
@@ -42,6 +47,8 @@
     player: api.PlayerState | null;
     edit: api.EditState | null;
     selection: sel.Selection | null;
+    /** Review mode (2o) has the editing: the word bar is not shown meanwhile. */
+    reviewing?: boolean;
     onSelect: (s: sel.Selection | null) => void;
     onError: (message: string) => void;
   } = $props();
@@ -174,29 +181,63 @@
   // decides). The new text comes back through the edit state's fixes key (App.svelte).
   let fixing = $state<number | null>(null);
   let fixDraft = $state("");
+  // `fixing` as a plain variable, for the field's own teardown and blur (5t repair): Svelte gives an
+  // effect's teardown the state from before the change that tore it down, so there `fixing` still
+  // named the field just closed. Its teardown then finished it a second time: Escape's draft was
+  // saved after all, Enter saved twice, and a field replaced by another word's closed that one too.
+  let fixOpen: number | null = null;
   function startFix(e: MouseEvent) {
-    const i = wordUnder(e.target);
-    if (i < 0 || !words) return;
-    fixing = i;
+    // Not `e.target` (5t): `down` captures the pointer on the scroller, and Chromium (WebView2) then
+    // sends the clicks and the double-click to the scroller, so the target never was a word and the
+    // field never opened. The element under the pointer, as `move` finds it. Only a kept word: a cut
+    // word in an open fold has no field, and `fixing` set without one would hold the follow for good.
+    const el = document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>("[data-i]");
+    if (!el || el.classList.contains("cutword") || !words) return;
+    const i = Number(el.dataset.i);
+    if (i === fixing) return;
+    // Another word's field still open (the press on this word kept it from blurring): what was
+    // typed there is saved first, as leaving it does (5t repair: it was lost, or saved as this
+    // word's text, when this word's draft replaced it before its field went away).
+    if (fixing != null) finishFix(true);
+    fixing = fixOpen = i;
     fixDraft = words.text[i];
   }
   // The field's row can scroll out of the rendered window (the list is virtual) and take the field
   // with it, without a blur: what was typed is saved then, as leaving the field does, so `fixing`
-  // never outlives its field (it holds the playhead follow).
-  function fixField(el: HTMLInputElement) {
+  // never outlives its field (it holds the playhead follow). Only while the fix is still this
+  // field's own: one replaced by another word's field was saved by `startFix` already.
+  function fixField(el: HTMLInputElement, i: number) {
     focusInput(el);
     return {
       destroy() {
-        if (fixing != null) finishFix(true);
+        if (fixOpen === i) finishFix(true);
       },
     };
   }
   function finishFix(save: boolean) {
     const i = fixing;
-    fixing = null;
+    fixing = fixOpen = null;
     if (!save || i == null || !words || fixDraft.trim() === words.text[i]) return;
     const text = fixDraft;
-    call(() => api.fixWord(i, text));
+    call(async () => {
+      const added = await api.fixWord(i, text);
+      if (added) tellLearned(added);
+    });
+  }
+
+  // A fix whose spelling joined the word list (5h's `settings::learn`) says so for a moment in the
+  // header (5t): before, nothing showed the list had changed until Settings was opened.
+  const LEARNED_MS = 4000;
+  let learned = $state<string | null>(null);
+  let learnedTimer = 0;
+  // Cleared when the panel goes: `fixWord` can answer after that (5t repair), and a timer set then
+  // would outlive the panel.
+  let mounted = false;
+  function tellLearned(entry: string) {
+    if (!mounted) return;
+    learned = entry;
+    clearTimeout(learnedTimer);
+    learnedTimer = window.setTimeout(() => (learned = null), LEARNED_MS);
   }
 
   const first = $derived(Math.max(0, Math.floor(top / ROW) - OVERSCAN));
@@ -209,7 +250,9 @@
   });
 
   const current = $derived(words && player?.position != null ? wordAt(words, player.position * 1000) : -1);
-  const chosen = $derived(selection?.kind === "words" ? selection : null);
+  // The selected words, sorted and joined, for drawing; the latest run, for Shift+click.
+  const joined = $derived(sel.runs(selection));
+  const latest = $derived(sel.latest(selection));
 
   // Following the playhead: scroll so the current word's row stays in view, unless the user has
   // scrolled lately. Our own scrolls are told apart by the position they set.
@@ -241,11 +284,22 @@
   }
 
   // Selecting: press on a word, drag across others, release. A press and release on one word
-  // without moving seeks there (and selects it); shift extends the selection from its anchor.
-  // `pressed` is the one drag in progress; `anchor` outlives it, for shift-clicks.
+  // without moving seeks there (and selects it); shift extends the latest stretch from its anchor.
+  // Ctrl (2p; Cmd on macOS, where Ctrl+click is the context menu, and never the Windows key)
+  // adds a stretch beside the ones selected: a press on a word adds it (a drag from it, the words
+  // dragged over), and a press and release on a word already selected takes it out, while a drag
+  // that starts on a selected word adds the words dragged over like any other (it only takes out
+  // the one word when the press does not move); a Ctrl+click does not seek, so picking out someone's lines one after another leaves the playhead
+  // where it was. `pressed` is the one drag in progress; `anchor` outlives it, for shift-clicks.
+  // `base` is what the drag's own run goes beside: nothing for a plain press, every stretch for
+  // Ctrl, all but the latest for Shift (that one is the run being extended).
   let anchor = -1;
   let pressed = false;
   let moved = false;
+  let base: sel.Selection | null = null;
+  let adding = false;
+  let unpick = false;
+  const MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
   function wordUnder(target: EventTarget | Element | null): number {
     const el = (target as HTMLElement | null)?.closest?.<HTMLElement>("[data-i]");
     return el ? Number(el.dataset.i) : -1;
@@ -256,16 +310,29 @@
     const i = wordUnder(e.target);
     if (i < 0 || e.button !== 0) return;
     e.preventDefault();
-    if (e.shiftKey && chosen) {
-      // The anchor only counts while it is an end of the current selection (the timeline may
-      // have replaced it).
-      const from = anchor === chosen.first || anchor === chosen.last ? anchor : chosen.first;
+    // The press seeks to the word on release (`up`), and the follow would then scroll a word in the
+    // first row or the last three away from under the pointer before a double-click's second press
+    // (5t). The word pressed is on screen already.
+    pausedUntil = performance.now() + FOLLOW_PAUSE_MS;
+    adding = MAC ? e.metaKey : e.ctrlKey;
+    unpick = false;
+    moved = false;
+    if (adding) {
+      base = selection?.kind === "words" ? selection : null;
+      anchor = i;
+      if (sel.has(joined, i)) unpick = true;
+      else onSelect(sel.adding(base, sel.run(i, i)));
+    } else if (e.shiftKey && latest && selection?.kind === "words") {
+      // The anchor only counts while it is an end of the latest stretch (the timeline may have
+      // replaced it).
+      const from = anchor === latest.first || anchor === latest.last ? anchor : latest.first;
       anchor = from;
-      onSelect(sel.words(from, i));
+      base = { kind: "words", runs: selection.runs.slice(0, -1) };
+      onSelect(sel.adding(base, sel.run(from, i)));
       moved = true;
     } else {
       anchor = i;
-      moved = false;
+      base = null;
       onSelect(sel.words(i, i));
     }
     pressed = true;
@@ -278,18 +345,20 @@
     const i = wordUnder(document.elementFromPoint(e.clientX, e.clientY));
     if (i >= 0 && (i !== anchor || moved)) {
       moved = true;
-      onSelect(sel.words(anchor, i));
+      onSelect(sel.adding(base, sel.run(anchor, i)));
     }
   }
 
   function up() {
     if (!pressed) return;
     pressed = false;
-    if (!moved && words && anchor >= 0) {
+    if (!moved && unpick) onSelect(sel.without(selection, anchor));
+    else if (!moved && !adding && words && anchor >= 0) {
       const i = anchor;
       call(() => api.seek(words!.start[i] / 1000, true));
     }
     moved = false;
+    unpick = false;
   }
 
   function toggle(t: Extract<Token, { kind: "cut" }>) {
@@ -302,6 +371,7 @@
   }
 
   onMount(() => {
+    mounted = true;
     let timer = 0;
     const ro = new ResizeObserver(() => {
       height = scroller.clientHeight;
@@ -313,6 +383,8 @@
     ro.observe(scroller);
     return () => {
       clearTimeout(timer);
+      mounted = false;
+      clearTimeout(learnedTimer);
       ro.disconnect();
     };
   });
@@ -321,7 +393,9 @@
 <section class="panel">
   <header>
     <span>Transcript</span>
-    {#if words}
+    {#if learned}
+      <span class="muted learned" role="status">"{learned}" added to the word list</span>
+    {:else if words}
       <span class="muted">{words.text.length.toLocaleString()} words</span>
     {/if}
   </header>
@@ -388,7 +462,7 @@
                   maxlength="100"
                   style:width="{Math.max(60, (wordWidth?.[t.i] ?? 0) + 24)}px"
                   bind:value={fixDraft}
-                  use:fixField
+                  use:fixField={t.i}
                   onpointerdown={(e) => e.stopPropagation()}
                   ondblclick={(e) => e.stopPropagation()}
                   onkeydown={(e) => {
@@ -396,14 +470,14 @@
                     if (e.key === "Enter") finishFix(true);
                     else if (e.key === "Escape") finishFix(false);
                   }}
-                  onblur={() => finishFix(true)}
+                  onblur={() => fixOpen === t.i && finishFix(true)}
                   aria-label="Fix this word's spelling"
                 />
               {:else if t.kind === "word"}
                 <span
                   class="w"
                   class:cur={t.i === current}
-                  class:sel={chosen && t.i >= chosen.first && t.i <= chosen.last}
+                  class:sel={sel.has(joined, t.i)}
                   style:box-shadow={words.also[t.i] ? `inset 0 -2px 0 ${colour(words.also[t.i])}` : null}
                   title={words.also[t.i]
                     ? `${nameOf(words.speaker[t.i])} and ${nameOf(words.also[t.i])} at once`
@@ -414,7 +488,7 @@
                 <span
                   class="w cutword"
                   class:cur={t.i === current}
-                  class:sel={chosen && t.i >= chosen.first && t.i <= chosen.last}
+                  class:sel={sel.has(joined, t.i)}
                   data-i={t.i}>{words.text[t.i]}</span
                 >
               {:else if t.kind === "cut"}
@@ -446,6 +520,9 @@
       {/if}
     {/if}
   </div>
+  {#if selection?.kind === "words" && words && edit?.editable && !reviewing}
+    <WordBar {edit} {selection} {onSelect} {onError} />
+  {/if}
 </section>
 
 <style>
@@ -466,6 +543,13 @@
   .muted {
     color: var(--muted);
     font-weight: 400;
+  }
+  .learned {
+    min-width: 0;
+    margin-left: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .scroll {
     position: relative;
