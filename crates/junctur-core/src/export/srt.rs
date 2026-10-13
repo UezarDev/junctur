@@ -29,15 +29,15 @@ use crate::transcribe::Word;
 
 /// A new cue after a pause this long in the edited timeline, even mid-sentence.
 const PAUSE_S: f64 = 1.0;
-/// A cue stays at least this long when the next one leaves room: one word flashed for its own
-/// 0.2 s cannot be read.
+/// A cue stays at least this long when the next one leaves room, so a lone short word is not
+/// gone before it is read.
 const MIN_S: f64 = 0.8;
 /// No cue is shorter than this: when the next one would start sooner (quick turns, or a stacked
-/// overlap cut at its limits), the next one waits. Shorter than [`MIN_S`] so a quick exchange does not drift far behind.
+/// overlap cut at its limits), the next one waits. Shorter than [`MIN_S`] so a quick exchange does
+/// not drift far behind. Not under a word limit (5i): there each cue is a word or a few, quicker
+/// than any floor, and every wait would add to the last until the captions trail the voice by
+/// seconds; a word cue starts when it is said and lasts until the next.
 const READABLE_S: f64 = 0.5;
-/// [`READABLE_S`] when a word limit is set (5i): shorter than a spoken word, so one word at a time
-/// follows the voice instead of each word waiting out 0.5 s and the captions falling behind.
-const WORD_READABLE_S: f64 = 0.2;
 
 /// One speaker's lines in a cue.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -216,11 +216,7 @@ pub fn cues<'a>(
         });
     }
     out.extend(open.map(Open::close));
-    let floor = if c.words == 0 {
-        READABLE_S
-    } else {
-        WORD_READABLE_S
-    };
+    let floor = if c.words == 0 { READABLE_S } else { 0.0 };
     settle(&mut out, c.seconds, floor, tl.total());
     out
 }
@@ -249,8 +245,10 @@ impl Said {
 struct OpenPart {
     speaker: u32,
     lines: Vec<String>,
-    /// Transcript words taken, for the word limit (5i): one each, whatever spaces its text holds.
+    /// Units taken (5i's word limit), one per word or replaced phrase (5j), whatever spaces its
+    /// text holds; `last_words` of them on the last line.
     words: u32,
+    last_words: u32,
     /// The track and end of its last word.
     track: usize,
     end: f64,
@@ -264,6 +262,7 @@ impl OpenPart {
             speaker: w.speaker(),
             lines: vec![text],
             words: 1,
+            last_words: 1,
             track: w.track,
             end: w.end,
             with: Vec::new(),
@@ -310,11 +309,11 @@ impl Open {
             if p.speaker == speaker {
                 parts.extend(fresh.take());
             } else if p.track != w.track && w.start < p.end {
-                let lines: Vec<String> = p.lines.last().cloned().into_iter().collect();
                 parts.push(OpenPart {
                     speaker: p.speaker,
-                    words: lines.iter().map(|l| l.split(' ').count() as u32).sum(),
-                    lines,
+                    lines: p.lines.last().cloned().into_iter().collect(),
+                    words: p.last_words,
+                    last_words: p.last_words,
                     track: p.track,
                     end: p.end,
                     with: p.with.clone(),
@@ -359,8 +358,14 @@ impl Open {
                 {
                     return false;
                 }
+                let had = p.lines.len();
                 p.lines = wrap_onto(std::mem::take(&mut p.lines), text, chars);
                 p.words += 1;
+                p.last_words = if p.lines.len() > had {
+                    1
+                } else {
+                    p.last_words + 1
+                };
                 p.track = w.track;
                 p.end = p.end.max(w.end);
                 p.add_with(w);
@@ -414,10 +419,12 @@ fn wrap_onto(mut lines: Vec<String>, w: &str, chars: usize) -> Vec<String> {
 
 /// Cues in order and never overlapping (Resolve puts subtitles on one track, which cannot hold
 /// two at once), all within the edited timeline's `total` seconds. Each cue lasts at least
-/// `floor` ([`READABLE_S`], or [`WORD_READABLE_S`] under a word limit): a next cue starting sooner
-/// (a quick turn) waits that long. Then
-/// each ends by the next one's start, held to [`MIN_S`] where there is room, never past the
-/// longest a cue may last. A cue pushed past the end of the timeline joins the one before.
+/// `floor` ([`READABLE_S`], or nothing under a word limit): a next cue starting sooner (a quick
+/// turn) waits that long. Then each ends by the next one's start, held to [`MIN_S`] where there is
+/// room, never past the longest a cue may last. A cue pushed past the end of the timeline joins the
+/// one before. Under a word limit nothing is pushed, and a cue starts inside the timeline, so only
+/// a cue said at the very instant of the next one is left with no time and joins the one before,
+/// the one case where a caption holds more words than the limit.
 fn settle(cues: &mut Vec<Cue>, longest: f64, floor: f64, total: f64) {
     cues.sort_by(|a, b| a.start.total_cmp(&b.start));
     for i in 0..cues.len() {
@@ -763,6 +770,81 @@ mod tests {
             vec![
                 vec![(1, "uno dos".into()), (2, "sí".into())],
                 vec![(1, "tres".into()), (2, "sí no".into())],
+            ]
+        );
+    }
+
+    #[test]
+    fn one_word_at_a_time_never_falls_behind_quick_words() {
+        // 100 words 0.1 s apart (short words with touching edges): a floor pushing each cue
+        // after the last would put the hundredth seconds behind its word.
+        let w: Vec<Word> = (0..100)
+            .map(|k| word(k as f64 * 0.1, k as f64 * 0.1 + 0.1, "la"))
+            .collect();
+        let e = edit(
+            &[(0.0, 40.0)],
+            Captions {
+                words: 1,
+                ..Default::default()
+            },
+        );
+        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1);
+        assert_eq!(c.len(), 100, "{c:?}");
+        for (c, w) in c.iter().zip(&w) {
+            assert!((c.start - w.start).abs() < 1e-9, "{c:?} for {w:?}");
+            assert!(c.end > c.start);
+        }
+    }
+
+    #[test]
+    fn under_a_word_limit_the_last_words_keep_their_own_cues() {
+        // Kept 0-10 s. Without a limit "b" would wait for "a" past the end and join it; one word
+        // at a time it starts when said, so the limit holds to the end.
+        let e = edit(
+            &[(0.0, 10.0)],
+            Captions {
+                words: 1,
+                ..Default::default()
+            },
+        );
+        let (a, b) = (word(9.90, 9.94, "a"), word(9.95, 9.99, "b"));
+        let c = cues(&e, &own(&e), [(0, &a), (0, &b)], 30, 1);
+        assert_eq!(solo(&c), vec!["a", "b"]);
+        assert!(
+            (c[1].start - 9.95).abs() < 1e-9 && (c[1].end - 10.0).abs() < 1e-9,
+            "{c:?}"
+        );
+    }
+
+    #[test]
+    fn a_carried_line_counts_a_replaced_phrase_as_one_word() {
+        use crate::edit::Replace;
+        let e = two_tracks(Captions {
+            words: 2,
+            replace: vec![Replace {
+                from: "new york".into(),
+                to: "big apple".into(),
+            }],
+            ..Default::default()
+        });
+        let one = [
+            word(0.0, 0.3, "uno"),
+            word(0.35, 0.6, "dos"),
+            word(0.8, 1.1, "tres"), // a third word for speaker 1: a new cue
+        ];
+        // "big apple" runs past the new cue's start: carried on as one word of two, so "ya" fits.
+        let two = [
+            word(0.5, 0.65, "new"),
+            word(0.7, 0.95, "york"),
+            word(1.0, 1.2, "ya"),
+        ];
+        let words = one.iter().map(|w| (0, w)).chain(two.iter().map(|w| (3, w)));
+        let got: Vec<_> = cues(&e, &own(&e), words, 30, 1).iter().map(parts).collect();
+        assert_eq!(
+            got,
+            vec![
+                vec![(1, "uno dos".into()), (2, "big apple".into())],
+                vec![(1, "tres".into()), (2, "big apple ya".into())],
             ]
         );
     }
