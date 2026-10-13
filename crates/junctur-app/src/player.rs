@@ -495,9 +495,9 @@ impl Core {
         self.change(|ed, list, _| ed.set_captions(list, captions))
     }
 
-    /// Writes the captions of the list in play to `out` as an SRT (5a), and one per speaker beside
-    /// it (5b), on the edited timeline at the frame rate the player rounds to. Read and written
-    /// outside the locks once the words and the list are in hand.
+    /// Writes the captions of the list in play to `out` as one SRT (5a, 5e), on the edited timeline
+    /// at the frame rate the player rounds to. Read and written outside the locks once the words
+    /// and the list are in hand.
     pub fn export_captions(&self, out: &Path) -> Result<CaptionFiles, String> {
         self.prepare();
         // An `Arc` of the words, not a copy; the lock is held only to take it.

@@ -3,9 +3,10 @@
   // sample of how it reads, how cues are cut, and exporting the SRT. Everything is saved to
   // edit.junctur at once (the `captions` and `speaker` lines), so it is readable and survives a
   // re-cut. Only what an SRT carries into DaVinci Resolve is offered: text, timing and colour.
-  // Size, font and position are set in Resolve (an SRT import drops them). Export writes one file per
-  // speaker beside the combined one (5b), since a Resolve subtitle track shows one caption at a time;
-  // the remembered voices are listed with Forget.
+  // Size, font and position are set in Resolve (an SRT import drops them). Export writes one file
+  // (5e): a Resolve subtitle track shows one caption at a time, so people talking at once share one
+  // caption, a line each; 5b's per-speaker files left beside it are listed. The remembered voices
+  // are listed with Forget.
   import { save } from "@tauri-apps/plugin-dialog";
   import * as api from "./api";
 
@@ -96,9 +97,8 @@
       busy = true;
       const r = await api.exportCaptions(path);
       exported = [
-        `${r.cues.toLocaleString()} captions, everyone: ${path}`,
-        ...r.speakers.map((s) => `${s.cues.toLocaleString()} captions, ${s.name}: ${s.path}`),
-        ...r.stale.map((p) => `Not written now, from an earlier export? Delete before importing: ${p}`),
+        `${r.cues.toLocaleString()} captions: ${path}`,
+        ...r.stale.map((p) => `A speaker file from an earlier export: delete it before importing: ${p}`),
       ];
     } catch (e) {
       onError(String(e));
@@ -151,7 +151,7 @@
         <input type="number" min="10" max="80" value={captions.chars} onchange={(e) => number(e, "chars", 10, 80)} />
       </label>
       <label class="field">
-        <span>Lines per caption</span>
+        <span>Lines per speaker</span>
         <input type="number" min="1" max="3" value={captions.lines} onchange={(e) => number(e, "lines", 1, 3)} />
       </label>
       <label class="field">
@@ -173,10 +173,10 @@
         {#each exported as line (line)}<p class="done">{line}</p>{/each}
       {/if}
       <p class="note">
-        Cues follow the edited timeline, like the render and the FCPXML. Each speaker also gets a file of their
-        own, "(name).srt", with everything they say, also while someone else talks: in DaVinci Resolve import
-        each one (File &gt; Import &gt; Subtitle) onto its own subtitle track at the start of the timeline, and
-        overlapping talk shows at once; the colours come through. An SRT carries no size or position: set those
+        Cues follow the edited timeline, like the render and the FCPXML. When people talk at once, one caption
+        holds them all, each speaker on their own line in their colour; the line limit applies to each speaker.
+        In DaVinci Resolve import the file (File &gt; Import &gt; Subtitle) onto one subtitle track at the start
+        of the timeline; the colours come through. An SRT carries no size or position: set those
         in Resolve. Premiere Pro is untested and likely shows its default style.
       </p>
 
