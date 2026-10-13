@@ -127,6 +127,7 @@ fn main() {
             commands::voices,
             commands::enroll_voice,
             commands::forget_voice,
+            commands::reanalyze_speakers,
             commands::undo,
             commands::redo,
             commands::set_video_margins,

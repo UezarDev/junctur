@@ -12,6 +12,7 @@ const SWITCHES: &[&str] = &[
     "--no-speakers",
     "--no-transcript",
     "--full",
+    "--rehear",
 ];
 
 pub struct Args {

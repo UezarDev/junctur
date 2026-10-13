@@ -336,6 +336,20 @@ pub async fn enroll_voice(
     app.editable()?.enroll_voice(first, last, &name)
 }
 
+/// Hears the open recording's speakers again from the audio, cut at the seconds pinned to people
+/// (5c, "Analyse speakers again"), and puts them into the list in play. Takes about as long as the
+/// speakers stage, so it runs on a blocking thread, not the async runtime's workers. Refused while
+/// the open recording is being analysed (2d: that run writes its speakers too), and run behind the
+/// analysis gate, so it never loads the models beside a run (one at a time on the GPU).
+#[tauri::command]
+pub async fn reanalyze_speakers(app: State<'_, App>) -> Result<(), String> {
+    let core = app.editable()?;
+    let analysis = app.analysis.clone();
+    tauri::async_runtime::spawn_blocking(move || analysis.exclusive(|| core.reanalyze_speakers()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Forgets voice `name`, relabelling the open recording.
 #[tauri::command]
 pub async fn forget_voice(app: State<'_, App>, name: String) -> Result<(), String> {

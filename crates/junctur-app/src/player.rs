@@ -510,6 +510,34 @@ impl Core {
         Ok(line)
     }
 
+    /// Hears the open recording's speakers again from the audio (5c), the windows cut at the
+    /// seconds pinned to people, and puts them into the list in play. Slow: the caller keeps it off
+    /// the async runtime.
+    ///
+    /// The recording open when it ends may not be the one heard (another was opened meanwhile):
+    /// the speakers go into the list in play only when that list is the heard recording's, checked
+    /// under the editor's lock; otherwise into its edit list on disk. The re-hearing guard is held
+    /// until then, so no enrollment slips in between.
+    pub fn reanalyze_speakers(&self) -> Result<(), String> {
+        let file = self.file().ok_or("no recording is open")?;
+        let (found, _rehearing) = voices::rehear(&file)?;
+        let mut here = false;
+        if self.file().as_deref() == Some(file.as_str()) {
+            self.change(|ed, list, _| {
+                if !junctur_core::output::same_file(&list.source, Path::new(&file)) {
+                    return Ok(None);
+                }
+                here = true;
+                let speakers = pipeline::speakers_for(Some(&found), Some(&list.speakers));
+                ed.respeak(list, speakers)
+            })?;
+        }
+        if !here {
+            voices::respeak_on_disk(&file, &found)?;
+        }
+        Ok(())
+    }
+
     /// Forgets voice `name` and labels the open recording's speakers again without it.
     pub fn forget_voice(&self, name: &str) -> Result<(), String> {
         match voices::forget(self.file().as_deref(), name)? {
