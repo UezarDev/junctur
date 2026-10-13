@@ -16,6 +16,8 @@
     words,
     loading,
     analysing = false,
+    listed = false,
+    through = null,
     player,
     edit,
     selection,
@@ -26,6 +28,10 @@
     loading: boolean;
     /** The recording is being analysed: the transcript comes when it is done. */
     analysing?: boolean;
+    /** Its edit list is made: the transcript comes a 5-minute piece at a time (2j). */
+    listed?: boolean;
+    /** While it transcribes: the words shown are every one before this many seconds (2j). */
+    through?: number | null;
     player: api.PlayerState | null;
     edit: api.EditState | null;
     selection: sel.Selection | null;
@@ -52,10 +58,15 @@
   let top = $state(0);
   const open = new SvelteSet<number>();
 
-  // A new transcript (another recording) starts with every fold closed.
+  // A new transcript (another recording) starts with every fold closed. One that only grew at its
+  // end (2j: a piece more while it transcribes) keeps them: folds are keyed by their first word,
+  // whose index has not moved.
+  let shown: Words | null = null;
   $effect(() => {
-    void words;
-    open.clear();
+    const w = words;
+    const grew = !!w && !!shown && w.text.length >= shown.text.length && w.start[0] === shown.start[0];
+    if (!grew) open.clear();
+    shown = w;
   });
 
   // Text widths measured once per distinct string (speech repeats words a lot).
@@ -289,11 +300,13 @@
   >
     {#if loading}
       <p class="note">Reading the transcript…</p>
-    {:else if !words}
+    {:else if !words || (through != null && words.text.length === 0)}
       <p class="note">
-        {analysing
-          ? "Analysing this recording: the transcript shows here when it is done."
-          : "No transcript for this recording yet. Re-analyse it (project panel) to edit by text."}
+        {analysing && listed
+          ? "Transcribing: the words show here five minutes at a time. Cut and keep on the timeline meanwhile."
+          : analysing
+            ? "Analysing this recording: the transcript shows here when it is done."
+            : "No transcript for this recording yet. Re-analyse it (project panel) to edit by text."}
       </p>
     {:else if laid}
       <div class="spacer" style:height="{laid.rows.length * ROW}px">
@@ -365,6 +378,9 @@
           </div>
         {/each}
       </div>
+      {#if through != null}
+        <p class="note">Transcribed to {stamp(through * 1000)}; the rest follows as it is done.</p>
+      {/if}
     {/if}
   </div>
 </section>

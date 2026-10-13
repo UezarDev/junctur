@@ -5,7 +5,7 @@
   // Re-analyse, the speakers, the waveforms' read, and the project folder with a button that opens it.
   import * as api from "./api";
   import { clock } from "./time";
-  import { current, whole } from "./steps";
+  import { busy as running, current, whole } from "./steps";
   import { name as trackName } from "./tracks";
   import TrackSteps from "./TrackSteps.svelte";
 
@@ -34,7 +34,7 @@
     onError: (message: string) => void;
   } = $props();
 
-  const busy = $derived(analysis?.phase === "queued" || analysis?.phase === "running");
+  const busy = $derived(running(analysis));
   const NAMES: Record<string, string> = {
     tracks: "Tracks",
     speech: "Speech",
@@ -113,6 +113,7 @@
     <h3>
       Analysis
       {#if analysis?.phase === "queued"}<span class="note">waiting for another recording</span>{/if}
+      {#if analysis?.phase === "waiting"}<span class="note">transcription waits for another recording</span>{/if}
     </h3>
     {#if error}
       <p class="failed">{error}</p>

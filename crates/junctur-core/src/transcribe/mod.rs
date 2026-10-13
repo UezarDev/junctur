@@ -3,6 +3,10 @@
 //! Every finished chunk is appended to `transcript.partial.jsonl` in the project folder before the
 //! next starts, so an interrupted run (a 30h stream is hours of Whisper) loses one chunk at most.
 //! The finished transcript is `transcript.json`, plus a plain `transcript.txt` to read.
+//!
+//! The recording is heard in 5-minute pieces (2j, [`PIECE`]): every track's chunks in one piece
+//! before any of the next, so the editor can take the transcript a piece at a time ([`so_far`])
+//! while the rest is heard.
 
 mod audio;
 mod chunks;
@@ -145,10 +149,48 @@ pub fn load(project: &Path) -> Option<Transcript> {
     serde_json::from_slice(&std::fs::read(path(project)).ok()?).ok()
 }
 
-/// Transcribe the speech regions of `sources`, resuming an interrupted run and reusing a finished
-/// one that answers `opts`. `log` gets the model note and progress every 5%; `reach` is told how
-/// far each track's transcript reaches ([`Reached`]), every track at the start and a chunk's track
-/// after each chunk (2h).
+fn partial_path(project: &Path) -> std::path::PathBuf {
+    project.join("transcript.partial.jsonl")
+}
+
+/// Seconds of the recording heard as one piece (2j): Uezar's "5 minutes at a time". Every track's
+/// chunks that start in a piece are transcribed before any chunk of the next one, so the first
+/// piece is whole minutes in, not once track 1 is done hours later.
+pub const PIECE: f64 = 300.0;
+
+/// The piece a chunk starting at `t` seconds belongs to.
+pub(crate) fn piece(t: f64) -> u64 {
+    (t.max(0.0) / PIECE) as u64
+}
+
+/// The chunks a run in progress (or an interrupted one) has finished, from its partial file, sorted
+/// as the finished transcript sorts them, so a word keeps its place when the whole one replaces
+/// this; `None` when there is no readable partial. A torn last line is dropped, as a resume drops
+/// it. For the editor while the rest is transcribed (2j).
+pub fn so_far(project: &Path) -> Option<Vec<Segment>> {
+    let (_, mut segs) = read_partial(&partial_path(project))?;
+    sort(&mut segs);
+    Some(segs)
+}
+
+/// The finished transcript's order: by start, then track.
+fn sort(segs: &mut [Segment]) {
+    segs.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.track.cmp(&b.track)));
+}
+
+/// What a run tells its caller as it goes besides the log: how far each track's transcript reaches
+/// ([`Reached`]; every track at the start and a chunk's track after each chunk, 2h), and where the
+/// transcript is whole on every track (2j): `transcribed(t)` says every word before `t` seconds is
+/// in, at the start of a run with work to do and each time `t` enters a new [`PIECE`]. Not at the
+/// end: the finished transcript says that.
+pub struct Reports<'a> {
+    pub reach: &'a mut dyn FnMut(usize, f64),
+    pub transcribed: &'a mut dyn FnMut(f64),
+}
+
+/// Transcribe the speech regions of `sources`, piece by piece ([`PIECE`]), resuming an interrupted
+/// run and reusing a finished one that answers `opts`. `log` gets the model note and progress every
+/// 5%; `reports` how far it has got ([`Reports`]).
 #[allow(clippy::too_many_arguments)]
 pub fn transcribe(
     file: &Path,
@@ -158,9 +200,10 @@ pub fn transcribe(
     cache_dir: &Path,
     opts: &TranscribeOptions,
     log: &mut dyn FnMut(&str),
-    reach: &mut dyn FnMut(usize, f64),
+    reports: Reports,
 ) -> Result<Transcript> {
-    let partial = project.join("transcript.partial.jsonl");
+    let Reports { reach, transcribed } = reports;
+    let partial = partial_path(project);
     if opts.force {
         let _ = std::fs::remove_file(&partial);
         let _ = std::fs::remove_file(path(project));
@@ -178,14 +221,7 @@ pub fn transcribe(
     } = resume_point(&partial, opts);
     let resumed_chunks = done.len();
 
-    let work: Vec<(usize, Chunk)> = sources
-        .iter()
-        .flat_map(|s| {
-            plan(&s.regions, total)
-                .into_iter()
-                .map(move |c| (s.track, c))
-        })
-        .collect();
+    let work = order(sources, total);
     let audio_s = 0.0 + work.iter().map(|(_, c)| c.end - c.start).sum::<f64>();
     let t0 = Instant::now();
     let groups = audio::groups(&work);
@@ -207,6 +243,11 @@ pub fn transcribe(
     let mut reached = Reached::new(sources, &groups, &todo);
     for (track, at) in reached.all() {
         reach(track, at);
+    }
+    // Where the transcript is whole on every track, and the piece that was last reported.
+    let mut whole = reached.whole();
+    if left > 0 {
+        transcribed(whole.min(total));
     }
     // Nothing left to hear: no GPU query, no model load. The choice is the one that did the work.
     let mut choice = Choice {
@@ -234,6 +275,13 @@ pub fn transcribe(
             out.flush()?;
             if let Some(at) = reached.finish(seg.track, seg.start) {
                 reach(seg.track, at);
+                let now = reached.whole();
+                // A new piece is whole (silence may have skipped several); the very end is the
+                // finished transcript's to tell.
+                if now.is_finite() && piece(now) > piece(whole) {
+                    transcribed(now.min(total));
+                }
+                whole = now;
             }
             done.push(seg);
             progress.at(done.len());
@@ -247,7 +295,7 @@ pub fn transcribe(
         };
         run.chunks(file, &mut w, &mut finished)?;
     }
-    done.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.track.cmp(&b.track)));
+    sort(&mut done);
     let t = Transcript {
         choice,
         languages: opts.languages.allowed.clone(),
@@ -260,6 +308,25 @@ pub fn transcribe(
     std::fs::write(project.join("transcript.txt"), t.render())?;
     let _ = std::fs::remove_file(&partial);
     Ok(t)
+}
+
+/// Every chunk of `sources` in the order Whisper hears them: piece by piece ([`PIECE`]), within a
+/// piece track by track (in `sources`' order), within a track in time. Track by track inside a
+/// piece keeps one decoder per track per piece (`audio::read` starts one per run of a track's
+/// groups); chunk by chunk across tracks would seek for every chunk, the cost 1e removed.
+fn order(sources: &[Source], total: f64) -> Vec<(usize, Chunk)> {
+    let mut work: Vec<(usize, usize, Chunk)> = sources
+        .iter()
+        .enumerate()
+        .flat_map(|(i, s)| {
+            plan(&s.regions, total)
+                .into_iter()
+                .map(move |c| (i, s.track, c))
+        })
+        .collect();
+    // Stable: each track's chunks stay in time order.
+    work.sort_by_key(|&(i, _, c)| (piece(c.start), i));
+    work.into_iter().map(|(_, track, c)| (track, c)).collect()
 }
 
 /// Where a run starts: the model to use, the header it writes, and the chunks an interrupted run
@@ -484,6 +551,15 @@ impl Reached {
             .collect()
     }
 
+    /// Where the transcript is whole on every track: the least of their positions (2j). Every word
+    /// still to come starts at or after it, as its chunk does. Infinite when every track is done.
+    fn whole(&self) -> f64 {
+        self.tracks
+            .iter()
+            .map(TrackChunks::position)
+            .fold(f64::INFINITY, f64::min)
+    }
+
     /// Marks `track`'s chunk at `start` done; how far the track reaches now, when it moved.
     fn finish(&mut self, track: usize, start: f64) -> Option<f64> {
         let t = self.tracks.iter_mut().find(|t| t.track == track)?;
@@ -658,6 +734,99 @@ mod tests {
         // A chunk of a track not asked for, or done twice, moves nothing.
         assert_eq!(r.finish(5, 0.0), None);
         assert_eq!(r.finish(1, 30.0), None);
+        assert_eq!(r.whole(), end);
+    }
+
+    #[test]
+    fn the_transcript_is_whole_up_to_the_track_furthest_behind() {
+        let chunk = |start: f64| Chunk {
+            start,
+            end: start + 10.0,
+        };
+        let source = |track| Source {
+            track,
+            regions: vec![],
+        };
+        let work = [(0, chunk(0.0)), (0, chunk(320.0)), (1, chunk(100.0))];
+        let groups = audio::groups(&work);
+        let todo: Vec<Vec<bool>> = groups.iter().map(|g| vec![true; g.chunks.len()]).collect();
+        let mut r = Reached::new(&[source(0), source(1)], &groups, &todo);
+        assert_eq!(r.whole(), 0.0);
+        r.finish(0, 0.0);
+        // Track 0 is at 320 s, track 1 still at 100 s: words before 100 s are all in.
+        assert_eq!(r.whole(), 100.0);
+        r.finish(1, 100.0);
+        assert_eq!(r.whole(), 320.0);
+        assert_eq!(piece(r.whole()), 1);
+        // No tracks: nothing to wait for.
+        assert_eq!(Reached::new(&[], &[], &[]).whole(), f64::INFINITY);
+    }
+
+    #[test]
+    fn whisper_hears_a_piece_of_every_track_before_the_next_piece() {
+        use crate::vad::Region;
+        let speech = |spans: &[(f64, f64)]| {
+            spans
+                .iter()
+                .map(|&(start, end)| Region { start, end })
+                .collect::<Vec<_>>()
+        };
+        let sources = [
+            Source {
+                track: 2,
+                regions: speech(&[(10.0, 20.0), (400.0, 410.0), (900.0, 905.0)]),
+            },
+            Source {
+                track: 0,
+                regions: speech(&[(50.0, 60.0), (299.0, 299.5), (310.0, 320.0)]),
+            },
+        ];
+        let got: Vec<(usize, u64)> = order(&sources, 1000.0)
+            .iter()
+            .map(|(t, c)| (*t, c.start as u64))
+            .collect();
+        // Piece 0 (0-5 min): track 2 then track 0, each in time; the chunk at 4:58.8 is piece 0's
+        // though it ends after 5:00. Then piece 1, then piece 3 (piece 2 has no speech).
+        assert_eq!(
+            got,
+            vec![(2, 9), (0, 49), (0, 298), (2, 399), (0, 309), (2, 899)]
+        );
+        // A piece's last group ends the piece: languages are never detected across a boundary.
+        let groups = audio::groups(&order(&sources, 1000.0));
+        assert!(groups.iter().all(|g| g
+            .chunks
+            .iter()
+            .all(|c| piece(c.start) == piece(g.chunks[0].start))));
+    }
+
+    #[test]
+    fn so_far_is_the_partial_in_the_finished_order() {
+        let dir = std::env::temp_dir().join(format!("junctur-sofar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(so_far(&dir).is_none(), "no partial: nothing");
+        let seg = |track, start: f64| Segment {
+            track,
+            start,
+            end: start + 1.0,
+            lang: "es".into(),
+            model: "large-v3-turbo".into(),
+            words: vec![],
+        };
+        // Written in Whisper's order (piece, then track); a run killed mid-line.
+        let mut body = serde_json::to_string(&header("es+en", "large-v3-turbo")).unwrap() + "\n";
+        for s in [seg(1, 5.0), seg(1, 40.0), seg(0, 20.0), seg(0, 5.0)] {
+            body += &(serde_json::to_string(&s).unwrap() + "\n");
+        }
+        body += "{\"track\":0,\"st";
+        std::fs::write(partial_path(&dir), body).unwrap();
+        let got: Vec<(usize, f64)> = so_far(&dir)
+            .unwrap()
+            .iter()
+            .map(|s| (s.track, s.start))
+            .collect();
+        assert_eq!(got, vec![(0, 5.0), (1, 5.0), (0, 20.0), (1, 40.0)]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

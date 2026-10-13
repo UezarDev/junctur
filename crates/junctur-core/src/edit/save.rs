@@ -88,6 +88,67 @@ fn latest_backup(edit_path: &Path) -> Option<String> {
 /// reader (or a crash) never sees a half-written or missing list; a failed save removes the
 /// temporary file and leaves the list as it was.
 pub fn save(path: &Path, list: &EditList) -> std::io::Result<Saved> {
+    let _one = writing();
+    save_now(path, list)
+}
+
+/// One writer of an edit list at a time in this process (2j): the app's editor saves while the
+/// app's own analysis fills in word counts ([`amend`]); either one reading and writing back over the
+/// other would lose a cut or the counts. Other processes (the CLI on a list the app has open) were
+/// never guarded and are not now.
+fn writing() -> std::sync::MutexGuard<'static, ()> {
+    static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    WRITING.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// What [`amend`] did.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Amended {
+    /// Rewritten with the change; the list now on disk.
+    Written(EditList),
+    /// The change changed nothing; the list on disk.
+    Same(EditList),
+    /// Not Junctur's form (a hand edit with comments or another layout, or a list that does not
+    /// parse): rewriting it could lose what the user wrote, so it is left as it is.
+    Left,
+    /// No list there.
+    Missing,
+}
+
+/// Applies `change` to the edit list at `path` and writes it back, when that loses nothing of what
+/// is there: an untouched editor save is saved again (stamped, as the editor would), and a list in
+/// Junctur's own form (its text is what its parse writes back) is written plain, as the pipeline
+/// wrote it. Anything else is left. For the pipeline putting word counts into a list the user may
+/// be editing (2j); under the same lock as [`save`].
+pub fn amend(path: &Path, change: impl FnOnce(&mut EditList)) -> std::io::Result<Amended> {
+    let _one = writing();
+    let old = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Amended::Missing),
+        Err(e) => return Err(e),
+    };
+    let editor = is_untouched_save(&old);
+    let body = unstamped(&old);
+    let Ok(list) = super::parse(body) else {
+        return Ok(Amended::Left);
+    };
+    if !editor && list.to_text() != body {
+        return Ok(Amended::Left);
+    }
+    let mut new = list.clone();
+    change(&mut new);
+    if new == list {
+        return Ok(Amended::Same(list));
+    }
+    if editor {
+        save_now(path, &new)?;
+    } else {
+        crate::output::write_replacing(path, new.to_text())?;
+    }
+    Ok(Amended::Written(new))
+}
+
+fn save_now(path: &Path, list: &EditList) -> std::io::Result<Saved> {
     let text = stamped(list.to_text());
     let old = match std::fs::read_to_string(path) {
         Ok(t) => Some(t),
@@ -172,6 +233,53 @@ mod tests {
         assert_eq!(read("edit.junctur.bak2").as_deref(), Some("hand edit 2"));
         assert!(fourth.replaced_unreadable);
         assert_eq!(read("edit.junctur.tmp"), None, "renamed away");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn amend_rewrites_only_what_loses_nothing() {
+        use super::super::Window;
+        let dir = scratch("amend");
+        let path = dir.join("edit.junctur");
+        let counted = |e: &mut EditList| {
+            e.windows = vec![Window {
+                start: 0.0,
+                score: 1.0,
+                speech: 1.0,
+                words: 7,
+            }]
+        };
+        assert_eq!(amend(&path, counted).unwrap(), Amended::Missing);
+        // As the pipeline writes it: written plain, nothing backed up.
+        std::fs::write(&path, list(5.0).to_text()).unwrap();
+        let Amended::Written(e) = amend(&path, counted).unwrap() else {
+            panic!("not written")
+        };
+        assert_eq!(e.windows[0].words, 7);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!is_untouched_save(&text) && text == e.to_text());
+        assert_eq!(amend(&path, counted).unwrap(), Amended::Same(e));
+        // An editor save (the user cut while it transcribed; its first save keeps the pipeline's
+        // list as a backup, as ever): their ranges kept, still an untouched save, so neither the
+        // amend nor the editor's next save backs anything up.
+        save(&path, &list(2.0)).unwrap();
+        std::fs::remove_file(dir.join("edit.junctur.bak")).unwrap();
+        let Amended::Written(e) = amend(&path, counted).unwrap() else {
+            panic!("not written")
+        };
+        assert_eq!((e.keep[0].end, e.windows.len()), (2.0, 1));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(is_untouched_save(&text));
+        assert_eq!(save(&path, &list(1.5)).unwrap().backup, None);
+        assert!(!dir.join("edit.junctur.bak").exists());
+        // A hand edit with a comment, or one that does not parse: left alone.
+        let hand = format!("# mine\n{}", list(3.0).to_text());
+        std::fs::write(&path, &hand).unwrap();
+        assert_eq!(amend(&path, counted).unwrap(), Amended::Left);
+        std::fs::write(&path, "keep x").unwrap();
+        assert_eq!(amend(&path, counted).unwrap(), Amended::Left);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep x");
+        assert!(!dir.join("edit.junctur.bak").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

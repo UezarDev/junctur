@@ -400,9 +400,10 @@ impl Core {
     /// Takes the edit list on disk when someone other than the app changed it (the watch, and
     /// every edit before it applies, so an outside change inside the watch's settle time is played
     /// and edited on, not overwritten unseen). The app's own last save is skipped. A list that
-    /// parses and differs from the one in play ends the undo history; one that does not parse
-    /// keeps the ranges in play (`cuts::merge`) and says why in the edit state.
-    /// `by` names the caller in the log line an outside change leaves.
+    /// parses and keeps other ranges than the one in play ends the undo history, which holds kept
+    /// ranges only: one that changed only the rest (2j: the run's word counts landing) keeps it.
+    /// One that does not parse keeps the ranges in play (`cuts::merge`) and says why in the edit
+    /// state. `by` names the caller in the log line an outside change leaves.
     fn sync(&self, ed: &mut Editor, by: &str) -> Result<(), String> {
         let (file, path, fps) = {
             let c = lock(&self.ctl);
@@ -421,8 +422,11 @@ impl Core {
         }
         c.fps = c.fps.or(fps);
         let new_list = read.as_ref().and_then(|e| e.list.as_deref());
-        if new_list.is_some() && new_list != c.edit.list.as_deref() {
+        let in_play = c.edit.list.as_deref();
+        if new_list.is_some() && new_list != in_play {
             eprintln!("junctur-app: edit.junctur changed on disk, taken ({by})");
+        }
+        if new_list.is_some() && new_list.map(|l| &l.keep) != in_play.map(|l| &l.keep) {
             ed.changed_elsewhere();
             // A first list (the app's own analysis just wrote it, 2d) had no history to clear.
             let notice =
@@ -523,20 +527,38 @@ impl Core {
         lock(&self.ctl).file.clone()
     }
 
-    /// An analysis of `file` (absolute) ended (2d). If it is the open recording, the words and
-    /// envelope read so far are dropped (a re-analysis may have replaced them) and the edit list on
-    /// disk is taken now rather than at the watch's next poll.
+    /// An analysis of `file` (absolute) ended (2d), or wrote its edit list (2j). If it is the open
+    /// recording, the words and envelope read so far are dropped (a re-analysis may have replaced
+    /// them; the words are the finished transcript's from now on) and the edit list on disk is
+    /// taken now rather than at the watch's next poll.
     pub fn analysed(&self, file: &Path) {
-        let open = self.file();
-        if open.and_then(|f| std::path::absolute(f).ok()).as_deref() != Some(file) {
+        if !self.is_open(file) {
             return;
         }
         {
             let mut ed = lock(&self.editor);
             ed.words = None;
             ed.envelope = None;
+            ed.through = None;
         }
         self.reload_edit();
+    }
+
+    /// `file` (absolute) is transcribed up to `through` seconds on every track (2j: a piece
+    /// landed): if it is the open recording, its words are read again, up to there, when next
+    /// asked for. `None`: the finished transcript's.
+    pub fn transcribed(&self, file: &Path, through: Option<f64>) {
+        if !self.is_open(file) {
+            return;
+        }
+        let mut ed = lock(&self.editor);
+        ed.words = None;
+        ed.through = through;
+    }
+
+    fn is_open(&self, file: &Path) -> bool {
+        let open = self.file();
+        open.and_then(|f| std::path::absolute(f).ok()).as_deref() == Some(file)
     }
 
     /// Puts newly labelled speakers into the list in play (names of speakers nobody enrolled are
@@ -617,21 +639,32 @@ impl Core {
 
     /// Reads the transcript and the speech envelope, if not yet in the editor, outside its lock
     /// (a 30 h transcript or envelope is tens of MB) so the watch and other edits are not held up.
+    /// While the recording transcribes (2j) the words are the ones so far, up to where every track
+    /// is done ([`Words::load_so_far`]).
     fn prepare(&self) {
-        let (dir, words, env) = {
+        let (dir, words, env, through) = {
             let ed = lock(&self.editor);
             let Some(dir) = ed.project_dir().map(PathBuf::from) else {
                 return;
             };
-            (dir, ed.words.is_none(), ed.envelope.is_none())
+            (dir, ed.words.is_none(), ed.envelope.is_none(), ed.through)
         };
-        let w = words.then(|| Words::load(&dir).map(Arc::new)).flatten();
+        let w = words
+            .then(|| match through {
+                Some(t) => Words::load_so_far(&dir, t),
+                None => Words::load(&dir),
+            })
+            .flatten()
+            .map(Arc::new);
         let e = env
             .then(|| pipeline::envelope(&dir).map(Arc::new))
             .flatten();
         let mut ed = lock(&self.editor);
         if ed.project_dir() == Some(dir.as_path()) {
-            ed.words = ed.words.take().or(w);
+            // A piece that landed meanwhile asks for the words again, up to further on.
+            if ed.through == through {
+                ed.words = ed.words.take().or(w);
+            }
             ed.envelope = ed.envelope.take().or(e);
         }
     }

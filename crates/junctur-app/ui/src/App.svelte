@@ -254,9 +254,21 @@
     }
   }
 
-  const busy = (p: api.Progress | null) => p?.phase === "queued" || p?.phase === "running";
-  const rank = (p: api.Progress | null) =>
-    p ? { queued: 1, running: 2, done: 3, failed: 3 }[p.phase] : 0;
+  const busy = steps.busy;
+  const rank = steps.rank;
+
+  // The words again while the recording transcribes (2j): a piece more of them, or the finished
+  // transcript after the pieces. Only words at the end are new (their indices are the core's
+  // promise), so the selection and what the panel shows stay; nothing is blanked meanwhile.
+  async function growTranscript() {
+    const file = opened?.file;
+    try {
+      const view = await api.transcript();
+      if (opened?.file === file) words = view ? toWords(view) : null;
+    } catch (e) {
+      failure = String(e);
+    }
+  }
 
   function onProgress(p: api.Progress) {
     if (!opened || p.file !== opened.file) return;
@@ -264,9 +276,13 @@
     analysis = p;
     if (busy(was) && !busy(p)) {
       // The run ended: what the panel said was out of date was its business; the transcript may
-      // be new (the edit list comes in through the watch).
+      // be new (the edit list comes in through the watch). One that grew piece by piece is the
+      // same words with more at the end.
       if (p.phase === "done") opened = { ...opened, outdated: [] };
-      void loadTranscript();
+      if (was?.transcribed != null && p.phase === "done") void growTranscript();
+      else void loadTranscript();
+    } else if (p.transcribed != null && p.transcribed !== was?.transcribed) {
+      void growTranscript();
     }
   }
 
@@ -512,6 +528,8 @@
           {words}
           loading={wordsLoading}
           analysing={busy(analysis)}
+          listed={analysis?.listed ?? false}
+          through={busy(analysis) ? (analysis?.transcribed ?? null) : null}
           {player}
           {edit}
           {selection}

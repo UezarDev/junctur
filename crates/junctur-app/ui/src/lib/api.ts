@@ -202,7 +202,9 @@ export interface MixerState {
   source: "provisional" | "roles" | "remembered";
 }
 
-export type Phase = "queued" | "running" | "done" | "failed";
+/** `queued`: behind another recording's first steps; `waiting`: its edit list is made (editable) and its
+ * transcription waits for another recording's (2j). */
+export type Phase = "queued" | "running" | "waiting" | "done" | "failed";
 
 /** How far one track has got through one stage (junctur-core pipeline/steps.rs, 2h): `at` seconds
  * of the track's `of` are behind it. */
@@ -224,6 +226,10 @@ export interface Progress {
   project: ProjectStatus | null;
   /** Per track, the latest stage it reported; only the running stage's are current (lib/steps.ts). */
   steps: Step[];
+  /** The run's edit list is made: it can be edited while the rest runs (2j). */
+  listed: boolean;
+  /** While transcribing: every word before this many seconds is in, on every track (2j). */
+  transcribed: number | null;
 }
 
 export interface Reanalysed {

@@ -60,6 +60,9 @@ pub struct Editor {
     /// is retried, since the pipeline may write them while the app is open.
     pub words: Option<Arc<Words>>,
     pub envelope: Option<Arc<Envelope>>,
+    /// While the recording transcribes (2j): the words are read up to this many seconds, where
+    /// every track is transcribed; `None` reads the finished transcript.
+    pub through: Option<f64>,
 }
 
 impl Editor {

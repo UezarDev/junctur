@@ -11,8 +11,9 @@ use crate::Result;
 /// The file in a project folder.
 pub(crate) const FILE: &str = "jobs.json";
 
-/// Stage names, in run order.
-pub const STAGES: [&str; 5] = ["tracks", "speech", "speakers", "transcribe", "edit"];
+/// Stage names, in run order. The edit list comes before the transcript (2j): it needs none of it
+/// but the word counts, filled in once the transcript is whole.
+pub const STAGES: [&str; 5] = ["tracks", "speech", "speakers", "edit", "transcribe"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -43,7 +44,14 @@ impl Jobs {
     pub fn load(dir: &Path) -> Self {
         std::fs::read(dir.join(FILE))
             .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
+            .and_then(|b| serde_json::from_slice::<Jobs>(&b).ok())
+            .map(|mut j| {
+                // A file written before 2j lists `transcribe` before `edit`: run order now.
+                // Stable, and names this version does not know go last.
+                let order = |n: &str| STAGES.iter().position(|&x| x == n).unwrap_or(usize::MAX);
+                j.stages.sort_by_key(|s| order(&s.name));
+                j
+            })
             .unwrap_or_else(|| Jobs {
                 file: PathBuf::new(),
                 stages: STAGES
@@ -190,6 +198,7 @@ mod tests {
         j.set(&dir, "speakers", StageState::Done, Some(2.0), None)
             .unwrap();
         let back = Jobs::load(&dir);
+        // Also put in today's order: the file had `transcribe` before `edit` (before 2j).
         let names: Vec<&str> = back.stages.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, STAGES);
         assert_eq!(back.get("speakers").unwrap().state, StageState::Done);

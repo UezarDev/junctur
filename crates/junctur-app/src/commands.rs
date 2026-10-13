@@ -47,24 +47,26 @@ impl App {
         self.with(|p| Ok(p.core()))
     }
 
-    /// [`App::core`] for a command that changes the edit list: refused while the open recording
-    /// is being analysed, whose `edit` stage rewrites the list (an edit made meanwhile would only
-    /// be backed up and replaced).
+    /// [`App::core`] for a command that changes the edit list: refused while the open recording's
+    /// run has not yet written its list, whose `edit` stage would replace it (an edit made
+    /// meanwhile would only be backed up and replaced). Once written, nothing later in the run
+    /// replaces it (2j): edits go on while it transcribes.
     fn editable(&self) -> Result<Arc<Core>, String> {
         let core = self.core()?;
         if core
             .file()
-            .is_some_and(|f| self.analysis.busy(Path::new(&f)))
+            .is_some_and(|f| !self.analysis.editable(Path::new(&f)))
         {
-            return Err("analysing this recording: edits wait until it finishes".into());
+            return Err("analysing this recording: edits wait until its edit list is made".into());
         }
         Ok(core)
     }
 }
 
-/// Sends a run's progress to the page. When it ends, the player first takes what it wrote (the
-/// edit list, a new transcript) if that recording is open: the page fetches the transcript again
-/// on this event, and must not get the words read before the run.
+/// Sends a run's progress to the page. When the run's list is written or the run ends, the player
+/// first takes what it wrote (the edit list, the envelope, a new transcript) if that recording is
+/// open, and when a piece of the transcript lands it reads the words up to it: the page fetches
+/// the transcript again on these events, and must not get the words read before them.
 pub fn notifier(handle: AppHandle) -> Notify {
     Arc::new(move |p: &Progress, change| {
         // A step only moves a bar (2h): reading the track roles on each of the ~hundred per track
@@ -73,7 +75,15 @@ pub fn notifier(handle: AppHandle) -> Notify {
             let _ = handle.emit(analysis::EVENT, p);
             return;
         }
-        if let Some(core) = handle.try_state::<App>().and_then(|a| a.core().ok()) {
+        let core = handle.try_state::<App>().and_then(|a| a.core().ok());
+        if change == Change::Transcribed {
+            if let Some(core) = core {
+                core.transcribed(Path::new(&p.file), p.transcribed);
+            }
+            let _ = handle.emit(analysis::EVENT, p);
+            return;
+        }
+        if let Some(core) = core {
             // The track roles come from a run's first stage: the mutes follow them as soon as it
             // is done, not when Whisper is (2e). Read on each line from then on, which is cheap
             // and catches a re-analysis whose roles moved; nothing is sent unless they did.
@@ -85,7 +95,7 @@ pub fn notifier(handle: AppHandle) -> Notify {
             if tracks_done {
                 core.tracks_known(Path::new(&p.file));
             }
-            if !p.phase.busy() {
+            if !p.phase.busy() || change == Change::Listed {
                 core.analysed(Path::new(&p.file));
             }
         }
@@ -155,7 +165,14 @@ pub async fn open_file(
             .iter()
             .any(|st| st.name == "edit" && st.state == StageState::Done);
         let unanalysed = s.edit.is_none() && (s.edit_error.is_none() || !finished);
-        if unanalysed {
+        // 2j: the list comes before the transcript, so a list does not mean a finished run. One
+        // whose transcription never finished (a closed app, a failed Whisper) is resumed: every
+        // finished stage and chunk is reused and the user's edits are kept.
+        let untranscribed = s
+            .stages
+            .iter()
+            .any(|st| st.name == "transcribe" && st.state != StageState::Done);
+        if unanalysed || untranscribed {
             // The file plays even when its analysis cannot start; the panel says why.
             analysis = Some(
                 app.analysis
@@ -165,6 +182,15 @@ pub async fn open_file(
         } else if !app.analysis.busy(file) {
             outdated = analysis::outdated(file);
         }
+    }
+    // Opened while it transcribes (from another recording, say): the words so far, not the
+    // finished transcript's file, which may be an older run's or missing.
+    if let Some(t) = analysis
+        .as_ref()
+        .filter(|a| a.phase.busy())
+        .and_then(|a| a.transcribed)
+    {
+        app.core()?.transcribed(&absolute, Some(t));
     }
     let (project, project_error) = match status {
         Ok(s) => (Some(s), None),

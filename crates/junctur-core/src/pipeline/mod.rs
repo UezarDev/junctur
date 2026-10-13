@@ -1,9 +1,13 @@
 //! The job queue: analysis stages run one after another for a recording, each leaving its result
 //! in the project folder, so a rerun skips what is done and an interrupted one resumes.
 //!
-//! Sequential on purpose: Whisper and the ONNX models share one GPU, and running two at once on a
-//! card another app already fills would only make both fall back to CPU. `jobs.json` records what
-//! each stage did, for `junctur status`; the stage results themselves are the source of truth.
+//! Sequential within a recording: Whisper and the ONNX models share one GPU, and running two at
+//! once on a card another app already fills would only make both fall back to CPU. Across
+//! recordings the run is two halves (2j): [`prepare`] (tracks, speech, speakers and the edit list,
+//! minutes at most) and [`finish`] (Whisper, hours), so a caller can run a recording's first half
+//! while another's transcription goes on, as Uezar asked: "tracks speech and speakers runs
+//! generally fast, so we shouldnt hold those back". `jobs.json` records what each stage did, for
+//! `junctur status`; the stage results themselves are the source of truth.
 
 mod adopt;
 mod jobs;
@@ -11,6 +15,7 @@ mod speakers;
 mod speech;
 mod steps;
 
+use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -116,6 +121,18 @@ pub struct PipelineOptions {
     pub no_speakers: bool,
     /// Enrolled voices to label speakers by (5b; the caller reads the voices file).
     pub voices: Vec<Voice>,
+    /// An edit list holding the user's edits is kept as it is instead of re-cut (2j: the app
+    /// resuming a run the user edited during, now that the list comes before the transcript). Off
+    /// for `junctur analyze` and the app's explicit re-analysis, which replace it and keep a backup.
+    pub keep_list: bool,
+}
+
+/// What a run's first half leaves for the second ([`prepare`]): the edit list is written by then.
+pub struct Prepared {
+    pub report: TrackReport,
+    pub speech: Speech,
+    pub speakers: Option<Found>,
+    pub edit: EditList,
 }
 
 /// What a finished run produced.
@@ -149,13 +166,26 @@ pub fn run(p: &Project, opts: &PipelineOptions, log: &mut dyn FnMut(&str)) -> Re
 }
 
 /// [`run`], telling `steps` how far each track has got through the speech, speakers and
-/// transcribe stages as they go (2h: the app's progress bars).
+/// transcribe stages as they go (2h: the app's progress bars). [`prepare`], then [`finish`].
 pub fn run_with(
     p: &Project,
     opts: &PipelineOptions,
     log: &mut dyn FnMut(&str),
     steps: Steps,
 ) -> Result<Outcome> {
+    let prepared = prepare(p, opts, log, steps)?;
+    finish(p, opts, prepared, log, steps, &mut |_| {})
+}
+
+/// A run's first half: tracks, speech, speakers and the edit list, written at its end without word
+/// counts (2j: nothing else in it needs the transcript, so the recording is editable before Whisper
+/// starts). With `opts.keep_list` a list holding the user's edits is kept as it is.
+pub fn prepare(
+    p: &Project,
+    opts: &PipelineOptions,
+    log: &mut dyn FnMut(&str),
+    steps: Steps,
+) -> Result<Prepared> {
     let mut jobs = p.jobs();
     jobs.file = p.file.clone();
 
@@ -176,29 +206,89 @@ pub fn run_with(
             }
         }
     };
+    let edit = jobs.stage(&p.dir, "edit", log, |log| {
+        let d = draft(p, &report, &speech, speakers.as_ref(), None, &opts.cut);
+        if opts.keep_list && d.users {
+            log("edit list: it holds your edits, kept as it is");
+            return Ok(p.edit().unwrap_or(d.list));
+        }
+        write_draft(p, d)
+    })?;
+    Ok(Prepared {
+        report,
+        speech,
+        speakers,
+        edit,
+    })
+}
+
+/// A run's second half: Whisper over the speech, piece by piece (`transcribed` is told where the
+/// transcript is whole, [`transcribe::Reports`]), then the words counted into the edit list's score
+/// windows in place ([`count_words`]). Never re-cuts: edits made since [`prepare`] stay.
+pub fn finish(
+    p: &Project,
+    opts: &PipelineOptions,
+    prepared: Prepared,
+    log: &mut dyn FnMut(&str),
+    steps: Steps,
+    transcribed: &mut dyn FnMut(f64),
+) -> Result<Outcome> {
+    let Prepared {
+        report,
+        speech,
+        speakers,
+        mut edit,
+    } = prepared;
+    let mut jobs = p.jobs();
+    jobs.file = p.file.clone();
     let transcript = if opts.no_transcript {
         None
     } else {
-        Some(transcribe_stage(
-            p, &mut jobs, &report, &speech, opts, log, steps,
-        )?)
-    };
-    let edit = jobs.stage(&p.dir, "edit", log, |_| {
-        cut(
+        let t = transcribe_stage(
             p,
+            &mut jobs,
             &report,
             &speech,
-            speakers.as_ref(),
-            transcript.as_ref(),
-            &opts.cut,
-        )
-    })?;
+            opts,
+            log,
+            steps,
+            transcribed,
+        )?;
+        if let Some(e) = count_words(p, &speech, &t, log)? {
+            edit = e;
+        }
+        Some(t)
+    };
     Ok(Outcome {
         report,
         speech,
         speakers,
         transcript,
         edit,
+    })
+}
+
+/// Puts the transcript's word counts into the score windows of the edit list on disk, changing
+/// nothing else, when rewriting it loses nothing of the user's ([`edit::amend`]); the list on disk
+/// afterwards, when it reads.
+fn count_words(
+    p: &Project,
+    speech: &Speech,
+    t: &Transcript,
+    log: &mut dyn FnMut(&str),
+) -> Result<Option<EditList>> {
+    let regions = speech.all_regions();
+    let starts: Vec<f64> = t.words().map(|w| w.start).collect();
+    let amended = edit::amend(&p.edit_path(), |e| {
+        e.windows = edit::windows(&regions, &starts, e.duration, e.settings.window);
+    })?;
+    Ok(match amended {
+        edit::Amended::Written(e) | edit::Amended::Same(e) => Some(e),
+        edit::Amended::Left => {
+            log("edit list: edited outside Junctur, its word counts are left as they are");
+            None
+        }
+        edit::Amended::Missing => None,
     })
 }
 
@@ -385,6 +475,7 @@ pub fn relabel(p: &Project, voices: &[Voice]) -> Result<Found> {
 }
 
 /// Whisper over the speech regions, resumed or reused when it can be.
+#[allow(clippy::too_many_arguments)]
 fn transcribe_stage(
     p: &Project,
     jobs: &mut Jobs,
@@ -393,6 +484,7 @@ fn transcribe_stage(
     opts: &PipelineOptions,
     log: &mut dyn FnMut(&str),
     steps: Steps,
+    transcribed: &mut dyn FnMut(f64),
 ) -> Result<Transcript> {
     let t_opts = TranscribeOptions {
         model: opts.model,
@@ -417,7 +509,10 @@ fn transcribe_stage(
             &p.cache_dir,
             &t_opts,
             log,
-            &mut |track, at| steps(steps::step(report, "transcribe", track, at)),
+            transcribe::Reports {
+                reach: &mut |track, at| steps(steps::step(report, "transcribe", track, at)),
+                transcribed: &mut *transcribed,
+            },
         )
     })
 }
@@ -456,7 +551,11 @@ pub fn cut(
     transcript: Option<&Transcript>,
     settings: &CutSettings,
 ) -> Result<EditList> {
-    let d = draft(p, report, speech, speakers, transcript, settings);
+    write_draft(p, draft(p, report, speech, speakers, transcript, settings))
+}
+
+/// Writes a re-cut, backing up the list it replaces when that is the user's.
+fn write_draft(p: &Project, d: Draft) -> Result<EditList> {
     if let (Some(old), true) = (&d.old, d.users) {
         back_up(&p.dir, old)?;
     }
@@ -494,27 +593,42 @@ fn draft(
     // Caption settings are the user's, like the names: a re-cut keeps them.
     let captions = parsed.map(|e| e.captions).unwrap_or_default();
     let speakers = speakers_for(speakers, previous.as_ref());
-    let make = |settings: &CutSettings| EditList {
+    let make = |settings: &CutSettings, starts: &[f64]| EditList {
         source: p.file.clone(),
         duration: report.duration,
         settings: *settings,
         keep: edit::keep_ranges(&regions, &env, report.duration, settings),
         speakers: speakers.clone(),
         captions,
-        windows: edit::windows(&regions, &starts, report.duration, settings.window),
+        windows: edit::windows(&regions, starts, report.duration, settings.window),
     };
-    let list = make(settings);
+    let list = make(settings, &starts);
+    // The finished transcript's word starts, read only when a comparison needs them (a 30 h
+    // transcript is tens of MB).
+    let finished: OnceCell<Vec<f64>> = OnceCell::new();
     let users = old.as_deref().is_some_and(|old| {
         // A list written before speakers existed (or with `--no-speakers`) is compared as Junctur
         // would have written it then, without them: gaining speakers is not a reason to back it up.
         let had_speakers = previous.as_ref().is_some_and(|s| !s.is_empty());
         old != list.to_text()
             && !is_generated(old, |s| {
-                let mut e = make(s);
-                if !had_speakers {
-                    e.speakers = Speakers::default();
-                }
-                e.to_text()
+                // As this call would write it, and as a run writes it before its transcript (2j:
+                // no word counts) and once it is done (the finished transcript's).
+                let done = finished.get_or_init(|| {
+                    transcribe::load(&p.dir)
+                        .map(|t| t.words().map(|w| w.start).collect())
+                        .unwrap_or_default()
+                });
+                [&starts[..], &[], &done[..]]
+                    .into_iter()
+                    .map(|w| {
+                        let mut e = make(s, w);
+                        if !had_speakers {
+                            e.speakers = Speakers::default();
+                        }
+                        e.to_text()
+                    })
+                    .collect()
             })
     });
     Draft { list, old, users }
@@ -597,9 +711,9 @@ pub fn speakers_for(found: Option<&Found>, previous: Option<&Speakers>) -> Speak
 /// the user's in it. An untouched app save is compared without its stamp: a list the app only
 /// renamed a speaker in is reproduced by the re-cut (names are carried over). Anything else (a hand
 /// edit, a list that no longer parses, one made from older analysis) is the user's.
-fn is_generated(old: &str, regenerate: impl Fn(&CutSettings) -> String) -> bool {
+fn is_generated(old: &str, regenerate: impl Fn(&CutSettings) -> Vec<String>) -> bool {
     let body = edit::unstamped(old);
-    edit::parse(body).is_ok_and(|e| regenerate(&e.settings) == body)
+    edit::parse(body).is_ok_and(|e| regenerate(&e.settings).iter().any(|t| t == body))
 }
 
 /// Keeps `old` at the first free `edit.junctur.bak`, `edit.junctur.bak2`, ... Backups are never
@@ -670,7 +784,7 @@ mod tests {
         old: &str,
         regenerate: impl Fn(&CutSettings) -> String,
     ) -> Result<()> {
-        if is_generated(old, regenerate) {
+        if is_generated(old, |s| vec![regenerate(s)]) {
             return Ok(());
         }
         back_up(dir, old)

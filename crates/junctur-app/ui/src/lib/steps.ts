@@ -39,10 +39,24 @@ export function whole(steps: api.Step[]): number | null {
   return percent({ stage: "", track: 0, at: steps.reduce((n, s) => n + Math.min(s.of, s.at), 0), of });
 }
 
-/** One line on the run: "Transcribing · 43%", "Finding speech…", "Waiting for another analysis";
- * null when nothing is running. */
+/** A run is waiting or running, on either of its lanes (2j). */
+export function busy(p: api.Progress | null): boolean {
+  return p?.phase === "queued" || p?.phase === "running" || p?.phase === "waiting";
+}
+
+/** Where a run is, as a number that only grows through its life: running again after waiting to
+ * transcribe is later than waiting (2j), so an older event answered late never moves it back. */
+export function rank(p: api.Progress | null): number {
+  if (!p) return 0;
+  if (p.phase === "running") return p.listed ? 4 : 2;
+  return { queued: 1, waiting: 3, done: 5, failed: 5 }[p.phase];
+}
+
+/** One line on the run: "Transcribing · 43%", "Finding speech…", "Waiting for another analysis",
+ * "Waiting to transcribe"; null when nothing is running. */
 export function label(p: api.Progress | null): string | null {
   if (p?.phase === "queued") return "Waiting for another analysis";
+  if (p?.phase === "waiting") return "Waiting to transcribe";
   if (p?.phase !== "running") return null;
   const stage = running(p);
   const name = stage ? (STEP[stage] ?? stage) : "Analysing";

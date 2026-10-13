@@ -6,9 +6,17 @@
 //!
 //! Its own module because none of it is the player's: a run outlives the recording being open (it
 //! resumes where it stopped if the app closes, as the CLI's does), and several recordings may be
-//! waiting. Runs go one at a time behind `gate`, the pipeline's own rule: Whisper and the ONNX
-//! models share one GPU. Rejected: cancelling (the pipeline has no point to stop at between its
-//! stages' own steps), and running two at once.
+//! waiting.
+//!
+//! A run is the pipeline's two halves on two lanes (2j): the first half (tracks, speech, speakers,
+//! the edit list) behind `first`, one recording at a time, then the transcription behind
+//! `transcription`, also one at a time. A recording opened while another transcribes gets its edit
+//! list at once (Uezar: the fast steps are not held back by "another transcript ... going in the
+//! back") and its transcription queues; once its list is written it can be edited while the rest
+//! runs, the words growing a 5-minute piece at a time ([`Progress::transcribed`]). Rejected:
+//! cancelling (the pipeline has no point to stop at between its stages' own steps; 2k's pause will
+//! stop the transcription lane between chunks), and both halves on one gate (2d), which held a new
+//! recording's minutes behind another's hours.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -27,16 +35,18 @@ pub const EVENT: &str = "analysis";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
-    /// Waiting for another recording's run to finish.
+    /// Waiting for another recording's first half (tracks to edit list) to finish.
     Queued,
     Running,
+    /// The edit list is written (editable); the transcription waits for another recording's.
+    Waiting,
     Done,
     Failed,
 }
 
 impl Phase {
     pub fn busy(self) -> bool {
-        matches!(self, Phase::Queued | Phase::Running)
+        matches!(self, Phase::Queued | Phase::Running | Phase::Waiting)
     }
 }
 
@@ -55,6 +65,13 @@ pub struct Progress {
     /// Per track, in track order, the latest stage it reported and how far through it it is (2h).
     /// Only the running stage's are current; the page shows those.
     pub steps: Vec<Step>,
+    /// The run's edit list is written (2j): it can be edited, and nothing later in the run
+    /// replaces it.
+    pub listed: bool,
+    /// While transcribing: every word before this many seconds of the recording is transcribed, on
+    /// every track (a whole number of 5-minute pieces, or where a resumed run starts). `None`
+    /// before the transcription starts and once it is whole.
+    pub transcribed: Option<f64>,
 }
 
 /// What a request to analyse again did.
@@ -75,6 +92,11 @@ pub enum Change {
     Run,
     /// Only a track's step (2h): the page redraws a bar, nothing else needs reading.
     Steps,
+    /// The run's edit list was just written (2j): the player takes it, and the new speech envelope.
+    Listed,
+    /// A piece more of the transcript is whole (2j, [`Progress::transcribed`]): the player reads
+    /// the words again.
+    Transcribed,
 }
 
 /// Told of every change of a run's progress (the app sends it to the page).
@@ -83,7 +105,10 @@ pub type Notify = Arc<dyn Fn(&Progress, Change) + Send + Sync>;
 #[derive(Clone)]
 pub struct Analysis {
     runs: Arc<Mutex<HashMap<PathBuf, Progress>>>,
-    gate: Arc<Mutex<()>>,
+    /// Held through a run's first half (tracks to edit list).
+    first: Arc<Mutex<()>>,
+    /// Held through a run's transcription: the one shared background job (2j).
+    transcription: Arc<Mutex<()>>,
     /// Held from taking a snapshot of a run until `notify` has it, so snapshots reach the page in
     /// the order they were taken: the speech stage reports from a thread per track, and an older
     /// snapshot sent last would move a bar back (79 % after 100 %). Not `runs` itself: the app's
@@ -100,7 +125,8 @@ impl Default for Analysis {
     fn default() -> Self {
         Self {
             runs: Default::default(),
-            gate: Default::default(),
+            first: Default::default(),
+            transcription: Default::default(),
             order: Default::default(),
             cache_dir: None,
             user: user_options,
@@ -144,12 +170,14 @@ impl Analysis {
 
     /// The options a run of `p` uses: the user's, device auto, and the cut settings of the list on
     /// disk, so a re-analysis keeps settings `junctur cut` set. Never `force`: stages whose results
-    /// still answer the options are reused.
-    fn options(&self, p: &Project) -> Result<PipelineOptions, String> {
+    /// still answer the options are reused. `keep_list`: a list with the user's edits is kept
+    /// (every run but an explicit re-analysis, 2j).
+    fn options(&self, p: &Project, keep_list: bool) -> Result<PipelineOptions, String> {
         let mut o = (self.user)()?;
         if let Ok(e) = p.edit() {
             o.cut = e.settings;
         }
+        o.keep_list = keep_list;
         Ok(o)
     }
 
@@ -164,6 +192,8 @@ impl Analysis {
             error: Some(error),
             project: self.status(&k),
             steps: Vec::new(),
+            listed: false,
+            transcribed: None,
         };
         lock(&self.runs).insert(k, r.clone());
         r
@@ -178,8 +208,21 @@ impl Analysis {
         self.progress(file).is_some_and(|p| p.phase.busy())
     }
 
-    /// Analyses `file` in the background; a run already waiting or running is returned as it is.
+    /// `file`'s edit list may be edited: no run, or its run has written the list (2j), which
+    /// nothing later in the run replaces.
+    pub fn editable(&self, file: &Path) -> bool {
+        self.progress(file)
+            .is_none_or(|p| !p.phase.busy() || p.listed)
+    }
+
+    /// Analyses `file` in the background, keeping an edit list with the user's edits (a run resumed
+    /// after they edited while it transcribed, 2j); a run already waiting or running is returned as
+    /// it is.
     pub fn start(&self, file: &Path, notify: Notify) -> Result<Progress, String> {
+        self.start_with(file, notify, true)
+    }
+
+    fn start_with(&self, file: &Path, notify: Notify, keep_list: bool) -> Result<Progress, String> {
         let p = Project::open(file, self.cache_dir.clone(), None).map_err(|e| e.to_string())?;
         let k = p.file.clone();
         let first = {
@@ -194,6 +237,8 @@ impl Analysis {
                 error: None,
                 project: self.status(&k),
                 steps: Vec::new(),
+                listed: false,
+                transcribed: None,
             };
             runs.insert(k.clone(), r.clone());
             r
@@ -202,10 +247,10 @@ impl Analysis {
         let me = self.clone();
         let spawned = std::thread::Builder::new()
             .name("analysis".into())
-            .spawn(move || me.run(&p, &notify));
+            .spawn(move || me.run(&p, &notify, keep_list));
         if let Err(e) = spawned {
             let e = format!("could not start the analysis: {e}");
-            self.update(&k, &|_, _| {}, |r| {
+            self.update(&k, &|_, _| {}, Change::Run, |r| {
                 r.phase = Phase::Failed;
                 r.error = Some(e.clone());
             });
@@ -235,44 +280,84 @@ impl Analysis {
             }
         }
         Ok(Reanalysed {
-            progress: Some(self.start(file, notify)?),
+            // Asked (or nothing of the user's to lose): the list is re-cut.
+            progress: Some(self.start_with(file, notify, false)?),
             hand_edited: false,
         })
     }
 
-    fn run(&self, p: &Project, notify: &Notify) {
-        let _turn = lock(&self.gate);
+    fn run(&self, p: &Project, notify: &Notify, keep_list: bool) {
         let k = p.file.clone();
-        self.update(&k, notify.as_ref(), |r| r.phase = Phase::Running);
-        let name = k.file_name().map(|n| n.to_string_lossy().into_owned());
-        let steps = |s: Step| self.step(&k, s, notify.as_ref());
-        let result = self.options(p).and_then(|o| {
-            let mut log = |line: &str| {
-                eprintln!(
-                    "junctur-app analysis ({}): {line}",
-                    name.as_deref().unwrap_or("")
-                );
-                self.update(&k, notify.as_ref(), |r| r.line = Some(line.to_string()));
-            };
-            pipeline::run_with(p, &o, &mut log, &steps)
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        });
+        let result = self.halves(p, notify, keep_list);
         if let Err(e) = &result {
             eprintln!("junctur-app analysis failed: {e}");
         }
-        self.update(&k, notify.as_ref(), |r| match &result {
-            Ok(()) => r.phase = Phase::Done,
-            Err(e) => {
-                r.phase = Phase::Failed;
-                r.error = Some(e.clone());
+        self.update(&k, notify.as_ref(), Change::Run, |r| {
+            r.transcribed = None;
+            match &result {
+                Ok(()) => r.phase = Phase::Done,
+                Err(e) => {
+                    r.phase = Phase::Failed;
+                    r.error = Some(e.clone());
+                }
             }
         });
     }
 
-    /// Changes `k`'s progress, reads its project status again and tells `notify` (outside the
-    /// `runs` lock: the app's handler takes the player's; in order, under [`Self::order`]).
-    fn update(&self, k: &Path, notify: &dyn Fn(&Progress, Change), f: impl FnOnce(&mut Progress)) {
+    /// The pipeline's first half on the `first` lane, then its transcription on the
+    /// `transcription` lane, telling the page when the list is written and as pieces land.
+    fn halves(&self, p: &Project, notify: &Notify, keep_list: bool) -> Result<(), String> {
+        let k = p.file.clone();
+        let notify = notify.as_ref();
+        let name = k.file_name().map(|n| n.to_string_lossy().into_owned());
+        let steps = |s: Step| self.step(&k, s, notify);
+        let mut log = |line: &str| {
+            eprintln!(
+                "junctur-app analysis ({}): {line}",
+                name.as_deref().unwrap_or("")
+            );
+            self.update(&k, notify, Change::Run, |r| r.line = Some(line.to_string()));
+        };
+        let o = self.options(p, keep_list)?;
+        let prepared = {
+            let _turn = lock(&self.first);
+            self.update(&k, notify, Change::Run, |r| r.phase = Phase::Running);
+            pipeline::prepare(p, &o, &mut log, &steps).map_err(|e| e.to_string())?
+        };
+        // Taken at once when free, so a lone recording never shows as waiting.
+        let (_turn, waited) = match self.transcription.try_lock() {
+            Ok(turn) => (turn, false),
+            Err(_) => {
+                self.update(&k, notify, Change::Listed, |r| {
+                    r.listed = true;
+                    r.phase = Phase::Waiting;
+                });
+                (lock(&self.transcription), true)
+            }
+        };
+        let change = if waited { Change::Run } else { Change::Listed };
+        self.update(&k, notify, change, |r| {
+            r.listed = true;
+            r.phase = Phase::Running;
+        });
+        let mut transcribed = |t: f64| {
+            self.update(&k, notify, Change::Transcribed, |r| r.transcribed = Some(t));
+        };
+        pipeline::finish(p, &o, prepared, &mut log, &steps, &mut transcribed)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// Changes `k`'s progress, reads its project status again and tells `notify` what moved
+    /// (outside the `runs` lock: the app's handler takes the player's; in order, under
+    /// [`Self::order`]).
+    fn update(
+        &self,
+        k: &Path,
+        notify: &dyn Fn(&Progress, Change),
+        change: Change,
+        f: impl FnOnce(&mut Progress),
+    ) {
         let _order = lock(&self.order);
         let status = self.status(k);
         let now = {
@@ -284,7 +369,7 @@ impl Analysis {
             r.project = status.or(r.project.take());
             r.clone()
         };
-        notify(&now, Change::Run);
+        notify(&now, change);
     }
 
     /// Takes a track's step and tells `notify` only when its stage or whole percentage moved: at
@@ -341,8 +426,8 @@ mod tests {
         let notify: Notify = Arc::new(move |p: &Progress, _| {
             let _ = lock(&tx).send(p.clone());
         });
-        // Hold the gate so the run waits, queued, and a second request finds it.
-        let held = lock(&a.gate);
+        // Hold the first lane so the run waits, queued, and a second request finds it.
+        let held = lock(&a.first);
         let first = a.start(&file, notify.clone()).unwrap();
         assert_eq!(first.phase, Phase::Queued);
         assert!(a.busy(&file));
@@ -371,6 +456,58 @@ mod tests {
     }
 
     #[test]
+    fn a_first_half_never_waits_behind_a_transcription() {
+        let d = std::env::temp_dir().join(format!("junctur-app-lanes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join("rec.mp4");
+        std::fs::write(&file, b"not a video").unwrap();
+        let a = Analysis::with_cache(d.join("cache"));
+        // Another recording is transcribing, for as long as this test runs.
+        let _transcribing = lock(&a.transcription);
+        a.start(&file, Arc::new(|_: &Progress, _| {})).unwrap();
+        // The tracks stage runs (and fails on this file) all the same.
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while a.busy(&file) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "held behind the transcription"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(a.progress(&file).unwrap().phase, Phase::Failed);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn edits_wait_only_until_the_runs_list_is_written() {
+        let a = Analysis::with_cache(std::env::temp_dir().join("junctur-app-editable-unused"));
+        let k = PathBuf::from("rec.mp4");
+        assert!(a.editable(&k), "no run");
+        let run = |phase, listed| Progress {
+            file: "rec.mp4".into(),
+            phase,
+            line: None,
+            error: None,
+            project: None,
+            steps: Vec::new(),
+            listed,
+            transcribed: None,
+        };
+        for (phase, listed, editable) in [
+            (Phase::Queued, false, false),
+            (Phase::Running, false, false),
+            (Phase::Waiting, true, true),
+            (Phase::Running, true, true),
+            (Phase::Done, true, true),
+            (Phase::Failed, false, true),
+        ] {
+            lock(&a.runs).insert(key(&k), run(phase, listed));
+            assert_eq!(a.editable(&k), editable, "{phase:?}, listed {listed}");
+        }
+    }
+
+    #[test]
     fn steps_are_sent_when_a_track_moves_a_whole_percent_or_a_stage() {
         let a = Analysis::with_cache(std::env::temp_dir().join("junctur-app-steps-unused"));
         let k = PathBuf::from("rec.mp4");
@@ -383,6 +520,8 @@ mod tests {
                 error: None,
                 project: None,
                 steps: Vec::new(),
+                listed: false,
+                transcribed: None,
             },
         );
         let sent = Mutex::new(Vec::<Vec<Step>>::new());
@@ -431,6 +570,8 @@ mod tests {
                 error: None,
                 project: None,
                 steps: Vec::new(),
+                listed: false,
+                transcribed: None,
             },
         );
         let sent = Mutex::new(Vec::<Vec<Step>>::new());
