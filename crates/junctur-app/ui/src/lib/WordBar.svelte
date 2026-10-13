@@ -64,12 +64,13 @@
 
   const runs = $derived(sel.pairs(selection));
 
-  // Another selection: the last answer was about the words before, and a name half typed for them
-  // is dropped (an enrolment already on its way still ends with its own line).
+  // Another selection: the last answer was about the words before (an enrolment already on its
+  // way still ends with its own line). An open "New name…" field and what is typed in it stay
+  // (2p repair): Ctrl+clicking more of someone's lines while naming them is the point. They go
+  // when the selection clears, which unmounts this bar.
   $effect(() => {
     void selection;
     said = null;
-    naming = false;
   });
 
   async function call(f: () => Promise<void>) {

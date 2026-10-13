@@ -250,9 +250,11 @@
 
   // Selecting: press on a word, drag across others, release. A press and release on one word
   // without moving seeks there (and selects it); shift extends the latest stretch from its anchor.
-  // Ctrl (2p) adds a stretch beside the ones selected: a press on a word adds it (a drag from it,
-  // the words dragged over), and a press and release on a word already selected takes it out; a
-  // Ctrl+click does not seek, so picking out someone's lines one after another leaves the playhead
+  // Ctrl (2p; Cmd on macOS, where Ctrl+click is the context menu, and never the Windows key)
+  // adds a stretch beside the ones selected: a press on a word adds it (a drag from it, the words
+  // dragged over), and a press and release on a word already selected takes it out, while a drag
+  // that starts on a selected word adds the words dragged over like any other (it only takes out
+  // the one word when the press does not move); a Ctrl+click does not seek, so picking out someone's lines one after another leaves the playhead
   // where it was. `pressed` is the one drag in progress; `anchor` outlives it, for shift-clicks.
   // `base` is what the drag's own run goes beside: nothing for a plain press, every stretch for
   // Ctrl, all but the latest for Shift (that one is the run being extended).
@@ -262,6 +264,7 @@
   let base: sel.Selection | null = null;
   let adding = false;
   let unpick = false;
+  const MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
   function wordUnder(target: EventTarget | Element | null): number {
     const el = (target as HTMLElement | null)?.closest?.<HTMLElement>("[data-i]");
     return el ? Number(el.dataset.i) : -1;
@@ -272,7 +275,7 @@
     const i = wordUnder(e.target);
     if (i < 0 || e.button !== 0) return;
     e.preventDefault();
-    adding = e.ctrlKey || e.metaKey;
+    adding = MAC ? e.metaKey : e.ctrlKey;
     unpick = false;
     moved = false;
     if (adding) {

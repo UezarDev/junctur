@@ -157,7 +157,7 @@ fn notice(e: &Edited) -> Option<String> {
             |n| n.to_string_lossy().into_owned(),
         )
     };
-    match (&e.saved.backup, e.saved.replaced_unreadable) {
+    let said = match (&e.saved.backup, e.saved.replaced_unreadable) {
         (Some(b), true) => Some(format!(
             "edit.junctur did not parse; it was kept as {} and replaced",
             name(b)
@@ -169,6 +169,18 @@ fn notice(e: &Edited) -> Option<String> {
                 .into(),
         ),
         _ => None,
+    };
+    // 2p repair: a several-stretch edit that left short stretches out says so.
+    let skipped = match e.skipped {
+        0 => None,
+        1 => Some("1 selected stretch is shorter than a frame and was left out".to_string()),
+        n => Some(format!(
+            "{n} selected stretches are shorter than a frame and were left out"
+        )),
+    };
+    match (said, skipped) {
+        (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+        (a, b) => a.or(b),
     }
 }
 
@@ -507,11 +519,11 @@ impl Core {
         runs: &[(usize, usize)],
         keep: bool,
     ) -> Result<(), String> {
-        self.prepare();
-        let ops: Vec<Op> = runs
-            .iter()
-            .map(|&(first, last)| Op::Words { first, last, keep })
+        let ops: Vec<Op> = crate::editor::join_runs(runs)?
+            .into_iter()
+            .map(|(first, last)| Op::Words { first, last, keep })
             .collect();
+        self.prepare();
         self.change(file, |ed, list, fps| ed.edit_all(list, &ops, fps))
     }
 
@@ -547,9 +559,8 @@ impl Core {
         runs: &[(usize, usize)],
         name: &str,
     ) -> Result<String, String> {
-        if runs.is_empty() {
-            return Err("select the words they say first".into());
-        }
+        // Joined first: overlapping runs would feed the same seconds into the voiceprint twice.
+        let runs = crate::editor::join_runs(runs)?;
         let file = file.ok_or("no recording is open")?;
         self.prepare();
         let words = lock(&self.editor)
