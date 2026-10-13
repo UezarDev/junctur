@@ -7,6 +7,10 @@
 //! each is split into that and its core, from its first to its last letter or digit, and only cores
 //! are compared. It runs over one track's words at a time, since two people talking at once have
 //! their words interleaved in time.
+//!
+//! A replacement's text is split back into words that keep the span of what it replaced (a
+//! `group`), so case, punctuation and the censor list see each of its words; the group is joined
+//! again into one unit at the end, so the cut still treats it as one word.
 
 use crate::edit::{Captions, Case, CensorStyle};
 
@@ -19,11 +23,13 @@ pub struct Unit {
 }
 
 /// A word split for matching: what comes before its first letter or digit, from there to its
-/// last, and the rest.
+/// last, and the rest. Pieces of one `group` (a replacement's words) share its span and show as
+/// one unit.
 #[derive(Debug, Clone)]
 struct Piece {
     first: usize,
     last: usize,
+    group: usize,
     lead: String,
     core: String,
     trail: String,
@@ -46,14 +52,17 @@ impl Piece {
         Self {
             first: i,
             last: i,
+            group: i,
             lead: lead.into(),
             core: core.into(),
             trail: trail.into(),
         }
     }
 
+    /// The core lower-cased. `İ` lower-cases to `i` and a combining dot; the dot is dropped so
+    /// `İstanbul` matches `istanbul`.
     fn key(&self) -> String {
-        self.core.to_lowercase()
+        self.core.to_lowercase().replace('\u{307}', "")
     }
 }
 
@@ -90,25 +99,39 @@ pub fn units(words: &[(usize, String)], c: &Captions) -> Vec<Unit> {
             .filter(|(_, w)| w.0 == t)
             .map(|(i, w)| Piece::new(i, &w.1))
             .collect();
+        // A group's pieces come one after another; joined with spaces into one unit.
+        let mut group: Option<(usize, Unit)> = None;
         for p in censor(text_of(replace(pieces, c), c), c) {
-            let text = format!("{}{}{}", p.lead, p.core, p.trail)
-                .trim()
-                .to_string();
-            if !text.is_empty() {
-                out.push(Unit {
-                    first: p.first,
-                    last: p.last,
-                    text,
-                });
+            let text = format!("{}{}{}", p.lead, p.core, p.trail);
+            let text = text.trim();
+            match &mut group {
+                Some((g, u)) if *g == p.group => {
+                    if !text.is_empty() && !u.text.is_empty() {
+                        u.text.push(' ');
+                    }
+                    u.text.push_str(text);
+                }
+                _ => {
+                    out.extend(group.take().map(|(_, u)| u));
+                    let unit = Unit {
+                        first: p.first,
+                        last: p.last,
+                        text: text.to_string(),
+                    };
+                    group = Some((p.group, unit));
+                }
             }
         }
+        out.extend(group.map(|(_, u)| u));
     }
+    out.retain(|u| !u.text.is_empty());
     out.sort_by_key(|u| u.first);
     out
 }
 
 /// Find and replace, one pass left to right; at each word the longest `from` that matches wins and
-/// its words become one piece, an empty `to` dropping them, punctuation and all.
+/// its words become one group of the `to`'s words, the first's leading and the last's trailing
+/// punctuation round them; an empty `to` drops them, punctuation and all.
 fn replace(pieces: Vec<Piece>, c: &Captions) -> Vec<Piece> {
     if c.replace.is_empty() {
         return pieces;
@@ -130,19 +153,23 @@ fn replace(pieces: Vec<Piece>, c: &Captions) -> Vec<Piece> {
         {
             Some((want, to)) => {
                 let end = &pieces[i + want.len() - 1];
-                let to = to.trim();
-                let (lead, trail) = if to.is_empty() {
-                    (String::new(), String::new())
-                } else {
-                    (pieces[i].lead.clone(), end.trail.clone())
-                };
-                out.push(Piece {
-                    first: pieces[i].first,
-                    last: end.last,
-                    lead,
-                    core: to.into(),
-                    trail,
-                });
+                let (first, last) = (pieces[i].first, end.last);
+                let mut words: Vec<Piece> = to
+                    .split_whitespace()
+                    .map(|w| Piece {
+                        first,
+                        last,
+                        group: first,
+                        ..Piece::new(first, w)
+                    })
+                    .collect();
+                if let Some(w) = words.first_mut() {
+                    w.lead.insert_str(0, &pieces[i].lead);
+                }
+                if let Some(w) = words.last_mut() {
+                    w.trail.push_str(&end.trail);
+                }
+                out.extend(words);
                 i += want.len();
             }
             None => {
@@ -174,7 +201,8 @@ fn cased(s: &str, case: Case) -> String {
         Case::AsSpoken => s.to_string(),
         Case::Upper => s.to_uppercase(),
         Case::Lower => s.to_lowercase(),
-        // The rest as spoken, so `NASA` and `iPhone` survive; lower-casing it would break them.
+        // The rest as spoken, so `NASA` survives (`iPhone` reads `IPhone`); lower-casing the rest
+        // would break every acronym.
         Case::Title => {
             let mut out = String::with_capacity(s.len());
             let mut start = true;
@@ -235,15 +263,17 @@ fn is_punctuation(c: char) -> bool {
     )
 }
 
-/// `s` without punctuation, but for an apostrophe or hyphen between letters (`don't`, `e-mail`).
+/// `s` without punctuation, but for an apostrophe or hyphen between letters (`don't`, `e-mail`)
+/// and a point, comma or colon between digits (`5.50`, `1,000`, `10:30`), part of the number.
 fn unpunctuated(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len());
+    let between = |k: usize, f: fn(&char) -> bool| {
+        k > 0 && f(&chars[k - 1]) && chars.get(k + 1).is_some_and(f)
+    };
     for (k, &ch) in chars.iter().enumerate() {
-        let inside = matches!(ch, '\'' | '’' | '-')
-            && k > 0
-            && chars[k - 1].is_alphanumeric()
-            && chars.get(k + 1).is_some_and(|n| n.is_alphanumeric());
+        let inside = (matches!(ch, '\'' | '’' | '-') && between(k, |c| c.is_alphanumeric()))
+            || (matches!(ch, '.' | ',' | ':') && between(k, char::is_ascii_digit));
         if inside || !is_punctuation(ch) {
             out.push(ch);
         }
@@ -354,6 +384,11 @@ mod tests {
             ),
             ["Qué", "tal", "don't", "e-mail", "50%", "$5", "hi", "sí"]
         );
+        // A point, comma or colon inside a number is part of it; one after it is not.
+        assert_eq!(
+            shown(&["$5.50.", "3.14,", "1,000", "10:30:", "a.b"], &c),
+            ["$5.50", "3.14", "1,000", "10:30", "ab"]
+        );
     }
 
     #[test]
@@ -400,6 +435,56 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(shown(&["a", "b"], &one), ["*", "b"]);
+        // Case aside covers `İ`, which lower-cases with a combining dot.
+        let city = Captions {
+            censor: vec!["istanbul".into()],
+            ..Default::default()
+        };
+        assert_eq!(shown(&["İstanbul"], &city), ["İ******l"]);
+    }
+
+    #[test]
+    fn the_censor_list_sees_each_word_of_a_replacement() {
+        let c = Captions {
+            replace: vec![pair("darn", "damn it"), pair("gosh", "oh my god")],
+            censor: vec!["damn".into(), "my god".into()],
+            case: Case::Title,
+            ..Default::default()
+        };
+        let w: Vec<(usize, String)> = ["Darn!", "gosh,", "so"]
+            .iter()
+            .map(|w| (0, w.to_string()))
+            .collect();
+        // Still one unit each, masked word by word, the punctuation round the whole.
+        let text: Vec<(usize, usize, String)> = units(&w, &c)
+            .into_iter()
+            .map(|u| (u.first, u.last, u.text))
+            .collect();
+        assert_eq!(
+            text,
+            [
+                (0, 0, "D**n It!".to_string()),
+                (1, 1, "Oh M* G*d,".to_string()),
+                (2, 2, "So".to_string())
+            ]
+        );
+        // A phrase replaced across words keeps their span.
+        let p = Captions {
+            replace: vec![pair("new york", "New York City")],
+            ..Default::default()
+        };
+        let w: Vec<(usize, String)> = ["new", "york."]
+            .iter()
+            .map(|w| (0, w.to_string()))
+            .collect();
+        assert_eq!(
+            units(&w, &p),
+            [Unit {
+                first: 0,
+                last: 1,
+                text: "New York City.".into()
+            }]
+        );
     }
 
     #[test]
