@@ -59,10 +59,15 @@ impl Piece {
         }
     }
 
-    /// The core lower-cased. `İ` lower-cases to `i` and a combining dot; the dot is dropped so
-    /// `İstanbul` matches `istanbul`.
+    /// The core lower-cased. `İ` lower-cases to `i` and a combining dot, so it is made a plain `i`
+    /// first (written whole or as `I` and the dot) and `İstanbul` matches `istanbul`. Only that
+    /// dot goes: 5j dropped every U+0307 after lower-casing, which also made a letter written with
+    /// a combining dot of its own (`ż` as `z` and the dot) match its bare letter (5p).
     fn key(&self) -> String {
-        self.core.to_lowercase().replace('\u{307}', "")
+        self.core
+            .replace('\u{130}', "i")
+            .replace("I\u{307}", "i")
+            .to_lowercase()
     }
 }
 
@@ -389,6 +394,8 @@ mod tests {
             shown(&["$5.50.", "3.14,", "1,000", "10:30:", "a.b"], &c),
             ["$5.50", "3.14", "1,000", "10:30", "ab"]
         );
+        // Only between two digits: a comma after a word goes even with a digit after it (5p).
+        assert_eq!(shown(&["apples,2", "1995.2"], &c), ["apples2", "1995.2"]);
     }
 
     #[test]
@@ -441,6 +448,21 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(shown(&["İstanbul"], &city), ["İ******l"]);
+        // Only that dot: a letter written with a combining dot of its own (`ż` as `z` and
+        // U+0307) is not its bare letter (5p).
+        let zed = Captions {
+            censor: vec!["zero".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            shown(&["z\u{307}ero", "zero"], &zed),
+            ["z\u{307}ero", "z**o"]
+        );
+        let dotted = Captions {
+            censor: vec!["z\u{307}ero".into()],
+            ..zed
+        };
+        assert_eq!(shown(&["z\u{307}ero"], &dotted), ["z***o"]);
     }
 
     #[test]

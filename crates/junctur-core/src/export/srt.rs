@@ -491,11 +491,13 @@ fn wrap_onto(mut lines: Vec<String>, w: &str, chars: usize) -> Vec<String> {
 /// `floor` ([`READABLE_S`], or nothing under a word limit): a next cue starting sooner (a quick
 /// turn) waits that long. Then each ends by the next one's start, held to [`MIN_S`] where there is
 /// room, never past the longest a cue may last. A cue pushed past the end of the timeline joins the
-/// one before. Under a word limit nothing is pushed, and a cue starts inside the timeline, so only
-/// a cue said at the very instant of the next one is left with no time and joins the one before,
-/// the one case where a caption holds more words than the limit.
+/// one before. Under a word limit nothing is pushed, and cues said at one instant share its time
+/// first ([`share_instants`]), so each keeps its words within the limit.
 fn settle(cues: &mut Vec<Cue>, longest: f64, floor: f64, total: f64) {
     cues.sort_by(|a, b| a.start.total_cmp(&b.start));
+    if floor == 0.0 {
+        share_instants(cues, total);
+    }
     for i in 0..cues.len() {
         let floor = cues[i].start + floor;
         if let Some(n) = cues.get_mut(i + 1) {
@@ -510,23 +512,63 @@ fn settle(cues: &mut Vec<Cue>, longest: f64, floor: f64, total: f64) {
         c.end = want.min(next).min(total);
     }
     // A cue pushed past the end of the timeline has no time left; its words go into the cue
-    // before it rather than being lost (a part per speaker, as in any cue).
+    // before it rather than being lost (a part per speaker, as in any cue). One with no cue
+    // before it goes into the next, ahead of its words: 5i dropped it, words and all (5p).
     let mut kept: Vec<Cue> = Vec::with_capacity(cues.len());
-    for c in cues.drain(..) {
-        match kept.last_mut() {
-            Some(prev) if c.end <= c.start => {
-                for part in c.parts {
-                    match prev.parts.iter_mut().find(|p| p.speaker == part.speaker) {
-                        Some(p) => p.lines.extend(part.lines),
-                        None => prev.parts.push(part),
-                    }
-                }
+    let mut early: Vec<Part> = Vec::new();
+    for mut c in cues.drain(..) {
+        if c.end <= c.start {
+            match kept.last_mut() {
+                Some(prev) => join(&mut prev.parts, c.parts),
+                None => join(&mut early, c.parts),
             }
-            _ if c.end <= c.start => {}
-            _ => kept.push(c),
+        } else {
+            if !early.is_empty() {
+                let own = std::mem::replace(&mut c.parts, std::mem::take(&mut early));
+                join(&mut c.parts, own);
+            }
+            kept.push(c);
         }
     }
     *cues = kept;
+}
+
+/// `more` added to `parts`, a speaker's lines after their own lines there.
+fn join(parts: &mut Vec<Part>, more: Vec<Part>) {
+    for part in more {
+        match parts.iter_mut().find(|p| p.speaker == part.speaker) {
+            Some(p) => p.lines.extend(part.lines),
+            None => parts.push(part),
+        }
+    }
+}
+
+/// Cues (in order) said at one instant, spread over it in turn, under a word limit (5p).
+///
+/// A cue the word limit closed is followed by one starting at the same instant when two units of
+/// one speaker start together: Whisper gives a word no length now and then, and a long
+/// translation (5k) puts several words where a spoken word ends. Cues cannot overlap, so the
+/// first had no time: 5i left it to join the cue before, past the limit, or dropped it as the
+/// first. Now the cues of one instant split, evenly and in turn, the time their words take (the
+/// minimum hold when none has a length), never past the next cue's start nor the end of the
+/// timeline, so every cue keeps its own time and nothing trails the voice: the next cue starts
+/// where it did. Two speakers at once are not this case; they share one cue, a part each.
+fn share_instants(cues: &mut [Cue], total: f64) {
+    let mut i = 0;
+    while i < cues.len() {
+        let t = cues[i].start;
+        let k = cues[i..].iter().take_while(|c| c.start <= t).count();
+        if k > 1 {
+            let next = cues.get(i + k).map_or(f64::INFINITY, |n| n.start);
+            let said = cues[i..i + k].iter().map(|c| c.end).fold(t, f64::max);
+            let end = if said > t { said } else { t + MIN_S };
+            let step = (end.min(next).min(total) - t).max(0.0) / k as f64;
+            for (m, c) in cues[i..i + k].iter_mut().enumerate() {
+                c.start = t + m as f64 * step;
+            }
+        }
+        i += k;
+    }
 }
 
 /// `HH:MM:SS,mmm`.
@@ -941,6 +983,83 @@ mod tests {
             (c[1].start - 9.95).abs() < 1e-9 && (c[1].end - 10.0).abs() < 1e-9,
             "{c:?}"
         );
+    }
+
+    #[test]
+    fn two_speakers_starting_a_word_at_once_share_one_cue_within_the_limit() {
+        // 5p's report: two tracks, both 0.0-0.5 s, one word at a time. The second speaker has no
+        // part yet and talks at once, so it joins the cue as its own part: no second cue at the
+        // same instant, and each part holds one word.
+        let e = two_tracks(Captions {
+            words: 1,
+            ..Default::default()
+        });
+        let (a, b) = (word(0.0, 0.5, "uno"), word(0.0, 0.5, "dos"));
+        let c = cues(&e, &own(&e), [(0, &a), (3, &b)], 30, 1, None);
+        assert_eq!(c.len(), 1, "{c:?}");
+        assert_eq!(parts(&c[0]), vec![(1, "uno".into()), (2, "dos".into())]);
+    }
+
+    #[test]
+    fn under_a_word_limit_words_said_at_one_instant_share_its_time() {
+        // Whisper gives a word no length now and then ("a" at 1.0-1.0), so the next starts at the
+        // same instant. Each keeps its own cue, in turn, within the limit: first in the
+        // recording, where it used to be dropped, and after another, where it used to join it.
+        let e = edit(
+            &[(0.0, 40.0)],
+            Captions {
+                words: 1,
+                ..Default::default()
+            },
+        );
+        let (x, a, b, z) = (
+            word(0.0, 0.3, "x"),
+            word(1.0, 1.0, "a"),
+            word(1.0, 1.3, "b"),
+            word(3.0, 3.3, "z"),
+        );
+        for (words, want) in [
+            (vec![&a, &b, &z], vec!["a", "b", "z"]),
+            (vec![&x, &a, &b, &z], vec!["x", "a", "b", "z"]),
+        ] {
+            let c = cues(&e, &own(&e), words.into_iter().map(|w| (0, w)), 30, 1, None);
+            assert_eq!(solo(&c), want);
+            let k = want.len() - 3;
+            assert!((c[k].start - 1.0).abs() < 1e-9, "{c:?}");
+            // "a" and "b" split the time until "b" ends; "b" is then held to the minimum.
+            assert!((c[k + 1].start - 1.15).abs() < 1e-9, "{c:?}");
+            assert!((c[k + 1].end - (1.15 + MIN_S)).abs() < 1e-9, "{c:?}");
+            for p in c.windows(2) {
+                assert!(
+                    p[0].start < p[0].end && p[0].end <= p[1].start + 1e-9,
+                    "{c:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_long_translation_keeps_the_word_limit_where_its_words_bunch_up() {
+        // Sixteen translated words over two spoken ones: two of them start in the space after
+        // "Sí", so at its end, the same instant. One word at a time, every cue holds one word.
+        let w = [word(0.0, 0.4, "Sí"), word(0.4, 1.0, "bien.")];
+        let c = Captions {
+            translate: "en".into(),
+            words: 1,
+            ..Default::default()
+        };
+        let e = edit(&[(0.0, 40.0)], c.clone());
+        let mut t = Translations::default();
+        let many = "a b c d e f g h i j k l m n o p";
+        t.insert("en", "Sí bien.", many);
+        let got = cues(&e, &c, w.iter().map(|w| (0, w)), 30, 1, Some(&t));
+        assert_eq!(solo(&got), many.split(' ').collect::<Vec<_>>());
+        for p in got.windows(2) {
+            assert!(
+                p[0].start < p[0].end && p[0].end <= p[1].start + 1e-9,
+                "{got:?}"
+            );
+        }
     }
 
     #[test]
