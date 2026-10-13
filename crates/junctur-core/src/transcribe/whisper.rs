@@ -16,6 +16,7 @@ use super::languages::Languages;
 use super::words::{self, Token, Word};
 use crate::models::{self, Model};
 use crate::runtime::{self, vram, Device, DevicePref};
+use crate::wordlist;
 use crate::{Error, Result};
 
 /// Which model to load. `Auto` (the default) means large-v3-turbo, on the GPU when it fits in the free
@@ -197,10 +198,16 @@ fn pick(pref: ModelPref, free: Option<u64>, gpu: Gpu) -> (Choice, &'static Model
 }
 
 pub struct Whisper {
+    /// Kept for its tokenizer, to fit the word list to the prompt (5h).
+    ctx: WhisperContext,
     state: WhisperState,
     threads: i32,
     /// Token ids from end-of-text up are special (timestamps, language, markers).
     eot: i32,
+    /// The initial prompt every chunk is decoded with, as tokens (5h, [`Self::set_prompt`]); empty
+    /// for none. Tokens rather than whisper-rs's `set_initial_prompt`, which leaks its string on every
+    /// call (a 30 h recording is thousands of chunks) and panics on a NUL.
+    prompt: Vec<i32>,
 }
 
 impl Whisper {
@@ -218,10 +225,36 @@ impl Whisper {
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8)) as i32;
         let eot = ctx.token_eot();
         Ok(Self {
+            ctx,
             state,
             threads,
             eot,
+            prompt: Vec::new(),
         })
+    }
+
+    /// Tells Whisper the user's word list (5h) before every chunk from now on: its leading entries
+    /// that fit the prompt's room, which is half the text context (224 tokens on large-v3) less the
+    /// marker whisper.cpp puts before it. whisper.cpp would cut a longer prompt itself, but from the
+    /// front and mid-word. Returns what went in and what was left out, for the log.
+    pub fn set_prompt(&mut self, words: &[String]) -> wordlist::Prompt {
+        let budget = (self.ctx.n_text_ctx() / 2 - 1).max(0) as usize;
+        let ctx = &self.ctx;
+        // Room for every token: a token is at least a byte, and whisper-rs misreads the count it
+        // is given back when there is too little.
+        let tokens = |text: &str| {
+            ctx.tokenize(text, text.len() + 8)
+                .map_or(usize::MAX, |t| t.len())
+        };
+        let p = wordlist::prompt(words, budget, tokens);
+        self.prompt = if p.text.is_empty() {
+            Vec::new()
+        } else {
+            self.ctx
+                .tokenize(&p.text, p.text.len() + 8)
+                .unwrap_or_default()
+        };
+        p
     }
 
     /// The language of `samples` (16 kHz mono, Whisper looks at the first 30 s) among `langs`.
@@ -255,6 +288,11 @@ impl Whisper {
         params.set_token_timestamps(true);
         // Each chunk stands alone: carrying text across chunks is how Whisper loops on a phrase.
         params.set_no_context(true);
+        // The word list (5h). Still applied with `no_context`: whisper.cpp clears the carried text
+        // before it adds the prompt tokens, on every call.
+        if !self.prompt.is_empty() {
+            params.set_tokens(&self.prompt);
+        }
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_special(false);

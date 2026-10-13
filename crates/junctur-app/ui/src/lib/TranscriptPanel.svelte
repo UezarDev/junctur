@@ -4,7 +4,8 @@
   // in the DOM, so a 30 h transcript scrolls like a short one. An edit rebuilds the tokens
   // (transcript.ts, one pass over the words); a resize or a fold toggle only repacks them into rows.
   // Where the speaker changes a name row comes first; click the name to rename the speaker (saved
-  // to edit.junctur at once).
+  // to edit.junctur at once). Double-click a word to fix its spelling (5h): saved to edit.junctur at
+  // once, shown here, in the caption preview and the SRT, and added to the word list Whisper is told.
   import { onMount } from "svelte";
   import { SvelteSet } from "svelte/reactivity";
   import * as api from "./api";
@@ -168,6 +169,25 @@
     if (name && name !== nameOf(id)) call(() => api.renameSpeaker(id, name));
   }
 
+  // Fixing a word (5h): the one double-clicked turns into a field with its text; Enter or leaving it
+  // saves, Escape drops it. Nothing typed, or the heard text again, takes a fix away (the core
+  // decides). The new text comes back through the edit state's fixes key (App.svelte).
+  let fixing = $state<number | null>(null);
+  let fixDraft = $state("");
+  function startFix(e: MouseEvent) {
+    const i = wordUnder(e.target);
+    if (i < 0 || !words) return;
+    fixing = i;
+    fixDraft = words.text[i];
+  }
+  function finishFix(save: boolean) {
+    const i = fixing;
+    fixing = null;
+    if (!save || i == null || !words || fixDraft.trim() === words.text[i]) return;
+    const text = fixDraft;
+    call(() => api.fixWord(i, text));
+  }
+
   const first = $derived(Math.max(0, Math.floor(top / ROW) - OVERSCAN));
   const visible = $derived.by(() => {
     if (!laid) return [];
@@ -187,7 +207,7 @@
   $effect(() => {
     if (!laid || current < 0 || !scroller) return;
     const row = laid.rowOf[current];
-    if (renaming || performance.now() < pausedUntil) return;
+    if (renaming || fixing != null || performance.now() < pausedUntil) return;
     const y = row * ROW;
     if (y < top + ROW || y > top + height - 3 * ROW) {
       ours = Math.max(0, Math.round(y - height / 3));
@@ -303,6 +323,7 @@
     onpointerdown={down}
     onpointermove={move}
     onpointerup={up}
+    ondblclick={startFix}
   >
     {#if loading}
       <p class="note">Reading the transcript…</p>
@@ -350,13 +371,32 @@
             {#if row.para != null}<span class="time">{stamp(row.para)}</span>{/if}
             {#each row.tokens as k (k)}
               {@const t = toks!.list[k]}
-              {#if t.kind === "word"}
+              {#if t.kind === "word" && t.i === fixing}
+                <input
+                  class="fix"
+                  maxlength="100"
+                  style:width="{Math.max(60, (wordWidth?.[t.i] ?? 0) + 24)}px"
+                  bind:value={fixDraft}
+                  use:focusInput
+                  onpointerdown={(e) => e.stopPropagation()}
+                  ondblclick={(e) => e.stopPropagation()}
+                  onkeydown={(e) => {
+                    e.stopPropagation();
+                    if (e.key === "Enter") finishFix(true);
+                    else if (e.key === "Escape") finishFix(false);
+                  }}
+                  onblur={() => finishFix(true)}
+                  aria-label="Fix this word's spelling"
+                />
+              {:else if t.kind === "word"}
                 <span
                   class="w"
                   class:cur={t.i === current}
                   class:sel={chosen && t.i >= chosen.first && t.i <= chosen.last}
                   style:box-shadow={words.also[t.i] ? `inset 0 -2px 0 ${colour(words.also[t.i])}` : null}
-                  title={words.also[t.i] ? `${nameOf(words.speaker[t.i])} and ${nameOf(words.also[t.i])} at once` : null}
+                  title={words.also[t.i]
+                    ? `${nameOf(words.speaker[t.i])} and ${nameOf(words.also[t.i])} at once`
+                    : "Double-click to fix the spelling"}
                   data-i={t.i}>{words.text[t.i]}</span
                 >
               {:else if t.kind === "cutword"}
@@ -511,6 +551,11 @@
   }
   .speaker:hover {
     background: rgba(255, 255, 255, 0.08);
+  }
+  .fix {
+    height: 20px;
+    margin-right: 4px;
+    font: 14px "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   }
   .rename {
     width: 220px;

@@ -11,6 +11,7 @@
 //! speaker 1 color=#F2B33D Speaker 1
 //! speaker 2 track=1 color=#5FB3F2 Lucía
 //! turn 1.300 4.100 1
+//! fix 1 2.340 Lucía
 //! window 0 0.820 0.820 14
 //! ```
 //!
@@ -23,26 +24,31 @@
 //! header `junctur-edit 2`
 //! (5a): a list without them is byte-for-byte what an older build wrote and still reads there,
 //! while a list with them tells an older build it is a newer format instead of failing on its
-//! first new line. Both versions read here.
+//! first new line. Both versions read here. A list with `fix` lines (5h: a word's spelling fixed by
+//! hand, `fix <track> <start> <text>`, the text the rest of the line) is version 3 for the same
+//! reason; every version reads here.
 
 use std::fmt::Write;
 use std::path::PathBuf;
 
 use super::{
-    default_color, default_name, parse_color, Captions, CutSettings, EditList, Range, SpeakerName,
-    Speakers, Turn, Window,
+    check_fix, default_color, default_name, fixes, parse_color, Captions, CutSettings, EditList,
+    Fix, Range, SpeakerName, Speakers, Turn, Window,
 };
 
-/// The newest version this build writes (with speakers); lists without speakers are written as 1.
-pub const FORMAT_VERSION: u32 = 2;
+/// The newest version this build writes (with fixed words, 5h); lists without them are written as
+/// 2 (with speakers or captions) or 1.
+pub const FORMAT_VERSION: u32 = 3;
 
 pub fn write(e: &EditList) -> String {
     let s = &e.settings;
     let mut out = String::new();
-    let version = if e.speakers.is_empty() && e.captions.is_none() {
+    let version = if !e.fixes.is_empty() {
+        FORMAT_VERSION
+    } else if e.speakers.is_empty() && e.captions.is_none() {
         1
     } else {
-        FORMAT_VERSION
+        2
     };
     let _ = writeln!(out, "junctur-edit {version}");
     let _ = writeln!(out, "source {}", e.source.display());
@@ -110,6 +116,17 @@ pub fn write(e: &EditList) -> String {
             let _ = writeln!(out, "turn {:.3} {:.3} {}", t.start, t.end, t.speaker);
         }
     }
+    if !e.fixes.is_empty() {
+        let _ = writeln!(
+            out,
+            "# fix <track> <start> <text>: a word's spelling, fixed by hand"
+        );
+        let mut fixes = e.fixes.clone();
+        fixes::sort(&mut fixes);
+        for f in &fixes {
+            let _ = writeln!(out, "fix {} {:.3} {}", f.track, f.start, f.text);
+        }
+    }
     let _ = writeln!(out, "# window <start> <score> <speech share> <words>");
     for w in &e.windows {
         let _ = writeln!(
@@ -146,6 +163,7 @@ pub fn parse(text: &str) -> Result<EditList, String> {
         keep: Vec::new(),
         speakers: Speakers::default(),
         captions: None,
+        fixes: Vec::new(),
         windows: Vec::new(),
     };
     // Turn lines may come before the speaker lines they name; checked once all are read.
@@ -256,6 +274,23 @@ pub fn parse(text: &str) -> Result<EditList, String> {
                 c.check().map_err(|why| bad(&why))?;
                 e.captions = Some(c);
             }
+            "fix" => {
+                let mut parts = rest.splitn(3, ' ');
+                let track = parts.next().and_then(|t| t.parse::<usize>().ok());
+                let start = parts.next().and_then(|t| t.parse::<f64>().ok());
+                let text = check_fix(parts.next().unwrap_or("")).map_err(|why| bad(&why))?;
+                let (Some(track), Some(start)) = (track, start) else {
+                    return Err(bad("expected `fix <track> <start> <text>`"));
+                };
+                if text.is_empty() || !start.is_finite() {
+                    return Err(bad("expected `fix <track> <start> <text>`"));
+                }
+                let fix = Fix { track, start, text };
+                if e.fixes.iter().any(|f| f.same_word(&fix)) {
+                    return Err(bad("a second `fix` line for this word"));
+                }
+                e.fixes.push(fix);
+            }
             "turn" => match nums()?[..] {
                 [start, end, id] if end > start && id >= 1.0 && id.fract() == 0.0 => {
                     e.speakers.turns.push(Turn {
@@ -292,6 +327,7 @@ pub fn parse(text: &str) -> Result<EditList, String> {
         }
     }
     e.speakers.names.sort_by_key(|n| n.id);
+    fixes::sort(&mut e.fixes);
     e.speakers.turns.sort_by(|a, b| a.start.total_cmp(&b.start));
     // Hand edits may leave ranges out of order or overlapping; the renderer wants neither.
     e.keep.sort_by(|a, b| a.start.total_cmp(&b.start));
@@ -327,6 +363,7 @@ mod tests {
             ],
             speakers: Speakers::default(),
             captions: None,
+            fixes: Vec::new(),
             windows: vec![Window {
                 start: 0.0,
                 score: 0.5,
@@ -388,7 +425,7 @@ mod tests {
         let plain = sample().to_text();
         assert!(!plain.contains("speaker"));
         assert!(plain.starts_with("junctur-edit 1\n"));
-        assert!(parse("junctur-edit 3\n").is_err());
+        assert!(parse("junctur-edit 4\n").is_err());
         // Caption settings alone make a version-2 list, and round-trip.
         let c = EditList {
             captions: Some(Captions {
@@ -504,6 +541,49 @@ mod tests {
         assert!(parse(&format!("{head}speaker 1 A\nspeaker 1 B\n")).is_err());
         assert!(parse(&format!("{head}speaker 1 track=x A\n")).is_err());
         assert!(parse(&format!("{head}speaker 1 A\nturn 2 1 1\n")).is_err());
+    }
+
+    #[test]
+    fn fixed_words_round_trip_as_version_3_and_bad_lines_are_refused() {
+        let e = EditList {
+            fixes: vec![
+                Fix {
+                    track: 0,
+                    start: 2.5,
+                    text: "Tsun Heto,".into(),
+                },
+                Fix {
+                    track: 1,
+                    start: 1.25,
+                    text: "Uezar".into(),
+                },
+            ],
+            ..with_speakers()
+        };
+        let text = e.to_text();
+        assert!(text.starts_with("junctur-edit 3\n"), "{text}");
+        assert!(
+            text.contains("fix 1 1.250 Uezar\nfix 0 2.500 Tsun Heto,\n"),
+            "{text}"
+        );
+        let back = parse(&text).unwrap();
+        assert_eq!(back.fixes[0].text, "Uezar", "in time order");
+        assert_eq!(back.fixes.len(), 2);
+        assert_eq!(parse(&back.to_text()).unwrap(), back);
+        // Without fixes a list is the version it was.
+        assert!(sample().to_text().starts_with("junctur-edit 1\n"));
+        let head = "junctur-edit 3\nsource x.mp4\n";
+        let e = parse(&format!("{head}fix 2 10.5   Delay  \n")).unwrap();
+        assert_eq!(e.fixes[0].text, "Delay");
+        for bad in [
+            "fix 1 2.000\n",
+            "fix x 2.000 Ana\n",
+            "fix 1 soon Ana\n",
+            "fix -1 2.000 Ana\n",
+            "fix 1 2.000 Ana\nfix 1 2.0001 Bo\n",
+        ] {
+            assert!(parse(&format!("{head}{bad}")).is_err(), "{bad}");
+        }
     }
 
     #[test]

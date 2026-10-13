@@ -655,6 +655,27 @@ impl Core {
         stopped
     }
 
+    /// Fixes the spelling of transcript word `index` (5h) in the edit list and saves it; returns the
+    /// heard text and the fixed one, for the word list. Not an undo step, like a rename.
+    pub fn fix_word(
+        &self,
+        file: Option<&str>,
+        index: usize,
+        text: &str,
+    ) -> Result<(String, String), String> {
+        self.prepare();
+        let words = lock(&self.editor)
+            .words
+            .clone()
+            .ok_or("this recording has no transcript")?;
+        let (Some(word), Some(&track)) = (words.list.get(index), words.tracks.get(index)) else {
+            return Err("no such word in the transcript".into());
+        };
+        let fixed = junctur_core::edit::check_fix(text)?;
+        self.change(file, |ed, list, _| ed.fix_word(list, track, word, &fixed))?;
+        Ok((word.text.clone(), fixed))
+    }
+
     /// Sets the edit list's caption settings and saves them.
     pub fn set_captions(&self, file: Option<&str>, captions: Captions) -> Result<(), String> {
         self.change(file, |ed, list, _| ed.set_captions(list, captions))
@@ -793,7 +814,8 @@ impl Core {
         let list = lock(&self.ctl).edit.list.clone();
         let none = Speakers::default();
         let speakers = list.as_deref().map_or(&none, |l| &l.speakers);
-        Some(TranscriptView::new(&words, speakers))
+        let fixes = list.as_deref().map_or(&[][..], |l| &l.fixes);
+        Some(TranscriptView::new(&words, speakers, fixes))
     }
 
     /// Keeps the right-hand `right`, bottom `bottom` and top `top` shares of the window (0..1) free

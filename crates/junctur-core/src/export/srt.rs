@@ -23,7 +23,7 @@ use std::fmt::Write;
 
 use serde::Serialize;
 
-use crate::edit::{frame_ranges, frames_ceil, Captions, EditList};
+use crate::edit::{frame_ranges, frames_ceil, Captions, EditList, Fixes};
 use crate::transcribe::Word;
 
 /// A new cue after a pause this long in the edited timeline, even mid-sentence.
@@ -172,13 +172,15 @@ pub fn cues<'a>(
 ) -> Vec<Cue> {
     let tl = Timeline::new(edit, num, den);
     let label = edit.speakers.labeller();
+    // A word the user fixed shows as fixed (5h), here and so in the preview and every export.
+    let fixes = Fixes::new(&edit.fixes);
     let mut words: Vec<(usize, &Word)> = words.into_iter().collect();
     words.sort_by(|a, b| a.1.start.total_cmp(&b.1.start));
 
     let mut out: Vec<Cue> = Vec::new();
     let mut open: Option<Open> = None;
     for (track, w) in words {
-        let text = clean(&w.text);
+        let text = clean(fixes.text(track, w));
         if text.is_empty() {
             continue;
         }
@@ -550,8 +552,28 @@ mod tests {
                 None,
             ),
             captions: Some(captions),
+            fixes: vec![],
             windows: vec![],
         }
+    }
+
+    #[test]
+    fn a_fixed_word_shows_as_fixed_on_its_own_track() {
+        let mut e = two_tracks(Captions::default());
+        e.fixes = vec![crate::edit::Fix {
+            track: 3,
+            start: 10.6,
+            text: "Uezar".into(),
+        }];
+        let one = [word(10.6, 10.9, "Wezar"), word(11.0, 11.3, "hola")];
+        let two = [word(10.6, 10.9, "Wezar")];
+        let words = one.iter().map(|w| (0, w)).chain(two.iter().map(|w| (3, w)));
+        let c = cues(&e, &own(&e), words, 30, 1);
+        // Only track 3's word was fixed; track 0's at the same moment is another word.
+        assert_eq!(
+            parts(&c[0]),
+            vec![(1, "Wezar hola".into()), (2, "Uezar".into())]
+        );
     }
 
     #[test]

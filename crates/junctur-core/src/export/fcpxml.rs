@@ -135,6 +135,7 @@ mod tests {
             keep,
             speakers: Default::default(),
             captions: Default::default(),
+            fixes: Vec::new(),
             windows: vec![],
         }
     }

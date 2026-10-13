@@ -78,6 +78,10 @@ pub struct TranscribeOptions {
     pub device: DevicePref,
     pub languages: Languages,
     pub force: bool,
+    /// The user's word list (5h), told to Whisper before every chunk. Neither in the partial's
+    /// header nor in [`answers`]: a changed list applies to the next run and never restarts or
+    /// outdates one.
+    pub words: Vec<String>,
 }
 
 /// First line of the partial file. A partial made with other languages or another model is not
@@ -279,6 +283,9 @@ pub fn transcribe(
             ..want.clone()
         });
         let mut w = Whisper::open(&models::ensure(model, cache_dir)?, choice.device)?;
+        if let Some(line) = prompt_line(&w.set_prompt(&opts.words)) {
+            log(&line);
+        }
         let mut out = open_partial(&partial, &header, &done)?;
         let mut progress = Progress::new(work.len(), log);
         progress.at(resumed_chunks);
@@ -523,6 +530,21 @@ impl Run<'_> {
     }
 }
 
+/// What the log says about the word list in Whisper's prompt (5h); nothing without one.
+fn prompt_line(p: &crate::wordlist::Prompt) -> Option<String> {
+    let entries = |n: usize| format!("{n} entr{}", if n == 1 { "y" } else { "ies" });
+    match (p.kept, p.left_out.len()) {
+        (0, 0) => None,
+        (k, 0) => Some(format!("word list: {} in Whisper's prompt", entries(k))),
+        (k, n) => Some(format!(
+            "word list: {} in Whisper's prompt, {} left out (the prompt is full; entries higher in the list win): {}",
+            entries(k),
+            entries(n),
+            p.left_out.join(", ")
+        )),
+    }
+}
+
 /// Where a run calls [`Reports::between`]: once before Whisper loads, then after each chunk while
 /// any remain, never after the last (a pause there would only hold the finishing back).
 struct Stops<'a> {
@@ -718,6 +740,27 @@ mod tests {
             model: model.into(),
             device: Device::Cuda,
         }
+    }
+
+    #[test]
+    fn the_log_names_the_word_list_and_what_was_left_out() {
+        use crate::wordlist::Prompt;
+        let p = |kept, left: &[&str]| Prompt {
+            text: String::new(),
+            kept,
+            left_out: left.iter().map(|s| s.to_string()).collect(),
+        };
+        assert_eq!(prompt_line(&p(0, &[])), None, "no list, no line");
+        assert_eq!(
+            prompt_line(&p(1, &[])).unwrap(),
+            "word list: 1 entry in Whisper's prompt"
+        );
+        let cut = prompt_line(&p(40, &["Junctur", "Resolve"])).unwrap();
+        assert!(
+            cut.starts_with("word list: 40 entries in Whisper's prompt, 2 entries left out"),
+            "{cut}"
+        );
+        assert!(cut.ends_with(": Junctur, Resolve"), "{cut}");
     }
 
     #[test]

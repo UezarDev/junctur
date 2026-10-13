@@ -1,0 +1,180 @@
+//! Words the user fixed (5h): a misheard word's right spelling, kept in the edit list as `fix
+//! <track> <start> <text>` and shown wherever the word is (the transcript panel, the caption
+//! preview, the SRT).
+//!
+//! In the edit list because a fix is the user's edit: saved with every other edit, kept through
+//! re-cuts, backed up before a list is replaced. Not beside the transcript, which is a cache a
+//! re-run replaces whole. A word is named by its track and its start to the millisecond (the list's
+//! precision): stable while a transcript grows piece by piece (2j) and the same in the app and the
+//! CLI, where word indices are not.
+
+use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::transcribe::Word;
+
+/// Longest fixed text, in characters: a word or a short phrase.
+pub const MAX_FIX: usize = 100;
+
+/// One fixed word.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Fix {
+    /// The audio track (0-based) it was heard on.
+    pub track: usize,
+    /// Its start in source seconds, as the transcript has it.
+    pub start: f64,
+    /// What it says.
+    pub text: String,
+}
+
+impl Fix {
+    fn key(&self) -> (usize, i64) {
+        key(self.track, self.start)
+    }
+
+    /// Both name the same word.
+    pub fn same_word(&self, other: &Fix) -> bool {
+        self.key() == other.key()
+    }
+}
+
+/// A word's start to the millisecond, as the list writes it.
+fn key(track: usize, start: f64) -> (usize, i64) {
+    (track, (start * 1000.0).round() as i64)
+}
+
+/// `text` as a fix keeps it: trimmed, on one line (the list's line ends it), runs of space as one, at
+/// most [`MAX_FIX`] characters. Empty means no fix.
+pub fn check_fix(text: &str) -> Result<String, String> {
+    let one: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let one = one.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one.chars().count() > MAX_FIX {
+        return Err(format!("a fixed word is at most {MAX_FIX} characters"));
+    }
+    Ok(one)
+}
+
+/// Sets the fix of the word heard as `heard` on `track` at `start` to `text` (through
+/// [`check_fix`]); empty text, or the heard text again, removes it. Kept in time order. Whether
+/// anything changed.
+pub fn set_fix(
+    fixes: &mut Vec<Fix>,
+    track: usize,
+    start: f64,
+    heard: &str,
+    text: &str,
+) -> Result<bool, String> {
+    let text = check_fix(text)?;
+    let heard = check_fix(heard).unwrap_or_default();
+    let k = key(track, start);
+    let at = fixes.iter().position(|f| f.key() == k);
+    let before = fixes.clone();
+    match at {
+        Some(i) if text.is_empty() || text == heard => {
+            fixes.remove(i);
+        }
+        Some(i) => fixes[i].text = text,
+        None if text.is_empty() || text == heard => {}
+        None => {
+            fixes.push(Fix { track, start, text });
+            sort(fixes);
+        }
+    }
+    Ok(*fixes != before)
+}
+
+/// The list's order: by start, then track.
+pub(super) fn sort(fixes: &mut [Fix]) {
+    fixes.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.track.cmp(&b.track)));
+}
+
+/// A list's fixes by word, for reading many words (a 30 h transcript) against a few fixes.
+pub struct Fixes<'a> {
+    by_word: HashMap<(usize, i64), &'a str>,
+}
+
+impl<'a> Fixes<'a> {
+    pub fn new(fixes: &'a [Fix]) -> Self {
+        Self {
+            by_word: fixes.iter().map(|f| (f.key(), f.text.as_str())).collect(),
+        }
+    }
+
+    /// The fixed text of `w` heard on `track`, if the user fixed it.
+    pub fn of(&self, track: usize, w: &Word) -> Option<&'a str> {
+        if self.by_word.is_empty() {
+            return None;
+        }
+        self.by_word.get(&key(track, w.start)).copied()
+    }
+
+    /// What `w` heard on `track` says: its fix, else what Whisper heard.
+    pub fn text<'w>(&self, track: usize, w: &'w Word) -> &'w str
+    where
+        'a: 'w,
+    {
+        self.of(track, w).unwrap_or(&w.text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn word(start: f64, text: &str) -> Word {
+        Word {
+            start,
+            end: start + 0.3,
+            text: text.into(),
+            p: 1.0,
+        }
+    }
+
+    #[test]
+    fn a_fix_is_set_changed_and_removed() {
+        let mut f = Vec::new();
+        assert!(set_fix(&mut f, 1, 12.34, " Wezar,", " Uezar, ").unwrap());
+        assert_eq!(f[0].text, "Uezar,");
+        assert!(
+            !set_fix(&mut f, 1, 12.34, " Wezar,", "Uezar,").unwrap(),
+            "same"
+        );
+        assert!(set_fix(&mut f, 0, 3.0, "a", "b").unwrap());
+        assert_eq!(
+            f.iter().map(|x| x.track).collect::<Vec<_>>(),
+            [0, 1],
+            "in time"
+        );
+        // The heard text again, or nothing, takes the fix away.
+        assert!(set_fix(&mut f, 1, 12.34, " Wezar,", "Wezar,").unwrap());
+        assert!(set_fix(&mut f, 0, 3.0, "a", "  ").unwrap());
+        assert!(f.is_empty());
+        assert!(
+            !set_fix(&mut f, 0, 3.0, "a", "a").unwrap(),
+            "nothing to fix"
+        );
+        // One line, not too long.
+        assert!(set_fix(&mut f, 0, 3.0, "a", "Tsun\nheto").unwrap());
+        assert_eq!(f[0].text, "Tsun heto");
+        assert!(set_fix(&mut f, 0, 3.0, "a", &"x".repeat(MAX_FIX + 1)).is_err());
+    }
+
+    #[test]
+    fn a_word_is_found_by_track_and_millisecond() {
+        let fixes = vec![Fix {
+            track: 1,
+            start: 312.34,
+            text: "Uezar".into(),
+        }];
+        let by = Fixes::new(&fixes);
+        // A start summed from a chunk's and a token's time, off in the last bits.
+        let heard = word(300.0 + 12.34, "Wezar");
+        assert_eq!(by.text(1, &heard), "Uezar");
+        assert_eq!(by.text(0, &heard), "Wezar", "another track");
+        assert_eq!(by.text(1, &word(312.341, "Wezar")), "Wezar", "another word");
+    }
+}

@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use junctur_core::edit::{word_span, CutSettings, Envelope, Speakers};
+use junctur_core::edit::{word_span, CutSettings, Envelope, Fix, Fixes, Speakers};
 use junctur_core::transcribe::{self, Word};
 use serde::Serialize;
 
@@ -121,7 +121,8 @@ impl Words {
 }
 
 /// The words for the frontend, compact for a 30 h transcript (hundreds of thousands of words):
-/// times in whole milliseconds, and each word's speaker id (0: none) from the edit list's turns.
+/// times in whole milliseconds, each word's speaker id (0: none) from the edit list's turns, and its
+/// text as the user fixed it (5h), else as heard.
 #[derive(Debug, Serialize)]
 pub struct TranscriptView {
     pub text: Vec<String>,
@@ -133,8 +134,9 @@ pub struct TranscriptView {
 }
 
 impl TranscriptView {
-    pub fn new(words: &Words, speakers: &Speakers) -> Self {
+    pub fn new(words: &Words, speakers: &Speakers, fixes: &[Fix]) -> Self {
         let ms = |s: f64| (s.max(0.0) * 1000.0).round() as u64;
+        let fixed = Fixes::new(fixes);
         let w = &words.list;
         let label = speakers.labeller();
         let (speaker, also) = w
@@ -149,7 +151,11 @@ impl TranscriptView {
             })
             .unzip();
         Self {
-            text: w.iter().map(|w| w.text.trim().to_string()).collect(),
+            text: w
+                .iter()
+                .zip(&words.tracks)
+                .map(|(w, &t)| fixed.text(t, w).trim().to_string())
+                .collect(),
             start: w.iter().map(|w| ms(w.start)).collect(),
             end: w.iter().map(|w| ms(w.end)).collect(),
             speaker,
@@ -242,11 +248,19 @@ mod tests {
 
     #[test]
     fn sorted_and_compact() {
-        let v = TranscriptView::new(&sample(), &Speakers::default());
+        let v = TranscriptView::new(&sample(), &Speakers::default(), &[]);
         assert_eq!(v.text, vec!["uno", "dos", "tres"]);
         assert_eq!(v.start, vec![10_000, 10_500, 12_000]);
         assert_eq!(v.end, vec![10_400, 11_000, 12_500]);
         assert_eq!(v.speaker, vec![0, 0, 0]);
+        // A fixed word shows as fixed (5h).
+        let fix = Fix {
+            track: 0,
+            start: 10.5,
+            text: "Uezar".into(),
+        };
+        let v = TranscriptView::new(&sample(), &Speakers::default(), &[fix]);
+        assert_eq!(v.text, vec!["uno", "Uezar", "tres"]);
     }
 
     #[test]
@@ -264,7 +278,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            TranscriptView::new(&sample(), &voices).speaker,
+            TranscriptView::new(&sample(), &voices, &[]).speaker,
             vec![2, 2, 1]
         );
         // By track: the track a word was heard on decides, whatever the turns overlap.
@@ -278,7 +292,7 @@ mod tests {
             &[Some(0), Some(3)],
             None,
         );
-        assert_eq!(TranscriptView::new(&w, &tracks).speaker, vec![2, 1]);
+        assert_eq!(TranscriptView::new(&w, &tracks, &[]).speaker, vec![2, 1]);
     }
 
     #[test]

@@ -399,6 +399,26 @@ pub async fn rename_speaker(app: State<'_, App>, id: u32, name: String) -> Resul
     e.rename_speaker(e.file(), id, &name)
 }
 
+/// Fixes the spelling of transcript word `index` (5h) and adds the fixed spelling to the word list
+/// (no prompt, never twice); resolves to the entry added, if one was. A word list that cannot be
+/// saved does not undo the fix: it is logged.
+#[tauri::command]
+pub async fn fix_word(
+    app: State<'_, App>,
+    index: usize,
+    text: String,
+) -> Result<Option<String>, String> {
+    let e = app.editable()?;
+    let (heard, fixed) = e.fix_word(e.file(), index, &text)?;
+    match settings::learn(&heard, &fixed) {
+        Ok(added) => Ok(added),
+        Err(err) => {
+            eprintln!("junctur-app: adding {fixed:?} to the word list: {err}");
+            Ok(None)
+        }
+    }
+}
+
 /// Sets speaker `id`'s caption colour (`#RRGGBB`).
 #[tauri::command]
 pub async fn recolor_speaker(app: State<'_, App>, id: u32, color: String) -> Result<(), String> {

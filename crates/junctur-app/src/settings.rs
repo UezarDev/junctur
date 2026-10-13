@@ -2,6 +2,9 @@
 //! `junctur/config.json` (core `config`), the file `junctur analyze` reads, so the CLI and the app
 //! transcribe with the same model and cut captions with the same defaults.
 //!
+//! It also holds the word list Whisper is told (5h), which a word fixed in the transcript joins
+//! ([`learn`]).
+//!
 //! Its own module because it is the one place the app writes the config file. The analysis only
 //! reads it when a run starts (`analysis.rs`, through `config::analysis_options`), so a changed
 //! model applies to the next run and never starts one; the open recording learns of it through 2d's
@@ -10,6 +13,7 @@
 use junctur_core::config::{self, Config};
 use junctur_core::edit::Captions;
 use junctur_core::transcribe::ModelPref;
+use junctur_core::wordlist;
 use serde::{Deserialize, Serialize};
 
 /// A Whisper model the dialog offers.
@@ -54,6 +58,9 @@ pub struct Settings {
     pub whisper_model: String,
     /// The caption settings a recording without its own starts from.
     pub captions: Captions,
+    /// The word list (5h), in its order: the first entries win when Whisper's prompt is full.
+    #[serde(default)]
+    pub words: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -82,6 +89,7 @@ fn from_config(c: &Config) -> Settings {
     Settings {
         whisper_model: c.whisper_model.unwrap_or_default().key().to_string(),
         captions: c.captions.unwrap_or_default(),
+        words: c.words.clone(),
     }
 }
 
@@ -94,6 +102,7 @@ fn to_config(s: &Settings) -> Result<Config, String> {
     Ok(Config {
         whisper_model: (model != ModelPref::Auto).then_some(model),
         captions: (s.captions != Captions::default()).then_some(s.captions),
+        words: wordlist::normalize(&s.words),
     })
 }
 
@@ -130,6 +139,21 @@ pub fn save_caption_defaults(captions: Captions) -> Result<SettingsView, String>
         captions,
         ..from_config(&now)
     })
+}
+
+/// Adds what fixing `heard` to `fixed` teaches ([`wordlist::learned`]) to the word list and saves
+/// it; the entry added, `None` when there is nothing to add or it is there already. A config file
+/// that cannot be read is not replaced from here.
+pub fn learn(heard: &str, fixed: &str) -> Result<Option<String>, String> {
+    let Some(entry) = wordlist::learned(heard, fixed) else {
+        return Ok(None);
+    };
+    let mut c = config::load().map_err(|e| e.to_string())?;
+    if !wordlist::add(&mut c.words, &entry) {
+        return Ok(None);
+    }
+    config::save(&c).map_err(|e| e.to_string())?;
+    Ok(Some(entry))
 }
 
 /// The caption defaults the player starts with; the built-in ones when the file cannot be read
@@ -172,6 +196,7 @@ mod tests {
                 on: true,
                 ..Default::default()
             },
+            words: vec!["Uezar".into(), "Tsunheto".into()],
         };
         let c = to_config(&s).unwrap();
         assert_eq!(c.whisper_model, Some(ModelPref::LargeV3));
@@ -179,10 +204,30 @@ mod tests {
     }
 
     #[test]
+    fn the_word_list_is_saved_trimmed_without_blanks_or_repeats() {
+        let s = Settings {
+            whisper_model: "auto".into(),
+            captions: Captions::default(),
+            words: vec![" Uezar ".into(), "".into(), "Delay".into(), "Uezar".into()],
+        };
+        assert_eq!(
+            to_config(&s).unwrap().words,
+            vec!["Uezar".to_string(), "Delay".to_string()]
+        );
+        // An empty list is not written.
+        let none = Settings {
+            words: vec!["  ".into()],
+            ..s
+        };
+        assert_eq!(to_config(&none).unwrap(), Config::default());
+    }
+
+    #[test]
     fn a_bad_model_or_out_of_limits_captions_are_refused() {
         let s = Settings {
             whisper_model: "large-v4".into(),
             captions: Captions::default(),
+            words: vec![],
         };
         assert!(to_config(&s).is_err());
         let s = Settings {
@@ -191,6 +236,7 @@ mod tests {
                 chars: 2,
                 ..Default::default()
             },
+            words: vec![],
         };
         assert!(to_config(&s).unwrap_err().contains("caption defaults"));
     }

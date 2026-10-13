@@ -13,6 +13,7 @@ use junctur_core::edit::{
 };
 
 use crate::cuts::Fps;
+use junctur_core::transcribe::Word;
 pub use words::{TranscriptView, Words};
 
 /// Undo steps kept. A 30 h list has ~10 000 ranges (160 kB a step); this caps memory near 30 MB.
@@ -201,6 +202,20 @@ impl Editor {
         })
     }
 
+    /// Fixes the spelling of `word`, heard on `track` (5h), and saves; empty text or the heard text
+    /// again takes the fix away. Like a rename, not an undo step: the history holds kept ranges.
+    pub fn fix_word(
+        &mut self,
+        list: &EditList,
+        track: usize,
+        word: &Word,
+        text: &str,
+    ) -> Result<Option<Edited>, String> {
+        self.restyle(list, |l| {
+            edit::set_fix(&mut l.fixes, track, word.start, &word.text, text).map(|_| ())
+        })
+    }
+
     /// Puts `speakers` in place of the list's (5b: labelled again after a voice was enrolled or
     /// forgotten) and saves. Like a rename, not an undo step.
     pub fn respeak(
@@ -321,6 +336,7 @@ mod tests {
             keep,
             speakers: Default::default(),
             captions: Default::default(),
+            fixes: Vec::new(),
             windows: vec![],
         }
     }
@@ -563,6 +579,48 @@ mod tests {
         let undone = step(&mut e, &renamed, Step::Undo, FPS);
         assert_eq!(undone.keep, l0.keep);
         assert_eq!(undone.speakers.name(1), Some("Ana María"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_fixed_word_is_saved_at_once_and_outlives_an_undo() {
+        let d = scratch("fix");
+        let path = d.join("edit.junctur");
+        let mut e = Editor::default();
+        e.reset(Some(path.clone()));
+        let heard = Word {
+            start: 12.34,
+            end: 12.8,
+            text: " Wezar,".into(),
+            p: 0.6,
+        };
+        let l0 = list(vec![r(1.0, 30.0)]);
+        let l1 = e
+            .fix_word(&l0, 1, &heard, "Uezar,")
+            .unwrap()
+            .expect("a change")
+            .list;
+        assert_eq!(l1.fixes[0].text, "Uezar,");
+        assert_eq!(reread(&path), l1, "saved at once");
+        assert!(!e.can_undo(), "not an undo step");
+        assert!(e.fix_word(&l1, 1, &heard, " Uezar, ").unwrap().is_none());
+        // A cut, then its undo: the fix stays, as a rename does.
+        let cut = Step::Do(Op::Frames {
+            start: 90,
+            end: 120,
+            keep: false,
+        });
+        let l2 = step(&mut e, &l1, cut, FPS);
+        let back = step(&mut e, &l2, Step::Undo, FPS);
+        assert_eq!(back.keep, l0.keep);
+        assert_eq!(reread(&path).fixes, l1.fixes);
+        // The heard spelling again takes the fix away.
+        let l3 = e
+            .fix_word(&back, 1, &heard, "Wezar,")
+            .unwrap()
+            .unwrap()
+            .list;
+        assert!(l3.fixes.is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

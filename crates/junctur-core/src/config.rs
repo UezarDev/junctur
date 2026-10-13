@@ -28,6 +28,10 @@ pub struct Config {
     /// The caption settings of a recording whose edit list has none of its own (2i, [`captions`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub captions: Option<Captions>,
+    /// The word list Whisper is told before every chunk (5h, [`crate::wordlist`]): names and terms
+    /// to spell the user's way. Read when a transcription starts, so a change applies to the next.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<String>,
 }
 
 /// The user's Junctur folder in the OS config folder (`%APPDATA%\junctur`), where the config file,
@@ -122,21 +126,39 @@ pub fn whisper_model(
     }
 }
 
+/// The model and word list a transcription runs with (5h): the model as [`whisper_model`] says; the
+/// word list is the config file's, empty when an explicit model meets a file that cannot be read
+/// (that file cannot block the choice, and its list is not known).
+fn transcription(flag: Option<&str>, cfg: Result<Config>) -> Result<(ModelPref, Vec<String>)> {
+    match (flag, cfg) {
+        (Some(_), cfg) => Ok((
+            whisper_model(flag, || Ok(Config::default()))?,
+            cfg.map(|c| c.words).unwrap_or_default(),
+        )),
+        (None, cfg) => {
+            let c = cfg?;
+            Ok((c.whisper_model.unwrap_or_default(), c.words))
+        }
+    }
+}
+
 /// The options `junctur analyze` runs with before its own flags, and the app's analysis with: the
-/// model ([`whisper_model`]; the config file is not read without a transcript, since no model is
-/// loaded) and the remembered voices (not read without speakers, so a broken voices file cannot
+/// model and word list ([`transcription`]; the config file is not read without a transcript, since no
+/// model is loaded) and the remembered voices (not read without speakers, so a broken voices file cannot
 /// block the rest). Device, cut settings and `force` stay the defaults for the caller to set.
 pub fn analysis_options(
     model_flag: Option<&str>,
     no_transcript: bool,
     no_speakers: bool,
 ) -> Result<PipelineOptions> {
+    let (model, words) = if no_transcript {
+        (ModelPref::Auto, Vec::new())
+    } else {
+        transcription(model_flag, load())?
+    };
     Ok(PipelineOptions {
-        model: if no_transcript {
-            ModelPref::Auto
-        } else {
-            whisper_model(model_flag, load)?
-        },
+        model,
+        words,
         no_transcript,
         no_speakers,
         voices: if no_speakers {
@@ -290,10 +312,38 @@ mod tests {
                 on: true,
                 ..Default::default()
             }),
+            words: vec!["Uezar".into(), "Tsunheto".into()],
         };
         save_to(&path, &c).unwrap();
         assert_eq!(load_from(&path, true).unwrap(), c);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_word_list_is_read_and_goes_with_the_model() {
+        let c = parse(br#"{"words":["Uezar","Delay"]}"#).unwrap();
+        assert_eq!(c.words, vec!["Uezar".to_string(), "Delay".to_string()]);
+        assert!(
+            parse(br#"{"words":"Uezar"}"#).is_err(),
+            "a list, not a string"
+        );
+        let ok = || Ok(c.clone());
+        let broken = || Err(Error::Config("bad config".into()));
+        assert_eq!(
+            transcription(None, ok()).unwrap(),
+            (ModelPref::Auto, c.words.clone())
+        );
+        assert_eq!(
+            transcription(Some("best"), ok()).unwrap(),
+            (ModelPref::LargeV3, c.words.clone())
+        );
+        // An explicit model is not blocked by a broken file; its list is then not known.
+        assert_eq!(
+            transcription(Some("best"), broken()).unwrap(),
+            (ModelPref::LargeV3, vec![])
+        );
+        assert!(transcription(None, broken()).is_err());
+        assert!(transcription(Some("large-v4"), ok()).is_err());
     }
 
     #[test]

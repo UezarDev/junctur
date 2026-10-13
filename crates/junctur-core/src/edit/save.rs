@@ -222,6 +222,7 @@ mod tests {
             keep: vec![Range { start: 0.0, end }],
             speakers: Default::default(),
             captions: Default::default(),
+            fixes: Vec::new(),
             windows: vec![],
         }
     }

@@ -6,6 +6,7 @@
 //! that can be rebuilt. The source itself is never touched.
 
 mod captions;
+mod fixes;
 mod format;
 mod frames;
 mod reduce;
@@ -19,6 +20,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 pub use captions::{default_color, parse_color, Captions};
+pub use fixes::{check_fix, set_fix, Fix, Fixes, MAX_FIX};
 pub use format::{parse, FORMAT_VERSION};
 pub use frames::{frame_ranges, frame_span, frames_ceil, frames_floor};
 pub use reduce::{keep_ranges, snap_boundary, word_span, Envelope, ENVELOPE_HOP};
@@ -93,6 +95,8 @@ pub struct EditList {
     /// no `captions` line, and then it follows the user's defaults (2i, `config::captions`), which
     /// the caller resolves before cutting cues.
     pub captions: Option<Captions>,
+    /// Words the user fixed (5h), in time order: shown in place of what Whisper heard.
+    pub fixes: Vec<Fix>,
     pub windows: Vec<Window>,
 }
 
