@@ -299,39 +299,21 @@ pub async fn set_captions(app: State<'_, App>, captions: Captions) -> Result<(),
     app.editable()?.set_captions(captions)
 }
 
-/// What an export wrote: the combined file's captions and each speaker's file (5b).
+/// What an export wrote: the file's captions (one file since 5e).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Exported {
     pub cues: usize,
-    pub speakers: Vec<SpeakerFile>,
-    /// Speaker files beside it this export did not write (an earlier name's, most likely).
+    /// Speaker files beside it from an earlier export (5b wrote one per speaker).
     pub stale: Vec<String>,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SpeakerFile {
-    pub path: String,
-    pub name: String,
-    pub cues: usize,
-}
-
-/// Writes the captions as an SRT to `path`, and one per speaker beside it.
+/// Writes the captions as one SRT to `path`, people talking at once stacked in one caption.
 #[tauri::command]
 pub async fn export_captions(app: State<'_, App>, path: String) -> Result<Exported, String> {
     let f = app.core()?.export_captions(Path::new(&path))?;
     Ok(Exported {
         cues: f.cues,
-        speakers: f
-            .speakers
-            .into_iter()
-            .map(|(p, name, cues)| SpeakerFile {
-                path: p.display().to_string(),
-                name,
-                cues,
-            })
-            .collect(),
         stale: f.stale.iter().map(|p| p.display().to_string()).collect(),
     })
 }

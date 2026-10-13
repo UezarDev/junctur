@@ -1,5 +1,6 @@
 //! Turning an edit list into something another program opens: an FCPXML timeline and SRTs of
-//! captions (5a; one per speaker since 5b), both for Resolve; the rendered video is the smart-render phase.
+//! captions (5a; overlapping speakers stacked in one caption since 5e), both for Resolve; the
+//! rendered video is the smart-render phase.
 
 pub mod fcpxml;
 pub mod srt;
@@ -31,22 +32,17 @@ pub fn write_fcpxml(edit: &EditList, out: &Path) -> Result<()> {
 /// What [`write_srt`] wrote.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CaptionFiles {
-    /// Cues in the combined file (the path asked for).
+    /// Cues in the file.
     pub cues: usize,
-    /// Each speaker's own file (5b): the path, the speaker's name and its cue count.
-    pub speakers: Vec<(PathBuf, String, usize)>,
-    /// Other `<stem> (…).srt` files beside the combined one that this export did not write: most
-    /// likely a speaker's file from before a rename or relabel. Not deleted (they could be the
-    /// user's own); said, so they are not imported by mistake.
+    /// `<stem> (…).srt` files beside it: speaker files 5b wrote before captions became one file
+    /// (5e). Not deleted (they could be the user's own); said, so they are not imported by mistake.
     pub stale: Vec<PathBuf>,
 }
 
-/// Write `edit`'s captions as SRT (5a, 5b): the combined file at `out`, everyone one cue at a time,
-/// and beside it one file per speaker with any words, `<stem> (<name>).srt`, holding every word
-/// that speaker says, so overlapping talk shows on separate Resolve subtitle tracks. The kept words
-/// go on the edited timeline, each cue in its speaker's colour, cut by the list's caption settings.
-/// The frame rate is the source's, as for the FCPXML, so cues land on the frames the render and the
-/// timeline have. Any of these paths but the source itself is replaced.
+/// Write `edit`'s captions as one SRT at `out` (5a, 5e): the kept words on the edited timeline,
+/// each speaker's lines in their colour, people talking at once stacked in one cue, cut by the
+/// list's caption settings. The frame rate is the source's, as for the FCPXML, so cues land on the
+/// frames the render and the timeline have. Any `out` but the source itself is replaced.
 pub fn write_srt(edit: &EditList, transcript: &Transcript, out: &Path) -> Result<CaptionFiles> {
     output::refuse_source(&edit.source, out)?;
     let (num, den) = ffmpeg::probe_video(&edit.source)?.map_or((30, 1), |v| (v.fps_num, v.fps_den));
@@ -67,40 +63,16 @@ pub fn write_captions(
     out: &Path,
 ) -> Result<CaptionFiles> {
     output::refuse_source(&edit.source, out)?;
-    let all = srt::cues(edit, words.iter().copied(), num, den);
-    let mut files = Vec::new();
-    let mut taken = Vec::new();
-    for s in &edit.speakers.names {
-        let cues = srt::cues_for(
-            edit,
-            words.iter().copied(),
-            num,
-            den,
-            srt::Pick::Speaker(s.id),
-        );
-        if cues.is_empty() {
-            continue;
-        }
-        let path = srt::speaker_path(out, &s.name, s.id, &mut taken);
-        output::refuse_source(&edit.source, &path)?;
-        files.push((path, s.name.clone(), cues));
-    }
-    std::fs::write(out, srt::write(&all, edit))?;
-    let mut speakers = Vec::new();
-    for (path, name, cues) in files {
-        std::fs::write(&path, srt::write(&cues, edit))?;
-        speakers.push((path, name, cues.len()));
-    }
-    let stale = stale_files(out, &speakers);
+    let cues = srt::cues(edit, words.iter().copied(), num, den);
+    std::fs::write(out, srt::write(&cues, edit))?;
     Ok(CaptionFiles {
-        cues: all.len(),
-        speakers,
-        stale,
+        cues: cues.len(),
+        stale: stale_files(out),
     })
 }
 
-/// `<stem> (…).srt` files beside `out` that are none of `written`.
-fn stale_files(out: &Path, written: &[(PathBuf, String, usize)]) -> Vec<PathBuf> {
+/// `<stem> (…).srt` files beside `out`.
+fn stale_files(out: &Path) -> Vec<PathBuf> {
     let (Some(dir), Some(stem)) = (out.parent(), out.file_stem()) else {
         return Vec::new();
     };
@@ -123,15 +95,9 @@ fn stale_files(out: &Path, written: &[(PathBuf, String, usize)]) -> Vec<PathBuf>
                 .unwrap_or_default();
             n.starts_with(&prefix) && n.ends_with(").srt")
         })
-        .filter(|p| !written.iter().any(|(w, _, _)| same_name(w, p)))
         .collect();
     out.sort();
     out
-}
-
-fn same_name(a: &Path, b: &Path) -> bool {
-    a.file_name().map(|n| n.to_string_lossy().to_lowercase())
-        == b.file_name().map(|n| n.to_string_lossy().to_lowercase())
 }
 
 #[cfg(test)]
@@ -139,7 +105,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn speaker_files_this_export_did_not_write_are_named() {
+    fn speaker_files_left_beside_it_are_named() {
         let d = std::env::temp_dir().join(format!("junctur-stale-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
@@ -152,10 +118,9 @@ mod tests {
         ] {
             std::fs::write(d.join(f), "").unwrap();
         }
-        let written = vec![(d.join("rec (ANA).srt"), "Ana".to_string(), 3)];
         assert_eq!(
-            stale_files(&d.join("rec.srt"), &written),
-            vec![d.join("rec (Old).srt")]
+            stale_files(&d.join("rec.srt")),
+            vec![d.join("rec (Ana).srt"), d.join("rec (Old).srt")]
         );
         let _ = std::fs::remove_dir_all(&d);
     }

@@ -81,12 +81,13 @@ enrolled follows that speaker through a relabel (matched by when they talk, not 
 
 `export --srt <out.srt>` writes the captions: the transcript's kept words on the edited timeline (the
 same frames as the render and the FCPXML), each cue as `<font color>` in its speaker's colour, cut by the
-`captions` line (`chars=` per line, `lines=` per caption, `seconds=` longest; set in the app's Captions
-panel or by hand). Beside `<out>.srt` (everyone, one caption at a time) it writes `<out> (<name>).srt`
-per speaker, holding everything that person says, also while someone else talks: a Resolve subtitle
-track shows one caption at a time, so put each speaker's file on its own track and overlapping talk
-shows at once. Speaker files left from an earlier export (a name since changed) are not deleted; the
-export lists them. Captions are optional: with `captions on`, `render` also writes these beside the video.
+`captions` line (`chars=` per line, `lines=` per speaker in a caption, `seconds=` longest; set in the
+app's Captions panel or by hand). It is one file for one Resolve subtitle track, which shows one caption
+at a time: when people talk at once (on separate voice tracks, or where `analyze` heard two voices on
+the mix), one caption holds them all, each speaker on their own line(s) in their colour, lasting until
+the last of them stops. Each word is shown once, under its one speaker. Per-speaker files that earlier
+versions wrote beside it (`<out> (<name>).srt`) are not deleted; the export lists them. Captions are
+optional: with `captions on`, `render` also writes the file beside the video.
 Checked in DaVinci Resolve (File > Import > Subtitle keeps the colours); Premiere Pro is unverified and
 likely shows its default caption style. SRT carries no size or position.
 

@@ -154,8 +154,7 @@ pub fn export(a: Args) -> Result<(), String> {
     Ok(())
 }
 
-/// The caption files for `e` at `out` (and one per speaker beside it), from the project's
-/// transcript.
+/// The caption file for `e` at `out`, from the project's transcript.
 fn write_captions(p: &Project, e: &EditList, out: &std::path::Path) -> Result<(), String> {
     let t = transcribe::load(&p.dir)
         .ok_or("captions need a transcript: run `junctur analyze` on this file first")?;
@@ -165,13 +164,10 @@ fn write_captions(p: &Project, e: &EditList, out: &std::path::Path) -> Result<()
 }
 
 fn print_captions(out: &std::path::Path, files: &export::CaptionFiles) {
-    println!("{} ({} captions, everyone)", out.display(), files.cues);
-    for (path, name, n) in &files.speakers {
-        println!("{} ({n} captions, {name})", path.display());
-    }
+    println!("{} ({} captions)", out.display(), files.cues);
     for path in &files.stale {
         println!(
-            "{} was not written now: from an earlier export? Delete it before importing",
+            "{} is a speaker file from an earlier export: delete it before importing",
             path.display()
         );
     }

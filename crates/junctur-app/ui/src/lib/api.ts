@@ -129,11 +129,10 @@ export interface Voice {
   seconds: number;
 }
 
-/** What a caption export wrote: the combined file and one per speaker (5b). */
+/** What a caption export wrote: one file since 5e. */
 export interface Exported {
   cues: number;
-  speakers: { path: string; name: string; cues: number }[];
-  /** Speaker files beside it this export did not write: from an earlier name, most likely. */
+  /** Speaker files beside it from an earlier export (5b wrote one per speaker). */
   stale: string[];
 }
 
@@ -254,7 +253,7 @@ export const renameSpeaker = (id: number, name: string) =>
 export const recolorSpeaker = (id: number, color: string) =>
   invoke<void>("recolor_speaker", { id, color });
 export const setCaptions = (captions: Captions) => invoke<void>("set_captions", { captions });
-/** Writes the captions as an SRT at `path`, and one per speaker beside it (`<name> (<speaker>).srt`). */
+/** Writes the captions as one SRT at `path`, people talking at once stacked in one caption (5e). */
 export const exportCaptions = (path: string) => invoke<Exported>("export_captions", { path });
 export const voices = () => invoke<Voice[]>("voices");
 /** Remembers `name`'s voice from words `first..=last` and relabels the speakers; resolves to a line for the user. */

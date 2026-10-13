@@ -239,12 +239,6 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
         }
         Action::Srt(path) => p.export_captions(std::path::Path::new(path)).map(|f| {
             eprintln!("junctur-app test: wrote {} captions to {path}", f.cues);
-            for (file, name, n) in f.speakers {
-                eprintln!(
-                    "junctur-app test: wrote {n} captions for {name} to {}",
-                    file.display()
-                );
-            }
         }),
         Action::Enroll(first, last, name) => p
             .enroll_voice(*first, *last, name)
