@@ -860,8 +860,6 @@ impl Core {
     }
 }
 
-/// Sends `m`'s mutes to the graph playing. It fails when there is none (no file, no audio, or a
-/// load whose chain is not up yet); the next `playback-restart` sends them again.
 /// Who talks when, as three arrays (source seconds, speaker ids from 1), sorted by start: a 30 h
 /// recording has thousands of turns, sent once per change of `speakersKey`.
 #[derive(Debug, Default, Serialize, PartialEq)]
@@ -883,6 +881,8 @@ impl TurnsView {
     }
 }
 
+/// Sends `m`'s mutes to the graph playing. It fails when there is none (no file, no audio, or a
+/// load whose chain is not up yet); the next `playback-restart` sends them again.
 fn send_weights(mpv: &Mpv, m: &Mixer) {
     if m.len() > 0 {
         let w = m.weights();

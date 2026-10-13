@@ -3,6 +3,7 @@
 //! transcript and edit list exist. The app runs the stages itself in `analysis` (2d).
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use junctur_core::ffmpeg;
 use junctur_core::pipeline::{self, Project, StageState, STAGES};
@@ -122,8 +123,11 @@ pub fn thumbnail(file: &Path, cache_dir: Option<PathBuf>) -> Result<Vec<u8>, Str
         return Ok(b);
     }
     let at = ffmpeg::probe(file).map_or(0.0, |x| (x.duration * 0.1).min(60.0));
-    // Written beside it and renamed, so a half-written still is never taken for the real one.
-    let tmp = p.dir.join(format!("thumb.{}.jpg", std::process::id()));
+    // Written beside it and renamed, so a half-written still is never taken for the real one; a
+    // name of its own per call, as two asks for one recording may run at once.
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let tmp = p.dir.join(format!("thumb.{}.{n}.jpg", std::process::id()));
     let args: Vec<String> = [
         "-v",
         "error",

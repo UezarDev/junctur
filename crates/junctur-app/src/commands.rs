@@ -20,7 +20,7 @@ use crate::project::{self, ProjectStatus, RecordingInfo};
 use crate::recent::{self, Recent};
 use crate::state::PlayerState;
 use crate::voices::VoiceView;
-use crate::waves::{self, WavesState, WavesView};
+use crate::waves::{self, WavesState};
 use junctur_core::pipeline::StageState;
 
 /// The player, or why it could not start (libmpv missing, no GL): the window still opens and
@@ -400,15 +400,21 @@ pub async fn waves_state(app: State<'_, App>) -> Result<Option<WavesState>, Stri
     Ok(app.waves.state())
 }
 
-/// Each track's peak per column of `[from, to)` seconds, for the lanes to draw.
+/// Each track's peak per column of `[from, to)` seconds, for the lanes to draw, as raw bytes
+/// ([`WavesView::bytes`]; none when no recording is open): asked on every pan, zoom and step of the
+/// read, where a JSON array of numbers would be several times the size and parsed each time.
 #[tauri::command]
 pub async fn waves(
     app: State<'_, App>,
     from: f64,
     to: f64,
     columns: usize,
-) -> Result<Option<WavesView>, String> {
-    Ok(app.waves.columns(from, to, columns))
+) -> Result<tauri::ipc::Response, String> {
+    let bytes = app
+        .waves
+        .columns(from, to, columns)
+        .map_or_else(Vec::new, |v| v.bytes());
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 /// A recent recording's length and where its analysis stands (the start window, 2g). Off the

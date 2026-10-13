@@ -45,12 +45,23 @@ pub struct WavesState {
 }
 
 /// What a lane draws: each track's peak per column, track by track (0..255, -60..0 dBFS).
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub struct WavesView {
     pub state: WavesState,
     pub columns: usize,
     pub peaks: Vec<u8>,
+}
+
+impl WavesView {
+    /// As the page reads it (api.ts `waves`): the column count and the track count as
+    /// little-endian u32s, then the peaks.
+    pub fn bytes(&self) -> Vec<u8> {
+        let mut b = Vec::with_capacity(8 + self.peaks.len());
+        b.extend_from_slice(&(self.columns as u32).to_le_bytes());
+        b.extend_from_slice(&(self.state.tracks as u32).to_le_bytes());
+        b.extend_from_slice(&self.peaks);
+        b
+    }
 }
 
 /// Told of every step of a read (the app sends it to the page).
@@ -84,11 +95,18 @@ impl Store {
             old.stop.store(true, Ordering::Relaxed);
         }
         let file = file.to_path_buf();
+        let (s, n) = (shared.clone(), notify.clone());
         let spawned = std::thread::Builder::new()
             .name("waves".into())
-            .spawn(move || compute(&file, dir.as_deref(), &shared, &notify));
+            .spawn(move || compute(&file, dir.as_deref(), &s, &n));
+        // Said where the page looks (Properties), not only on stderr.
         if let Err(e) = spawned {
-            eprintln!("junctur-app: no waveforms: {e}");
+            let state = {
+                let mut st = lock(&shared.state);
+                st.error = Some(format!("no thread to read them on: {e}"));
+                st.clone()
+            };
+            notify(&state);
         }
     }
 
@@ -112,6 +130,11 @@ impl Store {
 }
 
 fn compute(file: &Path, dir: Option<&Path>, shared: &Shared, notify: &Notify) {
+    // Another recording may have opened before this thread got going: no probe, no decoder.
+    let stopped = || shared.stop.load(Ordering::Relaxed);
+    if stopped() {
+        return;
+    }
     let set = |f: &dyn Fn(&mut WavesState)| {
         let s = {
             let mut s = lock(&shared.state);
@@ -128,6 +151,9 @@ fn compute(file: &Path, dir: Option<&Path>, shared: &Shared, notify: &Notify) {
     };
     let tracks = probe.audio.len().min(MAX_TRACKS);
     let duration = (probe.duration > 0.0).then_some(probe.duration);
+    if stopped() {
+        return;
+    }
     if let Some(w) = dir.and_then(|d| waves::load(d, tracks)) {
         let seconds = w.seconds();
         *lock(&shared.waves) = w;
@@ -145,7 +171,9 @@ fn compute(file: &Path, dir: Option<&Path>, shared: &Shared, notify: &Notify) {
     });
     let t0 = Instant::now();
     let mut told = Instant::now();
-    let read = waves::read(file, tracks, &shared.stop, &mut |more| {
+    // The peaks go straight into the shared copy, the only one: the read keeps none, and the save
+    // writes from it.
+    let read = waves::read(file, tracks, duration, &shared.stop, &mut |more| {
         let seconds = {
             let mut w = lock(&shared.waves);
             w.data.extend_from_slice(more);
@@ -158,18 +186,21 @@ fn compute(file: &Path, dir: Option<&Path>, shared: &Shared, notify: &Notify) {
         }
     });
     match read {
-        Ok(Some(w)) => {
+        Ok(Some(_)) => {
             eprintln!(
                 "junctur-app: waveforms of {tracks} tracks read in {:.1} s",
                 t0.elapsed().as_secs_f64()
             );
-            if let Some(d) = dir {
-                if let Err(e) = waves::save(d, &w) {
-                    eprintln!("junctur-app: keeping the waveforms in {}: {e}", d.display());
+            // Under the lock: the lanes wait for the write (once, tens of milliseconds at 30 h).
+            let seconds = {
+                let w = lock(&shared.waves);
+                if let Some(d) = dir {
+                    if let Err(e) = waves::save(d, &w) {
+                        eprintln!("junctur-app: keeping the waveforms in {}: {e}", d.display());
+                    }
                 }
-            }
-            let seconds = w.seconds();
-            *lock(&shared.waves) = w;
+                w.seconds()
+            };
             set(&|s| {
                 s.seconds = seconds;
                 s.done = true;
@@ -228,6 +259,8 @@ mod tests {
             v.peaks
         );
         assert_eq!(&v.peaks[2..], &[0, 0], "silence");
+        assert_eq!(&v.bytes()[..8], &[2, 0, 0, 0, 2, 0, 0, 0]);
+        assert_eq!(&v.bytes()[8..], &v.peaks[..]);
         // Opened again: taken from the folder.
         store.open(&f, Some(project), notify);
         let again = wait_done(&rx);

@@ -191,7 +191,10 @@ impl PlayerState {
         Change::Other
     }
 
-    /// Folds a change of the picture's size or rotation into its shape.
+    /// Folds a change of the picture's size or rotation into its shape. mpv's `dw`/`dh` are the
+    /// picture before rotation (checked against the bundled libmpv: a 640x360 clip tagged 90 degrees
+    /// reads 640x360 and `rotate` 270, while `video-out-params` says 360x640), so a quarter turn
+    /// swaps them.
     fn picture(&mut self, f: impl FnOnce(&mut (Option<f64>, Option<f64>, f64))) {
         f(&mut self.video);
         let (w, h, rotate) = self.video;
@@ -293,7 +296,8 @@ mod tests {
         s.apply(&prop(VIDEO_H, Value::Double(1080.0)));
         assert!((s.aspect.unwrap() - 16.0 / 9.0).abs() < 1e-9);
         assert_eq!((s.width, s.height), (Some(1920), Some(1080)));
-        // A phone recording stored landscape and rotated: portrait.
+        // A phone recording stored landscape and rotated: mpv reads it as above with `rotate` 90
+        // or 270 (as the bundled libmpv does), and it is portrait.
         s.apply(&prop(ROTATE, Value::Double(270.0)));
         assert_eq!((s.width, s.height), (Some(1080), Some(1920)));
         assert!(s.aspect.unwrap() < 1.0);

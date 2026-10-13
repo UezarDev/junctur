@@ -100,9 +100,9 @@ export interface WavesState {
 
 /** Each track's peak per column (0..255 for -60..0 dBFS), track by track. */
 export interface WavesView {
-  state: WavesState;
   columns: number;
-  peaks: number[];
+  tracks: number;
+  peaks: Uint8Array;
 }
 
 /** A recent recording's length and analysis (src/project.rs). */
@@ -269,9 +269,15 @@ export const setVideoMargins = (right: number, bottom: number) =>
 export const setSolo = (track: number, on: boolean) => invoke<void>("set_solo", { track, on });
 export const turns = () => invoke<Turns>("turns");
 export const wavesState = () => invoke<WavesState | null>("waves_state");
-/** Each track's peak in `columns` equal stretches of `[from, to)` seconds. */
-export const waves = (from: number, to: number, columns: number) =>
-  invoke<WavesView | null>("waves", { from, to, columns });
+/** Each track's peak in `columns` equal stretches of `[from, to)` seconds; null with no recording
+ * open. Sent as raw bytes (src/waves.rs `WavesView::bytes`): two little-endian u32s, the column and
+ * track counts, then the peaks track by track. */
+export async function waves(from: number, to: number, columns: number): Promise<WavesView | null> {
+  const b = await invoke<ArrayBuffer>("waves", { from, to, columns });
+  if (b.byteLength < 8) return null;
+  const head = new DataView(b, 0, 8);
+  return { columns: head.getUint32(0, true), tracks: head.getUint32(4, true), peaks: new Uint8Array(b, 8) };
+}
 export const recentInfo = (path: string) => invoke<RecordingInfo>("recent_info", { path });
 /** The recording's still, JPEG bytes. */
 export const thumbnail = (path: string) => invoke<ArrayBuffer>("thumbnail", { path });

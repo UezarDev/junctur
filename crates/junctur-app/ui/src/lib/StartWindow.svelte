@@ -6,7 +6,8 @@
   // recording opens straight into the editor and is analysed there; nothing here waits on analysis.
   //
   // The list is drawn from recent.json at once; each row then asks for its details and still in
-  // the background (`recent_info`, `thumbnail`), so twenty recordings never hold the list up.
+  // the background (`recent_info`, `thumbnail`), so twenty recordings never hold the list up; at
+  // most WORKERS rows at a time, top first, as each may start an ffprobe and an ffmpeg.
   import { onMount } from "svelte";
   import * as api from "./api";
   import { clock } from "./time";
@@ -40,10 +41,26 @@
     rows = { ...rows, [path]: { ...rows[path], ...r } };
   }
 
+  const WORKERS = 2;
+  let gone = false;
+
+  /** Fills the rows' details, `WORKERS` at a time, in list order. */
+  async function fill(list: api.Recent[]) {
+    let next = 0;
+    const worker = async () => {
+      while (!gone && next < list.length) await details(list[next++]);
+    };
+    await Promise.all(Array.from({ length: WORKERS }, worker));
+  }
+
   async function details(r: api.Recent) {
     if (r.missing) return;
     api.analysis(r.path).then((p) => patch(r.path, { progress: p }), () => {});
-    api.recentInfo(r.path).then((i) => patch(r.path, { info: i }), () => {});
+    try {
+      patch(r.path, { info: await api.recentInfo(r.path) });
+    } catch {
+      // The row keeps "…": the project cannot be read.
+    }
     try {
       const bytes = await api.thumbnail(r.path);
       const url = URL.createObjectURL(new Blob([bytes], { type: "image/jpeg" }));
@@ -60,7 +77,7 @@
     api.recent().then(
       (r) => {
         recent = r;
-        r.forEach((x) => void details(x));
+        void fill(r);
       },
       (e) => onError(String(e)),
     );
@@ -69,6 +86,7 @@
       if (hit) patch(hit.path, { progress: p });
     });
     return () => {
+      gone = true;
       off.then((f) => f());
       urls.forEach((u) => URL.revokeObjectURL(u));
     };

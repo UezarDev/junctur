@@ -67,16 +67,23 @@
   const panelWidth = $derived(loaded && panelOpen ? Math.min(PANEL, windowWidth * 0.45) : 0);
   const span = $derived(sel.seconds(selection, words, edit?.fps ?? null));
   const speakers = $derived(edit?.speakers ?? []);
+  // The layout from plain numbers: each is a derived value that only moves when it changes, so the
+  // player's state (sent many times a second for the position) never lays the editor out again.
+  const aspect = $derived(player?.aspect ?? null);
+  const trackCount = $derived(mixer?.tracks.length ?? 0);
+  const speakerCount = $derived(speakers.length);
   const L = $derived(
     layout({
       width: windowWidth,
       height: windowHeight,
       panel: panelWidth,
-      aspect: player?.aspect ?? null,
-      tracks: mixer?.tracks.length ?? 0,
-      speakers: speakers.length,
+      aspect,
+      tracks: trackCount,
+      speakers: speakerCount,
     }),
   );
+  const marginRight = $derived(loaded ? Math.round(L.margins.right * 1000) / 1000 : 0);
+  const marginBottom = $derived(loaded ? Math.round(L.margins.bottom * 1000) / 1000 : 0);
 
   function readOverlay(): boolean {
     try {
@@ -105,9 +112,8 @@
   let sent = "";
   let marginTimer = 0;
   $effect(() => {
-    const m = loaded ? L.margins : { right: 0, bottom: 0 };
-    const r = Math.round(m.right * 1000) / 1000;
-    const b = Math.round(m.bottom * 1000) / 1000;
+    const r = marginRight;
+    const b = marginBottom;
     clearTimeout(marginTimer);
     marginTimer = window.setTimeout(() => {
       const key = `${r} ${b}`;

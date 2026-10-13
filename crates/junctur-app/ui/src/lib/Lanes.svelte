@@ -16,6 +16,7 @@
   import { onMount } from "svelte";
   import * as api from "./api";
   import Avatars from "./Avatars.svelte";
+  import MuteSolo from "./MuteSolo.svelte";
   import { RULER } from "./layout";
   import { meter } from "./meters";
   import type { Selection } from "./selection";
@@ -70,6 +71,8 @@
   const audio = $derived(player?.audioTracks ?? []);
   const duration = $derived(player?.duration ?? 0);
   const end = $derived(view.start + view.len);
+  // What the lanes need: below the height left they scroll (headers and bodies together).
+  const content = $derived(RULER + speakersRow + tracks.length * row);
 
   const x = (t: number) => ((t - view.start) / view.len) * width;
   const timeAt = (clientX: number) => {
@@ -189,7 +192,7 @@
       const half = row / 2 - 3;
       ctx.fillStyle = tr.colour(t, speakers);
       ctx.globalAlpha = tr.heard(t, tracks) ? 0.85 : 0.4;
-      if (peaks && cols > 0 && k < peaks.state.tracks) {
+      if (peaks && cols > 0 && k < peaks.tracks) {
         const step = width / cols;
         for (let c = 0; c < cols; c++) {
           const v = peaks.peaks[k * cols + c];
@@ -326,10 +329,6 @@
     }
   }
 
-  async function toggle(f: () => Promise<void>) {
-    await call(f);
-  }
-
   const position = $derived(player?.position ?? null);
   const headX = $derived(position == null ? null : x(position));
   const sel = $derived(span ? { a: Math.max(0, x(span.start)), b: Math.min(width, x(span.end)) } : null);
@@ -345,6 +344,7 @@
 </script>
 
 <div class="lanes" class:thin style:--head="{head}px">
+  <div class="inner" style:height="{content}px">
   <div class="heads">
     <div class="h ruler" style:height="{RULER}px">
       <span>Tracks</span>
@@ -366,20 +366,8 @@
           <span class="nm">{t.index + 1} · {tr.name(t, audio)}</span>
           {#if !thin && row >= 34}<span class="sub">{tr.describe(t, audio, speakers)}</span>{/if}
         </span>
-        <button
-          class="ms m"
-          class:on={t.muted}
-          aria-pressed={t.muted}
-          title={t.muted ? "Muted: click to hear it (preview only)" : "Mute (preview only)"}
-          onclick={() => toggle(() => api.setMuted(t.index, !t.muted))}>M</button
-        >
-        <button
-          class="ms s"
-          class:on={t.solo}
-          aria-pressed={t.solo}
-          title={t.solo ? "Soloed: click to unsolo" : "Solo: hear only the soloed tracks (preview only, not remembered)"}
-          onclick={() => toggle(() => api.setSolo(t.index, !t.solo))}>S</button
-        >
+        <MuteSolo track={t} kind="mute" {onError} />
+        <MuteSolo track={t} kind="solo" {onError} />
         <span class="meter" class:off={!tr.heard(t, tracks)}>
           <span class="bar" use:meter={{ track: t.index, axis: "y" }}></span>
         </span>
@@ -409,15 +397,24 @@
       <div class="head" style:transform="translateX({headX}px)"></div>
     {/if}
   </div>
+  </div>
 </div>
 
 <style>
+  /* Scrolls when the lanes need more than the height left (many tracks, a short window): the
+     headers and the bodies move together. The wheel over the headers scrolls; over the bodies it
+     pans time. */
   .lanes {
-    display: flex;
     height: 100%;
+    overflow-x: hidden;
+    overflow-y: auto;
     background: var(--panel-solid);
     border-top: 1px solid var(--line);
     font-size: 13px;
+  }
+  .inner {
+    display: flex;
+    min-height: 100%;
   }
   .heads {
     flex: none;
@@ -465,26 +462,6 @@
     width: 7px;
     height: 7px;
     border-radius: 50%;
-  }
-  .ms {
-    flex: none;
-    width: 20px;
-    height: 18px;
-    padding: 0;
-    font-size: 10px;
-    font-weight: 700;
-    border-radius: 3px;
-    color: var(--muted);
-  }
-  .m.on {
-    color: #fff;
-    background: rgba(239, 111, 94, 0.55);
-    border-color: var(--bad);
-  }
-  .s.on {
-    color: #101114;
-    background: var(--accent);
-    border-color: var(--accent);
   }
   .meter {
     flex: none;

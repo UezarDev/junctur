@@ -50,7 +50,9 @@ pub fn decode_windows(
     let mut args: Vec<String> = ["-v", "error", "-nostdin", "-ss", &ss, "-t", &t, "-i", &path]
         .map(String::from)
         .to_vec();
-    args.extend(merge_args(tracks, ANALYSIS_RATE));
+    // Windows stop at the shortest track: the analysis compares tracks sample by sample, and a
+    // window past one track's end has nothing of it to compare (`window::align` cuts them so too).
+    args.extend(merge_args(tracks, ANALYSIS_RATE, None));
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let all = samples(&run("ffmpeg", &args)?);
     let mut out = vec![Vec::with_capacity(all.len() / n); n];
@@ -64,10 +66,31 @@ pub fn decode_windows(
 
 /// The output side of an ffmpeg that decodes `tracks` (at least one) as mono f32 at `rate`, laid
 /// side by side as channels in that order: `aformat` per track (the conversion `-ac 1 -ar` makes)
-/// then `amerge`, or a plain map for one track. Every track comes out as long as the shortest.
-fn merge_args(tracks: &[usize], rate: u32) -> Vec<String> {
+/// then `amerge`, or a plain map for one track. `amerge` ends with the shortest input, so without
+/// `pad` every track comes out as long as the shortest; with `pad` (seconds), every track is padded
+/// with silence and the output lasts exactly that long, so a track that ends early does not cut the
+/// others short.
+fn merge_args(tracks: &[usize], rate: u32, pad: Option<f64>) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
-    if let [t] = tracks {
+    if let Some(len) = pad {
+        let mut g = String::new();
+        for (i, t) in tracks.iter().enumerate() {
+            g += &format!(
+                "[0:a:{t}]aformat=sample_fmts=flt:sample_rates={rate}:channel_layouts=mono,apad[a{i}];"
+            );
+        }
+        if tracks.len() == 1 {
+            g.pop();
+            g = g.replace("[a0]", "[out]");
+        } else {
+            for i in 0..tracks.len() {
+                g += &format!("[a{i}]");
+            }
+            g += &format!("amerge=inputs={}[out]", tracks.len());
+        }
+        args.extend(["-filter_complex".into(), g, "-map".into(), "[out]".into()]);
+        args.extend(["-t".into(), format!("{len:.3}")]);
+    } else if let [t] = tracks {
         args.extend(["-map".into(), format!("0:a:{t}"), "-ac".into(), "1".into()]);
         args.extend(["-ar".into(), rate.to_string()]);
     } else {
@@ -138,12 +161,14 @@ impl PcmReader {
 
     /// Every one of `tracks` (at least one) from the start, mono at `rate`, interleaved one sample
     /// per track in that order (`channels` is their count): one decode for all, as
-    /// [`decode_windows`] does, streamed for a pass over a whole recording (2g's waveforms).
-    pub fn merged(file: &Path, tracks: &[usize], rate: u32) -> Result<Self> {
+    /// [`decode_windows`] does, streamed for a pass over a whole recording (2g's waveforms). Every
+    /// track lasts `len` seconds when given (the recording's length), padded with silence where it
+    /// ends early; without, all stop with the shortest.
+    pub fn merged(file: &Path, tracks: &[usize], rate: u32, len: Option<f64>) -> Result<Self> {
         let mut cmd = Command::new("ffmpeg");
         cmd.args(["-v", "error", "-nostdin", "-i"])
             .arg(file)
-            .args(merge_args(tracks, rate));
+            .args(merge_args(tracks, rate, len));
         let mut proc = Process::spawn(&mut cmd, Stdio::null(), Stdio::piped())?;
         let out = proc.child.stdout.take().expect("piped stdout");
         Ok(Self {

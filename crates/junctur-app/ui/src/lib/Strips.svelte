@@ -2,8 +2,9 @@
   // Portrait's mixer strips (2g, P4): beside a picture taller than wide, one strip per track with a
   // tall meter, Mute and Solo, its colour and name. The same controls as the lanes' headers (the
   // same features in both orientations); replaces 2e's row of strips over the play bar.
-  import * as api from "./api";
+  import type * as api from "./api";
   import { meter } from "./meters";
+  import MuteSolo from "./MuteSolo.svelte";
   import * as tr from "./tracks";
 
   let {
@@ -20,13 +21,6 @@
 
   const tracks = $derived(mixer?.tracks ?? []);
 
-  async function call(f: () => Promise<void>) {
-    try {
-      await f();
-    } catch (e) {
-      onError(String(e));
-    }
-  }
 </script>
 
 <div class="strips" role="group" aria-label="Audio tracks">
@@ -35,16 +29,8 @@
       <span class="meter" class:off={!tr.heard(t, tracks)}>
         <span class="bar" use:meter={{ track: t.index, axis: "y" }}></span>
       </span>
-      <button class="ms m" class:on={t.muted} aria-pressed={t.muted} title="Mute (preview only)" onclick={() => call(() => api.setMuted(t.index, !t.muted))}
-        >M</button
-      >
-      <button
-        class="ms s"
-        class:on={t.solo}
-        aria-pressed={t.solo}
-        title="Solo (preview only, not remembered)"
-        onclick={() => call(() => api.setSolo(t.index, !t.solo))}>S</button
-      >
+      <MuteSolo track={t} kind="mute" size="large" {onError} />
+      <MuteSolo track={t} kind="solo" size="large" {onError} />
       <span class="dot" style:background={tr.colour(t, speakers)}></span>
       <span class="n">{t.index + 1}</span>
       <span class="name">{tr.name(t, audio)}</span>
@@ -88,25 +74,6 @@
   }
   .meter.off .bar {
     background: var(--muted);
-  }
-  .ms {
-    width: 22px;
-    height: 20px;
-    padding: 0;
-    font-size: 10px;
-    font-weight: 700;
-    border-radius: 3px;
-    color: var(--muted);
-  }
-  .m.on {
-    color: #fff;
-    background: rgba(239, 111, 94, 0.55);
-    border-color: var(--bad);
-  }
-  .s.on {
-    color: #101114;
-    background: var(--accent);
-    border-color: var(--accent);
   }
   .dot {
     width: 7px;

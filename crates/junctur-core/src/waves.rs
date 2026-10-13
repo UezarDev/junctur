@@ -10,7 +10,7 @@
 //! Kept in the project folder as [`FILE`] (a header and the bytes, hop by hop: every track's byte for
 //! hop 0, then hop 1, ...), written whole once the read finishes; 30 h of 4 tracks is 21.6 MB.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -120,34 +120,48 @@ pub fn load(dir: &Path, tracks: usize) -> Option<Waves> {
     })
 }
 
-/// Writes `w` as [`FILE`] in `dir`, atomically (a reader never sees half of it).
+/// Writes `w` as [`FILE`] in `dir`, atomically (a reader never sees half of it): to a file of its
+/// own beside it, then renamed over it. Streamed, not gathered into one buffer first: 30 h of peaks
+/// is tens of megabytes the caller already holds once.
 pub fn save(dir: &Path, w: &Waves) -> Result<()> {
-    let mut bytes = Vec::with_capacity(16 + w.data.len());
-    bytes.extend_from_slice(MAGIC);
-    bytes.extend_from_slice(&(w.tracks as u32).to_le_bytes());
-    bytes.extend_from_slice(&RATE.to_le_bytes());
-    bytes.extend_from_slice(&w.data);
-    output::write_replacing(&dir.join(FILE), bytes)?;
-    Ok(())
+    let path = dir.join(FILE);
+    let tmp = dir.join(format!("{FILE}.{}.tmp", std::process::id()));
+    let written = (|| -> std::io::Result<()> {
+        let mut f = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+        f.write_all(MAGIC)?;
+        f.write_all(&(w.tracks as u32).to_le_bytes())?;
+        f.write_all(&RATE.to_le_bytes())?;
+        f.write_all(&w.data)?;
+        f.into_inner().map_err(|e| e.into_error())?.sync_all()?;
+        output::rename_over(&tmp, &path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    Ok(written?)
 }
 
-/// Reads the peaks of audio tracks `0..tracks` of `file` from start to end, handing each new
-/// stretch (whole hops, hop-major) to `more` as it is decoded. `Ok(None)` when `stop` was set before
-/// the end (the decoder is killed). A final partial hop counts as a hop.
+/// Reads the peaks of audio tracks `0..tracks` of `file` from start to `duration` seconds when
+/// known (the recording's length: a track that ends early is padded with silence, so it never cuts
+/// the others short; unknown, every track stops with the shortest), handing each new stretch (whole
+/// hops, hop-major) to `more` as it is decoded. Keeps nothing itself: the caller holds the one copy. Returns the hops read, or `Ok(None)` when `stop`
+/// was set before the end (the decoder is killed). A final partial hop counts as a hop.
 pub fn read(
     file: &Path,
     tracks: usize,
+    duration: Option<f64>,
     stop: &AtomicBool,
     more: &mut dyn FnMut(&[u8]),
-) -> Result<Option<Waves>> {
-    let mut w = Waves::new(tracks);
+) -> Result<Option<usize>> {
     if tracks == 0 {
-        return Ok(Some(w));
+        return Ok(Some(0));
     }
     let all: Vec<usize> = (0..tracks).collect();
-    let mut r = PcmReader::merged(file, &all, DECODE_RATE)?;
+    let mut r = PcmReader::merged(file, &all, DECODE_RATE, duration)?;
     let frame = PER_HOP * tracks;
     let mut buf = Vec::with_capacity(READ_HOPS * frame);
+    let mut out = Vec::with_capacity(READ_HOPS * tracks);
+    let mut hops = 0;
     loop {
         if stop.load(Ordering::Relaxed) {
             return Ok(None);
@@ -156,7 +170,7 @@ pub fn read(
         if buf.is_empty() {
             break;
         }
-        let at = w.data.len();
+        out.clear();
         // A read is whole hops of whole frames, but at the end of the stream.
         for hop in buf.chunks(frame) {
             let mut peaks = vec![0f32; tracks];
@@ -165,18 +179,19 @@ pub fn read(
                     *p = p.max(x.abs());
                 }
             }
-            w.data.extend(peaks.into_iter().map(level));
+            out.extend(peaks.into_iter().map(level));
+            hops += 1;
         }
-        more(&w.data[at..]);
+        more(&out);
     }
     r.finish()?;
-    if w.data.is_empty() {
+    if hops == 0 {
         return Err(Error::Tool {
             program: "ffmpeg",
             stderr: format!("no audio decoded from {}", file.display()),
         });
     }
-    Ok(Some(w))
+    Ok(Some(hops))
 }
 
 #[cfg(test)]
@@ -256,10 +271,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("junctur-waves-read-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("two.mka");
-        // A full-scale tone on track 1 for 3 s, a -20 dB one on track 2 for its first second.
+        // A full-scale tone on track 1 for 3 s, a -20 dB one on track 2 that ends after 1 s (a
+        // shorter track: it must not cut track 1's peaks short).
         let ok = std::process::Command::new("ffmpeg")
             .args(["-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=440:d=3"])
-            .args(["-f", "lavfi", "-i", "sine=f=300:d=1,apad=whole_dur=3"])
+            .args(["-f", "lavfi", "-i", "sine=f=300:d=1"])
             .args(["-filter_complex", "[0:a]volume=8[a];[1:a]volume=0.8[b]"])
             .args(["-map", "[a]", "-map", "[b]", "-c:a", "flac"])
             .arg(&f)
@@ -267,12 +283,18 @@ mod tests {
             .unwrap()
             .success();
         assert!(ok);
-        let mut seen = 0;
-        let w = read(&f, 2, &AtomicBool::new(false), &mut |b| seen += b.len())
-            .unwrap()
-            .unwrap();
-        assert_eq!(seen, w.data.len());
-        assert_eq!(w.hops(), 150, "3 s at 50 a second");
+        let mut w = Waves::new(2);
+        let hops = read(&f, 2, Some(3.0), &AtomicBool::new(false), &mut |b| {
+            w.data.extend_from_slice(b)
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(hops, w.hops());
+        assert_eq!(
+            w.hops(),
+            150,
+            "3 s at 50 a second, past the short track's end"
+        );
         let c = w.columns(0.0, 3.0, 3);
         // lavfi's sine is at 1/8 full scale; track 1 is turned up to full, track 2 to 1/10.
         assert!(c[0] > 245 && c[2] > 245, "{c:?}");
@@ -282,7 +304,14 @@ mod tests {
             c[4] < 60 && c[5] == 0,
             "silence after its first second: {c:?}"
         );
-        let stopped = read(&f, 2, &AtomicBool::new(true), &mut |_| {}).unwrap();
+        // One track alone is padded the same way.
+        let mut one = 0;
+        read(&f, 1, Some(3.0), &AtomicBool::new(false), &mut |b| {
+            one += b.len()
+        })
+        .unwrap();
+        assert_eq!(one, 150);
+        let stopped = read(&f, 2, Some(3.0), &AtomicBool::new(true), &mut |_| {}).unwrap();
         assert!(stopped.is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
