@@ -5,7 +5,8 @@
   // (transcript.ts, one pass over the words); a resize or a fold toggle only repacks them into rows.
   // Where the speaker changes a name row comes first; click the name to rename the speaker (saved
   // to edit.junctur at once). Double-click a word to fix its spelling (5h): saved to edit.junctur at
-  // once, shown here, in the caption preview and the SRT, and added to the word list Whisper is told.
+  // once, shown here, in the caption preview and the SRT, and added to the word list Whisper is told
+  // (the header says so for a moment, 5t).
   import { onMount } from "svelte";
   import { SvelteSet } from "svelte/reactivity";
   import * as api from "./api";
@@ -174,29 +175,63 @@
   // decides). The new text comes back through the edit state's fixes key (App.svelte).
   let fixing = $state<number | null>(null);
   let fixDraft = $state("");
+  // `fixing` as a plain variable, for the field's own teardown and blur (5t repair): Svelte gives an
+  // effect's teardown the state from before the change that tore it down, so there `fixing` still
+  // named the field just closed. Its teardown then finished it a second time: Escape's draft was
+  // saved after all, Enter saved twice, and a field replaced by another word's closed that one too.
+  let fixOpen: number | null = null;
   function startFix(e: MouseEvent) {
-    const i = wordUnder(e.target);
-    if (i < 0 || !words) return;
-    fixing = i;
+    // Not `e.target` (5t): `down` captures the pointer on the scroller, and Chromium (WebView2) then
+    // sends the clicks and the double-click to the scroller, so the target never was a word and the
+    // field never opened. The element under the pointer, as `move` finds it. Only a kept word: a cut
+    // word in an open fold has no field, and `fixing` set without one would hold the follow for good.
+    const el = document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>("[data-i]");
+    if (!el || el.classList.contains("cutword") || !words) return;
+    const i = Number(el.dataset.i);
+    if (i === fixing) return;
+    // Another word's field still open (the press on this word kept it from blurring): what was
+    // typed there is saved first, as leaving it does (5t repair: it was lost, or saved as this
+    // word's text, when this word's draft replaced it before its field went away).
+    if (fixing != null) finishFix(true);
+    fixing = fixOpen = i;
     fixDraft = words.text[i];
   }
   // The field's row can scroll out of the rendered window (the list is virtual) and take the field
   // with it, without a blur: what was typed is saved then, as leaving the field does, so `fixing`
-  // never outlives its field (it holds the playhead follow).
-  function fixField(el: HTMLInputElement) {
+  // never outlives its field (it holds the playhead follow). Only while the fix is still this
+  // field's own: one replaced by another word's field was saved by `startFix` already.
+  function fixField(el: HTMLInputElement, i: number) {
     focusInput(el);
     return {
       destroy() {
-        if (fixing != null) finishFix(true);
+        if (fixOpen === i) finishFix(true);
       },
     };
   }
   function finishFix(save: boolean) {
     const i = fixing;
-    fixing = null;
+    fixing = fixOpen = null;
     if (!save || i == null || !words || fixDraft.trim() === words.text[i]) return;
     const text = fixDraft;
-    call(() => api.fixWord(i, text));
+    call(async () => {
+      const added = await api.fixWord(i, text);
+      if (added) tellLearned(added);
+    });
+  }
+
+  // A fix whose spelling joined the word list (5h's `settings::learn`) says so for a moment in the
+  // header (5t): before, nothing showed the list had changed until Settings was opened.
+  const LEARNED_MS = 4000;
+  let learned = $state<string | null>(null);
+  let learnedTimer = 0;
+  // Cleared when the panel goes: `fixWord` can answer after that (5t repair), and a timer set then
+  // would outlive the panel.
+  let mounted = false;
+  function tellLearned(entry: string) {
+    if (!mounted) return;
+    learned = entry;
+    clearTimeout(learnedTimer);
+    learnedTimer = window.setTimeout(() => (learned = null), LEARNED_MS);
   }
 
   const first = $derived(Math.max(0, Math.floor(top / ROW) - OVERSCAN));
@@ -256,6 +291,10 @@
     const i = wordUnder(e.target);
     if (i < 0 || e.button !== 0) return;
     e.preventDefault();
+    // The press seeks to the word on release (`up`), and the follow would then scroll a word in the
+    // first row or the last three away from under the pointer before a double-click's second press
+    // (5t). The word pressed is on screen already.
+    pausedUntil = performance.now() + FOLLOW_PAUSE_MS;
     if (e.shiftKey && chosen) {
       // The anchor only counts while it is an end of the current selection (the timeline may
       // have replaced it).
@@ -302,6 +341,7 @@
   }
 
   onMount(() => {
+    mounted = true;
     let timer = 0;
     const ro = new ResizeObserver(() => {
       height = scroller.clientHeight;
@@ -313,6 +353,8 @@
     ro.observe(scroller);
     return () => {
       clearTimeout(timer);
+      mounted = false;
+      clearTimeout(learnedTimer);
       ro.disconnect();
     };
   });
@@ -321,7 +363,9 @@
 <section class="panel">
   <header>
     <span>Transcript</span>
-    {#if words}
+    {#if learned}
+      <span class="muted learned" role="status">"{learned}" added to the word list</span>
+    {:else if words}
       <span class="muted">{words.text.length.toLocaleString()} words</span>
     {/if}
   </header>
@@ -388,7 +432,7 @@
                   maxlength="100"
                   style:width="{Math.max(60, (wordWidth?.[t.i] ?? 0) + 24)}px"
                   bind:value={fixDraft}
-                  use:fixField
+                  use:fixField={t.i}
                   onpointerdown={(e) => e.stopPropagation()}
                   ondblclick={(e) => e.stopPropagation()}
                   onkeydown={(e) => {
@@ -396,7 +440,7 @@
                     if (e.key === "Enter") finishFix(true);
                     else if (e.key === "Escape") finishFix(false);
                   }}
-                  onblur={() => finishFix(true)}
+                  onblur={() => fixOpen === t.i && finishFix(true)}
                   aria-label="Fix this word's spelling"
                 />
               {:else if t.kind === "word"}
@@ -466,6 +510,13 @@
   .muted {
     color: var(--muted);
     font-weight: 400;
+  }
+  .learned {
+    min-width: 0;
+    margin-left: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .scroll {
     position: relative;
