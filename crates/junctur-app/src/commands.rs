@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use junctur_core::edit::Captions;
+use junctur_core::export::srt::Cue;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -293,7 +294,7 @@ pub async fn recolor_speaker(app: State<'_, App>, id: u32, color: String) -> Res
     app.editable()?.recolor_speaker(id, &color)
 }
 
-/// Sets the caption settings: on/off and how cues are cut.
+/// Sets the caption settings: export and preview switches, bold and italic, how cues are cut.
 #[tauri::command]
 pub async fn set_captions(app: State<'_, App>, captions: Captions) -> Result<(), String> {
     app.editable()?.set_captions(captions)
@@ -316,6 +317,13 @@ pub async fn export_captions(app: State<'_, App>, path: String) -> Result<Export
         cues: f.cues,
         stale: f.stale.iter().map(|p| p.display().to_string()).collect(),
     })
+}
+
+/// The captions as the export cuts them, for the preview over the picture (5d): output seconds,
+/// each cue's parts a speaker's lines.
+#[tauri::command]
+pub async fn caption_cues(app: State<'_, App>) -> Result<Vec<Cue>, String> {
+    app.core()?.caption_cues()
 }
 
 /// The voices Junctur remembers (5b).

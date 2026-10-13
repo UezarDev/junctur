@@ -1,21 +1,36 @@
-//! How captions are cut into cues, as the edit list keeps it (5a). Colours are per speaker
-//! ([`super::SpeakerName::color`]); this is the rest of what shapes the caption file, and only what
-//! an SRT carries into DaVinci Resolve: text, timing and colour. Size, font and position do not
-//! survive an SRT import (5a's check), so they are not settings here.
+//! How captions are cut into cues and styled, as the edit list keeps it (5a, 5d). Colours are per
+//! speaker ([`super::SpeakerName::color`]); this is the rest of what shapes the caption file, and
+//! only what an SRT carries into DaVinci Resolve: text, timing, colour, bold and italic. 5d's
+//! research (`.planning/research/resolve-caption-styling.md`) found nothing else an SRT import
+//! keeps: size, font family, outline, shadow, background and position are Resolve's subtitle
+//! Track Style, which no import sets, and a position tag (`{\an8}`) shows as literal text. So they
+//! are not settings here; offering them would promise what Resolve drops.
+//!
+//! Also the two switches (5d): export (`on`: a render writes the caption file) and the preview over
+//! the picture in the editor, which are separate so captions can be watched without being written.
+//! Every field has a serde default, so caption settings saved before a field existed (an older
+//! edit list's line, or the caption defaults in `junctur/config.json`) still load.
 
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct Captions {
-    /// Captions are optional: on, a render writes the caption file beside the video.
+    /// Export: captions are optional; on, a render writes the caption file beside the video.
     pub on: bool,
+    /// Show the captions over the picture in the editor as they play (5d). Preview only: it
+    /// changes nothing in any file but this setting.
+    pub preview: bool,
     /// Most characters on one line.
     pub chars: u32,
     /// Most lines in one cue, per speaker: people talking at once each get this many (5e).
     pub lines: u32,
     /// Longest a cue stays on screen, in seconds.
     pub seconds: f64,
+    /// Every caption bold (`<b>`), which Resolve's SRT import applies and its own export writes.
+    pub bold: bool,
+    /// Every caption italic (`<i>`), likewise.
+    pub italic: bool,
 }
 
 /// 42 characters and two lines is the common broadcast and streaming limit, readable at a glance;
@@ -24,9 +39,12 @@ impl Default for Captions {
     fn default() -> Self {
         Self {
             on: false,
+            preview: false,
             chars: 42,
             lines: 2,
             seconds: 6.0,
+            bold: false,
+            italic: false,
         }
     }
 }
@@ -105,5 +123,28 @@ mod tests {
             seconds: 30.0,
             ..Default::default()
         }));
+    }
+
+    #[test]
+    fn settings_saved_before_a_field_existed_still_load() {
+        // 5a's four fields only, as an older build's caption defaults would hold them.
+        let old: Captions =
+            serde_json::from_str(r#"{"on":true,"chars":30,"lines":1,"seconds":4}"#).unwrap();
+        assert_eq!(
+            old,
+            Captions {
+                on: true,
+                chars: 30,
+                lines: 1,
+                seconds: 4.0,
+                ..Default::default()
+            }
+        );
+        assert!(!old.preview && !old.bold && !old.italic);
+        let all: Captions = serde_json::from_str(
+            r#"{"on":false,"preview":true,"chars":42,"lines":2,"seconds":6,"bold":true,"italic":true}"#,
+        )
+        .unwrap();
+        assert!(all.preview && all.bold && all.italic);
     }
 }
