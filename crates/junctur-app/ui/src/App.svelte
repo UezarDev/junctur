@@ -471,13 +471,13 @@
     }
   }
 
-  // Where the floating edit actions go: at the selection, else at the playhead, along the lanes.
+  // Where the edit actions go: one fixed place, centred over the lanes' tracks just above their
+  // bottom edge, with or without a selection. 2g put them at the selection, else at the playhead,
+  // so the bar slid along while playing or scrubbing and was never where the hand left it (2n).
   const actionsAt = $derived.by(() => {
     const left = L.lanes.x + L.head + 1;
     const w = Math.max(1, L.lanes.w - L.head - 1);
-    const t = span ? (span.start + span.end) / 2 : (player?.position ?? view.start);
-    const x = left + Math.min(1, Math.max(0, (t - view.start) / view.len)) * w;
-    return { x, min: left + 4, max: L.lanes.x + L.lanes.w - 4, bottom: windowHeight - TITLE - (L.lanes.y + L.lanes.h) + 8 };
+    return { x: left + w / 2, min: left + 4, max: L.lanes.x + L.lanes.w - 4, bottom: windowHeight - TITLE - (L.lanes.y + L.lanes.h) + 8 };
   });
 
   onMount(() => {

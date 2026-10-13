@@ -3,7 +3,7 @@
   // lanes. Play, the skip toggle, the clocks, the whole recording as an overview (outlining the
   // window the lanes show) and, at the right end, the lanes' zoom. The track controls that were
   // here (2a's track select, 2e's strips) live on the lanes and the portrait strips; editing
-  // floats beside the selection (ActionBar).
+  // sits over the lanes (ActionBar).
   import * as api from "./api";
   import Timeline from "./Timeline.svelte";
   import Clocks from "./Clocks.svelte";

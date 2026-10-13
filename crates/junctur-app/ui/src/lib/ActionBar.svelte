@@ -1,10 +1,11 @@
 <script lang="ts">
-  // Editing controls that float beside what they act on (2g, mock B), replacing 2c's fixed edit
-  // row. With a selection (transcript words or a stretch of the lanes or timeline): what is
-  // selected, Cut, Keep, Remember voice… (5b: name whoever says the selected words; their voice is
-  // remembered for every recording), Undo and Redo, at the selection. With none: the stretch under
-  // the playhead (a kept range or a cut) with buttons that nudge either end by a frame (shift: ten)
-  // and cut or keep it whole, and Undo and Redo, at the playhead. Every action is one edit the
+  // Editing controls over the lanes (2g, mock B), replacing 2c's fixed edit row. They sit in one
+  // place, centred over the lanes (2n; 2g floated them beside the selection or the playhead, so
+  // they slid along while playing). With a selection (transcript words or a stretch of the lanes
+  // or timeline): what is selected, Cut, Keep, Remember voice… (5b: name whoever says the selected
+  // words; their voice is remembered for every recording), Undo and Redo. With none: the stretch
+  // under the playhead (a kept range or a cut) with buttons that nudge either end by a frame
+  // (shift: ten) and cut or keep it whole, and Undo and Redo. Every action is one edit the
   // engine saves to edit.junctur at once. Its notices (an outside change, a backup made, the voice
   // result) show on a line above it. The keyboard does the same without it (Delete, K, Ctrl+Z/Y).
   import * as api from "./api";
@@ -23,7 +24,7 @@
     player: api.PlayerState | null;
     edit: api.EditState | null;
     selection: sel.Selection | null;
-    /** Where to float: centred on `x` (window pixels), kept between `min` and `max`, its bottom at
+    /** Where to sit: centred on `x` (window pixels), kept between `min` and `max`, its bottom at
      * `bottom`. */
     at: { x: number; min: number; max: number; bottom: number };
     onSelect: (s: sel.Selection | null) => void;
