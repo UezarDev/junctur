@@ -9,7 +9,7 @@ use ort::session::Session;
 use ort::value::Tensor;
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::{self, Device, DevicePref};
+use crate::runtime;
 use crate::Result;
 
 pub const RATE: u32 = 16_000;
@@ -32,7 +32,6 @@ pub struct Region {
 
 pub struct Vad {
     session: Session,
-    pub device: Device,
     /// The model's inputs, made once and written in place frame by frame: a 30 h track is 3.4
     /// million frames, and building three tensors for each was most of the allocation in VAD.
     input: Tensor<f32>,
@@ -44,10 +43,9 @@ impl Vad {
     /// The model is tiny and runs frame by frame, so GPU transfer costs more than it saves: CPU
     /// always, and one thread: a frame is too small to split, and tracks run side by side.
     pub fn open(model: &Path) -> Result<Self> {
-        let (session, device) = runtime::open_with_threads(model, DevicePref::Cpu, 1)?;
+        let session = runtime::open_on_cpu(model, Some(1))?;
         Ok(Self {
             session,
-            device,
             input: Tensor::from_array(([1usize, CONTEXT + FRAME], vec![0.0; CONTEXT + FRAME]))?,
             state: Tensor::from_array(([2usize, 1, 128], vec![0.0; 2 * 128]))?,
             sr: Tensor::from_array((Vec::<usize>::new(), vec![RATE as i64]))?,

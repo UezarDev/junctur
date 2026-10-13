@@ -107,6 +107,16 @@ pub fn open_with_threads(
     Err(last.unwrap_or_else(|| crate::Error::Model("no backend could open the model".into())))
 }
 
+/// Open `model` on the CPU and on nothing else, `threads` per operator (every core when `None`).
+/// The only way the Tracks, Speech and Speakers stages open a model (5r: Uezar, "GPU only for the
+/// transcribing part"; CAM++ on ONNX Runtime's CUDA provider made a speaker of every sentence).
+pub fn open_on_cpu(model: &Path, threads: Option<usize>) -> Result<Session> {
+    let threads =
+        threads.unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
+    Cpu.open(model, threads)?
+        .ok_or_else(|| crate::Error::Model("the CPU could not open the model".into()))
+}
+
 /// Devices compiled into this build, for the report.
 pub fn compiled() -> &'static str {
     if cfg!(feature = "cuda") {

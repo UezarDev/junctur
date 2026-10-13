@@ -69,10 +69,12 @@ pub fn separate(file: &Path, track: usize, opts: &SeparateOptions) -> Result<Ste
         opts.span.start, opts.span.len
     );
     let dir = cache_dir.join("stems").join(cache::key(file, &settings)?);
+    // The speakers' file is named for the embeddings they were found from (5r: `stems.json` holds
+    // ones made on the GPU), so new ones are found while the separated stems are reused.
     let done = dir.join(if opts.no_speakers {
-        "stems-no-speakers.json"
+        "stems-no-speakers.json".to_string()
     } else {
-        "stems.json"
+        format!("stems-{}-embeddings.json", diarize::EMBEDDINGS_MARK)
     });
     if !opts.force {
         if let Some(s) = finished(&done) {
@@ -96,7 +98,7 @@ pub fn separate(file: &Path, track: usize, opts: &SeparateOptions) -> Result<Ste
     let speakers = if opts.no_speakers {
         None
     } else {
-        Some(speakers(&vocals, &speech, &cache_dir, opts.device)?)
+        Some(speakers(&vocals, &speech, &cache_dir)?)
     };
     let diarize_s = t2.elapsed().as_secs_f64();
 
@@ -133,14 +135,9 @@ fn finished(done: &Path) -> Option<Stems> {
 }
 
 /// Who speaks when, over the vocal stem's speech regions.
-fn speakers(
-    vocals: &Path,
-    speech: &[Region],
-    cache_dir: &Path,
-    device: DevicePref,
-) -> Result<Diarization> {
+fn speakers(vocals: &Path, speech: &[Region], cache_dir: &Path) -> Result<Diarization> {
     let model = models::ensure(&models::SPEAKER_EMBEDDING, cache_dir)?;
-    let mut emb = Embedder::open(&model, device)?;
+    let mut emb = Embedder::open(&model)?;
     let mut r = PcmReader::open(vocals, 0, vad::RATE, 1, Span::default())?;
     diarize::diarize(&mut r, speech, &mut emb)
 }

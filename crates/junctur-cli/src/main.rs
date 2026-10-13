@@ -12,7 +12,7 @@
 //! junctur export <file> [--fcpxml <out.fcpxml>] [--srt <out.srt>] [--project <dir>] [--cache-dir <dir>]
 //! junctur render <file> --out <out.mp4> [--project <dir>] [--cache-dir <dir>] [--full] [--force]
 //!                       [--jobs <n>]
-//! junctur voices [<file> --add <name> --at <start>-<end>[,...] | <file> --rehear [--cpu]] [--forget <name>]
+//! junctur voices [<file> --add <name> --at <start>-<end>[,...] | <file> --rehear] [--forget <name>]
 //! ```
 //!
 //! `--model` defaults to the config file's `whisper_model` (`junctur_core::config`), else `auto`. Speakers are
@@ -40,7 +40,7 @@ const USAGE: &str = "usage:
                         [--cache-dir <dir>]
   junctur render <file> --out <out.mp4> [--project <dir>] [--cache-dir <dir>] [--full] [--force]
                         [--jobs <n>]
-  junctur voices [<file> --add <name> --at <start>-<end>[,...] | <file> --rehear [--cpu]] [--forget <name>]
+  junctur voices [<file> --add <name> --at <start>-<end>[,...] | <file> --rehear] [--forget <name>]
 cut flags: [--pad-before <s>] [--pad-after <s>] [--merge-gap <s>] [--crossfade <ms>]";
 
 fn main() -> ExitCode {

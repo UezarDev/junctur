@@ -18,7 +18,7 @@ use ort::session::Session;
 use ort::value::Tensor;
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::{self, Device, DevicePref};
+use crate::runtime;
 use crate::vad::{Region, RATE};
 use crate::Result;
 
@@ -54,13 +54,15 @@ pub struct Overlap {
 
 pub struct Segmenter {
     session: Session,
-    pub device: Device,
 }
 
 impl Segmenter {
-    pub fn open(model: &Path, pref: DevicePref) -> Result<Self> {
-        let (session, device) = runtime::open(model, pref)?;
-        Ok(Self { session, device })
+    /// On the CPU, as everything in the Tracks, Speech and Speakers stages is (5r: Uezar, "GPU
+    /// only for the transcribing part").
+    pub fn open(model: &Path) -> Result<Self> {
+        Ok(Self {
+            session: runtime::open_on_cpu(model, None)?,
+        })
     }
 
     /// The most likely powerset class of every frame of each 10 s clip (0 none, 1-3 one local

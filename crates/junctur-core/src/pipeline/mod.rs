@@ -120,6 +120,8 @@ impl Project {
 
 #[derive(Debug, Clone, Default)]
 pub struct PipelineOptions {
+    /// Where Whisper may run. Only transcription uses it: tracks, speech and speakers always run on
+    /// the CPU (5r: CAM++ on the GPU found a speaker per sentence).
     pub device: DevicePref,
     pub model: ModelPref,
     /// The word list Whisper is told (5h; the caller reads the config file). Not part of what makes
@@ -415,7 +417,6 @@ fn speakers_stage(
                 &pins,
                 &p.dir,
                 &p.cache_dir,
-                opts.device,
                 &mut |track, at| steps(steps::step(report, "speakers", track, at)),
             )?;
             // Heard again: the voice names the old labels knew still are the voices', not
@@ -471,12 +472,7 @@ pub fn enroll(
 /// cut at the pins the user made ([`speakers::seeded`]), and labels them with `voices`; the other
 /// stages' results are reused, never rerun (they need nothing new: `--force` would redo Whisper
 /// for minutes). Saves `speakers.json`; the edit list is the caller's ([`respeak`]).
-pub fn rehear(
-    p: &Project,
-    voices: &[Voice],
-    device: DevicePref,
-    log: &mut dyn FnMut(&str),
-) -> Result<Found> {
+pub fn rehear(p: &Project, voices: &[Voice], log: &mut dyn FnMut(&str)) -> Result<Found> {
     let missing = || Error::Edit("run `junctur analyze` on this file first".into());
     let speech = p.speech().ok_or_else(missing)?;
     let report = tracks::analyze(
@@ -489,7 +485,6 @@ pub fn rehear(
     let mut jobs = p.jobs();
     jobs.file = p.file.clone();
     let opts = PipelineOptions {
-        device,
         force: true,
         voices: voices.to_vec(),
         ..Default::default()
@@ -507,12 +502,17 @@ pub fn labelled(p: &Project, voices: &[Voice]) -> Result<Found> {
 }
 
 /// [`labelled`] after a remembered person was renamed `from` -> `to` in `voices`: the seconds
-/// pinned to them (5c) follow the new name.
+/// pinned to them (5c) follow the new name. Speakers heard by an older Junctur (5r) cannot be
+/// labelled again, but their pins still follow the name, so that the next hearing gives those
+/// seconds to the renamed person instead of dropping them; the rest is kept as it is.
 pub fn labelled_renamed(p: &Project, voices: &[Voice], from: &str, to: &str) -> Result<Found> {
     let mut found = p
         .speakers()
         .ok_or_else(|| Error::Edit("run `junctur analyze` on this file first".into()))?;
     found.rename_pins(from, to);
+    if found.heard_by_an_older_junctur() {
+        return Ok(found);
+    }
     speakers::relabel(&found, &p.dir, voices)
 }
 
@@ -916,6 +916,90 @@ pub fn recut(p: &Project, settings: &CutSettings) -> Result<EditList> {
 mod tests {
     use super::*;
 
+    /// The code of every `.rs` file under `src/<rel>` (a folder or one file), without its
+    /// `mod tests`, CRLF read as LF.
+    fn code_under(rel: &str) -> Vec<(String, String)> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut todo = vec![root.join(rel)];
+        let mut out = Vec::new();
+        while let Some(at) = todo.pop() {
+            if at.is_dir() {
+                todo.extend(std::fs::read_dir(&at).unwrap().map(|e| e.unwrap().path()));
+            } else if at.extension().is_some_and(|x| x == "rs") {
+                let src = std::fs::read_to_string(&at).unwrap().replace("\r\n", "\n");
+                let code = match src.find("#[cfg(test)]\nmod tests") {
+                    Some(k) => src[..k].to_string(),
+                    None => src,
+                };
+                let name = at.strip_prefix(&root).unwrap().display().to_string();
+                out.push((name, code));
+            }
+        }
+        out
+    }
+
+    /// 5r: tracks, speech and speakers open every model on the CPU; only Whisper may use the GPU
+    /// (Uezar: "GPU only for the transcribing part"). CAM++ on ONNX Runtime's CUDA provider made a
+    /// speaker of every sentence. The stages' code (every file in their folders, so a new one is
+    /// read too) may open a model only through [`runtime::open_on_cpu`], and may not name a device
+    /// at all; this file, which runs them, hands the run's device to transcription only.
+    #[test]
+    fn tracks_speech_and_speakers_open_their_models_on_the_cpu_only() {
+        let mut stages = Vec::new();
+        for rel in [
+            "tracks",
+            "diarize",
+            "vad.rs",
+            "pipeline/speech.rs",
+            "pipeline/speakers.rs",
+        ] {
+            stages.extend(code_under(rel));
+        }
+        assert!(stages.len() >= 9, "{}", stages.len());
+        let mut opened = 0;
+        for (name, code) in &stages {
+            for banned in [
+                "DevicePref",
+                "Device::",
+                "runtime::open(",
+                "runtime::open_with_threads",
+                "Session::builder",
+                "ort::ep",
+            ] {
+                assert!(!code.contains(banned), "{name} has {banned}");
+            }
+            opened += code.matches("runtime::open_on_cpu(").count();
+        }
+        // The VAD's, the segmenter's and the embedder's.
+        assert!(opened >= 3, "{opened}");
+        let (_, this) = code_under("pipeline/mod.rs").remove(0);
+        for banned in [
+            "runtime::open",
+            "Session::builder",
+            "ort::ep",
+            "DevicePref::Auto",
+        ] {
+            assert!(!this.contains(banned), "pipeline/mod.rs has {banned}");
+        }
+        // Every `device` field this file writes is transcription's (its own options' declaration
+        // aside), and the run's device is only ever written into one.
+        let mut fields = 0;
+        for (k, _) in this.match_indices("device:") {
+            let before = &this[..k];
+            let opened = &before[..before.rfind(" {").expect("a struct")];
+            let owner = opened.rsplit([' ', '(', '=']).next().unwrap();
+            if !opened.ends_with("pub struct PipelineOptions") {
+                assert_eq!(owner, "TranscribeOptions", "a device field at byte {k}");
+                fields += 1;
+            }
+        }
+        assert!(fields > 0);
+        for (k, _) in this.match_indices(".device") {
+            let line = this[..k].rsplit('\n').next().unwrap();
+            assert!(line.trim_start().starts_with("device: "), "{line}.device");
+        }
+    }
+
     fn list(settings: CutSettings, keep_end: f64) -> String {
         EditList {
             source: PathBuf::from("in.mp4"),
@@ -1089,6 +1173,39 @@ mod tests {
         std::fs::write(&file, b"not a video").unwrap();
         let p = Project::open(&file, Some(d.join("cache")), None).unwrap();
         (d, p)
+    }
+
+    #[test]
+    fn a_rename_moves_the_pins_of_speakers_an_older_junctur_heard() {
+        // 5r: heard before the fix, so not labelled again; the renamed person's pins must still
+        // follow the name, or the next hearing would drop them as a name no voice has.
+        let (d, p) = scratch_project("rename-stale");
+        let mut found = Found {
+            method: Method::Voices,
+            tracks: vec![],
+            people: vec![],
+            turns: vec![],
+            speech: String::new(),
+            heard: Some(Heard {
+                track: 0,
+                windows: vec![],
+                overlaps: vec![],
+                key: "before 5r".into(),
+                dim: 0,
+                embeddings: String::new(),
+            }),
+            known: vec![],
+            pins: vec![],
+        };
+        found.pin("Ana", &[(1.0, 2.0)]);
+        found.pin("Bea", &[(3.0, 4.0)]);
+        write_speakers(&p, &found).unwrap();
+        assert!(labelled(&p, &[]).is_err(), "not labelled from old windows");
+        let renamed = labelled_renamed(&p, &[], "ana", "Anna").unwrap();
+        let names: Vec<&str> = renamed.pins.iter().map(|x| x.name.as_str()).collect();
+        assert_eq!(names, ["Anna", "Bea"]);
+        assert_eq!((renamed.turns, renamed.heard), (found.turns, found.heard));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
