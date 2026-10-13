@@ -118,6 +118,12 @@ pub fn segments(regions: &[Region]) -> Vec<Region> {
     out
 }
 
+/// Every setting that shapes what hearing finds (windows, and overlaps through
+/// [`segment::settings`]): part of the key that says when cached results are stale.
+pub fn hearing_settings() -> String {
+    format!("{SEGMENT_S} {MIN_SEGMENT_S} {}", segment::settings())
+}
+
 /// What one read of a track gives the `speakers` stage (5b): the fixed embedding windows over its
 /// speech and their unit embeddings, in the same order, and, when a segmentation model was given,
 /// where two people talk at once. Kept whole (not just the labels) so speakers can be labelled again

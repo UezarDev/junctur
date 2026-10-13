@@ -99,6 +99,8 @@ pub struct TranscriptView {
     pub start: Vec<u64>,
     pub end: Vec<u64>,
     pub speaker: Vec<u32>,
+    /// Someone else who says the word too (5b: two people talking at once), 0 for none.
+    pub also: Vec<u32>,
 }
 
 impl TranscriptView {
@@ -106,15 +108,23 @@ impl TranscriptView {
         let ms = |s: f64| (s.max(0.0) * 1000.0).round() as u64;
         let w = &words.list;
         let label = speakers.labeller();
+        let (speaker, also) = w
+            .iter()
+            .zip(&words.tracks)
+            .map(|(w, &t)| {
+                let all = label.speakers_of_word(t, w.start, w.end);
+                (
+                    all.first().copied().unwrap_or(0),
+                    all.get(1).copied().unwrap_or(0),
+                )
+            })
+            .unzip();
         Self {
             text: w.iter().map(|w| w.text.trim().to_string()).collect(),
             start: w.iter().map(|w| ms(w.start)).collect(),
             end: w.iter().map(|w| ms(w.end)).collect(),
-            speaker: w
-                .iter()
-                .zip(&words.tracks)
-                .map(|(w, &t)| label.of_word(t, w.start, w.end).unwrap_or(0))
-                .collect(),
+            speaker,
+            also,
         }
     }
 }

@@ -35,6 +35,10 @@ pub struct CaptionFiles {
     pub cues: usize,
     /// Each speaker's own file (5b): the path, the speaker's name and its cue count.
     pub speakers: Vec<(PathBuf, String, usize)>,
+    /// Other `<stem> (…).srt` files beside the combined one that this export did not write: most
+    /// likely a speaker's file from before a rename or relabel. Not deleted (they could be the
+    /// user's own); said, so they are not imported by mistake.
+    pub stale: Vec<PathBuf>,
 }
 
 /// Write `edit`'s captions as SRT (5a, 5b): the combined file at `out`, everyone one cue at a time,
@@ -87,8 +91,72 @@ pub fn write_captions(
         std::fs::write(&path, srt::write(&cues, edit))?;
         speakers.push((path, name, cues.len()));
     }
+    let stale = stale_files(out, &speakers);
     Ok(CaptionFiles {
         cues: all.len(),
         speakers,
+        stale,
     })
+}
+
+/// `<stem> (…).srt` files beside `out` that are none of `written`.
+fn stale_files(out: &Path, written: &[(PathBuf, String, usize)]) -> Vec<PathBuf> {
+    let (Some(dir), Some(stem)) = (out.parent(), out.file_stem()) else {
+        return Vec::new();
+    };
+    let prefix = format!("{} (", stem.to_string_lossy()).to_lowercase();
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let n = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            n.starts_with(&prefix) && n.ends_with(").srt")
+        })
+        .filter(|p| !written.iter().any(|(w, _, _)| same_name(w, p)))
+        .collect();
+    out.sort();
+    out
+}
+
+fn same_name(a: &Path, b: &Path) -> bool {
+    a.file_name().map(|n| n.to_string_lossy().to_lowercase())
+        == b.file_name().map(|n| n.to_string_lossy().to_lowercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn speaker_files_this_export_did_not_write_are_named() {
+        let d = std::env::temp_dir().join(format!("junctur-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        for f in [
+            "rec.srt",
+            "rec (Ana).srt",
+            "rec (Old).srt",
+            "rec (x).txt",
+            "other (Ana).srt",
+        ] {
+            std::fs::write(d.join(f), "").unwrap();
+        }
+        let written = vec![(d.join("rec (ANA).srt"), "Ana".to_string(), 3)];
+        assert_eq!(
+            stale_files(&d.join("rec.srt"), &written),
+            vec![d.join("rec (Old).srt")]
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

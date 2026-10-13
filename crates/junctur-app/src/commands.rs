@@ -292,6 +292,8 @@ pub async fn set_captions(app: State<'_, App>, captions: Captions) -> Result<(),
 pub struct Exported {
     pub cues: usize,
     pub speakers: Vec<SpeakerFile>,
+    /// Speaker files beside it this export did not write (an earlier name's, most likely).
+    pub stale: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -317,6 +319,7 @@ pub async fn export_captions(app: State<'_, App>, path: String) -> Result<Export
                 cues,
             })
             .collect(),
+        stale: f.stale.iter().map(|p| p.display().to_string()).collect(),
     })
 }
 

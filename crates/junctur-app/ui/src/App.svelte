@@ -90,7 +90,7 @@
       (view) => {
         // Only onto the same transcript (another file may have opened meanwhile).
         if (view && words === before && view.speaker.length === before.text.length) {
-          words = { ...before, speaker: Uint32Array.from(view.speaker) };
+          words = { ...before, speaker: Uint32Array.from(view.speaker), also: Uint32Array.from(view.also ?? []) };
         }
       },
       (e) => (failure = String(e)),

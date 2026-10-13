@@ -93,6 +93,8 @@ export interface Voice {
 export interface Exported {
   cues: number;
   speakers: { path: string; name: string; cues: number }[];
+  /** Speaker files beside it this export did not write: from an earlier name, most likely. */
+  stale: string[];
 }
 
 /** The transcript's words (src/editor/words.rs), sorted by start; times in ms. */
@@ -102,6 +104,8 @@ export interface TranscriptView {
   end: number[];
   /** Each word's speaker id, 0 for none. */
   speaker: number[];
+  /** Someone else saying the word too (two people at once), 0 for none. */
+  also: number[];
 }
 
 export type StageState = "pending" | "running" | "done" | "failed";

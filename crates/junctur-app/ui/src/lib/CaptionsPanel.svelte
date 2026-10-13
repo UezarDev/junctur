@@ -98,6 +98,7 @@
       exported = [
         `${r.cues.toLocaleString()} captions, everyone: ${path}`,
         ...r.speakers.map((s) => `${s.cues.toLocaleString()} captions, ${s.name}: ${s.path}`),
+        ...r.stale.map((p) => `Not written now, from an earlier export? Delete before importing: ${p}`),
       ];
     } catch (e) {
       onError(String(e));

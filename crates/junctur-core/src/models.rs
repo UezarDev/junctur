@@ -87,7 +87,15 @@ pub fn ensure(model: &Model, cache_dir: &Path) -> Result<PathBuf> {
     let dir = dir(cache_dir);
     let path = dir.join(model.file);
     if path.is_file() {
-        return Ok(path);
+        if verified(model, &path)? {
+            return Ok(path);
+        }
+        // Another file under the model's name (a changed pin, a partial copy): fetched again.
+        eprintln!(
+            "junctur: {} is not the pinned model; fetching it again",
+            model.file
+        );
+        std::fs::remove_file(&path)?;
     }
     std::fs::create_dir_all(&dir)?;
     let part = dir.join(format!("{}.part", model.file));
@@ -113,7 +121,45 @@ pub fn ensure(model: &Model, cache_dir: &Path) -> Result<PathBuf> {
         )));
     }
     std::fs::rename(&part, &path)?;
+    mark(model, &path)?;
     Ok(path)
+}
+
+/// Where the size and time of a model file last checked against its pin are kept.
+fn marker(path: &Path) -> PathBuf {
+    let mut m = path.as_os_str().to_owned();
+    m.push(".verified");
+    PathBuf::from(m)
+}
+
+/// `size mtime sha256` of `path`, as the marker holds it.
+fn stamp(model: &Model, path: &Path) -> Result<String> {
+    let meta = std::fs::metadata(path)?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    Ok(format!("{} {mtime} {}", meta.len(), model.sha256))
+}
+
+fn mark(model: &Model, path: &Path) -> Result<()> {
+    std::fs::write(marker(path), stamp(model, path)?)?;
+    Ok(())
+}
+
+/// Whether the file at `path` is `model` as pinned. Hashing a 3 GB Whisper model on every run
+/// would cost seconds, so a file is hashed once and its size and time remembered beside it; a
+/// file that changes since, or a pin that changes, is hashed again.
+fn verified(model: &Model, path: &Path) -> Result<bool> {
+    if std::fs::read_to_string(marker(path)).ok() == Some(stamp(model, path)?) {
+        return Ok(true);
+    }
+    let ok = sha256_file(path)? == model.sha256;
+    if ok {
+        mark(model, path)?;
+    }
+    Ok(ok)
 }
 
 /// Streamed: the Whisper models are gigabytes, too large to read whole.
@@ -143,6 +189,27 @@ fn hex(digest: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_model_file_is_checked_once_and_again_when_it_changes() {
+        let d = std::env::temp_dir().join(format!("junctur-models-pin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let path = d.join("m.onnx");
+        std::fs::write(&path, b"abc").unwrap();
+        let m = Model {
+            file: "m.onnx",
+            url: "",
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            license: "",
+        };
+        assert!(verified(&m, &path).unwrap());
+        assert!(marker(&path).is_file());
+        assert!(verified(&m, &path).unwrap(), "from the marker");
+        std::fs::write(&path, b"abd!").unwrap();
+        assert!(!verified(&m, &path).unwrap(), "changed since");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn sha256_reference_vector() {

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 pub use jobs::{Jobs, StageRecord, StageState, STAGES};
-pub use speakers::{load_embeddings, speech_key, Found, Heard, Method};
+pub use speakers::{hearing_key, speech_key, Found, Heard, Method};
 pub use speech::{Speech, SpeechTrack};
 
 use crate::edit::{self, CutSettings, EditList, Speakers};
@@ -231,10 +231,11 @@ fn speakers_stage(
     opts: &PipelineOptions,
     log: &mut dyn FnMut(&str),
 ) -> Result<Found> {
-    let cached = p
-        .speakers()
+    let previous = p.speakers();
+    let cached = previous
+        .clone()
         .filter(|_| !opts.force)
-        .and_then(|f| speakers::cached(f, speech, &p.dir));
+        .and_then(|f| speakers::cached(f, speech, &voice_tracks(report), &p.dir));
     let found = match cached {
         // Heard before: only labelled again, with the voices as they are now (cheap).
         Some((f, embeddings)) => {
@@ -246,7 +247,7 @@ fn speakers_stage(
             again
         }
         None => jobs.stage(&p.dir, "speakers", log, |_| {
-            let f = speakers::find(
+            let mut f = speakers::find(
                 &p.file,
                 speech,
                 &voice_tracks(report),
@@ -255,6 +256,11 @@ fn speakers_stage(
                 &p.cache_dir,
                 opts.device,
             )?;
+            // Heard again: the voice names the old labels knew still are the voices', not
+            // names for whatever cluster now sits there.
+            if let Some(old) = &previous {
+                speakers::remember_known(&mut f, old);
+            }
             std::fs::write(p.speakers_path(), serde_json::to_vec_pretty(&f)?)?;
             Ok(f)
         })?,
@@ -264,9 +270,11 @@ fn speakers_stage(
 }
 
 /// Remembers `name`'s voice from `stretches` of this recording (source seconds; 5b): the cached
-/// windows there, without overlapping talk, are averaged into a voiceprint added to `voices` (the
-/// caller saves the file), and the project's speakers are labelled again with it. Returns the new
-/// speakers; the edit list is the caller's to update ([`speakers_for`], [`respeak`]).
+/// windows there, without overlapping talk, are averaged into a voiceprint added to `voices`, and
+/// the project's speakers are labelled with it. Nothing is written: the caller saves the voices
+/// file first and then the speakers ([`save_speakers`]), so a failure on the way leaves the old
+/// voices with the old labels, and new labels never stand on voices that were not saved. The edit
+/// list is the caller's to update ([`speakers_for`], [`respeak`]).
 pub fn enroll(
     p: &Project,
     voices: &mut Voices,
@@ -278,25 +286,47 @@ pub fn enroll(
         .ok_or_else(|| Error::Edit("run `junctur analyze` on this file first".into()))?;
     let (sample, seconds) = speakers::voice_sample(&found, &p.dir, stretches)?;
     let refs: Vec<&[f32]> = sample.iter().map(Vec::as_slice).collect();
-    voices.enroll(name, &refs, seconds)?;
-    let usable: Vec<Voice> = voices.usable().into_iter().cloned().collect();
-    relabel(p, &usable)
+    let mut changed = voices.clone();
+    changed.enroll(name, &refs, seconds)?;
+    let usable: Vec<Voice> = changed.usable().into_iter().cloned().collect();
+    let again = speakers::relabel(&found, &p.dir, &usable)?;
+    *voices = changed;
+    Ok(again)
+}
+
+/// The project's speakers labelled again with `voices` from what the stage heard (no audio),
+/// without saving them.
+pub fn labelled(p: &Project, voices: &[Voice]) -> Result<Found> {
+    let found = p
+        .speakers()
+        .ok_or_else(|| Error::Edit("run `junctur analyze` on this file first".into()))?;
+    speakers::relabel(&found, &p.dir, voices)
+}
+
+/// Saves `found` as the project's speakers (`speakers.json`), when it differs from what is there.
+pub fn save_speakers(p: &Project, found: &Found) -> Result<()> {
+    if p.speakers().as_ref() != Some(found) {
+        std::fs::write(p.speakers_path(), serde_json::to_vec_pretty(found)?)?;
+    }
+    Ok(())
 }
 
 /// Puts `found`'s speakers into the project's edit list in place of the ones it names, keeping
 /// everything else (kept ranges, captions, the names of speakers who are not enrolled voices), and
-/// writes it when that changes it. For the CLI after enrolling; the app does the same through its
-/// editor. `None` when there is no readable edit list.
-pub fn respeak(p: &Project, found: &Found) -> Result<Option<EditList>> {
+/// saves it as the app's editor does ([`edit::save`]: atomic, a hand edit backed up first) when
+/// that changes it. For the CLI after enrolling. `None` when there is no readable edit list;
+/// else the list and where a replaced hand edit was kept, if one was.
+pub fn respeak(p: &Project, found: &Found) -> Result<Option<(EditList, Option<PathBuf>)>> {
     let Ok(mut e) = p.edit() else {
         return Ok(None);
     };
     let speakers = speakers_for(Some(found), Some(&e.speakers));
+    let mut backup = None;
     if speakers != e.speakers {
         e.speakers = speakers;
-        std::fs::write(p.edit_path(), e.to_text())?;
+        backup = edit::save(&p.edit_path(), &e)?.backup;
     }
-    Ok(Some(e))
+    Ok(Some((e, backup)))
 }
 
 /// One line on what the speakers stage found, for the log.
@@ -330,13 +360,8 @@ pub fn describe(found: &Found) -> String {
 /// what the stage heard, and saves the result; no audio is read. The edit list is not touched: the
 /// caller puts the new speakers into the list it holds ([`speakers_for`]).
 pub fn relabel(p: &Project, voices: &[Voice]) -> Result<Found> {
-    let found = p
-        .speakers()
-        .ok_or_else(|| Error::Edit("run `junctur analyze` on this file first".into()))?;
-    let again = speakers::relabel(&found, &p.dir, voices)?;
-    if again != found {
-        std::fs::write(p.speakers_path(), serde_json::to_vec_pretty(&again)?)?;
-    }
+    let again = labelled(p, voices)?;
+    save_speakers(p, &again)?;
     Ok(again)
 }
 
@@ -541,7 +566,7 @@ pub fn outdated(p: &Project, opts: &PipelineOptions) -> Vec<String> {
 /// found (skipped, or the stage failed) the ones `previous` had, so neither erases a rename.
 pub fn speakers_for(found: Option<&Found>, previous: Option<&Speakers>) -> Speakers {
     match found {
-        Some(f) => Speakers::found(f.turns.clone(), &f.tracks, &f.people, previous),
+        Some(f) => Speakers::found(f.turns.clone(), &f.tracks, &f.people, previous, &f.known),
         None => previous.cloned().unwrap_or_default(),
     }
 }
@@ -677,8 +702,8 @@ mod tests {
     #[test]
     fn a_recut_without_found_speakers_keeps_the_ones_the_list_had() {
         let turn = |speaker| edit::Turn {
-            start: 1.0,
-            end: 2.0,
+            start: speaker as f64,
+            end: speaker as f64 + 1.0,
             speaker,
         };
         let mut had = Speakers::new(vec![turn(1), turn(2)], &[None, None], None);
@@ -690,12 +715,33 @@ mod tests {
         let found = Found {
             people: vec![],
             heard: None,
+            known: vec![],
             method: Method::Voices,
             tracks: vec![None, None],
             turns: vec![turn(2)],
             speech: String::new(),
         };
         assert_eq!(speakers_for(Some(&found), Some(&had)).name(2), Some("Ana"));
+        // Ana's stretch is speaker 1 now (an enrolled voice took the old numbering): the name
+        // goes with what she says, not with the number.
+        let renumbered = Found {
+            turns: vec![edit::Turn {
+                speaker: 1,
+                ..turn(2)
+            }],
+            ..found.clone()
+        };
+        let s = speakers_for(Some(&renumbered), Some(&had));
+        assert_eq!((s.name(1), s.name(2)), (Some("Ana"), Some("Speaker 2")));
+        // A name an enrolled voice had (here: since forgotten) is never carried onto a cluster.
+        let forgotten = Found {
+            known: vec!["ANA".into()],
+            ..found
+        };
+        assert_eq!(
+            speakers_for(Some(&forgotten), Some(&had)).name(2),
+            Some("Speaker 2")
+        );
     }
 
     fn scratch_project(name: &str) -> (PathBuf, Project) {

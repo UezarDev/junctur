@@ -49,15 +49,18 @@ pub fn analyze(a: Args) -> Result<(), String> {
     k.extend(CUT_FLAGS);
     a.reject_unknown(&k)?;
     let p = project(&a)?;
-    // The model (`--model`, else the config file's `whisper_model`, else `auto`) and the remembered
-    // voices, as the app's analysis takes them too; then this command's own flags.
+    // The model (`--model`, else the config file's `whisper_model`, else `auto`), as the app's
+    // analysis takes it too; then this command's own flags.
     let model = a.path("--model").map(|m| m.to_string_lossy().into_owned());
-    let mut opts = config::analysis_options(
-        model.as_deref(),
-        a.has("--no-transcript"),
-        a.has("--no-speakers"),
-    )
-    .map_err(|e| e.to_string())?;
+    let no_speakers = a.has("--no-speakers");
+    let mut opts = config::analysis_options(model.as_deref(), a.has("--no-transcript"), true)
+        .map_err(|e| e.to_string())?;
+    // The voices are read here rather than by `analysis_options`: read only when speakers are told
+    // apart, and a broken voices file is said and skipped instead of stopping the analysis.
+    opts.no_speakers = no_speakers;
+    if !no_speakers {
+        opts.voices = voices::remembered_or_none(&mut |m| eprintln!("junctur: {m}"));
+    }
     if a.has("--cpu") {
         opts.device = DevicePref::Cpu;
     }
@@ -123,7 +126,7 @@ pub fn cut(a: Args) -> Result<(), String> {
     // The voices may have changed since `analyze`: label the speakers again first (cheap). A
     // project heard before 5b cannot be; its speakers stay as they were.
     if p.speakers().is_some() {
-        let voices = voices::remembered().map_err(|e| e.to_string())?;
+        let voices = voices::remembered_or_none(&mut |m| eprintln!("junctur: {m}"));
         if let Err(e) = pipeline::relabel(&p, &voices) {
             eprintln!("junctur: speakers not relabelled: {e}");
         }
@@ -165,6 +168,12 @@ fn print_captions(out: &std::path::Path, files: &export::CaptionFiles) {
     println!("{} ({} captions, everyone)", out.display(), files.cues);
     for (path, name, n) in &files.speakers {
         println!("{} ({n} captions, {name})", path.display());
+    }
+    for path in &files.stale {
+        println!(
+            "{} was not written now: from an earlier export? Delete it before importing",
+            path.display()
+        );
     }
 }
 
