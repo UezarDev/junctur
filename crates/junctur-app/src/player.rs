@@ -15,13 +15,14 @@
 
 use std::collections::VecDeque;
 use std::ops::Deref;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use junctur_core::edit::EditList;
-use junctur_core::pipeline;
+use junctur_core::edit::{Captions, EditList, Speakers};
+use junctur_core::export::{self, CaptionFiles};
+use junctur_core::pipeline::{self, Found};
 use tauri::{AppHandle, Emitter};
 
 use crate::cuts::{self, edl, watch, Edit, EditState, EditorStatus, Form, Fps, Load};
@@ -30,6 +31,7 @@ use crate::lock::lock;
 use crate::mpv::{self, Event, Events, Mpv};
 use crate::state::{Change, PlayerState, OBSERVED};
 use crate::trace::Trace;
+use crate::voices;
 
 pub const STATE_EVENT: &str = "player-state";
 pub const EDIT_EVENT: &str = "edit-state";
@@ -424,6 +426,106 @@ impl Core {
         if let Step::Do(Op::Words { .. }) = step {
             self.prepare();
         }
+        self.change(|ed, list, fps| ed.edit(list, step, fps))
+    }
+
+    /// Renames speaker `id` in the edit list and saves it (first taking any outside change). A
+    /// speaker that is a remembered person renames the person (5b), in every recording.
+    pub fn rename_speaker(&self, id: u32, name: &str) -> Result<(), String> {
+        let name = junctur_core::edit::check_name(name)?;
+        match self.file().map(|f| voices::rename(&f, id, name)) {
+            Some(Ok(Some(found))) => self.respeak(&found),
+            Some(Err(e)) => Err(e),
+            _ => self.change(|ed, list, _| ed.rename(list, id, name)),
+        }
+    }
+
+    /// Sets speaker `id`'s caption colour in the edit list and saves it; a remembered person's
+    /// colour is theirs in every recording (5b).
+    pub fn recolor_speaker(&self, id: u32, color: &str) -> Result<(), String> {
+        match self.file().map(|f| voices::recolor(&f, id, color)) {
+            Some(Ok(Some(found))) => self.respeak(&found),
+            Some(Err(e)) => Err(e),
+            _ => self.change(|ed, list, _| ed.recolor(list, id, color)),
+        }
+    }
+
+    /// Remembers `name`'s voice from transcript words `first..=last` of the open recording (5b)
+    /// and labels its speakers again; returns a line for the user. Works from the windows the
+    /// speakers stage kept, so nothing is decoded and it takes a moment at most.
+    pub fn enroll_voice(&self, first: usize, last: usize, name: &str) -> Result<String, String> {
+        self.prepare();
+        let words = lock(&self.editor)
+            .words
+            .clone()
+            .ok_or("this recording has no transcript")?;
+        let stretch = words
+            .stretch(first, last)
+            .ok_or("no such words in the transcript")?;
+        let file = self.file().ok_or("no recording is open")?;
+        let (found, line) = voices::enroll(&file, name, stretch)?;
+        self.respeak(&found)?;
+        Ok(line)
+    }
+
+    /// Forgets voice `name` and labels the open recording's speakers again without it.
+    pub fn forget_voice(&self, name: &str) -> Result<(), String> {
+        match voices::forget(self.file().as_deref(), name)? {
+            Some(found) => self.respeak(&found),
+            None => Ok(()),
+        }
+    }
+
+    /// The open recording's path.
+    fn file(&self) -> Option<String> {
+        lock(&self.ctl).file.clone()
+    }
+
+    /// Puts newly labelled speakers into the list in play (names of speakers nobody enrolled are
+    /// kept by id, as a re-cut does) and saves it; the kept ranges and the undo history stay.
+    fn respeak(&self, found: &Found) -> Result<(), String> {
+        self.change(|ed, list, _| {
+            let speakers = pipeline::speakers_for(Some(found), Some(&list.speakers));
+            ed.respeak(list, speakers)
+        })
+    }
+
+    /// Sets the edit list's caption settings and saves them.
+    pub fn set_captions(&self, captions: Captions) -> Result<(), String> {
+        self.change(|ed, list, _| ed.set_captions(list, captions))
+    }
+
+    /// Writes the captions of the list in play to `out` as an SRT (5a), and one per speaker beside
+    /// it (5b), on the edited timeline at the frame rate the player rounds to. Read and written
+    /// outside the locks once the words and the list are in hand.
+    pub fn export_captions(&self, out: &Path) -> Result<CaptionFiles, String> {
+        self.prepare();
+        // An `Arc` of the words, not a copy; the lock is held only to take it.
+        let words = lock(&self.editor)
+            .words
+            .clone()
+            .ok_or("captions need a transcript: run the pipeline on this recording")?;
+        let (list, fps) = {
+            let c = lock(&self.ctl);
+            let list = c.edit.list.clone().ok_or("no edit list yet")?;
+            (list, c.fps.ok_or("the frame rate is not known")?)
+        };
+        let tracked: Vec<_> = words
+            .tracks
+            .iter()
+            .copied()
+            .zip(words.list.iter())
+            .collect();
+        export::write_captions(&list, &tracked, fps.num, fps.den, out)
+            .map_err(|e| format!("writing {}: {e}", out.display()))
+    }
+
+    /// Takes any outside change on disk, lets `f` change and save the list in play, and plays
+    /// the result.
+    fn change(
+        &self,
+        f: impl FnOnce(&mut Editor, &EditList, Fps) -> Result<Option<Edited>, String>,
+    ) -> Result<(), String> {
         let mut ed = lock(&self.editor);
         let synced = self.sync(&mut ed, "before an edit");
         let (list, fps) = {
@@ -436,7 +538,7 @@ impl Core {
             (list, c.fps.ok_or("the frame rate is not known")?)
         };
         synced.map_err(|e| format!("the preview did not reload: {e}"))?;
-        let edited = ed.edit(&list, step, fps)?;
+        let edited = f(&mut ed, &list, fps)?;
         let mut c = lock(&self.ctl);
         let mut status = EditorStatus {
             can_undo: ed.can_undo(),
@@ -477,11 +579,15 @@ impl Core {
     }
 
     /// The transcript's words, read on first use (and again while there are none, as the pipeline
-    /// may write them); `None` without a project or transcript.
+    /// may write them), labelled with the speakers of the list in play; `None` without a project
+    /// or transcript.
     pub fn transcript(&self) -> Option<TranscriptView> {
         self.prepare();
         let words = lock(&self.editor).words.clone()?;
-        Some(TranscriptView::new(&words))
+        let list = lock(&self.ctl).edit.list.clone();
+        let none = Speakers::default();
+        let speakers = list.as_deref().map_or(&none, |l| &l.speakers);
+        Some(TranscriptView::new(&words, speakers))
     }
 
     /// Keeps the right-hand `share` of the window (0..1) free of video, for a panel there.

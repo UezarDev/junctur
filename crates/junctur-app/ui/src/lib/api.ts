@@ -58,6 +58,43 @@ export interface EditState {
   canRedo: boolean;
   /** What the last edit or outside change did that the user should know. */
   notice: string | null;
+  /** The speakers the edit list names (ids from 1). */
+  speakers: Speaker[];
+  /** Changes when the words' speaker labels would (turns changed on disk), not on a rename. */
+  speakersKey: string;
+  /** Caption settings (the edit list's `captions` line). */
+  captions: Captions;
+}
+
+export interface Speaker {
+  id: number;
+  name: string;
+  /** Caption colour, `#RRGGBB`. */
+  color: string;
+}
+
+/** How the caption file is cut (src: junctur-core edit/captions.rs). */
+export interface Captions {
+  on: boolean;
+  chars: number;
+  lines: number;
+  seconds: number;
+}
+
+/** A voice Junctur remembers (5b), used to name speakers in every recording. */
+export interface Voice {
+  name: string;
+  color: string;
+  /** Seconds of speech its voiceprint was made from. */
+  seconds: number;
+}
+
+/** What a caption export wrote: the combined file and one per speaker (5b). */
+export interface Exported {
+  cues: number;
+  speakers: { path: string; name: string; cues: number }[];
+  /** Speaker files beside it this export did not write: from an earlier name, most likely. */
+  stale: string[];
 }
 
 /** The transcript's words (src/editor/words.rs), sorted by start; times in ms. */
@@ -65,6 +102,10 @@ export interface TranscriptView {
   text: string[];
   start: number[];
   end: number[];
+  /** Each word's speaker id, 0 for none. */
+  speaker: number[];
+  /** Someone else saying the word too (two people at once), 0 for none. */
+  also: number[];
 }
 
 export type StageState = "pending" | "running" | "done" | "failed";
@@ -99,6 +140,20 @@ export const editWords = (first: number, last: number, keep: boolean) =>
 /** Cuts or keeps source frames `[start, end)` exactly. */
 export const editFrames = (start: number, end: number, keep: boolean) =>
   invoke<void>("edit_frames", { start, end, keep });
+/** Renames speaker `id` in the edit list (saved at once, not an undo step). */
+export const renameSpeaker = (id: number, name: string) =>
+  invoke<void>("rename_speaker", { id, name });
+/** Sets speaker `id`'s caption colour (`#RRGGBB`). */
+export const recolorSpeaker = (id: number, color: string) =>
+  invoke<void>("recolor_speaker", { id, color });
+export const setCaptions = (captions: Captions) => invoke<void>("set_captions", { captions });
+/** Writes the captions as an SRT at `path`, and one per speaker beside it (`<name> (<speaker>).srt`). */
+export const exportCaptions = (path: string) => invoke<Exported>("export_captions", { path });
+export const voices = () => invoke<Voice[]>("voices");
+/** Remembers `name`'s voice from words `first..=last` and relabels the speakers; resolves to a line for the user. */
+export const enrollVoice = (first: number, last: number, name: string) =>
+  invoke<string>("enroll_voice", { first, last, name });
+export const forgetVoice = (name: string) => invoke<void>("forget_voice", { name });
 export const undo = () => invoke<void>("undo");
 export const redo = () => invoke<void>("redo");
 /** The share of the window's width (0..1) on the right to keep free of video. */

@@ -60,6 +60,8 @@ fn edit(source: &Path) -> EditList {
                 end: 15.55,
             },
         ],
+        speakers: Default::default(),
+        captions: Default::default(),
         windows: vec![],
     }
 }

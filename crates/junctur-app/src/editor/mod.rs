@@ -8,7 +8,9 @@ pub mod words;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use junctur_core::edit::{self, frame_ranges, frames_ceil, EditList, Envelope, Range, Saved};
+use junctur_core::edit::{
+    self, check_name, frame_ranges, frames_ceil, Captions, EditList, Envelope, Range, Saved,
+};
 
 use crate::cuts::Fps;
 pub use words::{TranscriptView, Words};
@@ -148,6 +150,89 @@ impl Editor {
         }))
     }
 
+    /// Renames speaker `id` and saves; `None` when the name is already that. Like every styling
+    /// change (below) not an undo step: the history holds kept ranges only, so undoing a cut keeps
+    /// the new name (the list saved for an undo is the one in play with older ranges).
+    pub fn rename(
+        &mut self,
+        list: &EditList,
+        id: u32,
+        name: &str,
+    ) -> Result<Option<Edited>, String> {
+        let name = check_name(name)?;
+        self.restyle(list, |l| {
+            l.speakers
+                .rename(id, name)
+                .then_some(())
+                .ok_or(format!("there is no speaker {id}"))
+        })
+    }
+
+    /// Sets speaker `id`'s caption colour (`#RRGGBB`) and saves.
+    pub fn recolor(
+        &mut self,
+        list: &EditList,
+        id: u32,
+        color: &str,
+    ) -> Result<Option<Edited>, String> {
+        let color = edit::parse_color(color.trim())
+            .ok_or_else(|| format!("{color:?} is not a colour like #F2B33D"))?;
+        self.restyle(list, |l| {
+            l.speakers
+                .recolor(id, &color)
+                .then_some(())
+                .ok_or(format!("there is no speaker {id}"))
+        })
+    }
+
+    /// Sets the caption settings (on/off and how cues are cut) and saves.
+    pub fn set_captions(
+        &mut self,
+        list: &EditList,
+        captions: Captions,
+    ) -> Result<Option<Edited>, String> {
+        captions.check()?;
+        self.restyle(list, |l| {
+            l.captions = captions;
+            Ok(())
+        })
+    }
+
+    /// Puts `speakers` in place of the list's (5b: labelled again after a voice was enrolled or
+    /// forgotten) and saves. Like a rename, not an undo step.
+    pub fn respeak(
+        &mut self,
+        list: &EditList,
+        speakers: junctur_core::edit::Speakers,
+    ) -> Result<Option<Edited>, String> {
+        self.restyle(list, |l| {
+            l.speakers = speakers;
+            Ok(())
+        })
+    }
+
+    /// Applies `f` to a copy of `list` and saves it; `None` when it changed nothing.
+    fn restyle(
+        &mut self,
+        list: &EditList,
+        f: impl FnOnce(&mut EditList) -> Result<(), String>,
+    ) -> Result<Option<Edited>, String> {
+        let mut new = list.clone();
+        f(&mut new)?;
+        if new == *list {
+            return Ok(None);
+        }
+        let path = self.path.clone().ok_or("no edit list is open")?;
+        let saved =
+            edit::save(&path, &new).map_err(|e| format!("saving {}: {e}", path.display()))?;
+        self.written = Some(saved.text.clone());
+        Ok(Some(Edited {
+            list: new,
+            saved,
+            unsnapped: false,
+        }))
+    }
+
     /// Moves an undo (or redo) step to the other stack, `before` being the ranges it replaced.
     fn shift(&mut self, step: Step, before: Vec<Range>) {
         match step {
@@ -231,6 +316,8 @@ mod tests {
             duration: 60.0,
             settings: CutSettings::default(),
             keep,
+            speakers: Default::default(),
+            captions: Default::default(),
             windows: vec![],
         }
     }
@@ -407,6 +494,72 @@ mod tests {
             keep: false,
         });
         assert!(e.edit(&l2, tiny, FPS).unwrap_err().contains("frame"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn renames_are_saved_and_survive_undo() {
+        use junctur_core::edit::{Speakers, Turn};
+        let d = scratch("rename");
+        let path = d.join("edit.junctur");
+        let mut e = Editor::default();
+        e.reset(Some(path.clone()));
+        let mut l0 = list(vec![r(0.0, 30.0)]);
+        l0.speakers = Speakers::new(
+            vec![Turn {
+                start: 1.0,
+                end: 5.0,
+                speaker: 1,
+            }],
+            &[None],
+            None,
+        );
+        let l1 = step(
+            &mut e,
+            &l0,
+            Step::Do(Op::Frames {
+                start: 30,
+                end: 60,
+                keep: false,
+            }),
+            FPS,
+        );
+        let renamed = e.rename(&l1, 1, "  Ana María ").unwrap().unwrap().list;
+        assert_eq!(renamed.speakers.name(1), Some("Ana María"));
+        assert_eq!(reread(&path), renamed);
+        assert!(e.is_own(&std::fs::read_to_string(&path).unwrap()));
+        // The same name again writes nothing; bad names and ids are refused.
+        assert!(e.rename(&renamed, 1, "Ana María").unwrap().is_none());
+        assert!(e.rename(&renamed, 1, "  ").is_err());
+        assert!(e.rename(&renamed, 1, "a\nb").is_err());
+        assert!(e
+            .rename(&renamed, 1, &"x".repeat(edit::MAX_NAME + 1))
+            .is_err());
+        assert!(e.rename(&renamed, 2, "Bea").is_err());
+        assert!(e.rename(&renamed, 1, "track=2 Bob").is_err());
+        assert!(e.rename(&renamed, 1, "color=#FF0000 Bob").is_err());
+        let bob = e.rename(&renamed, 1, "Bob track=2").unwrap().unwrap().list;
+        // Colours and caption settings save the same way, also not undo steps.
+        let renamed = e.rename(&bob, 1, "Ana María").unwrap().unwrap().list;
+        let red = e.recolor(&renamed, 1, " #ff0000").unwrap().unwrap().list;
+        assert_eq!(red.speakers.color(1), Some("#FF0000"));
+        assert!(e.recolor(&red, 1, "#FF0000").unwrap().is_none());
+        assert!(e.recolor(&red, 1, "red").is_err());
+        assert!(e.recolor(&red, 2, "#00FF00").is_err());
+        let on = Captions {
+            on: true,
+            ..Captions::default()
+        };
+        let captioned = e.set_captions(&red, on).unwrap().unwrap().list;
+        assert_eq!(reread(&path).captions, on);
+        assert!(e
+            .set_captions(&captioned, Captions { lines: 9, ..on })
+            .is_err());
+        let renamed = captioned;
+        // Undoing the cut keeps the name.
+        let undone = step(&mut e, &renamed, Step::Undo, FPS);
+        assert_eq!(undone.keep, l0.keep);
+        assert_eq!(undone.speakers.name(1), Some("Ana María"));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

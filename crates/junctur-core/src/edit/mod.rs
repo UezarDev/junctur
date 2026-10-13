@@ -1,25 +1,32 @@
 //! The edit list: which ranges of the source to keep, as a readable text file the user can diff,
-//! commit and hand-edit, plus a score per short time window for the later Review/Swipe modes.
+//! commit and hand-edit, plus who speaks when (named speakers and their turns) and a score per short
+//! time window for the later Review/Swipe modes.
 //!
 //! It is the one piece of state a project owns; everything else in the project folder is a cache
 //! that can be rebuilt. The source itself is never touched.
 
+mod captions;
 mod format;
 mod frames;
 mod reduce;
 mod save;
 mod scores;
+mod speakers;
 mod splice;
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+pub use captions::{default_color, parse_color, Captions};
 pub use format::{parse, FORMAT_VERSION};
 pub use frames::{frame_ranges, frame_span, frames_ceil, frames_floor};
 pub use reduce::{keep_ranges, snap_boundary, word_span, Envelope, ENVELOPE_HOP};
-pub use save::{backup_path, save, Saved};
+pub use save::{backup_path, save, unstamped, Saved};
 pub use scores::windows;
+pub use speakers::{
+    check_name, default_name, Labeller, Person, SpeakerName, Speakers, Turn, MAX_NAME,
+};
 pub use splice::{cut_span, keep_span};
 
 /// A kept stretch of the source, in seconds.
@@ -80,6 +87,10 @@ pub struct EditList {
     pub duration: f64,
     pub settings: CutSettings,
     pub keep: Vec<Range>,
+    /// Who speaks when; empty when the project has no speakers stage result.
+    pub speakers: Speakers,
+    /// How the caption file is cut into cues, and whether captions are on.
+    pub captions: Captions,
     pub windows: Vec<Window>,
 }
 

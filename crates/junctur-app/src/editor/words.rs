@@ -1,15 +1,18 @@
 //! The transcript as the editor sees it: every word of every track in one list, sorted by start, so
-//! the frontend and the editor name a word by the same index.
+//! the frontend and the editor name a word by the same index. Each word keeps the track it was heard
+//! on, which is what names its speaker when speakers are tracks (5a).
 
 use std::path::Path;
 
-use junctur_core::edit::{word_span, CutSettings, Envelope};
+use junctur_core::edit::{word_span, CutSettings, Envelope, Speakers};
 use junctur_core::transcribe::{self, Word};
 use serde::Serialize;
 
 #[derive(Debug, Default)]
 pub struct Words {
     pub list: Vec<Word>,
+    /// The audio track (0-based ordinal) each word was heard on.
+    pub tracks: Vec<usize>,
     /// The latest end among words `0..=i`. With several tracks a long word can outlast the words
     /// that start after it, so speech up to word `i` ends here, not at word `i`'s own end.
     ends_by: Vec<f64>,
@@ -19,12 +22,24 @@ impl Words {
     /// The project's `transcript.json`, or `None` when there is none (or it does not read).
     pub fn load(project_dir: &Path) -> Option<Self> {
         let t = transcribe::load(project_dir)?;
-        Some(Self::from_words(t.words().cloned().collect()))
+        let words = t
+            .segments
+            .iter()
+            .flat_map(|s| s.words.iter().map(|w| (s.track, w.clone())))
+            .collect();
+        Some(Self::from_tracked(words))
     }
 
-    pub fn from_words(mut list: Vec<Word>) -> Self {
+    /// Words all heard on track 0.
+    #[cfg(test)]
+    pub fn from_words(list: Vec<Word>) -> Self {
+        Self::from_tracked(list.into_iter().map(|w| (0, w)).collect())
+    }
+
+    pub fn from_tracked(mut words: Vec<(usize, Word)>) -> Self {
         // Stable: words of one chunk keep their order when two start together.
-        list.sort_by(|a, b| a.start.total_cmp(&b.start));
+        words.sort_by(|a, b| a.1.start.total_cmp(&b.1.start));
+        let (tracks, list): (Vec<usize>, Vec<Word>) = words.into_iter().unzip();
         let ends_by = list
             .iter()
             .scan(f64::NEG_INFINITY, |m, w| {
@@ -32,7 +47,18 @@ impl Words {
                 Some(*m)
             })
             .collect();
-        Self { list, ends_by }
+        Self {
+            list,
+            tracks,
+            ends_by,
+        }
+    }
+
+    /// The source seconds words `first..=last` are said in: the first one's start to the latest
+    /// end up to the last (5b: a voice is enrolled from this). `None` for an index out of range.
+    pub fn stretch(&self, first: usize, last: usize) -> Option<(f64, f64)> {
+        let (first, last) = (first.min(last), first.max(last));
+        Some((self.list.get(first)?.start, *self.ends_by.get(last)?))
     }
 
     /// The source span that cutting (`keep` false) or keeping words `first..=last` changes, placed
@@ -66,22 +92,39 @@ impl Words {
 }
 
 /// The words for the frontend, compact for a 30 h transcript (hundreds of thousands of words):
-/// times in whole milliseconds.
+/// times in whole milliseconds, and each word's speaker id (0: none) from the edit list's turns.
 #[derive(Debug, Serialize)]
 pub struct TranscriptView {
     pub text: Vec<String>,
     pub start: Vec<u64>,
     pub end: Vec<u64>,
+    pub speaker: Vec<u32>,
+    /// Someone else who says the word too (5b: two people talking at once), 0 for none.
+    pub also: Vec<u32>,
 }
 
 impl TranscriptView {
-    pub fn new(words: &Words) -> Self {
+    pub fn new(words: &Words, speakers: &Speakers) -> Self {
         let ms = |s: f64| (s.max(0.0) * 1000.0).round() as u64;
         let w = &words.list;
+        let label = speakers.labeller();
+        let (speaker, also) = w
+            .iter()
+            .zip(&words.tracks)
+            .map(|(w, &t)| {
+                let all = label.speakers_of_word(t, w.start, w.end);
+                (
+                    all.first().copied().unwrap_or(0),
+                    all.get(1).copied().unwrap_or(0),
+                )
+            })
+            .unzip();
         Self {
             text: w.iter().map(|w| w.text.trim().to_string()).collect(),
             start: w.iter().map(|w| ms(w.start)).collect(),
             end: w.iter().map(|w| ms(w.end)).collect(),
+            speaker,
+            also,
         }
     }
 }
@@ -110,10 +153,43 @@ mod tests {
 
     #[test]
     fn sorted_and_compact() {
-        let v = TranscriptView::new(&sample());
+        let v = TranscriptView::new(&sample(), &Speakers::default());
         assert_eq!(v.text, vec!["uno", "dos", "tres"]);
         assert_eq!(v.start, vec![10_000, 10_500, 12_000]);
         assert_eq!(v.end, vec![10_400, 11_000, 12_500]);
+        assert_eq!(v.speaker, vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn words_are_labelled_by_turn_or_by_track() {
+        use junctur_core::edit::Turn;
+        let turn = |start, end, speaker| Turn {
+            start,
+            end,
+            speaker,
+        };
+        // By voice: "uno" and "dos" in speaker 2's turn, "tres" in speaker 1's.
+        let voices = Speakers::new(
+            vec![turn(9.8, 11.2, 2), turn(11.8, 13.0, 1)],
+            &[None, None],
+            None,
+        );
+        assert_eq!(
+            TranscriptView::new(&sample(), &voices).speaker,
+            vec![2, 2, 1]
+        );
+        // By track: the track a word was heard on decides, whatever the turns overlap.
+        let w = Words::from_tracked(vec![
+            (3, word(10.0, 10.4, "hola")),
+            (0, word(10.1, 10.3, "sí")),
+        ]);
+        assert_eq!(w.tracks, vec![3, 0]);
+        let tracks = Speakers::new(
+            vec![turn(10.0, 10.4, 1), turn(9.0, 11.0, 2)],
+            &[Some(0), Some(3)],
+            None,
+        );
+        assert_eq!(TranscriptView::new(&w, &tracks).speaker, vec![2, 1]);
     }
 
     #[test]

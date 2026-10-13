@@ -3,6 +3,8 @@
   // playhead lit and followed. Rows have one fixed height and only those on screen (plus a few) are
   // in the DOM, so a 30 h transcript scrolls like a short one. An edit rebuilds the tokens
   // (transcript.ts, one pass over the words); a resize or a fold toggle only repacks them into rows.
+  // Where the speaker changes a name row comes first; click the name to rename the speaker (saved
+  // to edit.junctur at once).
   import { onMount } from "svelte";
   import { SvelteSet } from "svelte/reactivity";
   import * as api from "./api";
@@ -112,9 +114,39 @@
   // Per resize or fold toggle: rows only.
   const laid = $derived(
     toks && words && width > 0
-      ? timed("rows", () => pack(toks, words!.text.length, open, Math.max(80, width - GUTTER - 2 * PAD)))
+      ? timed("rows", () =>
+          pack(toks, words!.text.length, open, Math.max(80, width - GUTTER - 2 * PAD), words!.speaker),
+        )
       : null,
   );
+
+  // Speakers: names and caption colours from the edit list (set in the Captions panel).
+  const names = $derived(new Map((edit?.speakers ?? []).map((s) => [s.id, s.name])));
+  const colours = $derived(new Map((edit?.speakers ?? []).map((s) => [s.id, s.color])));
+  const colour = (id: number) => colours.get(id) ?? "var(--muted)";
+  const nameOf = (id: number) => names.get(id) ?? `Speaker ${id}`;
+
+  // Renaming: the one name row that was clicked (by row index: the same speaker has a name row at
+  // every turn) turns into an input; Enter or leaving it saves, Escape drops it. While it is open
+  // the list stops following the playhead, so the row is not scrolled away (and unmounted) under
+  // the user's typing.
+  let renaming = $state<{ id: number; row: number } | null>(null);
+  let draft = $state("");
+  function startRename(id: number, row: number) {
+    renaming = { id, row };
+    draft = nameOf(id);
+  }
+  function focusInput(el: HTMLInputElement) {
+    el.focus();
+    el.select();
+  }
+  function finishRename(save: boolean) {
+    const id = renaming?.id;
+    renaming = null;
+    if (!save || id == null) return;
+    const name = draft.trim();
+    if (name && name !== nameOf(id)) call(() => api.renameSpeaker(id, name));
+  }
 
   const first = $derived(Math.max(0, Math.floor(top / ROW) - OVERSCAN));
   const visible = $derived.by(() => {
@@ -135,7 +167,7 @@
   $effect(() => {
     if (!laid || current < 0 || !scroller) return;
     const row = laid.rowOf[current];
-    if (performance.now() < pausedUntil) return;
+    if (renaming || performance.now() < pausedUntil) return;
     const y = row * ROW;
     if (y < top + ROW || y > top + height - 3 * ROW) {
       ours = Math.max(0, Math.round(y - height / 3));
@@ -260,6 +292,33 @@
       <div class="spacer" style:height="{laid.rows.length * ROW}px">
         {#each visible as { index, row } (index)}
           <div class="row" style:top="{index * ROW}px" style:padding-left="{GUTTER}px">
+            {#if row.speaker != null}
+              {@const id = row.speaker}
+              {#if renaming?.row === index}
+                <input
+                  class="rename"
+                  maxlength="60"
+                  bind:value={draft}
+                  use:focusInput
+                  onpointerdown={(e) => e.stopPropagation()}
+                  onkeydown={(e) => {
+                    e.stopPropagation();
+                    if (e.key === "Enter") finishRename(true);
+                    else if (e.key === "Escape") finishRename(false);
+                  }}
+                  onblur={() => finishRename(true)}
+                  aria-label="Speaker name"
+                />
+              {:else}
+                <button
+                  class="speaker"
+                  style:color={colour(id)}
+                  onpointerdown={(e) => e.stopPropagation()}
+                  onclick={() => startRename(id, index)}
+                  title="Rename this speaker">{nameOf(id)}</button
+                >
+              {/if}
+            {/if}
             {#if row.para != null}<span class="time">{stamp(row.para)}</span>{/if}
             {#each row.tokens as k (k)}
               {@const t = toks!.list[k]}
@@ -268,6 +327,8 @@
                   class="w"
                   class:cur={t.i === current}
                   class:sel={chosen && t.i >= chosen.first && t.i <= chosen.last}
+                  style:box-shadow={words.also[t.i] ? `inset 0 -2px 0 ${colour(words.also[t.i])}` : null}
+                  title={words.also[t.i] ? `${nameOf(words.speaker[t.i])} and ${nameOf(words.also[t.i])} at once` : null}
                   data-i={t.i}>{words.text[t.i]}</span
                 >
               {:else if t.kind === "cutword"}
@@ -402,5 +463,24 @@
   }
   .gap:hover {
     background: var(--bad);
+  }
+  .speaker {
+    padding: 0 4px;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 20px;
+    background: none;
+    border: none;
+    border-radius: 3px;
+    cursor: text;
+  }
+  .speaker:hover {
+    background: rgba(255, 255, 255, 0.08);
+  }
+  .rename {
+    width: 220px;
+    height: 20px;
+    font-size: 12px;
+    font-weight: 600;
   }
 </style>

@@ -51,6 +51,15 @@ pub fn is_untouched_save(text: &str) -> bool {
     u64::from_str_radix(line[STAMP.len()..].trim(), 16).is_ok_and(|h| h == hash(body))
 }
 
+/// `text` without its stamp line when it is an untouched editor save; else `text` as it is.
+pub fn unstamped(text: &str) -> &str {
+    if is_untouched_save(text) {
+        text.rfind(STAMP).map_or(text, |at| &text[..at])
+    } else {
+        text
+    }
+}
+
 fn backup_name(edit_path: &Path, n: u32) -> PathBuf {
     let name = edit_path
         .file_name()
@@ -137,6 +146,8 @@ mod tests {
             duration: 10.0,
             settings: CutSettings::default(),
             keep: vec![Range { start: 0.0, end }],
+            speakers: Default::default(),
+            captions: Default::default(),
             windows: vec![],
         }
     }

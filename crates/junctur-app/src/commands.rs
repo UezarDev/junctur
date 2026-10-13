@@ -6,6 +6,7 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use junctur_core::edit::Captions;
 use serde::Serialize;
 use tauri::State;
 
@@ -15,6 +16,7 @@ use crate::lock::lock;
 use crate::player::{Core, Player};
 use crate::project::{self, ProjectStatus};
 use crate::state::PlayerState;
+use crate::voices::VoiceView;
 
 /// The player, or why it could not start (libmpv missing, no GL): the window still opens and
 /// says so instead of the app failing to launch.
@@ -132,6 +134,89 @@ pub async fn edit_frames(
     keep: bool,
 ) -> Result<(), String> {
     app.core()?.edit(Step::Do(Op::Frames { start, end, keep }))
+}
+
+/// Renames speaker `id` in the edit list.
+#[tauri::command]
+pub async fn rename_speaker(app: State<'_, App>, id: u32, name: String) -> Result<(), String> {
+    app.core()?.rename_speaker(id, &name)
+}
+
+/// Sets speaker `id`'s caption colour (`#RRGGBB`).
+#[tauri::command]
+pub async fn recolor_speaker(app: State<'_, App>, id: u32, color: String) -> Result<(), String> {
+    app.core()?.recolor_speaker(id, &color)
+}
+
+/// Sets the caption settings: on/off and how cues are cut.
+#[tauri::command]
+pub async fn set_captions(app: State<'_, App>, captions: Captions) -> Result<(), String> {
+    app.core()?.set_captions(captions)
+}
+
+/// What an export wrote: the combined file's captions and each speaker's file (5b).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Exported {
+    pub cues: usize,
+    pub speakers: Vec<SpeakerFile>,
+    /// Speaker files beside it this export did not write (an earlier name's, most likely).
+    pub stale: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeakerFile {
+    pub path: String,
+    pub name: String,
+    pub cues: usize,
+}
+
+/// Writes the captions as an SRT to `path`, and one per speaker beside it.
+#[tauri::command]
+pub async fn export_captions(app: State<'_, App>, path: String) -> Result<Exported, String> {
+    let f = app.core()?.export_captions(Path::new(&path))?;
+    Ok(Exported {
+        cues: f.cues,
+        speakers: f
+            .speakers
+            .into_iter()
+            .map(|(p, name, cues)| SpeakerFile {
+                path: p.display().to_string(),
+                name,
+                cues,
+            })
+            .collect(),
+        stale: f.stale.iter().map(|p| p.display().to_string()).collect(),
+    })
+}
+
+/// The voices Junctur remembers (5b).
+#[tauri::command]
+pub async fn voices() -> Result<Vec<VoiceView>, String> {
+    crate::voices::list()
+}
+
+/// Remembers `name`'s voice from transcript words `first..=last` and labels the speakers again;
+/// returns a line for the user.
+#[tauri::command]
+pub async fn enroll_voice(
+    app: State<'_, App>,
+    first: usize,
+    last: usize,
+    name: String,
+) -> Result<String, String> {
+    app.core()?.enroll_voice(first, last, &name)
+}
+
+/// Forgets voice `name`, relabelling the open recording.
+#[tauri::command]
+pub async fn forget_voice(app: State<'_, App>, name: String) -> Result<(), String> {
+    match app.core() {
+        Ok(core) => core.forget_voice(&name),
+        // No player (libmpv missing): the voice can still be forgotten.
+        Err(_) => crate::voices::forget(None, &name).map(|_| ()),
+    }
 }
 
 #[tauri::command]

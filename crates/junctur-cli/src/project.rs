@@ -6,10 +6,11 @@ use junctur_core::export;
 use junctur_core::pipeline::{self, PipelineOptions, Project, StageState, STAGES};
 use junctur_core::render::{self, RenderOptions};
 use junctur_core::runtime::DevicePref;
-use junctur_core::transcribe::ModelPref;
+use junctur_core::transcribe::{self, ModelPref};
 
 use crate::args::Args;
 use crate::config::{self, Config};
+use crate::voices;
 
 const PROJECT_FLAGS: &[&str] = &["--project", "--cache-dir"];
 const CUT_FLAGS: &[&str] = &["--pad-before", "--pad-after", "--merge-gap", "--crossfade"];
@@ -53,7 +54,13 @@ fn model(
 }
 
 pub fn analyze(a: Args) -> Result<(), String> {
-    let mut k = known(&["--cpu", "--model", "--force", "--no-transcript"]);
+    let mut k = known(&[
+        "--cpu",
+        "--model",
+        "--force",
+        "--no-transcript",
+        "--no-speakers",
+    ]);
     k.extend(CUT_FLAGS);
     a.reject_unknown(&k)?;
     let p = project(&a)?;
@@ -75,6 +82,13 @@ pub fn analyze(a: Args) -> Result<(), String> {
         cut: cut_settings(&a)?,
         force: a.has("--force"),
         no_transcript,
+        no_speakers: a.has("--no-speakers"),
+        // Read only when speakers are told apart; a broken voices file is said and skipped.
+        voices: if a.has("--no-speakers") {
+            Vec::new()
+        } else {
+            voices::usable()
+        },
         ..Default::default()
     };
     let out = pipeline::run(&p, &opts, &mut |line| eprintln!("junctur: {line}"))
@@ -134,21 +148,57 @@ pub fn cut(a: Args) -> Result<(), String> {
     k.extend(CUT_FLAGS);
     a.reject_unknown(&k)?;
     let p = project(&a)?;
+    // The voices may have changed since `analyze`: label the speakers again first (cheap). A
+    // project heard before 5b cannot be; its speakers stay as they were.
+    if p.speakers().is_some() {
+        if let Err(e) = pipeline::relabel(&p, &voices::usable()) {
+            eprintln!("junctur: speakers not relabelled: {e}");
+        }
+    }
     let e = pipeline::recut(&p, &cut_settings(&a)?).map_err(|e| e.to_string())?;
     print_edit(&p, &e);
     Ok(())
 }
 
 pub fn export(a: Args) -> Result<(), String> {
-    a.reject_unknown(&known(&["--fcpxml"]))?;
-    let out = a
-        .path("--fcpxml")
-        .ok_or("export needs --fcpxml <out.fcpxml>")?;
+    a.reject_unknown(&known(&["--fcpxml", "--srt"]))?;
+    let (fcpxml, srt) = (a.path("--fcpxml"), a.path("--srt"));
+    if fcpxml.is_none() && srt.is_none() {
+        return Err("export needs --fcpxml <out.fcpxml> and/or --srt <out.srt>".into());
+    }
     let p = project(&a)?;
     let e = p.edit().map_err(|e| e.to_string())?;
-    export::write_fcpxml(&e, &out).map_err(|e| e.to_string())?;
-    println!("{} ({} clips)", out.display(), e.keep.len());
+    if let Some(out) = fcpxml {
+        export::write_fcpxml(&e, &out).map_err(|e| e.to_string())?;
+        println!("{} ({} clips)", out.display(), e.keep.len());
+    }
+    if let Some(out) = srt {
+        write_captions(&p, &e, &out)?;
+    }
     Ok(())
+}
+
+/// The caption files for `e` at `out` (and one per speaker beside it), from the project's
+/// transcript.
+fn write_captions(p: &Project, e: &EditList, out: &std::path::Path) -> Result<(), String> {
+    let t = transcribe::load(&p.dir)
+        .ok_or("captions need a transcript: run `junctur analyze` on this file first")?;
+    let files = export::write_srt(e, &t, out).map_err(|e| e.to_string())?;
+    print_captions(out, &files);
+    Ok(())
+}
+
+fn print_captions(out: &std::path::Path, files: &export::CaptionFiles) {
+    println!("{} ({} captions, everyone)", out.display(), files.cues);
+    for (path, name, n) in &files.speakers {
+        println!("{} ({n} captions, {name})", path.display());
+    }
+    for path in &files.stale {
+        println!(
+            "{} was not written now: from an earlier export? Delete it before importing",
+            path.display()
+        );
+    }
 }
 
 pub fn render(a: Args) -> Result<(), String> {
@@ -156,6 +206,17 @@ pub fn render(a: Args) -> Result<(), String> {
     let out = a.path("--out").ok_or("render needs --out <out.mp4>")?;
     let p = project(&a)?;
     let e = p.edit().map_err(|e| e.to_string())?;
+    // With captions on, what the caption file needs is checked before an encode that can take an
+    // hour, not after it.
+    let captions = if e.captions.on {
+        let srt = out.with_extension("srt");
+        junctur_core::output::refuse_source(&e.source, &srt).map_err(|e| e.to_string())?;
+        let t = transcribe::load(&p.dir)
+            .ok_or("captions are on but there is no transcript: run `junctur analyze` first")?;
+        Some((srt, t))
+    } else {
+        None
+    };
     let opts = RenderOptions {
         full: a.has("--full"),
         overwrite: a.has("--force"),
@@ -181,6 +242,11 @@ pub fn render(a: Args) -> Result<(), String> {
         r.audio_tracks,
         r.seconds
     );
+    // Captions are an optional toggle in the edit list; on, they go beside the video.
+    if let Some((srt, t)) = captions {
+        let files = export::write_srt(&e, &t, &srt).map_err(|e| e.to_string())?;
+        print_captions(&srt, &files);
+    }
     Ok(())
 }
 
@@ -196,6 +262,14 @@ fn print_edit(p: &Project, e: &EditList) {
         e.duration,
         e.keep.len()
     );
+    if !e.speakers.names.is_empty() {
+        let names: Vec<&str> = e.speakers.names.iter().map(|n| n.name.as_str()).collect();
+        println!(
+            "speakers: {} ({} turns; rename them in the edit list's `speaker` lines)",
+            names.join(", "),
+            e.speakers.turns.len()
+        );
+    }
     println!("  {}", p.edit_path().display());
 }
 

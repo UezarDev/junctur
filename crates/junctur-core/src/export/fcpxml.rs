@@ -133,6 +133,8 @@ mod tests {
             duration: 10.0,
             settings: CutSettings::default(),
             keep,
+            speakers: Default::default(),
+            captions: Default::default(),
             windows: vec![],
         }
     }
