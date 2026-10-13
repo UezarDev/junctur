@@ -58,8 +58,10 @@ pub struct Segmenter {
 }
 
 impl Segmenter {
-    pub fn open(model: &Path, pref: DevicePref) -> Result<Self> {
-        let (session, device) = runtime::open(model, pref)?;
+    /// On the CPU, as everything in the Tracks, Speech and Speakers stages is (5r: Uezar, "GPU
+    /// only for the transcribing part").
+    pub fn open(model: &Path) -> Result<Self> {
+        let (session, device) = runtime::open(model, DevicePref::Cpu)?;
         Ok(Self { session, device })
     }
 

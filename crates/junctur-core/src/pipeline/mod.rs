@@ -120,6 +120,8 @@ impl Project {
 
 #[derive(Debug, Clone, Default)]
 pub struct PipelineOptions {
+    /// Where Whisper may run. Only transcription uses it: tracks, speech and speakers always run on
+    /// the CPU (5r: CAM++ on the GPU found a speaker per sentence).
     pub device: DevicePref,
     pub model: ModelPref,
     /// The word list Whisper is told (5h; the caller reads the config file). Not part of what makes
@@ -415,7 +417,6 @@ fn speakers_stage(
                 &pins,
                 &p.dir,
                 &p.cache_dir,
-                opts.device,
                 &mut |track, at| steps(steps::step(report, "speakers", track, at)),
             )?;
             // Heard again: the voice names the old labels knew still are the voices', not
@@ -471,12 +472,7 @@ pub fn enroll(
 /// cut at the pins the user made ([`speakers::seeded`]), and labels them with `voices`; the other
 /// stages' results are reused, never rerun (they need nothing new: `--force` would redo Whisper
 /// for minutes). Saves `speakers.json`; the edit list is the caller's ([`respeak`]).
-pub fn rehear(
-    p: &Project,
-    voices: &[Voice],
-    device: DevicePref,
-    log: &mut dyn FnMut(&str),
-) -> Result<Found> {
+pub fn rehear(p: &Project, voices: &[Voice], log: &mut dyn FnMut(&str)) -> Result<Found> {
     let missing = || Error::Edit("run `junctur analyze` on this file first".into());
     let speech = p.speech().ok_or_else(missing)?;
     let report = tracks::analyze(
@@ -489,7 +485,6 @@ pub fn rehear(
     let mut jobs = p.jobs();
     jobs.file = p.file.clone();
     let opts = PipelineOptions {
-        device,
         force: true,
         voices: voices.to_vec(),
         ..Default::default()
@@ -915,6 +910,46 @@ pub fn recut(p: &Project, settings: &CutSettings) -> Result<EditList> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 5r: tracks, speech and speakers run every model on the CPU; only Whisper may use the GPU
+    /// (Uezar: "GPU only for the transcribing part"). CAM++ on ONNX Runtime's CUDA provider made a
+    /// speaker of every sentence. Read from the stages' own source, so a device argument or a GPU
+    /// session added to any of them fails here, not on someone's recording.
+    #[test]
+    fn tracks_speech_and_speakers_open_their_models_on_the_cpu_only() {
+        let sources = [
+            ("tracks/mod.rs", include_str!("../tracks/mod.rs")),
+            ("tracks/classify.rs", include_str!("../tracks/classify.rs")),
+            ("tracks/roles.rs", include_str!("../tracks/roles.rs")),
+            ("tracks/window.rs", include_str!("../tracks/window.rs")),
+            ("tracks/render.rs", include_str!("../tracks/render.rs")),
+            ("vad.rs", include_str!("../vad.rs")),
+            ("pipeline/speech.rs", include_str!("speech.rs")),
+            ("pipeline/speakers.rs", include_str!("speakers.rs")),
+            ("diarize/mod.rs", include_str!("../diarize/mod.rs")),
+            ("diarize/segment.rs", include_str!("../diarize/segment.rs")),
+            ("diarize/cluster.rs", include_str!("../diarize/cluster.rs")),
+            ("diarize/fbank.rs", include_str!("../diarize/fbank.rs")),
+        ];
+        let mut sessions = 0;
+        for (name, src) in sources {
+            for banned in [
+                "DevicePref::Auto",
+                ": DevicePref",
+                "Session::builder",
+                "ort::ep",
+            ] {
+                assert!(!src.contains(banned), "{name} has {banned}");
+            }
+            for (at, _) in src.match_indices("runtime::open") {
+                let call = &src[at..at + src[at..].find(')').expect("a call")];
+                assert!(call.contains("DevicePref::Cpu"), "{name}: {call}");
+                sessions += 1;
+            }
+        }
+        // At least the VAD's, the segmenter's and the embedder's.
+        assert!(sessions >= 3, "{sessions}");
+    }
 
     fn list(settings: CutSettings, keep_end: f64) -> String {
         EditList {

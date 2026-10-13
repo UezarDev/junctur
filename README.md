@@ -57,7 +57,7 @@ junctur status <file> [--project <dir>]
 junctur cut <file> [--project <dir>] [cut flags]
 junctur export <file> [--fcpxml <out.fcpxml>] [--srt <out.srt>] [--project <dir>]
 junctur render <file> --out <out.mp4> [--project <dir>] [--full] [--force] [--jobs <n>]
-junctur voices [<file> --add <name> --at <start>-<end>[,...] | <file> --rehear [--cpu]] [--forget <name>]
+junctur voices [<file> --add <name> --at <start>-<end>[,...] | <file> --rehear] [--forget <name>]
 cut flags: [--pad-before <s>] [--pad-after <s>] [--merge-gap <s>] [--crossfade <ms>]
 ```
 
@@ -66,7 +66,9 @@ in the cache unless `--project <dir>` puts it somewhere else, for example a git 
 
 `analyze` also tells speakers apart (`--no-speakers` skips it): one speaker per speech track when OBS
 recorded the voices on their own tracks, otherwise by voice on the mix (CAM++ embeddings of 1.5 s
-windows, and pyannote's segmentation model for where two people talk at once). They are written into
+windows, and pyannote's segmentation model for where two people talk at once). Both always run on the
+CPU, as tracks and speech do, also in a CUDA build, where only Whisper uses the GPU: on ONNX Runtime's CUDA
+provider CAM++'s embeddings were wrong, and every sentence became its own speaker. They are written into
 `edit.junctur` as `speaker <id> <name>` lines and `turn <start> <end> <id>` lines; turns of two people
 overlap where both talk. Rename or recolour a speaker by editing its line (or in the app). A re-cut keeps
 the names.
@@ -77,7 +79,8 @@ person says and choose "Remember voice…", or `junctur voices <file> --add <nam
 labelled again: the open recording at once, any other at its next `analyze` or `cut` (`export` writes the
 edit list as it is). Voices nobody remembered are grouped automatically as "Speaker N". Remembering the same name again adds to the voice;
 half a minute from several places works best. The voices live in `junctur/voices.json` beside the config
-file (or the file `JUNCTUR_VOICES` names); `junctur voices` lists them, `--forget <name>` drops one.
+file (or the file `JUNCTUR_VOICES` names); `junctur voices` lists them, `--forget <name>` drops one. A
+voice remembered before that fix (or with another model) is deleted: remember it again.
 Enrolling relabels from what `analyze` kept (`windows.f32` in the project), without reading the
 recording again; `analyze` and `cut` relabel with the current voices. A rename of a speaker nobody
 enrolled follows that speaker through a relabel (matched by when they talk, not by number).

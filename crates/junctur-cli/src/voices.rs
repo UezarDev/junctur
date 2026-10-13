@@ -4,7 +4,6 @@
 //! app's "Analyse speakers again" (5c): the speakers heard again from the audio, cut at the pins.
 
 use junctur_core::pipeline::{self, Found, Project};
-use junctur_core::runtime::DevicePref;
 use junctur_core::voices::{self, Voice, Voices};
 
 use crate::args::Args;
@@ -53,7 +52,6 @@ pub fn run(a: Args) -> Result<(), String> {
         "--at",
         "--forget",
         "--rehear",
-        "--cpu",
         "--project",
         "--cache-dir",
     ])?;
@@ -95,14 +93,9 @@ pub fn run(a: Args) -> Result<(), String> {
         let p = Project::open(&a.file()?, a.path("--cache-dir"), a.path("--project"))
             .map_err(|e| e.to_string())?;
         let usable: Vec<Voice> = v.usable().into_iter().cloned().collect();
-        let device = if a.has("--cpu") {
-            DevicePref::Cpu
-        } else {
-            DevicePref::Auto
-        };
         // The stage's log already ends with what it found.
-        let found = pipeline::rehear(&p, &usable, device, &mut |l| println!("{l}"))
-            .map_err(|e| e.to_string())?;
+        let found =
+            pipeline::rehear(&p, &usable, &mut |l| println!("{l}")).map_err(|e| e.to_string())?;
         print_speakers(&p, &found, false)?;
         return Ok(());
     }
@@ -110,17 +103,7 @@ pub fn run(a: Args) -> Result<(), String> {
         println!("no voices remembered ({})", file.display());
     }
     for voice in &v.voices {
-        println!(
-            "{} {} ({:.1} s{})",
-            voice.color,
-            voice.name,
-            voice.seconds,
-            if voice.model == junctur_core::models::SPEAKER_EMBEDDING.sha256 {
-                ""
-            } else {
-                ", from another model: enroll again"
-            }
-        );
+        println!("{} {} ({:.1} s)", voice.color, voice.name, voice.seconds);
     }
     Ok(())
 }

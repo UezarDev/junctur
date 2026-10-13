@@ -14,7 +14,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use junctur_core::pipeline::{self, Found, Project};
-use junctur_core::runtime::DevicePref;
 use junctur_core::voices::{self, Voice, Voices};
 use serde::Serialize;
 
@@ -104,7 +103,7 @@ pub fn rehear(file: &str) -> Result<(Found, Rehearing), String> {
         let _held = crate::lock::lock(&LOCK);
         load()?.1
     };
-    let found = pipeline::rehear(&p, &usable(&v), DevicePref::Auto, &mut |l| {
+    let found = pipeline::rehear(&p, &usable(&v), &mut |l| {
         eprintln!("junctur-app: speakers again: {l}")
     })
     .map_err(|e| e.to_string())?;
@@ -140,7 +139,8 @@ fn commit(
 }
 
 /// The open recording's speakers labelled with `v`, not saved; `None` for one whose speakers
-/// cannot be relabelled (tracks, or heard before 5b), which keeps its speakers. `renamed`: a
+/// cannot be relabelled (tracks, or heard before 5b, or before 5r: maybe on the GPU), which keeps
+/// its speakers until they are analysed again. `renamed`: a
 /// remembered person renamed (from, to), whose pinned seconds (5c) follow the new name.
 fn labelled(
     file: &str,
@@ -149,7 +149,11 @@ fn labelled(
 ) -> Result<Option<(Project, Found)>, String> {
     let p = project(file)?;
     match p.speakers() {
-        Some(f) if f.heard.is_some() => {
+        Some(f)
+            if f.heard
+                .as_ref()
+                .is_some_and(|h| h.key == pipeline::hearing_key(h.track)) =>
+        {
             let found = match renamed {
                 Some((from, to)) => pipeline::labelled_renamed(&p, &usable(v), from, to),
                 None => pipeline::labelled(&p, &usable(v)),

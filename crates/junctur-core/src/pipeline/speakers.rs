@@ -32,7 +32,6 @@ use crate::diarize::{
 };
 use crate::edit::{Person, Turn};
 use crate::ffmpeg::{PcmReader, Span};
-use crate::runtime::DevicePref;
 use crate::vad::{Region, RATE};
 use crate::voices::Voice;
 use crate::{models, Result};
@@ -311,7 +310,6 @@ pub fn find(
     pins: &[Pin],
     dir: &Path,
     cache_dir: &Path,
-    device: DevicePref,
     heard: &mut dyn FnMut(usize, f64),
 ) -> Result<Found> {
     let found = match plan(speech, voice) {
@@ -333,9 +331,9 @@ pub fn find(
         },
         Plan::Diarize(one) => {
             let model = models::ensure(&models::SPEAKER_EMBEDDING, cache_dir)?;
-            let mut emb = Embedder::open(&model, device)?;
+            let mut emb = Embedder::open(&model)?;
             let seg_model = models::ensure(&models::SEGMENTATION, cache_dir)?;
-            let mut seg = Segmenter::open(&seg_model, device)?;
+            let mut seg = Segmenter::open(&seg_model)?;
             let mut r = PcmReader::open(file, one.track, RATE, 1, Span::default())?;
             // Not `finish`ed: hearing stops reading after the last speech window, and the decoder
             // is dropped (killed) rather than waited for.
@@ -401,15 +399,21 @@ pub fn cached(
         return Some((found, Vec::new()));
     }
     let heard = found.heard.as_ref()?;
-    if heard.key != hearing_key(heard.track) {
-        return None;
-    }
     let e = heard_embeddings(heard, dir)?;
     Some((found, e))
 }
 
-/// `windows.f32` in `dir` when it is the one `heard` was written with.
+/// Why a recording heard by voice has no windows to label or sample from: heard before 5b kept
+/// them, or before 5r, whose windows may be the GPU's and not CAM++'s.
+const HEARD_BY_AN_OLDER_JUNCTUR: &str = "this recording's speakers were found by an older Junctur: analyse them again first (`junctur analyze`, or \"Analyse speakers again\" in the app)";
+
+/// `windows.f32` in `dir` when it is the one `heard` was written with, by this build's hearing
+/// ([`hearing_key`]): windows from another one, such as 5r's GPU-made ones, are never labelled
+/// with or taken as a voice sample (a voice remembered from them would match nobody).
 fn heard_embeddings(heard: &Heard, dir: &Path) -> Option<Vec<Vec<f32>>> {
+    if heard.key != hearing_key(heard.track) {
+        return None;
+    }
     let b = std::fs::read(embeddings_path(dir)).ok()?;
     if format!("{:016x}", fnv(&b)) != heard.embeddings {
         return None;
@@ -429,12 +433,7 @@ pub fn relabel(found: &Found, dir: &Path, voices: &[Voice]) -> Result<Found> {
         .heard
         .as_ref()
         .and_then(|h| heard_embeddings(h, dir))
-        .ok_or_else(|| {
-            crate::Error::Edit(
-                "this recording's speakers were found before Junctur kept voiceprints: run `junctur analyze` on it once"
-                    .into(),
-            )
-        })?;
+        .ok_or_else(|| crate::Error::Edit(HEARD_BY_AN_OLDER_JUNCTUR.into()))?;
     Ok(label(found, &e, voices))
 }
 
@@ -458,9 +457,11 @@ pub fn voice_sample(
 ) -> Result<(Vec<Vec<f32>>, f64)> {
     let not_heard = || {
         crate::Error::Edit(match found.method {
-            Method::Tracks => "the speakers here are their own tracks: there is no voice to tell apart".into(),
+            Method::Tracks => {
+                "the speakers here are their own tracks: there is no voice to tell apart".into()
+            }
             Method::None => "no track of this recording carries speech".into(),
-            Method::Voices => "this recording's speakers were found before Junctur kept voiceprints: run `junctur analyze` on it once".into(),
+            Method::Voices => HEARD_BY_AN_OLDER_JUNCTUR.into(),
         })
     };
     let heard = found
@@ -508,7 +509,7 @@ pub fn voice_sample(
 /// Embeddings of `stretches` of `track` read straight from `file`, and their seconds: the voice
 /// sample (5c) when no cached window lies inside the selection (one word, a region under 0.5 s, a
 /// word outside the speech regions). Each stretch is read at least [`MIN_CLIP_S`] long, centred on it.
-/// CPU: one short clip is not worth starting the GPU for. 5b rejected decoding at enrollment as
+/// On the CPU, as every embedding is (5r). 5b rejected decoding at enrollment as
 /// the way to get a sample, since the stage already has the numbers; this is only for what it
 /// never saw.
 pub fn embed_stretches(
@@ -518,7 +519,7 @@ pub fn embed_stretches(
     cache_dir: &Path,
 ) -> Result<(Vec<Vec<f32>>, f64)> {
     let model = models::ensure(&models::SPEAKER_EMBEDDING, cache_dir)?;
-    let mut emb = Embedder::open(&model, DevicePref::Cpu)?;
+    let mut emb = Embedder::open(&model)?;
     let mut out = Vec::new();
     let mut seconds = 0.0;
     for &(a, b) in stretches {
@@ -835,7 +836,6 @@ mod tests {
             &[],
             Path::new("."),
             Path::new("."),
-            DevicePref::Cpu,
             &mut |_, _| panic!("nothing to hear"),
         )
         .unwrap();
@@ -872,7 +872,6 @@ mod tests {
                 &pins,
                 Path::new("."),
                 Path::new("."),
-                DevicePref::Cpu,
                 &mut |_, _| {},
             )
             .unwrap();
@@ -914,6 +913,27 @@ mod tests {
         assert_ne!(speech_key(&speech(&[0, 1])), speech_key(&moved));
     }
 
+    #[test]
+    fn windows_heard_before_5r_are_heard_again() {
+        // The key 5b to 5q wrote, for the same models and settings: it did not say where the windows
+        // were embedded, so ones made on the GPU (not CAM++'s numbers) were reused for good.
+        let before = |track: usize| {
+            let what = format!(
+                "{track}|{}|{}|{} {} {}",
+                models::SPEAKER_EMBEDDING.sha256,
+                models::SEGMENTATION.sha256,
+                1.5,
+                0.5,
+                diarize::segment::settings()
+            );
+            format!("{:016x}", fnv(what.as_bytes()))
+        };
+        for track in [0, 2] {
+            assert_ne!(hearing_key(track), before(track));
+        }
+        assert!(diarize::hearing_settings().ends_with(" emb=cpu"));
+    }
+
     fn unit(v: &[f32]) -> Vec<f32> {
         let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         v.iter().map(|x| x / n).collect()
@@ -932,7 +952,7 @@ mod tests {
             name: name.into(),
             color: "#123456".into(),
             seconds: 30.0,
-            model: models::SPEAKER_EMBEDDING.sha256.into(),
+            model: crate::voices::print_model(),
             print,
         }
     }
@@ -1113,7 +1133,11 @@ mod tests {
         );
         let mut other = mine.clone();
         other.heard.as_mut().unwrap().key = "old".into();
-        assert!(cached(other, &speech, &[], &d).is_none());
+        assert!(cached(other.clone(), &speech, &[], &d).is_none());
+        // Nor are windows another hearing made (5r: maybe on the GPU) labelled or sampled from.
+        let err = relabel(&other, &d, &[]).unwrap_err().to_string();
+        assert!(err.contains("older Junctur"), "{err}");
+        assert!(voice_sample(&other, &d, &[(0.0, 6.0)]).is_err());
         // A windows.f32 of the same size from another run is not these windows.
         let mut swapped = e.clone();
         swapped.swap(0, 19);
