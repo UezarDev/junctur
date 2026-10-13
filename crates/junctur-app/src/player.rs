@@ -47,6 +47,11 @@ pub const LEVELS_EVENT: &str = "levels";
 /// read each time.
 const LEVELS_EVERY: Duration = Duration::from_millis(50);
 
+/// A meter reading that has not moved for this long is old: astats only measures audio as mpv
+/// filters it, so a stalled player leaves its last reading behind. mpv filters in bursts as its
+/// buffer drains, so a few reads in a row can match while all is well.
+const LEVELS_STALE: Duration = Duration::from_millis(300);
+
 /// Position updates arrive every frame; the frontend needs a few a second.
 const POSITION_EVERY: Duration = Duration::from_millis(100);
 
@@ -192,6 +197,8 @@ pub struct Core {
     ctl: Mutex<Ctl>,
     /// Shared with the event thread, which resends the mutes when playback restarts.
     mixer: Arc<Mutex<Mixer>>,
+    /// Held while `mutes.json` is written, so writes land in the order of the clicks.
+    saving: Mutex<()>,
 }
 
 impl Player {
@@ -250,6 +257,7 @@ impl Player {
             loads,
             editor: Mutex::new(Editor::default()),
             mixer,
+            saving: Mutex::new(()),
             ctl: Mutex::new(Ctl {
                 file: None,
                 edit_path: None,
@@ -707,55 +715,59 @@ impl Core {
     }
 
     /// Mutes or unmutes audio track `track` (0-based) at once, in the graph playing, and remembers
-    /// it for the recording. Playback only: the edit list and renders never see it.
+    /// it for the recording. Playback only: the edit list and renders never see it. The mute is
+    /// applied (and shown) even when it cannot be remembered; the error then says so.
     pub fn set_muted(&self, track: usize, muted: bool) -> Result<(), String> {
-        let saved = {
+        {
             let mut m = lock(&self.mixer);
-            let saved = m.set_muted(track, muted);
+            m.set_muted(track, muted)?;
             // Under the lock, so two quick clicks reach mpv in order.
             send_weights(&self.mpv, &m);
-            saved
-        };
+        }
         self.emit_mixer();
-        saved
+        // Written outside the mixer's lock (the event thread takes it on every restart and meter
+        // tick); the mutes are read under `saving`, so the last write holds the last click.
+        let _turn = lock(&self.saving);
+        let memory = lock(&self.mixer).memory();
+        match memory {
+            Some(m) => m
+                .write()
+                .map_err(|e| format!("muted in the preview, but not {e}")),
+            None => Ok(()),
+        }
     }
 
-    /// The analysis of `file` (absolute) moved on (2d): once its `tracks` stage has left the
-    /// roles, a mixer still on track 1 only (nothing was analysed when it opened) takes their
-    /// default mutes, unless the user set some meanwhile.
+    /// The analysis of `file` (absolute) has its `tracks` stage done (2d): the mixer takes the
+    /// roles it left, on a first analysis or a re-analysis that changed them, moving only the
+    /// mutes the user never set, and tells the page when anything changed.
     pub fn tracks_known(&self, file: &Path) {
-        {
+        let project = {
             let m = lock(&self.mixer);
-            if !m.provisional() || !m.is_for(file) {
+            if !m.is_for(file) {
                 return;
             }
-        }
-        // Read outside the lock; `None` until the stage has run.
-        let Some(report) = mixer::report(file) else {
+            m.project().cloned()
+        };
+        // Read outside the lock.
+        let Some(report) = project.as_ref().and_then(pipeline::cached_tracks) else {
             return;
         };
-        let changed = {
+        {
             let mut m = lock(&self.mixer);
-            // Another recording may have opened, or the user muted something, meanwhile.
-            if !m.provisional() || !m.is_for(file) {
+            // Another recording may have opened meanwhile.
+            if !m.is_for(file) || !m.learn(&report) {
                 return;
             }
-            let changed = m.learn(&report);
-            if changed {
-                send_weights(&self.mpv, &m);
-            }
-            changed
-        };
-        eprintln!("junctur-app: track roles known, default mutes taken (changed: {changed})");
+            send_weights(&self.mpv, &m);
+        }
+        eprintln!("junctur-app: track roles taken for the mutes");
         self.emit_mixer();
     }
 
     /// The meters (each track's peak) and what is heard after the mutes, in dBFS, read now.
     pub fn levels(&self) -> (Vec<Option<f32>>, Option<f32>) {
         let n = lock(&self.mixer).len();
-        let meter = self
-            .mpv
-            .get_string(&format!("af-metadata/{}", mixer::METER));
+        let meter = meter(&self.mpv);
         let heard = self.mpv.get_string(&format!("af-metadata/{}", mixer::MIX));
         (
             meter.map_or_else(|| vec![None; n], |j| mixer::levels(&j, n)),
@@ -831,10 +843,73 @@ fn send_weights(mpv: &Mpv, m: &Mixer) {
     }
 }
 
+/// The meter reading, as mpv's JSON (see `mixer::levels`); `None` without an audio chain.
+fn meter(mpv: &Mpv) -> Option<String> {
+    mpv.get_string(&format!("af-metadata/{}", mixer::METER))
+}
+
 #[derive(Clone, serde::Serialize)]
 struct Levels {
-    /// Each track's peak in dBFS, as last measured (`None`: not measured).
+    /// Each track's peak in dBFS (`None`: nothing live, shown as silence).
     levels: Vec<Option<f32>>,
+}
+
+/// The meters the event thread sends: every [`LEVELS_EVERY`] while playing, on a tick of their own
+/// (not on mpv's position events), and silence once when playback pauses or stalls, so the page
+/// never keeps a last reading up.
+struct Meters {
+    sent: Instant,
+    /// The last reading and when it last moved.
+    last: Option<String>,
+    moved: Instant,
+    /// Silence was sent last.
+    silent: bool,
+}
+
+impl Meters {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            sent: now - LEVELS_EVERY,
+            last: None,
+            moved: now,
+            silent: true,
+        }
+    }
+
+    /// How long until the meters are due, when they need the event thread at all: while
+    /// `playing`, and once more after it stops, for the silence.
+    fn due_in(&self, playing: bool) -> Option<Duration> {
+        (playing || !self.silent).then(|| LEVELS_EVERY.saturating_sub(self.sent.elapsed()))
+    }
+
+    /// What to send for `reading` at `now` (`playing`, `n` tracks): the levels, silence (all
+    /// `None`) once when nothing live is left to show, or nothing.
+    fn take(
+        &mut self,
+        reading: Option<String>,
+        playing: bool,
+        n: usize,
+        now: Instant,
+    ) -> Option<Vec<Option<f32>>> {
+        self.sent = now;
+        if reading != self.last {
+            self.last = reading;
+            self.moved = now;
+        }
+        let live = playing && n > 0 && now.duration_since(self.moved) < LEVELS_STALE;
+        match (&self.last, live) {
+            (Some(json), true) => {
+                self.silent = false;
+                Some(mixer::levels(json, n))
+            }
+            _ if !self.silent => {
+                self.silent = true;
+                Some(vec![None; n])
+            }
+            _ => None,
+        }
+    }
 }
 
 /// What the event thread shares with the player.
@@ -847,30 +922,10 @@ struct Shared {
     trace: Option<Arc<Trace>>,
 }
 
-impl Shared {
-    /// Sends the meters, read now, when there are tracks to meter.
-    fn send_levels(&self) {
-        let n = lock(&self.mixer).len();
-        if n == 0 {
-            return;
-        }
-        let Some(json) = self
-            .mpv
-            .get_string(&format!("af-metadata/{}", mixer::METER))
-        else {
-            return;
-        };
-        let levels = Levels {
-            levels: mixer::levels(&json, n),
-        };
-        let _ = self.app.emit(LEVELS_EVENT, levels);
-    }
-}
-
 fn event_loop(events: &mut Events, shared: &Shared) {
     let state = &shared.state;
     let mut last_sent = Instant::now() - POSITION_EVERY;
-    let mut levels_sent = Instant::now() - LEVELS_EVERY;
+    let mut meters = Meters::new();
     // A held-back position is sent once its interval is up, so the last one (a seek while
     // paused) is never lost.
     let mut held = false;
@@ -880,14 +935,28 @@ fn event_loop(events: &mut Events, shared: &Shared) {
         let _ = shared.app.emit(STATE_EVENT, snapshot);
     };
     loop {
-        let timeout = if held {
-            POSITION_EVERY
-                .saturating_sub(last_sent.elapsed())
-                .as_secs_f64()
-        } else {
-            -1.0
+        let tracks = lock(&shared.mixer).len();
+        let playing = tracks > 0 && {
+            let s = lock(state);
+            s.path.is_some() && !s.paused
         };
-        let Some(event) = events.wait(timeout) else {
+        // Wake for a held-back position or the meters, whichever is due first.
+        let timeout = [
+            held.then(|| POSITION_EVERY.saturating_sub(last_sent.elapsed())),
+            meters.due_in(playing),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .map_or(-1.0, |d| d.as_secs_f64());
+        let event = events.wait(timeout);
+        if meters.due_in(playing).is_some_and(|d| d.is_zero()) {
+            let reading = if playing { meter(&shared.mpv) } else { None };
+            if let Some(levels) = meters.take(reading, playing, tracks, Instant::now()) {
+                let _ = shared.app.emit(LEVELS_EVENT, Levels { levels });
+            }
+        }
+        let Some(event) = event else {
             if held && last_sent.elapsed() >= POSITION_EVERY {
                 held = false;
                 send(&mut last_sent);
@@ -933,11 +1002,6 @@ fn event_loop(events: &mut Events, shared: &Shared) {
                 change
             }
         };
-        // Positions come every frame while playing, and only then: the meters ride on them.
-        if change == Change::Position && levels_sent.elapsed() >= LEVELS_EVERY {
-            levels_sent = Instant::now();
-            shared.send_levels();
-        }
         let due = match change {
             Change::None => false,
             Change::Position => last_sent.elapsed() >= POSITION_EVERY,
@@ -972,5 +1036,32 @@ mod tests {
         l.unpush();
         assert_eq!(l.push("f".into(), Form::Source), 4);
         assert!(l.started(9).is_none(), "an entry the player never loaded");
+    }
+
+    #[test]
+    fn meters_fall_silent_once_when_paused_or_stalled() {
+        let mut m = Meters::new();
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let json = |db: &str| Some(format!(r#"{{"lavfi.astats.1.Peak_level":"{db}"}}"#));
+        assert_eq!(m.due_in(false), None, "nothing to do before playing");
+        assert_eq!(m.take(json("-10"), true, 1, at(0)), Some(vec![Some(-10.0)]));
+        assert_eq!(
+            m.take(json("-12"), true, 1, at(50)),
+            Some(vec![Some(-12.0)])
+        );
+        // The same reading a few times running is still live (mpv filters in bursts)...
+        assert_eq!(
+            m.take(json("-12"), true, 1, at(200)),
+            Some(vec![Some(-12.0)])
+        );
+        // ...until it is old: a stalled player. Silence is sent once.
+        assert_eq!(m.take(json("-12"), true, 1, at(400)), Some(vec![None]));
+        assert_eq!(m.take(json("-12"), true, 1, at(450)), None);
+        assert_eq!(m.take(json("-8"), true, 1, at(500)), Some(vec![Some(-8.0)]));
+        // Paused: silence once, then no more ticks.
+        assert!(m.due_in(false).is_some(), "one more tick for the silence");
+        assert_eq!(m.take(None, false, 1, at(550)), Some(vec![None]));
+        assert_eq!(m.due_in(false), None);
     }
 }

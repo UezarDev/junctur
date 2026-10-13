@@ -116,18 +116,29 @@ pub struct Outcome {
     pub edit: EditList,
 }
 
+/// The options the `tracks` stage analyses `p` with: one place for the stage and for every reader
+/// of what it cached, whose cache key depends on them.
+pub fn tracks_options(p: &Project, force: bool) -> tracks::AnalyzeOptions {
+    tracks::AnalyzeOptions {
+        cache_dir: Some(p.cache_dir.clone()),
+        use_cache: !force,
+        ..Default::default()
+    }
+}
+
+/// The track report the `tracks` stage left for `p`, without analysing: `None` before it ran.
+/// For the app's player, which only wants the roles when they are known (2e).
+pub fn cached_tracks(p: &Project) -> Option<TrackReport> {
+    tracks::cached(&p.file, &tracks_options(p, false))
+}
+
 /// Run every stage in order. `log` gets one line per event, for the CLI to print.
 pub fn run(p: &Project, opts: &PipelineOptions, log: &mut dyn FnMut(&str)) -> Result<Outcome> {
     let mut jobs = p.jobs();
     jobs.file = p.file.clone();
 
     let report = jobs.stage(&p.dir, "tracks", log, |_| {
-        let a = tracks::AnalyzeOptions {
-            cache_dir: Some(p.cache_dir.clone()),
-            use_cache: !opts.force,
-            ..Default::default()
-        };
-        tracks::analyze(&p.file, &a)
+        tracks::analyze(&p.file, &tracks_options(p, opts.force))
     })?;
     let speech = speech_stage(p, &mut jobs, &report, opts.force, log)?;
     // Speakers are an extra, not core: when they cannot be found (the model cannot be fetched
@@ -468,11 +479,7 @@ pub fn hand_edited(p: &Project) -> Result<bool> {
     let Some(speech) = p.speech() else {
         return Ok(true);
     };
-    let opts = tracks::AnalyzeOptions {
-        cache_dir: Some(p.cache_dir.clone()),
-        ..Default::default()
-    };
-    let report = tracks::analyze(&p.file, &opts)?;
+    let report = tracks::analyze(&p.file, &tracks_options(p, false))?;
     let transcript = transcribe::load(&p.dir);
     let speakers = p.speakers();
     let d = draft(
@@ -559,11 +566,7 @@ fn back_up(dir: &Path, old: &str) -> Result<()> {
 pub fn recut(p: &Project, settings: &CutSettings) -> Result<EditList> {
     let missing = || Error::Edit("run `junctur analyze` on this file first".into());
     let speech = p.speech().ok_or_else(missing)?;
-    let opts = tracks::AnalyzeOptions {
-        cache_dir: Some(p.cache_dir.clone()),
-        ..Default::default()
-    };
-    let report = tracks::analyze(&p.file, &opts)?;
+    let report = tracks::analyze(&p.file, &tracks_options(p, false))?;
     let transcript = transcribe::load(&p.dir);
     let t0 = Instant::now();
     let e = cut(

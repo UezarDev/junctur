@@ -65,9 +65,17 @@ impl App {
 pub fn notifier(handle: AppHandle) -> Notify {
     Arc::new(move |p: &Progress| {
         if let Some(core) = handle.try_state::<App>().and_then(|a| a.core().ok()) {
-            // The track roles come from a run's first stage: the mutes follow them then, not when
-            // Whisper is done (2e).
-            core.tracks_known(Path::new(&p.file));
+            // The track roles come from a run's first stage: the mutes follow them as soon as it
+            // is done, not when Whisper is (2e). Read on each line from then on, which is cheap
+            // and catches a re-analysis whose roles moved; nothing is sent unless they did.
+            let tracks_done = p.project.as_ref().is_some_and(|s| {
+                s.stages
+                    .iter()
+                    .any(|st| st.name == "tracks" && st.state == StageState::Done)
+            });
+            if tracks_done {
+                core.tracks_known(Path::new(&p.file));
+            }
             if !p.phase.busy() {
                 core.analysed(Path::new(&p.file));
             }

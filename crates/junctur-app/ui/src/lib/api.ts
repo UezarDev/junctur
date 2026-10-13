@@ -143,6 +143,8 @@ export interface MixTrack {
   /** 0-based; the play bar shows it from 1. */
   index: number;
   muted: boolean;
+  /** The user set this mute; the roles' defaults no longer move it. */
+  set: boolean;
   role: Role | null;
   /** The track this one is a copy of. */
   copyOf: number | null;

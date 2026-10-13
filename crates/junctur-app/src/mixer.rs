@@ -18,7 +18,8 @@
 use std::path::{Path, PathBuf};
 
 use junctur_core::ffmpeg;
-use junctur_core::tracks::{self, AnalyzeOptions, Role, TrackReport};
+use junctur_core::pipeline::{self, Project};
+use junctur_core::tracks::{Role, TrackReport};
 use serde::{Deserialize, Serialize};
 
 /// Tracks taking part: 2 channels each, and mpv carries at most 64 (OBS records at most 6).
@@ -41,7 +42,8 @@ pub enum Source {
     Provisional,
     /// From the roles: the mix alone, or every separate track.
     Roles,
-    /// The user's own, read from or saved to [`FILE`].
+    /// At least one track is muted or heard because the user said so (read from or saved to
+    /// [`FILE`]); the others follow the roles.
     Remembered,
 }
 
@@ -51,6 +53,8 @@ pub struct Track {
     /// 0-based audio ordinal (mpv's `aid` is this + 1).
     pub index: usize,
     pub muted: bool,
+    /// The user set this track's mute: the roles' defaults no longer move it.
+    pub set: bool,
     /// The role of the distinct track this is, when the analysis got that far.
     pub role: Option<Role>,
     /// The track this one decodes the same as (or nearly), when it is a copy.
@@ -68,77 +72,100 @@ pub struct MixerState {
 #[derive(Debug, Clone, Default)]
 pub struct Mixer {
     tracks: Vec<Track>,
-    source: Source,
-    /// The project folder [`FILE`] goes in; `None` when the project could not be opened.
-    dir: Option<PathBuf>,
-    /// The recording, absolute (as the analysis names it), once opened.
-    file: Option<PathBuf>,
+    /// A track report has been taken (its roles are in `tracks`).
+    roles: bool,
+    /// The recording's project (its folder holds [`FILE`]); `None` when it could not be opened.
+    project: Option<Project>,
 }
 
+/// [`FILE`]'s contents. `set` says which mutes are the user's; a file without it counts all.
 #[derive(Serialize, Deserialize)]
 struct Remembered {
     muted: Vec<bool>,
+    #[serde(default)]
+    set: Option<Vec<bool>>,
 }
 
-/// The track report the pipeline's `tracks` stage cached for `file`, if it ran.
-pub fn report(file: &Path) -> Option<TrackReport> {
-    tracks::cached(file, &AnalyzeOptions::default())
+/// The mutes to write to [`FILE`], taken under the mixer's lock and written after it.
+pub struct Memory {
+    path: PathBuf,
+    text: Vec<u8>,
+}
+
+impl Memory {
+    pub fn write(&self) -> Result<(), String> {
+        junctur_core::output::write_replacing(&self.path, &self.text)
+            .map_err(|e| format!("remembering the mutes in {}: {e}", self.path.display()))
+    }
 }
 
 impl Mixer {
-    /// The mixer for recording `file` with project folder `dir`: its track count from the cached
-    /// track report, else from ffprobe (a process start, so callers do this outside their locks);
-    /// none when neither can say (mpv then plays the file as it would).
+    /// The mixer for recording `file` with project folder `dir`: its track count from the track
+    /// report the pipeline cached, else from ffprobe (a process start, so callers do this outside
+    /// their locks); none when neither can say (mpv then plays the file as it would).
     pub fn open(file: &str, dir: Option<PathBuf>) -> Self {
         let path = Path::new(file);
-        let report = report(path);
+        let project = dir.and_then(|d| Project::open(path, None, Some(d)).ok());
+        let report = project.as_ref().and_then(pipeline::cached_tracks);
         let count = match &report {
             Some(r) if !r.tracks.is_empty() => r.tracks.len(),
             _ => ffmpeg::probe(path).map_or(0, |p| p.audio.len()),
         };
-        let mut m = Self::new(count, report.as_ref(), dir);
-        m.file = std::path::absolute(path).ok();
-        m
+        Self::new(count, report.as_ref(), project)
     }
 
-    /// Whether this is the mixer of `file` (absolute).
+    /// Whether this is the mixer of `file` (absolute, as the analysis names it).
     pub fn is_for(&self, file: &Path) -> bool {
-        self.file.as_deref() == Some(file)
+        self.project.as_ref().is_some_and(|p| p.file == file)
     }
 
-    /// `count` audio tracks (capped at [`MAX_TRACKS`]), muted as remembered in `dir`, else as the
-    /// roles in `report` say, else track 1 only.
-    pub fn new(count: usize, report: Option<&TrackReport>, dir: Option<PathBuf>) -> Self {
+    pub fn project(&self) -> Option<&Project> {
+        self.project.as_ref()
+    }
+
+    /// `count` audio tracks (capped at [`MAX_TRACKS`]): the mutes the user set in `project`, the
+    /// others as the roles in `report` say, else track 1 only.
+    pub fn new(count: usize, report: Option<&TrackReport>, project: Option<Project>) -> Self {
         let count = count.min(MAX_TRACKS);
         let mut m = Self {
             tracks: (0..count)
                 .map(|index| Track {
                     index,
                     muted: index > 0,
+                    set: false,
                     role: None,
                     copy_of: None,
                 })
                 .collect(),
-            source: Source::Provisional,
-            dir,
-            file: None,
+            roles: false,
+            project,
         };
+        if let Some(r) = m.project.as_ref().and_then(|p| remembered(&p.dir, count)) {
+            let set = r.set.unwrap_or_else(|| vec![true; count]);
+            for ((t, muted), set) in m.tracks.iter_mut().zip(r.muted).zip(set) {
+                if set {
+                    t.muted = muted;
+                    t.set = true;
+                }
+            }
+        }
         if let Some(r) = report {
             m.learn(r);
-        }
-        if let Some(muted) = m.dir.as_deref().and_then(|d| remembered(d, count)) {
-            for (t, mu) in m.tracks.iter_mut().zip(muted) {
-                t.muted = mu;
-            }
-            m.source = Source::Remembered;
         }
         m
     }
 
     pub fn state(&self) -> MixerState {
+        let source = if self.tracks.iter().any(|t| t.set) {
+            Source::Remembered
+        } else if self.roles {
+            Source::Roles
+        } else {
+            Source::Provisional
+        };
         MixerState {
             tracks: self.tracks.clone(),
-            source: self.source,
+            source,
         }
     }
 
@@ -146,14 +173,11 @@ impl Mixer {
         self.tracks.len()
     }
 
-    pub fn provisional(&self) -> bool {
-        self.source == Source::Provisional
-    }
-
-    /// Takes the roles from `report`, and their default mutes unless the user set some. Returns
-    /// whether a mute changed.
+    /// Takes the roles from `report` (a first analysis, or a re-analysis that changed them) and
+    /// their default mutes for every track the user has not set. Returns whether anything shown
+    /// changed: a role, a copy, or a mute.
     pub fn learn(&mut self, report: &TrackReport) -> bool {
-        let n = self.tracks.len();
+        let before = self.tracks.clone();
         for t in &mut self.tracks {
             t.role = None;
             t.copy_of = None;
@@ -169,35 +193,40 @@ impl Mixer {
                 }
             }
         }
-        if self.source == Source::Remembered {
-            return false;
-        }
-        let heard = default_heard(report, n);
-        let mut changed = false;
+        let heard = default_heard(report, self.tracks.len());
         for (t, h) in self.tracks.iter_mut().zip(heard) {
-            changed |= t.muted == h;
-            t.muted = !h;
+            if !t.set {
+                t.muted = !h;
+            }
         }
-        self.source = Source::Roles;
-        changed
+        let first = !self.roles;
+        self.roles = true;
+        first || self.tracks != before
     }
 
-    /// Mutes or unmutes track `index` and remembers all the mutes in the project folder.
-    pub fn set_muted(&mut self, index: usize, muted: bool) -> Result<(), String> {
+    /// Mutes or unmutes track `index` as the user asked; returns the mutes to remember, for the
+    /// caller to write outside its lock (`None` without a project folder).
+    pub fn set_muted(&mut self, index: usize, muted: bool) -> Result<Option<Memory>, String> {
         let t = self
             .tracks
             .get_mut(index)
             .ok_or_else(|| format!("no audio track {}", index + 1))?;
         t.muted = muted;
-        self.source = Source::Remembered;
-        match &self.dir {
-            Some(d) => remember(d, &self.muted()),
-            None => Ok(()),
-        }
+        t.set = true;
+        Ok(self.memory())
     }
 
-    fn muted(&self) -> Vec<bool> {
-        self.tracks.iter().map(|t| t.muted).collect()
+    /// The mutes as [`FILE`] holds them.
+    pub fn memory(&self) -> Option<Memory> {
+        let dir = &self.project.as_ref()?.dir;
+        let r = Remembered {
+            muted: self.tracks.iter().map(|t| t.muted).collect(),
+            set: Some(self.tracks.iter().map(|t| t.set).collect()),
+        };
+        Some(Memory {
+            path: dir.join(FILE),
+            text: serde_json::to_vec(&r).ok()?,
+        })
     }
 
     /// amix's `weights`: 1 for a track heard, 0 for a muted one.
@@ -294,19 +323,10 @@ fn default_heard(report: &TrackReport, n: usize) -> Vec<bool> {
 }
 
 /// The mutes remembered in project folder `dir`, when there are `count` of them.
-fn remembered(dir: &Path, count: usize) -> Option<Vec<bool>> {
+fn remembered(dir: &Path, count: usize) -> Option<Remembered> {
     let r: Remembered = serde_json::from_slice(&std::fs::read(dir.join(FILE)).ok()?).ok()?;
-    (r.muted.len() == count).then_some(r.muted)
-}
-
-fn remember(dir: &Path, muted: &[bool]) -> Result<(), String> {
-    let text = serde_json::to_vec(&Remembered {
-        muted: muted.to_vec(),
-    })
-    .map_err(|e| e.to_string())?;
-    let path = dir.join(FILE);
-    junctur_core::output::write_replacing(&path, text)
-        .map_err(|e| format!("remembering the mutes in {}: {e}", path.display()))
+    let fits = r.muted.len() == count && r.set.as_ref().is_none_or(|s| s.len() == count);
+    fits.then_some(r)
 }
 
 /// The level silence is reported at (astats says `-inf`, which JSON cannot carry).
@@ -435,7 +455,7 @@ mod tests {
     #[test]
     fn without_roles_track_one_until_they_come() {
         let mut m = Mixer::new(3, None, None);
-        assert!(m.provisional());
+        assert_eq!(m.state().source, Source::Provisional);
         assert_eq!(muted(&m), [false, true, true]);
         let r = report(vec![
             logical(&[0], Role::Voice),
@@ -444,39 +464,97 @@ mod tests {
         ]);
         assert!(m.learn(&r), "the roles changed what is heard");
         assert_eq!(muted(&m), [false, false, false]);
-        assert!(!m.provisional());
+        assert_eq!(m.state().source, Source::Roles);
+        assert!(!m.learn(&r), "the same roles again change nothing");
         // A report naming no track of the file still leaves something heard.
         let m = Mixer::new(2, Some(&report(vec![logical(&[7], Role::Mix)])), None);
         assert_eq!(muted(&m), [false, true]);
     }
 
+    /// A project in a scratch folder (the file itself is never read).
+    fn project(name: &str) -> (PathBuf, Project) {
+        let d = scratch(name);
+        let file = d.join("rec.mp4");
+        std::fs::write(&file, b"not a video").unwrap();
+        let p = Project::open(&file, Some(d.join("cache")), Some(d.join("project"))).unwrap();
+        (d, p)
+    }
+
+    fn remember(m: &mut Mixer, track: usize, mute: bool) {
+        m.set_muted(track, mute).unwrap().unwrap().write().unwrap();
+    }
+
     #[test]
     fn the_users_mutes_are_remembered_and_beat_the_roles() {
-        let d = scratch("remember");
+        let (d, p) = project("remember");
         let r = report(vec![logical(&[0], Role::Mix), logical(&[1], Role::Voice)]);
-        let mut m = Mixer::new(2, Some(&r), Some(d.clone()));
-        m.set_muted(1, false).unwrap();
-        m.set_muted(0, true).unwrap();
+        let mut m = Mixer::new(2, Some(&r), Some(p.clone()));
+        remember(&mut m, 1, false);
+        remember(&mut m, 0, true);
         assert!(m.set_muted(2, true).is_err(), "no third track");
-        let again = Mixer::new(2, Some(&r), Some(d.clone()));
+        let again = Mixer::new(2, Some(&r), Some(p.clone()));
         assert_eq!(muted(&again), [true, false]);
         assert_eq!(again.state().source, Source::Remembered);
         assert_eq!(again.state().tracks[0].role, Some(Role::Mix));
         // Roles learned later do not undo them.
-        let mut later = Mixer::new(2, None, Some(d.clone()));
-        assert!(!later.learn(&r));
+        let mut later = Mixer::new(2, None, Some(p.clone()));
+        later.learn(&r);
         assert_eq!(muted(&later), [true, false]);
         // A file with another track count ignores them.
         assert_eq!(
-            muted(&Mixer::new(3, Some(&r), Some(d.clone()))),
+            muted(&Mixer::new(3, Some(&r), Some(p.clone()))),
             [false, true, true]
         );
         // Broken: ignored.
-        std::fs::write(d.join(FILE), b"{").unwrap();
+        std::fs::write(p.dir.join(FILE), b"{").unwrap();
         assert_eq!(
-            muted(&Mixer::new(2, Some(&r), Some(d.clone()))),
+            muted(&Mixer::new(2, Some(&r), Some(p.clone()))),
             [false, true]
         );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Opened mid-analysis, the user unmutes track 3; the roles then say three separate tracks:
+    /// track 2, never touched, follows them, and track 3 stays the user's.
+    #[test]
+    fn roles_move_only_the_tracks_the_user_left_alone() {
+        let (d, p) = project("untouched");
+        let mut m = Mixer::new(3, None, Some(p.clone()));
+        assert_eq!(muted(&m), [false, true, true]);
+        remember(&mut m, 2, false);
+        let separate = report(vec![
+            logical(&[0], Role::Voice),
+            logical(&[1], Role::Voice),
+            logical(&[2], Role::Voice),
+        ]);
+        assert!(m.learn(&separate));
+        assert_eq!(muted(&m), [false, false, false]);
+        // So on the next open, from the file: track 3 is the user's, the rest follow the roles.
+        let with_mix = report(vec![
+            logical(&[0], Role::Voice),
+            logical(&[1], Role::Mix),
+            logical(&[2], Role::Voice),
+        ]);
+        let reopened = Mixer::new(3, Some(&with_mix), Some(p.clone()));
+        assert_eq!(muted(&reopened), [true, false, false]);
+        assert_eq!(
+            reopened
+                .state()
+                .tracks
+                .iter()
+                .map(|t| t.set)
+                .collect::<Vec<_>>(),
+            [false, false, true]
+        );
+        // A re-analysis that changes the roles moves the untouched tracks and the labels.
+        let mut m = reopened;
+        assert!(m.learn(&separate));
+        assert_eq!(muted(&m), [false, false, false]);
+        assert_eq!(m.state().tracks[1].role, Some(Role::Voice));
+        // A file from before `set` was kept counts every mute as the user's.
+        std::fs::write(p.dir.join(FILE), br#"{"muted":[true,false,true]}"#).unwrap();
+        let old = Mixer::new(3, Some(&separate), Some(p.clone()));
+        assert_eq!(muted(&old), [true, false, true]);
         let _ = std::fs::remove_dir_all(&d);
     }
 
