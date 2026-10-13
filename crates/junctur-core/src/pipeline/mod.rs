@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 pub use jobs::{Jobs, StageRecord, StageState, STAGES};
-pub use speakers::{hearing_key, speech_key, Found, Heard, Method};
+pub use speakers::{hearing_key, seeded, speech_key, Found, Heard, Method, Pin};
 pub use speech::{Speech, SpeechTrack};
 pub use steps::{Step, Steps};
 
@@ -96,9 +96,20 @@ impl Project {
         serde_json::from_slice(&std::fs::read(self.speech_path()).ok()?).ok()
     }
 
-    /// Who talks when, as the `speakers` stage left it; `None` before it ran.
+    /// Who talks when, as the `speakers` stage left it; `None` before it ran (or when the file
+    /// cannot be read: the stage sets such a file aside, [`speakers_stage`]).
     pub fn speakers(&self) -> Option<Found> {
-        serde_json::from_slice(&std::fs::read(self.speakers_path()).ok()?).ok()
+        self.speakers_file().ok().flatten()
+    }
+
+    /// `speakers.json`: `None` when there is none, an error when it is there but unreadable. Since
+    /// 5c it holds the user's pins, so an unreadable one is not the same as none.
+    fn speakers_file(&self) -> Result<Option<Found>> {
+        match std::fs::read(self.speakers_path()) {
+            Ok(b) => Ok(Some(serde_json::from_slice(&b)?)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub fn edit(&self) -> Result<EditList> {
@@ -357,7 +368,19 @@ fn speakers_stage(
     log: &mut dyn FnMut(&str),
     steps: Steps,
 ) -> Result<Found> {
-    let previous = p.speakers();
+    // An unreadable file holds pins (5c) nothing else knows: kept aside under another name and
+    // said, not silently replaced by a file without them.
+    let previous = match p.speakers_file() {
+        Ok(f) => f,
+        Err(e) => {
+            let kept = set_aside(&p.speakers_path())?;
+            log(&format!(
+                "speakers.json could not be read ({e}): kept as {}; the seconds pinned to people in it are not used",
+                kept.display()
+            ));
+            None
+        }
+    };
     let cached = previous
         .clone()
         .filter(|_| !opts.force)
@@ -368,16 +391,22 @@ fn speakers_stage(
             jobs.skip(&p.dir, "speakers", log)?;
             let again = speakers::label(&f, &embeddings, &opts.voices);
             if again != f {
-                std::fs::write(p.speakers_path(), serde_json::to_vec_pretty(&again)?)?;
+                write_speakers(p, &again)?;
             }
             again
         }
         None => jobs.stage(&p.dir, "speakers", log, |_| {
+            // The user's pins (5c) cut the windows and outlive the hearing they were made on.
+            let pins = previous
+                .as_ref()
+                .map(|f| f.pins.clone())
+                .unwrap_or_default();
             let mut f = speakers::find(
                 &p.file,
                 speech,
                 &voice_tracks(report),
                 &opts.voices,
+                &pins,
                 &p.dir,
                 &p.cache_dir,
                 opts.device,
@@ -388,7 +417,7 @@ fn speakers_stage(
             if let Some(old) = &previous {
                 speakers::remember_known(&mut f, old);
             }
-            std::fs::write(p.speakers_path(), serde_json::to_vec_pretty(&f)?)?;
+            write_speakers(p, &f)?;
             Ok(f)
         })?,
     };
@@ -402,23 +431,64 @@ fn speakers_stage(
 /// file first and then the speakers ([`save_speakers`]), so a failure on the way leaves the old
 /// voices with the old labels, and new labels never stand on voices that were not saved. The edit
 /// list is the caller's to update ([`speakers_for`], [`respeak`]).
+///
+/// Since 5c any stretch will do, one word included ([`speakers::voice_sample`]'s fallbacks, then
+/// the audio itself: [`speakers::embed_stretches`]), and the stretches are pinned to `name`
+/// ([`Found::pin`]): labelled as that person from now on, whatever the windows there sound like.
+/// Returns the speakers and the seconds of speech this added to the voice.
 pub fn enroll(
     p: &Project,
     voices: &mut Voices,
     name: &str,
     stretches: &[(f64, f64)],
-) -> Result<Found> {
-    let found = p
+) -> Result<(Found, f64)> {
+    let mut found = p
         .speakers()
         .ok_or_else(|| Error::Edit("run `junctur analyze` on this file first".into()))?;
-    let (sample, seconds) = speakers::voice_sample(&found, &p.dir, stretches)?;
+    let (mut sample, mut seconds) = speakers::voice_sample(&found, &p.dir, stretches)?;
+    if sample.is_empty() {
+        let track = found.heard.as_ref().map_or(0, |h| h.track);
+        (sample, seconds) = speakers::embed_stretches(&p.file, track, stretches, &p.cache_dir)?;
+    }
     let refs: Vec<&[f32]> = sample.iter().map(Vec::as_slice).collect();
     let mut changed = voices.clone();
     changed.enroll(name, &refs, seconds)?;
+    let named = changed.get(name).map_or(name, |v| v.name.as_str());
+    found.pin(named, stretches);
     let usable: Vec<Voice> = changed.usable().into_iter().cloned().collect();
     let again = speakers::relabel(&found, &p.dir, &usable)?;
     *voices = changed;
-    Ok(again)
+    Ok((again, seconds))
+}
+
+/// Hears the project's speakers again from the audio (5c: "Analyse speakers again"), the windows
+/// cut at the pins the user made ([`speakers::seeded`]), and labels them with `voices`; the other
+/// stages' results are reused, never rerun (they need nothing new: `--force` would redo Whisper
+/// for minutes). Saves `speakers.json`; the edit list is the caller's ([`respeak`]).
+pub fn rehear(
+    p: &Project,
+    voices: &[Voice],
+    device: DevicePref,
+    log: &mut dyn FnMut(&str),
+) -> Result<Found> {
+    let missing = || Error::Edit("run `junctur analyze` on this file first".into());
+    let speech = p.speech().ok_or_else(missing)?;
+    let report = tracks::analyze(
+        &p.file,
+        &tracks::AnalyzeOptions {
+            cache_dir: Some(p.cache_dir.clone()),
+            ..Default::default()
+        },
+    )?;
+    let mut jobs = p.jobs();
+    jobs.file = p.file.clone();
+    let opts = PipelineOptions {
+        device,
+        force: true,
+        voices: voices.to_vec(),
+        ..Default::default()
+    };
+    speakers_stage(p, &mut jobs, &report, &speech, &opts, log, steps::none())
 }
 
 /// The project's speakers labelled again with `voices` from what the stage heard (no audio),
@@ -430,10 +500,60 @@ pub fn labelled(p: &Project, voices: &[Voice]) -> Result<Found> {
     speakers::relabel(&found, &p.dir, voices)
 }
 
+/// [`labelled`] after a remembered person was renamed `from` -> `to` in `voices`: the seconds
+/// pinned to them (5c) follow the new name.
+pub fn labelled_renamed(p: &Project, voices: &[Voice], from: &str, to: &str) -> Result<Found> {
+    let mut found = p
+        .speakers()
+        .ok_or_else(|| Error::Edit("run `junctur analyze` on this file first".into()))?;
+    found.rename_pins(from, to);
+    speakers::relabel(&found, &p.dir, voices)
+}
+
+/// Writes `speakers.json` whole through a temporary file of its own renamed over it (retried
+/// briefly when a reader holds it on Windows, like the voices file): since 5c it holds the user's
+/// pins, and a write torn by a crash would lose them.
+fn write_speakers(p: &Project, found: &Found) -> Result<()> {
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = p.speakers_path();
+    let tmp = path.with_extension(format!("json.{}-{n}.tmp", std::process::id()));
+    std::fs::write(&tmp, serde_json::to_vec_pretty(found)?)?;
+    let mut tries = 0;
+    loop {
+        match std::fs::rename(&tmp, &path) {
+            Ok(()) => return Ok(()),
+            Err(_) if tries < 5 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(40));
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e.into());
+            }
+        }
+    }
+}
+
+/// Renames `path` to the first free `<name>.unreadable`, `<name>.unreadable2`, ... beside it;
+/// returns the new path.
+fn set_aside(path: &Path) -> Result<PathBuf> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let free = (1..)
+        .map(|n| match n {
+            1 => path.with_file_name(format!("{name}.unreadable")),
+            n => path.with_file_name(format!("{name}.unreadable{n}")),
+        })
+        .find(|p| !p.exists())
+        .expect("some name is free");
+    std::fs::rename(path, &free)?;
+    Ok(free)
+}
+
 /// Saves `found` as the project's speakers (`speakers.json`), when it differs from what is there.
 pub fn save_speakers(p: &Project, found: &Found) -> Result<()> {
     if p.speakers().as_ref() != Some(found) {
-        std::fs::write(p.speakers_path(), serde_json::to_vec_pretty(found)?)?;
+        write_speakers(p, found)?;
     }
     Ok(())
 }
@@ -609,7 +729,8 @@ fn draft(
     let parsed = old.as_deref().and_then(|t| edit::parse(t).ok());
     let previous = parsed.as_ref().map(|e| e.speakers.clone());
     // Caption settings are the user's, like the names: a re-cut keeps them.
-    let captions = parsed.map(|e| e.captions).unwrap_or_default();
+    // None stays None: a list that followed the user's defaults still does (2i).
+    let captions = parsed.and_then(|e| e.captions);
     let speakers = speakers_for(speakers, previous.as_ref());
     let make = |settings: &CutSettings, starts: &[f64]| EditList {
         source: p.file.clone(),
@@ -853,6 +974,52 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_speakers_file_is_set_aside_and_writes_leave_no_temporary() {
+        let dir = std::env::temp_dir().join(format!("junctur-spk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = Project {
+            file: PathBuf::from("in.mp4"),
+            dir: dir.clone(),
+            cache_dir: dir.clone(),
+        };
+        assert!(p.speakers_file().unwrap().is_none());
+        std::fs::write(p.speakers_path(), "{ nope").unwrap();
+        assert!(p.speakers_file().is_err());
+        assert!(p.speakers().is_none());
+        let kept = set_aside(&p.speakers_path()).unwrap();
+        assert_eq!(kept, dir.join("speakers.json.unreadable"));
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "{ nope");
+        assert!(!p.speakers_path().exists());
+        let mut found = Found {
+            people: vec![],
+            heard: None,
+            known: vec![],
+            method: Method::None,
+            tracks: vec![],
+            turns: vec![],
+            speech: String::new(),
+            pins: vec![],
+        };
+        found.pin("Ana", &[(1.0, 2.0)]);
+        write_speakers(&p, &found).unwrap();
+        write_speakers(&p, &found).unwrap();
+        assert_eq!(p.speakers(), Some(found));
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
+        // A second unreadable file does not replace the first one set aside.
+        std::fs::write(p.speakers_path(), "x").unwrap();
+        assert_eq!(
+            set_aside(&p.speakers_path()).unwrap(),
+            dir.join("speakers.json.unreadable2")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn a_recut_without_found_speakers_keeps_the_ones_the_list_had() {
         let turn = |speaker| edit::Turn {
             start: speaker as f64,
@@ -873,6 +1040,7 @@ mod tests {
             tracks: vec![None, None],
             turns: vec![turn(2)],
             speech: String::new(),
+            pins: vec![],
         };
         assert_eq!(speakers_for(Some(&found), Some(&had)).name(2), Some("Ana"));
         // Ana's stretch is speaker 1 now (an enrolled voice took the old numbering): the name

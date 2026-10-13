@@ -188,7 +188,7 @@ impl Editor {
         })
     }
 
-    /// Sets the caption settings (on/off and how cues are cut) and saves.
+    /// Sets the caption settings (switches, style, how cues are cut) and saves.
     pub fn set_captions(
         &mut self,
         list: &EditList,
@@ -196,7 +196,7 @@ impl Editor {
     ) -> Result<Option<Edited>, String> {
         captions.check()?;
         self.restyle(list, |l| {
-            l.captions = captions;
+            l.captions = Some(captions);
             Ok(())
         })
     }
@@ -554,7 +554,7 @@ mod tests {
             ..Captions::default()
         };
         let captioned = e.set_captions(&red, on).unwrap().unwrap().list;
-        assert_eq!(reread(&path).captions, on);
+        assert_eq!(reread(&path).captions, Some(on));
         assert!(e
             .set_captions(&captioned, Captions { lines: 9, ..on })
             .is_err());

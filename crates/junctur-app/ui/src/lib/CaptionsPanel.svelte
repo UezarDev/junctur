@@ -1,14 +1,23 @@
 <script lang="ts">
-  // The caption styling panel (5a): captions on or off, each speaker's colour and name with a
-  // sample of how it reads, how cues are cut, and exporting the SRT. Everything is saved to
-  // edit.junctur at once (the `captions` and `speaker` lines), so it is readable and survives a
-  // re-cut. Only what an SRT carries into DaVinci Resolve is offered: text, timing and colour.
-  // Size, font and position are set in Resolve (an SRT import drops them). Export writes one file
+  // The caption styling panel (5a, 5d): exporting captions with a render, previewing them over the
+  // picture (two switches since 5d), each speaker's colour and name with a sample of how it reads,
+  // bold and italic, how cues are cut, and exporting the SRT. Everything is saved to edit.junctur
+  // at once (the `captions` and `speaker` lines), so it is readable and survives a re-cut. Only
+  // what an SRT carries into DaVinci Resolve is offered: text, timing, colour, bold and italic
+  // (5d's research). Size, font, outline, shadow, background and position are Resolve's subtitle
+  // Track Style, which no import sets; the note says so rather than offering settings Resolve drops. Export writes one file
   // (5e): a Resolve subtitle track shows one caption at a time, so people talking at once share one
   // caption, a line each; 5b's per-speaker files left beside it are listed. The remembered voices
-  // are listed with Forget.
+  // are listed with Forget, and the speakers can be analysed again from the audio (5c), the seconds
+  // picked for each voice cutting the windows; that reads the recording again, so it is a button,
+  // never automatic. The caption settings' own fields (export, preview, style, how cues are cut) are
+  // `CaptionRules`, shared with Settings (2i); a list without
+  // its own settings follows the user's defaults, and "Save as default" makes this recording's the
+  // defaults.
   import { save } from "@tauri-apps/plugin-dialog";
   import * as api from "./api";
+  import { captionFace } from "./captionStyle";
+  import CaptionRules from "./CaptionRules.svelte";
 
   let {
     edit,
@@ -23,8 +32,10 @@
   const captions = $derived(edit?.captions ?? null);
   const speakers = $derived(edit?.speakers ?? []);
   const usable = $derived(!!edit?.editable && !!captions);
+  const face = $derived(captionFace(captions ?? { bold: false, italic: false }));
   let exported = $state<string[] | null>(null);
   let busy = $state(false);
+  let savedDefault = $state(false);
 
   // The remembered voices, read again whenever the speakers change (an enrollment relabels them).
   let voiceList = $state<api.Voice[]>([]);
@@ -35,6 +46,21 @@
       .then((v) => (voiceList = v))
       .catch(() => (voiceList = []));
   });
+
+  let rehearing = $state(false);
+  let reheard = $state<string | null>(null);
+  async function rehear() {
+    rehearing = true;
+    reheard = null;
+    try {
+      await api.reanalyzeSpeakers();
+      reheard = "Speakers analysed again.";
+    } catch (e) {
+      onError(String(e));
+    } finally {
+      rehearing = false;
+    }
+  }
 
   async function forget(name: string) {
     await call(() => api.forgetVoice(name));
@@ -54,17 +80,15 @@
     call(() => api.setCaptions({ ...captions, ...change }));
   }
 
-  // A number field commits on change, inside its limits; anything else snaps back on the next
-  // edit state (the input shows the saved value again).
-  function number(e: Event, key: "chars" | "lines" | "seconds", min: number, max: number) {
-    const el = e.currentTarget as HTMLInputElement;
-    const v = Number(el.value);
-    if (!Number.isFinite(v) || v < min || v > max) {
-      el.value = String(captions?.[key] ?? "");
-      onError(`${key === "chars" ? "Characters per line" : key === "lines" ? "Lines" : "Seconds"} must be ${min} to ${max}`);
-      return;
+  async function saveDefault() {
+    if (!captions) return;
+    savedDefault = false;
+    try {
+      await api.saveCaptionDefaults(captions);
+      savedDefault = true;
+    } catch (e) {
+      onError(String(e));
     }
-    setCaptions({ [key]: key === "seconds" ? v : Math.round(v) });
   }
 
   function rename(id: number, e: Event) {
@@ -111,23 +135,14 @@
 <section class="panel">
   <header>
     <span>Captions</span>
-    {#if captions}
-      <label class="toggle" title="On: rendering also writes the captions beside the video">
-        <input
-          type="checkbox"
-          checked={captions.on}
-          disabled={!usable}
-          onchange={(e) => setCaptions({ on: (e.currentTarget as HTMLInputElement).checked })}
-        />
-        {captions.on ? "On" : "Off"}
-      </label>
-    {/if}
   </header>
 
   <div class="body">
     {#if !usable || !captions}
       <p class="note">Open a recording with an edit list to set up its captions.</p>
     {:else}
+      <CaptionRules value={captions} part="switches" onChange={(c) => setCaptions(c)} {onError} />
+
       <h3>Speakers</h3>
       {#if speakers.length === 0}
         <p class="note">No speakers in this edit list yet; captions will be white. Run the pipeline to tell them apart.</p>
@@ -142,29 +157,37 @@
           />
           <input class="name" value={s.name} maxlength="60" aria-label="Name of speaker {s.id}" onchange={(e) => rename(s.id, e)} />
         </div>
-        <div class="sample" style:color={s.color}>{s.name}: ¿qué tal? Hola a todos</div>
+        <div
+          class="sample"
+          style:color={s.color}
+          style:font-weight={face.weight}
+          style:font-style={face.style}
+        >
+          {s.name}: ¿qué tal? Hola a todos
+        </div>
       {/each}
 
+      <h3>Style</h3>
+      <CaptionRules value={captions} part="style" onChange={(c) => setCaptions(c)} {onError} />
+      <p class="note">
+        Colour, bold and italic are all an SRT brings into Resolve. Font, size, outline, shadow, background and
+        position are the subtitle track's style in Resolve (select the track, Inspector &gt; Track): set them there
+        once for every caption. Resolve has been reported to give bold or italic captions their own style rather
+        than the track's: if a Track Style change then misses them, turn these off. The preview shows Resolve's
+        default look.
+      </p>
+
       <h3>How captions are cut</h3>
-      <label class="field">
-        <span>Characters per line</span>
-        <input type="number" min="10" max="80" value={captions.chars} onchange={(e) => number(e, "chars", 10, 80)} />
-      </label>
-      <label class="field">
-        <span>Lines per speaker</span>
-        <input type="number" min="1" max="3" value={captions.lines} onchange={(e) => number(e, "lines", 1, 3)} />
-      </label>
-      <label class="field">
-        <span>Longest caption (s)</span>
-        <input
-          type="number"
-          min="1"
-          max="15"
-          step="0.5"
-          value={captions.seconds}
-          onchange={(e) => number(e, "seconds", 1, 15)}
-        />
-      </label>
+      <CaptionRules value={captions} part="cut" onChange={(c) => setCaptions(c)} {onError} />
+      <div class="defaults">
+        <span class="note">
+          {edit?.captionsOwn ? "Set for this recording." : "Following your defaults (Settings)."}
+        </span>
+        <button onclick={saveDefault} title="New recordings, and ones not set by hand, start from these">
+          Save as default
+        </button>
+      </div>
+      {#if savedDefault}<p class="done">Saved as the default for every recording.</p>{/if}
 
       <button class="export" onclick={exportSrt} disabled={busy || !source}>
         {busy ? "Writing…" : "Export captions (.srt)…"}
@@ -176,16 +199,17 @@
         Cues follow the edited timeline, like the render and the FCPXML. When people talk at once, one caption
         holds them all, each speaker on their own line in their colour; the line limit applies to each speaker.
         In DaVinci Resolve import the file (File &gt; Import &gt; Subtitle) onto one subtitle track at the start
-        of the timeline; the colours come through. An SRT carries no size or position: set those
-        in Resolve. Premiere Pro is untested and likely shows its default style.
+        of the timeline; the colours, bold and italic come through. An SRT carries no size or position: set
+        those in Resolve. Premiere Pro is untested and likely shows its default style.
       </p>
 
       <h3>Remembered voices</h3>
       {#if voiceList.length === 0}
         <p class="note">
           None yet. Select some words only one person says in the transcript and choose "Remember voice…": every
-          recording then names that person's speaker the same, in the same colour. Half a minute from a few
-          places works best; add more by remembering the same name again.
+          recording then names that person's speaker the same, in the same colour. Any length works, even one
+          word, and the words picked are that person's from then on; half a minute from a few places makes the
+          voice recognisable elsewhere. Add more by remembering the same name again.
         </p>
       {/if}
       {#each voiceList as v (v.name)}
@@ -195,6 +219,16 @@
           <button onclick={() => forget(v.name)} title="Forget {v.name}'s voice in every recording">Forget</button>
         </div>
       {/each}
+      <button class="export" onclick={rehear} disabled={rehearing || !source}>
+        {rehearing ? "Analysing speakers…" : "Analyse speakers again"}
+      </button>
+      {#if reheard}<p class="done">{reheard}</p>{/if}
+      <p class="note">
+        Remembering a voice relabels at once and keeps the words you picked as that person's. Analysing again
+        also reads the recording again, with its voice windows cut where your picks begin and end: it takes
+        about as long as the first speaker analysis, and remembering or forgetting a voice is not possible
+        until it is done.
+      </p>
     {/if}
   </div>
 </section>
@@ -214,12 +248,6 @@
     padding: 10px 12px 8px;
     font-weight: 600;
     border-bottom: 1px solid var(--line);
-  }
-  .toggle {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-    font-weight: 400;
   }
   .body {
     flex: 1;
@@ -266,14 +294,12 @@
       0 0 2px #000,
       0 0 2px #000;
   }
-  .field {
+  .defaults {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin: 6px 0;
-  }
-  .field input {
-    width: 72px;
+    gap: 8px;
+    margin-top: 8px;
   }
   .export {
     margin-top: 16px;

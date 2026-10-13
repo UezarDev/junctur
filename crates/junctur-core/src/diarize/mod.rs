@@ -16,7 +16,9 @@ use crate::runtime::{self, Device, DevicePref};
 use crate::vad::{Region, RATE};
 use crate::Result;
 
-pub use cluster::{label, normalize, two_pass, Labels, CENTROID_MATCH, FIRST, MERGE, VOICE_MATCH};
+pub use cluster::{
+    label, label_fixed, normalize, two_pass, Labels, CENTROID_MATCH, FIRST, MERGE, VOICE_MATCH,
+};
 pub use segment::{Overlap, Segmenter};
 
 /// Segment length for one embedding. Long enough for a stable voiceprint, short enough that one

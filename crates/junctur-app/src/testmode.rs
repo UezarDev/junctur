@@ -11,8 +11,9 @@
 //! Edit steps (2c) run the editor as the frontend does: `cutw=12-15` / `keepw=12-15` (transcript
 //! words, by index), `cutf=300-450` / `keepf=300-450` (source frames), `undo`, `redo`, and
 //! `rename=<id>:<name>` (5a: a speaker's name; no `;` in it), `color=<id>:#RRGGBB`,
-//! `captions=on|off` and `srt=<path>` (write the captions there), `enroll=<first>-<last>:<name>`
-//! (5b: remember a voice from transcript words) and `forget=<name>`. Set `JUNCTUR_VOICES` to a
+//! `captions=on|off` and `srt=<path>` (write the captions there), `preview=on|off` (5d: the
+//! captions over the picture; each caption it shows is a `caption preview` line in `ui`),
+//! `enroll=<first>-<last>:<name>` (5b: remember a voice from transcript words) and `forget=<name>`. Set `JUNCTUR_VOICES` to a
 //! scratch file for these, or they change the user's own voices. `reanalyse` (2d) analyses the open
 //! recording again, replacing user edits (a recording without an edit list is analysed as it
 //! opens); the report's `analysis` is the open recording's analysis progress and `outdated` what
@@ -21,7 +22,10 @@
 //! the play bar numbers them); each step's report and the final one add the mutes (`mixer`) and
 //! the levels read then (`levels`: each track's meter and what is heard, in dBFS); `solo=<n>` /
 //! `unsolo=<n>` (2g) solo or unsolo one, and `menu=<id>` chooses a menu item as a click on it does
-//! (`menu=talking` shows the overlay of who is talking). The final report adds how far the waveforms are (`waves`);
+//! (`menu=talking` shows the overlay of who is talking; 2i: the title bar's menus, so also
+//! `menu=close`, back to the start window, and `menu=settings`, the Settings dialog). The final
+//! report adds how far the waveforms are (`waves`) and the settings the dialog shows (`settings`;
+//! set `JUNCTUR_CONFIG` to a scratch file before anything saves them);
 //! the picture's shape is in the `state` (`width`, `height`, `aspect`). Each step's
 //! report adds the edit state it left, and the final report re-reads `edit.junctur` from disk
 //! (`disk`: does it parse, and is it the list in play), counts the loads asked of mpv (a save must
@@ -45,6 +49,9 @@ use crate::trace::Trace;
 
 pub const ENV: &str = "JUNCTUR_TEST_OFFSCREEN";
 pub const STEPS_ENV: &str = "JUNCTUR_TEST_STEPS";
+/// The event a `menu=<id>` step is sent to the page as, as the title bar's own items go to
+/// App.svelte's `onMenu` (2i; 2g's native menu sent the same).
+const MENU_EVENT: &str = "menu";
 
 /// Where the window goes: well outside any monitor layout.
 const POSITION: (i32, i32) = (-12000, -12000);
@@ -83,6 +90,8 @@ enum Action {
     Rename(u32, String),
     Recolor(u32, String),
     Captions(bool),
+    /// 5d: the captions over the picture.
+    Preview(bool),
     Srt(String),
     Enroll(usize, usize, String),
     Forget(String),
@@ -98,10 +107,12 @@ enum Action {
 /// The frontend's log lines (`ui_log`), kept for the report.
 static UI_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-/// A line from the frontend: printed, and kept for the report in test mode.
+/// A line from the frontend: printed and kept for the report, in test mode only. Outside it the
+/// lines are dropped: the caption preview (5d) sends one per caption shown, which an ordinary
+/// session has no use for on stderr.
 pub fn ui_log(message: String) {
-    eprintln!("junctur-app ui: {message}");
     if seconds().is_some() {
+        eprintln!("junctur-app ui: {message}");
         lock(&UI_LOG).push(message);
     }
 }
@@ -153,6 +164,8 @@ fn parse_steps(s: &str) -> Result<Vec<(f64, Action)>, String> {
             }
             Some(("captions", "on")) => Action::Captions(true),
             Some(("captions", "off")) => Action::Captions(false),
+            Some(("preview", "on")) => Action::Preview(true),
+            Some(("preview", "off")) => Action::Preview(false),
             Some(("srt", path)) if !path.is_empty() => Action::Srt(path.to_string()),
             Some(("enroll", v)) => {
                 let (words, name) = v.split_once(':').ok_or_else(bad)?;
@@ -210,7 +223,7 @@ fn analysis(app: &AppHandle) -> Option<crate::analysis::Progress> {
 fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
     if let Action::Menu(id) = a {
         use tauri::Emitter;
-        return app.emit(crate::menu::EVENT, id).map_err(|e| e.to_string());
+        return app.emit(MENU_EVENT, id).map_err(|e| e.to_string());
     }
     if let Action::Reanalyse = a {
         let file = with_player(app, |p| p.file())?.ok_or("no file is open")?;
@@ -236,6 +249,10 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
         Action::Captions(on) => {
             let c = p.edit_state().captions;
             p.set_captions(junctur_core::edit::Captions { on: *on, ..c })
+        }
+        Action::Preview(on) => {
+            let c = p.edit_state().captions;
+            p.set_captions(junctur_core::edit::Captions { preview: *on, ..c })
         }
         Action::Srt(path) => p.export_captions(std::path::Path::new(path)).map(|f| {
             eprintln!("junctur-app test: wrote {} captions to {path}", f.cues);
@@ -397,6 +414,8 @@ pub fn arm(app: AppHandle, seconds: f64, trace: Option<Arc<Trace>>) {
                     .map(|f| crate::analysis::outdated(std::path::Path::new(&f))),
                 "mixer": mixer(&app),
                 "waves": app.try_state::<App>().and_then(|a| a.waves.state()),
+                "settings": crate::settings::read(),
+                "margins": with_player(&app, |p| p.video_margins()).ok(),
                 "ui": lock(&UI_LOG).clone(),
             }),
             Err(e) => json!({ "verdict": "error", "error": e }),
@@ -468,11 +487,13 @@ mod tests {
             vec![(5.0, Action::Rename(2, "Ana María".into()))]
         );
         assert_eq!(
-            parse_steps("1:color=2:#FF0000;2:captions=on;3:srt=C:\\x\\out.srt").unwrap(),
+            parse_steps("1:color=2:#FF0000;2:captions=on;3:srt=C:\\x\\out.srt;4:preview=on")
+                .unwrap(),
             vec![
                 (1.0, Action::Recolor(2, "#FF0000".into())),
                 (2.0, Action::Captions(true)),
                 (3.0, Action::Srt("C:\\x\\out.srt".into())),
+                (4.0, Action::Preview(true)),
             ]
         );
         assert_eq!(

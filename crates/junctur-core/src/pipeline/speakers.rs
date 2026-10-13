@@ -17,6 +17,10 @@
 //! each, so turns of different people overlap there. Its own stage and file because it is analysis
 //! the edit list is made from, like `speech.json`; the names the user gives the speakers live in the
 //! edit list ([`crate::edit::Speakers`]).
+//!
+//! Since 5c the seconds a user picks to remember a voice are **pins** ([`Pin`]): those seconds are
+//! that person whatever the windows say, at every labelling, and hearing again cuts its windows at
+//! them ([`seeded`]), so the user's picks shape both the cheap pass and the slow one.
 
 use std::path::{Path, PathBuf};
 
@@ -41,6 +45,23 @@ const MIN_EVIDENCE_S: f64 = 0.5;
 /// When only one of an overlap's two people is known, the other is the nearest other speaker
 /// within this many seconds of it.
 const NEIGHBOUR_S: f64 = 3.0;
+/// A stretch embedded straight from the audio ([`embed_stretches`]) is read at least this long,
+/// centred on it, so CAM++ has frames to work on even for one short word.
+const MIN_CLIP_S: f64 = 0.5;
+/// Turn pieces shorter than this, left between two pins, are dropped (turns are held to the ms).
+const SLIVER_S: f64 = 0.001;
+
+/// Seconds the user said are one person's (5c): the stretch picked to remember their voice. At
+/// every labelling those seconds are that person and nobody else ([`label`]); hearing again cuts
+/// its windows at them ([`seeded`]). By name, so a pin follows the voice the name is; a pin whose
+/// name is no usable voice (forgotten, another model) is ignored but kept, and remembering the
+/// name again brings it back.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Pin {
+    pub start: f64,
+    pub end: f64,
+    pub name: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -76,6 +97,120 @@ pub struct Found {
     /// cluster ([`crate::edit::Speakers::found`]).
     #[serde(default)]
     pub known: Vec<String>,
+    /// The seconds the user pinned to a person (5c), sorted by start, never overlapping. The
+    /// project's own record of what the user said, so it is carried over when hearing runs again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pins: Vec<Pin>,
+}
+
+impl Found {
+    /// Pins `stretches` (source seconds) to `name`: a newer pin takes its seconds from older pins
+    /// of other people, and one person's pins that touch or overlap become one.
+    pub fn pin(&mut self, name: &str, stretches: &[(f64, f64)]) {
+        let same = |p: &Pin| p.name.to_lowercase() == name.trim().to_lowercase();
+        let mut mine: Vec<(f64, f64)> = stretches
+            .iter()
+            .copied()
+            .filter(|(a, b)| b - a > SLIVER_S)
+            .chain(
+                self.pins
+                    .iter()
+                    .filter(|p| same(p))
+                    .map(|p| (p.start, p.end)),
+            )
+            .collect();
+        mine.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut joined: Vec<(f64, f64)> = Vec::new();
+        for (a, b) in mine {
+            match joined.last_mut() {
+                Some(last) if a <= last.1 => last.1 = last.1.max(b),
+                _ => joined.push((a, b)),
+            }
+        }
+        let mut pins: Vec<Pin> = self
+            .pins
+            .iter()
+            .filter(|p| !same(p))
+            .flat_map(|p| {
+                outside(p.start, p.end, &joined)
+                    .into_iter()
+                    .map(|(start, end)| Pin {
+                        start,
+                        end,
+                        name: p.name.clone(),
+                    })
+            })
+            .collect();
+        pins.extend(joined.into_iter().map(|(start, end)| Pin {
+            start,
+            end,
+            name: name.trim().to_string(),
+        }));
+        pins.sort_by(|a, b| a.start.total_cmp(&b.start));
+        self.pins = pins;
+    }
+
+    /// Renames the pins of `from` to `to` (a remembered person renamed).
+    pub fn rename_pins(&mut self, from: &str, to: &str) {
+        for p in &mut self.pins {
+            if p.name.to_lowercase() == from.trim().to_lowercase() {
+                p.name = to.trim().to_string();
+            }
+        }
+    }
+}
+
+/// The pieces of `start..end` outside every one of `cut` (sorted by start, not overlapping), each
+/// longer than [`SLIVER_S`].
+fn outside(start: f64, end: f64, cut: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    let mut out = Vec::new();
+    let mut at = start;
+    for &(a, b) in cut {
+        if b <= at || a >= end {
+            continue;
+        }
+        if a - at > SLIVER_S {
+            out.push((at, a));
+        }
+        at = at.max(b);
+    }
+    if end - at > SLIVER_S {
+        out.push((at, end));
+    }
+    out
+}
+
+/// Speech regions for hearing, cut at every pin's edges (5c), with the pins that lie outside the
+/// regions added (the user says someone talks there), so the windows of a piece 1.5 s or longer
+/// stay inside it and the pinned seconds get windows of their own. Not every window: a piece under
+/// 0.5 s gets none, and one under 1.5 s gets one centred window ([`diarize::segments`]) that
+/// reaches past its edges, since every window is 1.5 s (one input shape on CUDA). Such a window's
+/// label is still overruled inside the pin ([`label`]).
+pub fn seeded(regions: &[Region], pins: &[Pin]) -> Vec<Region> {
+    let mut edges: Vec<f64> = pins.iter().flat_map(|p| [p.start, p.end]).collect();
+    edges.sort_by(f64::total_cmp);
+    let mut out: Vec<Region> = Vec::new();
+    for r in regions {
+        let mut at = r.start;
+        for &e in edges.iter().filter(|&&e| e > r.start && e < r.end) {
+            if e > at {
+                out.push(Region { start: at, end: e });
+                at = e;
+            }
+        }
+        out.push(Region {
+            start: at,
+            end: r.end,
+        });
+    }
+    let spoken: Vec<(f64, f64)> = regions.iter().map(|r| (r.start, r.end)).collect();
+    for p in pins {
+        for (start, end) in outside(p.start, p.end, &spoken) {
+            out.push(Region { start, end });
+        }
+    }
+    out.sort_by(|a, b| a.start.total_cmp(&b.start));
+    out
 }
 
 /// What hearing found on the diarized track, besides the embeddings (kept in `windows.f32`).
@@ -163,15 +298,17 @@ fn plan<'a>(speech: &'a Speech, voice: &[usize]) -> Plan<'a> {
 
 /// Who talks when in `file`, from the speech stage's regions, labelled with `voices`. `voice` names
 /// the speech tracks whose role is a single voice; the others are mixes. When the speakers are told
-/// apart by voice, the window embeddings are written to project folder `dir` for [`relabel`].
-/// `heard` is told the track being heard and how far through it the hearing is (2h); speakers told
-/// apart by track hear nothing, so it is not called.
+/// apart by voice, the window embeddings are written to project folder `dir` for [`relabel`], and
+/// the windows are cut at `pins` (5c: [`seeded`]), which the result keeps. `heard` is told the
+/// track being heard and how far through it the hearing is (2h); speakers told apart by track hear
+/// nothing, so it is not called.
 #[allow(clippy::too_many_arguments)]
 pub fn find(
     file: &Path,
     speech: &Speech,
     voice: &[usize],
     voices: &[Voice],
+    pins: &[Pin],
     dir: &Path,
     cache_dir: &Path,
     device: DevicePref,
@@ -186,9 +323,12 @@ pub fn find(
             speech: speech_key(speech),
             heard: None,
             known: Vec::new(),
+            pins: pins.to_vec(),
         },
+        // Pins are the user's whatever the plan: kept for when the tracks are heard by voice again.
         Plan::ByTrack(tracks) => Found {
             speech: speech_key(speech),
+            pins: pins.to_vec(),
             ..by_track(&tracks)
         },
         Plan::Diarize(one) => {
@@ -201,7 +341,8 @@ pub fn find(
             // is dropped (killed) rather than waited for.
             let track = one.track;
             heard(track, 0.0);
-            let a = diarize::analyze(&mut r, &one.regions, &mut emb, Some(&mut seg), &mut |at| {
+            let regions = seeded(&one.regions, pins);
+            let a = diarize::analyze(&mut r, &regions, &mut emb, Some(&mut seg), &mut |at| {
                 heard(track, at)
             })?;
             // The rest of the track has no speech to hear: done.
@@ -222,6 +363,7 @@ pub fn find(
                     embeddings,
                 }),
                 known: Vec::new(),
+                pins: pins.to_vec(),
             };
             return Ok(label(&unlabelled, &a.embeddings, voices));
         }
@@ -299,6 +441,16 @@ pub fn relabel(found: &Found, dir: &Path, voices: &[Voice]) -> Result<Found> {
 /// A voice sample from what was heard (5b): the cached embeddings of the windows whose middle is
 /// in one of `stretches` (source seconds), and the seconds of speech they cover. Windows touching a
 /// stretch where two people talk at once are left out: their voiceprint is two people's.
+///
+/// A short selection (5c: one word is allowed) often has no such window: windows are 1.5 s. Then
+/// the windows reaching into it that touch no overlap stretch, each counted by the seconds of the
+/// selection it covers, so a word moves a voice built from more only a little. Such a window is
+/// mostly the seconds around the word, usually the same person still talking but not always.
+/// Embedding just the word instead was measured in the repair pass and is far worse: CAM++ on
+/// 0.4 s gives prints too noisy to recognise anyone (five words each on the sample: the brother
+/// right 1% of his frames, against 34% from the windows around the same words). Empty when no
+/// such window either (overlaps on both sides, or no window there at all): the caller then embeds
+/// the selected audio itself ([`embed_stretches`]).
 pub fn voice_sample(
     found: &Found,
     dir: &Path,
@@ -322,18 +474,78 @@ pub fn voice_sample(
     // Overlaps are sorted by start and none is longer than a segmentation window, so only those
     // starting within that much before a window can touch it.
     let longest = diarize::segment::WINDOW_S;
-    for (w, emb) in heard.windows.iter().zip(e) {
-        let mid = (w.start + w.end) / 2.0;
-        let chosen = stretches.iter().any(|&(a, b)| a <= mid && mid <= b);
+    let shared = |w: &Region| {
         let upto = heard.overlaps.partition_point(|o| o.start < w.end);
-        let shared = heard.overlaps[..upto]
+        heard.overlaps[..upto]
             .iter()
             .rev()
             .take_while(|o| o.start > w.start - longest)
-            .any(|o| o.end > w.start);
-        if chosen && !shared {
+            .any(|o| o.end > w.start)
+    };
+    for (w, emb) in heard.windows.iter().zip(&e) {
+        let mid = (w.start + w.end) / 2.0;
+        let chosen = stretches.iter().any(|&(a, b)| a <= mid && mid <= b);
+        if chosen && !shared(w) {
             seconds += w.end - w.start;
-            out.push(emb);
+            out.push(emb.clone());
+        }
+    }
+    if out.is_empty() {
+        for (w, emb) in heard.windows.iter().zip(&e) {
+            let covered: f64 = stretches
+                .iter()
+                .map(|&(a, b)| (w.end.min(b) - w.start.max(a)).max(0.0))
+                .sum();
+            if covered > 0.0 && !shared(w) {
+                seconds += covered;
+                out.push(emb.clone());
+            }
+        }
+    }
+    Ok((out, seconds))
+}
+
+/// Embeddings of `stretches` of `track` read straight from `file`, and their seconds: the voice
+/// sample (5c) when no cached window lies inside the selection (one word, a region under 0.5 s, a
+/// word outside the speech regions). Each stretch is read at least [`MIN_CLIP_S`] long, centred on it.
+/// CPU: one short clip is not worth starting the GPU for. 5b rejected decoding at enrollment as
+/// the way to get a sample, since the stage already has the numbers; this is only for what it
+/// never saw.
+pub fn embed_stretches(
+    file: &Path,
+    track: usize,
+    stretches: &[(f64, f64)],
+    cache_dir: &Path,
+) -> Result<(Vec<Vec<f32>>, f64)> {
+    let model = models::ensure(&models::SPEAKER_EMBEDDING, cache_dir)?;
+    let mut emb = Embedder::open(&model, DevicePref::Cpu)?;
+    let mut out = Vec::new();
+    let mut seconds = 0.0;
+    for &(a, b) in stretches {
+        let len = (b - a).max(MIN_CLIP_S);
+        let start = ((a + b) / 2.0 - len / 2.0).max(0.0);
+        let mut r = PcmReader::open(
+            file,
+            track,
+            RATE,
+            1,
+            Span {
+                start,
+                len: Some(len),
+            },
+        )?;
+        let mut samples = Vec::new();
+        loop {
+            let more = r.read(RATE as usize)?;
+            if more.is_empty() {
+                break;
+            }
+            samples.extend(more);
+        }
+        r.finish()?;
+        if let Some(e) = emb.embed(&samples)? {
+            out.push(e);
+            seconds += b - a;
         }
     }
     Ok((out, seconds))
@@ -341,27 +553,80 @@ pub fn voice_sample(
 
 /// Labels the heard windows: enrolled voices first, then clusters ([`diarize::label`]); turns from
 /// the windows, plus a turn for each of the two people in every overlap stretch.
+///
+/// Pins (5c) of a voice in `voices` win over all of it: a window whose middle is in one is that
+/// voice outright ([`diarize::label_fixed`]), every turn is cut out of the pins, and each pin is a
+/// turn of its person, so inside a pin there is exactly one speaker, the pinned one. A pinned voice
+/// no window came out as still gets a speaker, after the others.
 pub fn label(found: &Found, embeddings: &[Vec<f32>], voices: &[Voice]) -> Found {
     let Some(heard) = &found.heard else {
         return found.clone();
     };
     let prints: Vec<Vec<f32>> = voices.iter().map(|v| v.print.clone()).collect();
-    let labels = diarize::label(
+    // Pins of the voices here, by voice index; pins are sorted and never overlap.
+    let pins: Vec<(f64, f64, usize)> = found
+        .pins
+        .iter()
+        .filter_map(|p| {
+            let name = p.name.to_lowercase();
+            voices
+                .iter()
+                .position(|v| v.name.to_lowercase() == name)
+                .map(|v| (p.start, p.end, v))
+        })
+        .collect();
+    let spans: Vec<(f64, f64)> = pins.iter().map(|&(a, b, _)| (a, b)).collect();
+    let fixed: Vec<Option<usize>> = heard
+        .windows
+        .iter()
+        .map(|w| {
+            let mid = (w.start + w.end) / 2.0;
+            let i = pins.partition_point(|p| p.1 < mid);
+            pins.get(i).filter(|p| p.0 <= mid).map(|p| p.2)
+        })
+        .collect();
+    let mut labels = diarize::label_fixed(
         embeddings,
         &prints,
+        &fixed,
         VOICE_MATCH,
         CENTROID_MATCH,
         MINOR_SHARE,
     );
+    for &(_, _, v) in &pins {
+        if !labels.voices.contains(&Some(v)) {
+            labels.voices.push(Some(v));
+        }
+    }
+    let id_of = |v: usize| {
+        labels
+            .voices
+            .iter()
+            .position(|&x| x == Some(v))
+            .expect("every pinned voice has a speaker") as u32
+            + 1
+    };
     let windows = diarize::turns(&heard.windows, &labels.windows);
+    // Window turns outside the pins, and the pins: still sorted and never overlapping, which
+    // `who`, `covering` and `neighbour` rely on.
     let mut turns: Vec<Turn> = windows
         .iter()
-        .map(|t| Turn {
-            start: t.start,
-            end: t.end,
-            speaker: t.speaker as u32 + 1,
+        .flat_map(|t| {
+            outside(t.start, t.end, &spans)
+                .into_iter()
+                .map(move |(start, end)| Turn {
+                    start,
+                    end,
+                    speaker: t.speaker as u32 + 1,
+                })
         })
+        .chain(pins.iter().map(|&(start, end, v)| Turn {
+            start,
+            end,
+            speaker: id_of(v),
+        }))
         .collect();
+    turns.sort_by(|a, b| a.start.total_cmp(&b.start));
     let base = turns.clone();
     for o in &heard.overlaps {
         let pair = match (who(&o.a, &base), who(&o.b, &base)) {
@@ -375,11 +640,13 @@ pub fn label(found: &Found, embeddings: &[Vec<f32>], voices: &[Voice]) -> Found 
             (None, None) => covering(o, &base).and_then(|x| neighbour(o, x, &base).map(|y| (x, y))),
         };
         for speaker in pair.into_iter().flat_map(|(a, b)| [a, b]) {
-            turns.push(Turn {
-                start: o.start,
-                end: o.end,
-                speaker,
-            });
+            for (start, end) in outside(o.start, o.end, &spans) {
+                turns.push(Turn {
+                    start,
+                    end,
+                    speaker,
+                });
+            }
         }
     }
     turns.sort_by(|a, b| a.start.total_cmp(&b.start));
@@ -403,6 +670,7 @@ pub fn label(found: &Found, embeddings: &[Vec<f32>], voices: &[Voice]) -> Found 
         turns,
         speech: found.speech.clone(),
         heard: found.heard.clone(),
+        pins: found.pins.clone(),
     }
 }
 
@@ -522,6 +790,7 @@ fn by_track(tracks: &[&SpeechTrack]) -> Found {
         speech: String::new(),
         heard: None,
         known: Vec::new(),
+        pins: Vec::new(),
     }
 }
 
@@ -563,6 +832,7 @@ mod tests {
             &speech,
             &[],
             &[],
+            &[],
             Path::new("."),
             Path::new("."),
             DevicePref::Cpu,
@@ -572,6 +842,42 @@ mod tests {
         assert_eq!(f.method, Method::None);
         assert!(f.turns.is_empty());
         assert_eq!(f.speech, speech_key(&speech));
+    }
+
+    #[test]
+    fn pins_survive_every_plan() {
+        let pins = vec![Pin {
+            start: 1.0,
+            end: 2.0,
+            name: "Ana".into(),
+        }];
+        let track = |track| SpeechTrack {
+            track,
+            regions: vec![Region {
+                start: 0.0,
+                end: 3.0,
+            }],
+            share: 0.5,
+        };
+        for (tracks, voice) in [(vec![], vec![]), (vec![track(1), track(2)], vec![1, 2])] {
+            let speech = Speech {
+                tracks,
+                seconds: 10.0,
+            };
+            let f = find(
+                Path::new("missing.mp4"),
+                &speech,
+                &voice,
+                &[],
+                &pins,
+                Path::new("."),
+                Path::new("."),
+                DevicePref::Cpu,
+                &mut |_, _| {},
+            )
+            .unwrap();
+            assert_eq!(f.pins, pins, "{:?}", f.method);
+        }
     }
 
     #[test]
@@ -664,6 +970,7 @@ mod tests {
                 embeddings: format!("{:016x}", fnv(&bytes)),
             }),
             known: vec![],
+            pins: vec![],
         };
         (found, e)
     }
@@ -825,5 +1132,161 @@ mod tests {
         std::fs::write(d.join(EMBEDDINGS_FILE), [0u8; 8]).unwrap();
         assert!(relabel(&found, &d, &[]).is_err());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn speakers_at(f: &Found, t: f64) -> Vec<u32> {
+        let mut s: Vec<u32> = f
+            .turns
+            .iter()
+            .filter(|x| x.start <= t && t < x.end)
+            .map(|x| x.speaker)
+            .collect();
+        s.sort();
+        s.dedup();
+        s
+    }
+
+    fn pins(f: &Found) -> Vec<(f64, f64, &str)> {
+        f.pins
+            .iter()
+            .map(|p| (p.start, p.end, p.name.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn a_newer_pin_takes_its_seconds_and_one_persons_pins_join() {
+        let (mut f, _) = heard(vec![]);
+        f.pin("Ana", &[(2.0, 5.0)]);
+        f.pin("Bea", &[(4.0, 6.0), (10.0, 11.0)]);
+        assert_eq!(
+            pins(&f),
+            vec![(2.0, 4.0, "Ana"), (4.0, 6.0, "Bea"), (10.0, 11.0, "Bea")]
+        );
+        // Ana again over the middle of Bea's: Bea keeps what is left either side; Ana's pins
+        // are found whatever the case of the name, and take the name as given (enrolling gives
+        // the voice's own).
+        f.pin("ana", &[(4.5, 5.5)]);
+        assert_eq!(
+            pins(&f),
+            vec![
+                (2.0, 4.0, "ana"),
+                (4.0, 4.5, "Bea"),
+                (4.5, 5.5, "ana"),
+                (5.5, 6.0, "Bea"),
+                (10.0, 11.0, "Bea")
+            ]
+        );
+        f.pin("Ana", &[(3.5, 4.5)]);
+        assert_eq!(pins(&f)[0], (2.0, 5.5, "Ana"));
+        assert_eq!(f.pins.len(), 3);
+        f.rename_pins("ANA", "Anita");
+        assert_eq!(pins(&f)[0], (2.0, 5.5, "Anita"));
+        // An empty stretch, or a sliver under a millisecond, pins nothing.
+        let (mut g, _) = heard(vec![]);
+        g.pin("Ana", &[(3.0, 3.0), (5.0, 5.0005)]);
+        assert!(g.pins.is_empty());
+    }
+
+    #[test]
+    fn pinned_seconds_are_the_pinned_person_and_nobody_else() {
+        // Bea is pinned over 3-6 s, where the windows hear Ana, and where an overlap stretch
+        // would give both a turn.
+        let o = Overlap {
+            start: 4.0,
+            end: 5.0,
+            a: vec![[0.0, 3.0]],
+            b: vec![[16.0, 18.0]],
+        };
+        let (mut found, e) = heard(vec![o]);
+        let voices = [
+            voice("Ana", unit(&[1.0, 0.0, 0.0])),
+            voice("Bea", unit(&[0.0, 1.0, 0.0])),
+        ];
+        assert_eq!(speakers_at(&label(&found, &e, &voices), 4.5), vec![1, 2]);
+        found.pin("Bea", &[(3.0, 6.0)]);
+        let f = label(&found, &e, &voices);
+        assert_eq!(f.pins, found.pins, "the pins are kept");
+        for t in [3.0, 3.5, 4.5, 5.9] {
+            assert_eq!(speakers_at(&f, t), vec![2], "at {t}: {:?}", f.turns);
+        }
+        assert_eq!(speakers_at(&f, 2.9), vec![1]);
+        assert_eq!(speakers_at(&f, 6.0), vec![1]);
+        assert_eq!(speakers_at(&f, 20.0), vec![2]);
+        // Turns of window labels never overlap each other, pins included.
+        let mut solo: Vec<&Turn> = f.turns.iter().collect();
+        solo.sort_by(|a, b| a.start.total_cmp(&b.start));
+        assert!(solo.windows(2).all(|w| w[0].end <= w[1].start + 1e-9));
+        // A pin of a name no voice has is ignored, and kept.
+        let mut odd = found.clone();
+        odd.pin("Nobody", &[(20.0, 21.0)]);
+        let f = label(&odd, &e, &voices);
+        assert_eq!(speakers_at(&f, 20.5), vec![2]);
+        assert_eq!(f.pins.len(), 2);
+        // A pinned voice no window sounds like still gets a speaker, after the others.
+        let cid = voice("Cid", unit(&[0.0, 0.0, 1.0]));
+        let three = [voices[0].clone(), voices[1].clone(), cid];
+        let mut c = found.clone();
+        c.pin("Cid", &[(20.0, 21.0)]);
+        let f = label(&c, &e, &three);
+        let names: Vec<_> = f
+            .people
+            .iter()
+            .map(|p| p.as_ref().map(|p| p.name.as_str()))
+            .collect();
+        assert_eq!(names, vec![Some("Ana"), Some("Bea"), Some("Cid")]);
+        assert_eq!(speakers_at(&f, 20.5), vec![3]);
+        assert_eq!(speakers_at(&f, 21.5), vec![2]);
+    }
+
+    #[test]
+    fn a_short_selection_takes_the_clear_windows_around_it() {
+        let d = scratch("short");
+        let o = Overlap {
+            start: 3.2,
+            end: 3.4,
+            a: vec![],
+            b: vec![],
+        };
+        let (found, e) = heard(vec![o]);
+        save_embeddings(&d, &e).unwrap();
+        // One word, 3.3-3.6, in a window whose middle is outside it and which touches the
+        // overlap (two people), and a word where hearing made no window: nothing, the caller
+        // embeds the word's own audio.
+        for word in [(3.3, 3.6), (31.0, 31.4)] {
+            let (sample, secs) = voice_sample(&found, &d, &[word]).unwrap();
+            assert!(sample.is_empty() && secs == 0.0, "{word:?}");
+        }
+        // A word across two windows clear of overlaps: both, by the seconds each covers.
+        let (sample, secs) = voice_sample(&found, &d, &[(5.8, 6.2)]).unwrap();
+        assert_eq!(sample, vec![e[3].clone(), e[4].clone()]);
+        assert!((secs - 0.4).abs() < 1e-9, "{secs}");
+        // A longer pick still takes its clean windows.
+        assert_eq!(voice_sample(&found, &d, &[(4.0, 8.0)]).unwrap().0.len(), 2);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn hearing_regions_are_cut_at_the_pins() {
+        let r = |start, end| Region { start, end };
+        let pin = |start, end| Pin {
+            start,
+            end,
+            name: "Ana".into(),
+        };
+        let regions = [r(0.0, 10.0), r(20.0, 22.0)];
+        let got = seeded(&regions, &[pin(2.0, 3.0), pin(9.0, 12.0), pin(15.0, 16.0)]);
+        assert_eq!(
+            got,
+            vec![
+                r(0.0, 2.0),
+                r(2.0, 3.0),
+                r(3.0, 9.0),
+                r(9.0, 10.0),
+                r(10.0, 12.0),
+                r(15.0, 16.0),
+                r(20.0, 22.0)
+            ]
+        );
+        assert_eq!(seeded(&regions, &[]), regions.to_vec());
     }
 }

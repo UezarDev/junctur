@@ -1,7 +1,7 @@
 //! The pipeline commands: `analyze`, `status`, `cut`, `export`, `render`. They share one project per
 //! recording (`--project <dir>` to keep it somewhere git can track it).
 
-use junctur_core::edit::{CutSettings, EditList};
+use junctur_core::edit::{Captions, CutSettings, EditList};
 use junctur_core::pipeline::{self, Project, StageState, STAGES};
 use junctur_core::render::{self, RenderOptions};
 use junctur_core::runtime::DevicePref;
@@ -15,6 +15,13 @@ const CUT_FLAGS: &[&str] = &["--pad-before", "--pad-after", "--merge-gap", "--cr
 
 fn project(a: &Args) -> Result<Project, String> {
     Project::open(&a.file()?, a.path("--cache-dir"), a.path("--project")).map_err(|e| e.to_string())
+}
+
+/// The caption settings `e`'s cues are cut with (2i): its own, else the config file's defaults, as
+/// the app shows them, so a render and an export cut the cues the app would. The config file is
+/// read only for a list without its own.
+fn captions(e: &EditList) -> Result<Captions, String> {
+    config::captions(e.captions, config::load).map_err(|e| e.to_string())
 }
 
 fn cut_settings(a: &Args) -> Result<CutSettings, String> {
@@ -149,16 +156,22 @@ pub fn export(a: Args) -> Result<(), String> {
         println!("{} ({} clips)", out.display(), e.keep.len());
     }
     if let Some(out) = srt {
-        write_captions(&p, &e, &out)?;
+        // Only the captions need the config file, so a broken one never blocks an FCPXML.
+        write_captions(&p, &e, &captions(&e)?, &out)?;
     }
     Ok(())
 }
 
 /// The caption file for `e` at `out`, from the project's transcript.
-fn write_captions(p: &Project, e: &EditList, out: &std::path::Path) -> Result<(), String> {
+fn write_captions(
+    p: &Project,
+    e: &EditList,
+    c: &Captions,
+    out: &std::path::Path,
+) -> Result<(), String> {
     let t = transcribe::load(&p.dir)
         .ok_or("captions need a transcript: run `junctur analyze` on this file first")?;
-    let files = export::write_srt(e, &t, out).map_err(|e| e.to_string())?;
+    let files = export::write_srt(e, c, &t, out).map_err(|e| e.to_string())?;
     print_captions(out, &files);
     Ok(())
 }
@@ -178,9 +191,10 @@ pub fn render(a: Args) -> Result<(), String> {
     let out = a.path("--out").ok_or("render needs --out <out.mp4>")?;
     let p = project(&a)?;
     let e = p.edit().map_err(|e| e.to_string())?;
+    let c = captions(&e)?;
     // With captions on, what the caption file needs is checked before an encode that can take an
     // hour, not after it.
-    let captions = if e.captions.on {
+    let captions = if c.on {
         let srt = out.with_extension("srt");
         junctur_core::output::refuse_source(&e.source, &srt).map_err(|e| e.to_string())?;
         let t = transcribe::load(&p.dir)
@@ -216,7 +230,7 @@ pub fn render(a: Args) -> Result<(), String> {
     );
     // Captions are an optional toggle in the edit list; on, they go beside the video.
     if let Some((srt, t)) = captions {
-        let files = export::write_srt(&e, &t, &srt).map_err(|e| e.to_string())?;
+        let files = export::write_srt(&e, &c, &t, &srt).map_err(|e| e.to_string())?;
         print_captions(&srt, &files);
     }
     Ok(())

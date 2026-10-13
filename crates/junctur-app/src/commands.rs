@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use junctur_core::edit::Captions;
+use junctur_core::export::srt::Cue;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -18,6 +19,7 @@ use crate::mixer::MixerState;
 use crate::player::{Core, Player, TurnsView};
 use crate::project::{self, ProjectStatus, RecordingInfo};
 use crate::recent::{self, Recent};
+use crate::settings::{self, Settings, SettingsView};
 use crate::state::PlayerState;
 use crate::voices::VoiceView;
 use crate::waves::{self, WavesState};
@@ -156,6 +158,11 @@ pub async fn open_file(
             let _ = h.emit(waves::EVENT, s);
         }),
     );
+    // Closed while this was opening (2i): `close_file` closes the player first and the waveforms
+    // after, so either it stopped this read or the player no longer has the file and it stops here.
+    if app.core()?.file().as_deref() != Some(path.as_str()) {
+        app.waves.close_for(&absolute);
+    }
     let mut analysis = app.analysis.progress(file);
     let mut outdated = Vec::new();
     if let Ok(s) = &status {
@@ -332,7 +339,7 @@ pub async fn recolor_speaker(app: State<'_, App>, id: u32, color: String) -> Res
     app.editable()?.recolor_speaker(id, &color)
 }
 
-/// Sets the caption settings: on/off and how cues are cut.
+/// Sets the caption settings: export and preview switches, bold and italic, how cues are cut.
 #[tauri::command]
 pub async fn set_captions(app: State<'_, App>, captions: Captions) -> Result<(), String> {
     app.editable()?.set_captions(captions)
@@ -357,6 +364,13 @@ pub async fn export_captions(app: State<'_, App>, path: String) -> Result<Export
     })
 }
 
+/// The captions as the export cuts them, for the preview over the picture (5d): output seconds,
+/// each cue's parts a speaker's lines.
+#[tauri::command]
+pub async fn caption_cues(app: State<'_, App>) -> Result<Vec<Cue>, String> {
+    app.core()?.caption_cues()
+}
+
 /// The voices Junctur remembers (5b).
 #[tauri::command]
 pub async fn voices() -> Result<Vec<VoiceView>, String> {
@@ -373,6 +387,21 @@ pub async fn enroll_voice(
     name: String,
 ) -> Result<String, String> {
     app.editable()?.enroll_voice(first, last, &name)
+}
+
+/// Hears the open recording's speakers again from the audio, cut at the seconds pinned to people
+/// (5c, "Analyse speakers again"), and puts them into the list in play. Takes about as long as the
+/// speakers stage, so it runs on a blocking thread, not the async runtime's workers. Refused while
+/// the open recording's run has not written its edit list (2d: that run writes its speakers too;
+/// 2j: past it, only the transcription is left, which does not), and run behind the first halves'
+/// lane ([`Analysis::exclusive`]), never beside another speakers stage.
+#[tauri::command]
+pub async fn reanalyze_speakers(app: State<'_, App>) -> Result<(), String> {
+    let core = app.editable()?;
+    let analysis = app.analysis.clone();
+    tauri::async_runtime::spawn_blocking(move || analysis.exclusive(|| core.reanalyze_speakers()))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Forgets voice `name`, relabelling the open recording.
@@ -399,8 +428,13 @@ pub async fn redo(app: State<'_, App>) -> Result<(), String> {
 /// The shares of the window on the right (the side panel) and at the bottom (play bar and lanes)
 /// kept free of video.
 #[tauri::command]
-pub async fn set_video_margins(app: State<'_, App>, right: f64, bottom: f64) -> Result<(), String> {
-    app.core()?.set_video_margins(right, bottom)
+pub async fn set_video_margins(
+    app: State<'_, App>,
+    right: f64,
+    bottom: f64,
+    top: f64,
+) -> Result<(), String> {
+    app.core()?.set_video_margins(right, bottom, top)
 }
 
 /// Solos or unsolos audio track `track` (0-based) in the preview; not remembered (2g).
@@ -475,10 +509,65 @@ pub async fn reveal(app: State<'_, App>) -> Result<(), String> {
         .map_err(|e| format!("opening {dir}: {e}"))
 }
 
-/// The page's side of a View menu check mark (a toggle by key rather than by the menu).
+/// Closes the open recording (2i: File > Close recording, back to the start window). Its
+/// waveform read stops; an analysis of it goes on (runs are not the player's), and reopening the
+/// recording shows where it is.
 #[tauri::command]
-pub fn set_menu_check(handle: AppHandle, id: String, checked: bool) -> Result<(), String> {
-    crate::menu::set_check(&handle, &id, checked)
+pub async fn close_file(app: State<'_, App>) -> Result<(), String> {
+    // The player first: an open on its way checks it after starting its waveforms (`open_file`).
+    let closed = app.core()?.close();
+    app.waves.close();
+    closed
+}
+
+/// The Settings dialog's contents (2i).
+#[tauri::command]
+pub async fn settings() -> SettingsView {
+    settings::read()
+}
+
+/// Saves the Settings dialog. Nothing is analysed again: the page asks for `outdated` after.
+#[tauri::command]
+pub async fn save_settings(
+    app: State<'_, App>,
+    settings: Settings,
+) -> Result<SettingsView, String> {
+    let view = settings::save(&settings)?;
+    if let Ok(core) = app.core() {
+        core.set_caption_defaults(view.settings.captions);
+    }
+    Ok(view)
+}
+
+/// The Captions panel's "Save as default": these become the caption defaults (2i).
+#[tauri::command]
+pub async fn save_caption_defaults(
+    app: State<'_, App>,
+    captions: Captions,
+) -> Result<SettingsView, String> {
+    let view = settings::save_caption_defaults(captions)?;
+    if let Ok(core) = app.core() {
+        core.set_caption_defaults(view.settings.captions);
+    }
+    Ok(view)
+}
+
+/// Why `path`'s analysis is out of date with the settings now (2d's notice), asked again after
+/// Settings saved a model.
+#[tauri::command]
+pub async fn outdated(app: State<'_, App>, path: String) -> Result<Vec<String>, String> {
+    let file = Path::new(&path);
+    if app.analysis.busy(file) {
+        return Ok(Vec::new());
+    }
+    Ok(analysis::outdated(file))
+}
+
+/// Opens Windows' snap layouts for the window (2i: the pointer rests on the title bar's maximise
+/// button; see `window`).
+#[tauri::command]
+pub fn snap_layouts(window: tauri::WebviewWindow) -> Result<(), String> {
+    crate::window::snap_layouts(&window)
 }
 
 /// A line from the frontend for the app's log (timings test mode reports).

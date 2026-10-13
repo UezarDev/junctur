@@ -18,7 +18,9 @@
 //! does a speaker's name (after its id and the optional `track=<n>` and `color=#RRGGBB`), so
 //! renaming or recolouring a speaker by hand is editing one line. Times are seconds with
 //! millisecond precision. Speaker and turn lines are written only when there are speakers, the
-//! `captions` line only when it is not the default, and only then is the header `junctur-edit 2`
+//! `captions` line only when the list has its own caption settings (2i: without one it follows the
+//! user's defaults, so a line equal to the built-in default is still written), and only then is the
+//! header `junctur-edit 2`
 //! (5a): a list without them is byte-for-byte what an older build wrote and still reads there,
 //! while a list with them tells an older build it is a newer format instead of failing on its
 //! first new line. Both versions read here.
@@ -37,7 +39,7 @@ pub const FORMAT_VERSION: u32 = 2;
 pub fn write(e: &EditList) -> String {
     let s = &e.settings;
     let mut out = String::new();
-    let version = if e.speakers.is_empty() && e.captions == Captions::default() {
+    let version = if e.speakers.is_empty() && e.captions.is_none() {
         1
     } else {
         FORMAT_VERSION
@@ -66,15 +68,25 @@ pub fn write(e: &EditList) -> String {
     for r in &e.keep {
         let _ = writeln!(out, "keep {:.3} {:.3}", r.start, r.end);
     }
-    let c = &e.captions;
-    if *c != Captions::default() {
+    if let Some(c) = &e.captions {
         let _ = writeln!(
             out,
-            "# captions <on|off> chars=<per line> lines=<per caption> seconds=<longest>"
+            "# captions <on|off> chars=<per line> lines=<per speaker> seconds=<longest> \
+             [preview=on] [bold=on] [italic=on]"
         );
+        // 5d's switches only when on, so a list that does not use them reads in 5a's builds.
+        let flags: String = [
+            ("preview", c.preview),
+            ("bold", c.bold),
+            ("italic", c.italic),
+        ]
+        .iter()
+        .filter(|(_, on)| *on)
+        .map(|(k, _)| format!(" {k}=on"))
+        .collect();
         let _ = writeln!(
             out,
-            "captions {} chars={} lines={} seconds={}",
+            "captions {} chars={} lines={} seconds={}{flags}",
             if c.on { "on" } else { "off" },
             c.chars,
             c.lines,
@@ -131,7 +143,7 @@ pub fn parse(text: &str) -> Result<EditList, String> {
         settings: CutSettings::default(),
         keep: Vec::new(),
         speakers: Speakers::default(),
-        captions: Captions::default(),
+        captions: None,
         windows: Vec::new(),
     };
     // Turn lines may come before the speaker lines they name; checked once all are read.
@@ -223,15 +235,23 @@ pub fn parse(text: &str) -> Result<EditList, String> {
                         .split_once('=')
                         .ok_or_else(|| bad("expected key=value"))?;
                     let whole = || v.parse::<u32>().map_err(|_| bad("not a whole number"));
+                    let flag = || match v {
+                        "on" => Ok(true),
+                        "off" => Ok(false),
+                        _ => Err(bad("expected on or off")),
+                    };
                     match k {
                         "chars" => c.chars = whole()?,
                         "lines" => c.lines = whole()?,
                         "seconds" => c.seconds = v.parse().map_err(|_| bad("not a number"))?,
+                        "preview" => c.preview = flag()?,
+                        "bold" => c.bold = flag()?,
+                        "italic" => c.italic = flag()?,
                         _ => return Err(bad("unknown caption setting")),
                     }
                 }
                 c.check().map_err(|why| bad(&why))?;
-                e.captions = c;
+                e.captions = Some(c);
             }
             "turn" => match nums()?[..] {
                 [start, end, id] if end > start && id >= 1.0 && id.fract() == 0.0 => {
@@ -303,7 +323,7 @@ mod tests {
                 },
             ],
             speakers: Speakers::default(),
-            captions: Captions::default(),
+            captions: None,
             windows: vec![Window {
                 start: 0.0,
                 score: 0.5,
@@ -359,7 +379,7 @@ mod tests {
         assert!(text.contains("turn 2.500 4.000 2\n"));
         assert!(
             !text.contains("captions"),
-            "default captions are not written"
+            "a list without its own captions writes none"
         );
         assert_eq!(parse(&text).unwrap(), e);
         let plain = sample().to_text();
@@ -368,12 +388,13 @@ mod tests {
         assert!(parse("junctur-edit 3\n").is_err());
         // Caption settings alone make a version-2 list, and round-trip.
         let c = EditList {
-            captions: Captions {
+            captions: Some(Captions {
                 on: true,
                 chars: 32,
                 lines: 1,
                 seconds: 4.5,
-            },
+                ..Captions::default()
+            }),
             ..sample()
         };
         let text = c.to_text();
@@ -383,6 +404,28 @@ mod tests {
             "{text}"
         );
         assert_eq!(parse(&text).unwrap(), c);
+        // Own settings equal to the built-in default are still the list's own (2i): written, and
+        // read back as set rather than as following the user's defaults.
+        let own = EditList {
+            captions: Some(Captions::default()),
+            ..sample()
+        };
+        let text = own.to_text();
+        assert!(
+            text.starts_with(
+                "junctur-edit 2
+"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "captions off chars=42 lines=2 seconds=6
+"
+            ),
+            "{text}"
+        );
+        assert_eq!(parse(&text).unwrap().captions, Some(Captions::default()));
     }
 
     #[test]
@@ -395,7 +438,7 @@ mod tests {
         assert_eq!(e.speakers.color(1), Some("#A0B0C0"));
         assert_eq!(e.speakers.color(2), Some(default_color(2).as_str()));
         assert_eq!(e.speakers.name(2), Some("Bo"));
-        assert_eq!(e.captions, Captions::default());
+        assert_eq!(e.captions, Some(Captions::default()));
         // Not a colour: part of the name, as an older list would have it.
         let old = parse(&format!("{head}speaker 1 color=red Ana\n")).unwrap();
         assert_eq!(old.speakers.name(1), Some("color=red Ana"));
@@ -406,6 +449,30 @@ mod tests {
         assert!(parse(&format!("{head}captions maybe\n")).is_err());
         assert!(parse(&format!("{head}captions on chars=500\n")).is_err());
         assert!(parse(&format!("{head}captions on size=3\n")).is_err());
+        assert!(parse(&format!("{head}captions on bold=yes\n")).is_err());
+    }
+
+    #[test]
+    fn caption_switches_and_styles_round_trip() {
+        // Each written only when on, after 5a's settings; off by hand reads as off.
+        let c = EditList {
+            captions: Some(Captions {
+                preview: true,
+                italic: true,
+                ..Captions::default()
+            }),
+            ..sample()
+        };
+        let text = c.to_text();
+        assert!(
+            text.contains("captions off chars=42 lines=2 seconds=6 preview=on italic=on\n"),
+            "{text}"
+        );
+        assert_eq!(parse(&text).unwrap(), c);
+        let head = "junctur-edit 2\nsource x.mp4\n";
+        let e = parse(&format!("{head}captions on bold=on preview=off\n")).unwrap();
+        let c = e.captions.unwrap();
+        assert!(c.on && c.bold && !c.preview && !c.italic);
     }
 
     #[test]

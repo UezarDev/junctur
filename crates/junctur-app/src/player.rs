@@ -25,6 +25,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use junctur_core::edit::{Captions, EditList, Speakers};
+use junctur_core::export::srt::{self, Cue};
 use junctur_core::export::{self, CaptionFiles};
 use junctur_core::pipeline::{self, Found};
 use serde::Serialize;
@@ -200,6 +201,8 @@ pub struct Core {
     mixer: Arc<Mutex<Mixer>>,
     /// Held while `mutes.json` is written, so writes land in the order of the clicks.
     saving: Mutex<()>,
+    /// The user's caption defaults (2i), for an edit list without settings of its own.
+    caption_defaults: Mutex<Captions>,
 }
 
 impl Player {
@@ -259,6 +262,7 @@ impl Player {
             editor: Mutex::new(Editor::default()),
             mixer,
             saving: Mutex::new(()),
+            caption_defaults: Mutex::new(Captions::default()),
             ctl: Mutex::new(Ctl {
                 file: None,
                 edit_path: None,
@@ -514,6 +518,34 @@ impl Core {
         Ok(line)
     }
 
+    /// Hears the open recording's speakers again from the audio (5c), the windows cut at the
+    /// seconds pinned to people, and puts them into the list in play. Slow: the caller keeps it off
+    /// the async runtime.
+    ///
+    /// The recording open when it ends may not be the one heard (another was opened meanwhile):
+    /// the speakers go into the list in play only when that list is the heard recording's, checked
+    /// under the editor's lock; otherwise into its edit list on disk. The re-hearing guard is held
+    /// until then, so no enrollment slips in between.
+    pub fn reanalyze_speakers(&self) -> Result<(), String> {
+        let file = self.file().ok_or("no recording is open")?;
+        let (found, _rehearing) = voices::rehear(&file)?;
+        let mut here = false;
+        if self.file().as_deref() == Some(file.as_str()) {
+            self.change(|ed, list, _| {
+                if !junctur_core::output::same_file(&list.source, Path::new(&file)) {
+                    return Ok(None);
+                }
+                here = true;
+                let speakers = pipeline::speakers_for(Some(&found), Some(&list.speakers));
+                ed.respeak(list, speakers)
+            })?;
+        }
+        if !here {
+            voices::respeak_on_disk(&file, &found)?;
+        }
+        Ok(())
+    }
+
     /// Forgets voice `name` and labels the open recording's speakers again without it.
     pub fn forget_voice(&self, name: &str) -> Result<(), String> {
         match voices::forget(self.file().as_deref(), name)? {
@@ -573,6 +605,41 @@ impl Core {
         })
     }
 
+    /// Closes the recording (2i: back to the start window). mpv stops and idles, and what was kept
+    /// for the recording goes: loads not begun, the edit list and its watch, the editor's history
+    /// and words, the mutes. Edits are saved as they are made, so nothing is lost. An analysis of it
+    /// is not the player's and goes on (see `analysis`).
+    pub fn close(&self) -> Result<(), String> {
+        let mut ed = lock(&self.editor);
+        ed.reset(None);
+        let mut c = lock(&self.ctl);
+        c.watch = None;
+        c.file = None;
+        c.edit_path = None;
+        c.fps = None;
+        c.edit = Edit::default();
+        c.status = EditorStatus::default();
+        c.requested = Form::Source;
+        // A load asked for but not begun must not start the recording again; the loads stay locked
+        // until the state is closed, so mpv's `start-file` for one cannot land in between.
+        let stopped = {
+            let mut loads = lock(&self.loads);
+            loads.waiting.clear();
+            let stopped = self.mpv.command(&["stop"]);
+            let mut s = lock(&self.state);
+            s.set_reference(None);
+            s.close();
+            stopped
+        };
+        *lock(&self.mixer) = Mixer::default();
+        self.emit_edit(&c);
+        drop(c);
+        drop(ed);
+        self.emit_state();
+        self.emit_mixer();
+        stopped
+    }
+
     /// Sets the edit list's caption settings and saves them.
     pub fn set_captions(&self, captions: Captions) -> Result<(), String> {
         self.change(|ed, list, _| ed.set_captions(list, captions))
@@ -582,8 +649,31 @@ impl Core {
     /// at the frame rate the player rounds to. Read and written outside the locks once the words
     /// and the list are in hand.
     pub fn export_captions(&self, out: &Path) -> Result<CaptionFiles, String> {
+        let (list, captions, words, fps) = self.caption_source()?;
+        let tracked: Vec<_> = words
+            .tracks
+            .iter()
+            .copied()
+            .zip(words.list.iter())
+            .collect();
+        export::write_captions(&list, &captions, &tracked, fps.num, fps.den, out)
+            .map_err(|e| format!("writing {}: {e}", out.display()))
+    }
+
+    /// The captions of the list in play as the SRT export cuts them (5d's preview over the
+    /// picture): the same cues on the same output timeline, so the preview shows what Resolve
+    /// will, cue for cue.
+    pub fn caption_cues(&self) -> Result<Vec<Cue>, String> {
+        let (list, captions, words, fps) = self.caption_source()?;
+        let tracked = words.tracks.iter().copied().zip(words.list.iter());
+        Ok(srt::cues(&list, &captions, tracked, fps.num, fps.den))
+    }
+
+    /// What a caption file is cut from: the list in play, its caption settings (its own, else the
+    /// defaults it shows, 2i, so export and preview agree with the panel), the words the editor
+    /// holds (an `Arc`, not a copy; each lock is held only to take its part) and the frame rate.
+    fn caption_source(&self) -> Result<(Arc<EditList>, Captions, Arc<Words>, Fps), String> {
         self.prepare();
-        // An `Arc` of the words, not a copy; the lock is held only to take it.
         let words = lock(&self.editor)
             .words
             .clone()
@@ -593,14 +683,10 @@ impl Core {
             let list = c.edit.list.clone().ok_or("no edit list yet")?;
             (list, c.fps.ok_or("the frame rate is not known")?)
         };
-        let tracked: Vec<_> = words
-            .tracks
-            .iter()
-            .copied()
-            .zip(words.list.iter())
-            .collect();
-        export::write_captions(&list, &tracked, fps.num, fps.den, out)
-            .map_err(|e| format!("writing {}: {e}", out.display()))
+        let captions = list
+            .captions
+            .unwrap_or_else(|| *lock(&self.caption_defaults));
+        Ok((list, captions, words, fps))
     }
 
     /// Takes any outside change on disk, lets `f` change and save the list in play, and plays
@@ -688,10 +774,10 @@ impl Core {
         Some(TranscriptView::new(&words, speakers))
     }
 
-    /// Keeps the right-hand `right` and bottom `bottom` shares of the window (0..1) free of video,
-    /// for the side panel and for the play bar and track lanes under the picture (2g); mpv centres
-    /// the picture in what is left.
-    pub fn set_video_margins(&self, right: f64, bottom: f64) -> Result<(), String> {
+    /// Keeps the right-hand `right`, bottom `bottom` and top `top` shares of the window (0..1) free
+    /// of video, for the side panel, the play bar and track lanes under the picture (2g) and the
+    /// title bar above it (2i); mpv centres the picture in what is left.
+    pub fn set_video_margins(&self, right: f64, bottom: f64, top: f64) -> Result<(), String> {
         let share = |x: f64| {
             if x.is_finite() {
                 x.clamp(0.0, 0.9)
@@ -701,10 +787,18 @@ impl Core {
         };
         self.mpv
             .set_string("video-margin-ratio-right", &format!("{:.4}", share(right)))?;
+        self.mpv
+            .set_string("video-margin-ratio-top", &format!("{:.4}", share(top)))?;
         self.mpv.set_string(
             "video-margin-ratio-bottom",
             &format!("{:.4}", share(bottom)),
         )
+    }
+
+    /// The margins mpv has now, right, bottom and top (test mode; the top one is the title bar, 2i).
+    pub fn video_margins(&self) -> [Option<String>; 3] {
+        ["right", "bottom", "top"]
+            .map(|side| self.mpv.get_string(&format!("video-margin-ratio-{side}")))
     }
 
     /// The edit list's speaker turns, for the Speakers lane (2g).
@@ -739,7 +833,14 @@ impl Core {
 
     pub fn edit_state(&self) -> EditState {
         let c = lock(&self.ctl);
-        EditState::new(&c.edit, c.skip, c.fps, &c.status)
+        let defaults = *lock(&self.caption_defaults);
+        EditState::new(&c.edit, c.skip, c.fps, &c.status, &defaults)
+    }
+
+    /// New caption defaults from Settings (2i): a list without its own settings shows them at once.
+    pub fn set_caption_defaults(&self, captions: Captions) {
+        *lock(&self.caption_defaults) = captions;
+        self.emit_edit(&lock(&self.ctl));
     }
 
     pub fn toggle_pause(&self) -> Result<(), String> {
@@ -893,9 +994,10 @@ impl Core {
     }
 
     fn emit_edit(&self, c: &Ctl) {
+        let defaults = *lock(&self.caption_defaults);
         let _ = self.app.emit(
             EDIT_EVENT,
-            EditState::new(&c.edit, c.skip, c.fps, &c.status),
+            EditState::new(&c.edit, c.skip, c.fps, &c.status, &defaults),
         );
     }
 }
@@ -1066,7 +1168,11 @@ fn event_loop(events: &mut Events, shared: &Shared) {
                 continue;
             }
             Event::StartFile { entry } => {
-                let Some(load) = lock(&shared.loads).started(*entry) else {
+                // The state starts under the loads lock (taken before the state's, as `close`
+                // takes them): a close between taking the load and starting it would otherwise put
+                // a recording up with no file open (2i).
+                let mut loads = lock(&shared.loads);
+                let Some(load) = loads.started(*entry) else {
                     eprintln!(
                         "junctur-app: mpv started entry {entry}, which the player did not load"
                     );
@@ -1076,6 +1182,7 @@ fn event_loop(events: &mut Events, shared: &Shared) {
                     t.start(&load.form);
                 }
                 lock(state).start(load);
+                drop(loads);
                 Change::Other
             }
             e => {

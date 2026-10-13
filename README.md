@@ -34,10 +34,13 @@ Early. These pieces work:
 - For `render`: an NVIDIA GPU and an ffmpeg build with NVENC/NVDEC (`h264_nvenc`, `-hwaccel cuda`).
 - Optional, for GPU: an NVIDIA GPU with CUDA 13 and cuDNN 9 installed, and a build with `--features cuda`.
   Without it, or when the GPU cannot start, everything runs on CPU. Whisper runs large-v3-turbo on the
-  GPU when 2.1 GB of VRAM is free, else on CPU, and says so.
+  GPU when 2.1 GB of VRAM is free, else on CPU, and says so (also when the build has no GPU support, or
+  the CUDA 13 runtime's `cublas64_13.dll` is not installed). A CUDA build starts on a PC without CUDA:
+  it finds the CUDA DLLs through `CUDA_PATH` (or `JUNCTUR_CUDA_DIR`, `JUNCTUR_CUDNN_DIR`) when needed.
   Building whisper.cpp's CUDA kernels: with several CUDA versions installed set `CUDAToolkit_ROOT` to the
   CUDA 13 folder; CMake 4.0 does not know Visual Studio 2026, so set `CMAKE_GENERATOR` to an older
-  installed one (e.g. `Visual Studio 16 2019`) if it picks that.
+  installed one (e.g. `Visual Studio 16 2019`) if it picks that. The app's `npm run tauri` sets both
+  when they are unset.
 
 ## Build and use
 
@@ -54,7 +57,7 @@ junctur status <file> [--project <dir>]
 junctur cut <file> [--project <dir>] [cut flags]
 junctur export <file> [--fcpxml <out.fcpxml>] [--srt <out.srt>] [--project <dir>]
 junctur render <file> --out <out.mp4> [--project <dir>] [--full] [--force] [--jobs <n>]
-junctur voices [<file> --add <name> --at <start>-<end>[,...]] [--forget <name>]
+junctur voices [<file> --add <name> --at <start>-<end>[,...] | <file> --rehear [--cpu]] [--forget <name>]
 cut flags: [--pad-before <s>] [--pad-after <s>] [--merge-gap <s>] [--crossfade <ms>]
 ```
 
@@ -78,6 +81,12 @@ file (or the file `JUNCTUR_VOICES` names); `junctur voices` lists them, `--forge
 Enrolling relabels from what `analyze` kept (`windows.f32` in the project), without reading the
 recording again; `analyze` and `cut` relabel with the current voices. A rename of a speaker nobody
 enrolled follows that speaker through a relabel (matched by when they talk, not by number).
+
+Any length works, even one word: a short pick makes a rough voice (Junctur says so), but the seconds
+picked are pinned to that person in that recording, kept in its `speakers.json`, and every later labelling
+gives those seconds to them and nobody else. `junctur voices <file> --rehear` (the app's "Analyse speakers
+again") reads the recording's speakers again from the audio with the voice windows cut where the pins
+begin and end, reusing every other stage; it takes about as long as the speakers stage did.
 
 `export --srt <out.srt>` writes the captions: the transcript's kept words on the edited timeline (the
 same frames as the render and the FCPXML), each cue as `<font color>` in its speaker's colour, cut by the
@@ -108,7 +117,9 @@ project panel shows each stage as it runs, and the transcript and edit list fill
 analysed recording opens straight away; when the config file now asks for another Whisper model than the
 transcript was made with, the panel says so and offers Re-analyse (never on its own). Re-analyse reruns
 only what the settings changed and re-cuts; when the edit list holds your own edits it asks first, and
-keeps them as `edit.junctur.bak*`. Build the app with `--features cuda` to analyse on the GPU.
+keeps them as `edit.junctur.bak*`. `npm run tauri dev` / `build` build the app with `--features cuda` when
+the CUDA 13 toolkit is installed (`CUDA_PATH_V13_0`), so it analyses on the GPU; `JUNCTUR_CPU=1` builds
+a CPU one. Plain `cargo build` is always CPU-only.
 
 Play/pause, seek, pick the audio track, and see the recording's project state (stages, transcript, edit
 list), read from the same folder `junctur status` uses. Video is played by
@@ -158,11 +169,16 @@ Downloaded on first use into `<cache>/models/`, checked against pinned SHA-256 d
 | `large-v3-q5_0` | large-v3 quantised to 5 bits: large-v3's decoder in about 2.2 GB of VRAM, a little more than turbo |
 
 To change the default, create `junctur/config.json` in the OS config folder (`%APPDATA%` on Windows,
-`~/.config` elsewhere), or point `JUNCTUR_CONFIG` at a file:
+`~/.config` elsewhere), or point `JUNCTUR_CONFIG` at a file; the desktop app's Settings (the gear in its
+title bar) writes the same file:
 
 ```json
-{ "whisper_model": "large-v3" }
+{ "whisper_model": "large-v3", "captions": { "on": true, "chars": 32 } }
 ```
+
+`captions` holds the caption defaults: what a recording whose edit list has no `captions` line of its own
+cuts its captions with (`on`, `chars` per line, `lines` per speaker, `seconds` at most), in the app and in
+`render` and `export --srt`. A key left out keeps its built-in value.
 
 `--model` on the command line wins over the config file. A config file that does not parse, names an
 unknown model or key, or is named by `JUNCTUR_CONFIG` but missing, is an error rather than a silent

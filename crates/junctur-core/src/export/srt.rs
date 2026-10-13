@@ -4,7 +4,7 @@
 //! imported a test file with `<font color>` per cue and the colours came through; the same test as
 //! WebVTT (`::cue` classes) did not. Premiere Pro is unverified; reports say its import gives every
 //! caption its default style. Only what an SRT carries into Resolve is written: text, timing,
-//! colour. Each line gets its own `<font>` tag, since a tag spanning a line break is the case
+//! colour, and bold or italic (5d). Each line gets its own `<font>` tag, since a tag spanning a line break is the case
 //! importers disagree on.
 //!
 //! One SRT holds one Resolve subtitle track, and a track shows one caption at a time: Uezar's
@@ -21,6 +21,8 @@
 
 use std::fmt::Write;
 
+use serde::Serialize;
+
 use crate::edit::{frame_ranges, frames_ceil, Captions, EditList};
 use crate::transcribe::Word;
 
@@ -34,7 +36,7 @@ const MIN_S: f64 = 0.8;
 const READABLE_S: f64 = 0.5;
 
 /// One speaker's lines in a cue.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Part {
     /// Speaker id, 0 for none.
     pub speaker: u32,
@@ -42,8 +44,8 @@ pub struct Part {
 }
 
 /// A caption: one part per speaker talking in it, in the order they started, so more than one only
-/// where people talk at once.
-#[derive(Debug, Clone, PartialEq)]
+/// where people talk at once. Serialized for the app's preview over the picture (5d).
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Cue {
     /// Output seconds.
     pub start: f64,
@@ -157,13 +159,17 @@ fn clean(text: &str) -> String {
 /// when the last of the overlapping speakers stops. An overlap longer than the limits allow becomes
 /// several stacked cues, each within them; a speaker still mid-word when one closes keeps their
 /// last line on screen in the next ([`Open::after`]).
+///
+/// `c` is the caption settings to cut with, resolved by the caller: the list's own, else the
+/// user's defaults (2i, `config::captions`). Taken apart from `edit`, whose `captions` may be
+/// `None`, so a caller cannot forget the defaults and silently get the built-in ones.
 pub fn cues<'a>(
     edit: &EditList,
+    c: &Captions,
     words: impl IntoIterator<Item = (usize, &'a Word)>,
     num: u64,
     den: u64,
 ) -> Vec<Cue> {
-    let c: &Captions = &edit.captions;
     let tl = Timeline::new(edit, num, den);
     let label = edit.speakers.labeller();
     let mut words: Vec<(usize, &Word)> = words.into_iter().collect();
@@ -439,7 +445,19 @@ fn stamp(s: f64) -> String {
 /// `<font color>` of its part's speaker; a word nobody was heard saying is left white. A cue's parts
 /// follow one another line by line, so a change of speaker is a line break: no blank line between
 /// them, which would end the cue.
-pub fn write(cues: &[Cue], edit: &EditList) -> String {
+///
+/// Bold and italic (5d) wrap every line outside its colour, `<b><i><font …>line</font></i></b>`:
+/// the order Resolve's own SRT export writes (`<b>` around the whole text), each line closed on its
+/// own like the colour. Resolve's import applies both (5d's research); nothing else is written,
+/// since the rest of what Resolve styles is its subtitle Track Style, which an SRT cannot set.
+/// `c` is resolved by the caller, as for [`cues`].
+pub fn write(cues: &[Cue], edit: &EditList, c: &Captions) -> String {
+    let (open, close) = match (c.bold, c.italic) {
+        (true, true) => ("<b><i>", "</i></b>"),
+        (true, false) => ("<b>", "</b>"),
+        (false, true) => ("<i>", "</i>"),
+        (false, false) => ("", ""),
+    };
     let mut out = String::new();
     for (n, c) in cues.iter().enumerate() {
         let _ = write!(
@@ -454,10 +472,10 @@ pub fn write(cues: &[Cue], edit: &EditList) -> String {
             for line in &part.lines {
                 match color {
                     Some(col) => {
-                        let _ = write!(out, "<font color=\"{col}\">{line}</font>\r\n");
+                        let _ = write!(out, "{open}<font color=\"{col}\">{line}</font>{close}\r\n");
                     }
                     None => {
-                        let _ = write!(out, "{line}\r\n");
+                        let _ = write!(out, "{open}{line}{close}\r\n");
                     }
                 }
             }
@@ -499,6 +517,11 @@ mod tests {
             .collect()
     }
 
+    /// The test list's own caption settings, which these tests always set.
+    fn own(e: &EditList) -> Captions {
+        e.captions.expect("the test lists have their own captions")
+    }
+
     fn edit(keep: &[(f64, f64)], captions: Captions) -> EditList {
         EditList {
             source: "rec.mp4".into(),
@@ -524,7 +547,7 @@ mod tests {
                 &[None, None],
                 None,
             ),
-            captions,
+            captions: Some(captions),
             windows: vec![],
         }
     }
@@ -540,13 +563,13 @@ mod tests {
             word(30.2, 30.6, "qué"),
             word(30.7, 31.0, "tal"),
         ];
-        let c = cues(&e, w.iter().map(|w| (0, w)), 30, 1);
+        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1);
         assert_eq!(c.len(), 2, "{c:?}");
         assert_eq!(parts(&c[0]), vec![(1, "hola amigos".into())]);
         assert!((c[0].start - 0.5).abs() < 1e-9);
         assert_eq!(parts(&c[1]), vec![(2, "qué tal".into())]);
         assert!((c[1].start - 2.2).abs() < 1e-9, "{}", c[1].start);
-        let text = write(&c, &e);
+        let text = write(&c, &e, &own(&e));
         let first = "1\r\n00:00:00,500 --> 00:00:01,600\r\n\
                      <font color=\"#F2B33D\">hola amigos</font>\r\n\r\n2\r\n00:00:02,200 --> ";
         assert!(text.starts_with(first), "{text}");
@@ -563,7 +586,7 @@ mod tests {
         let mut e = edit(&keep, Captions::default());
         e.duration = 200.0;
         let last = word(199.0 * 0.9 + 0.1, 199.0 * 0.9 + 0.3, "fin");
-        let c = cues(&e, [(0, &last)], 30, 1);
+        let c = cues(&e, &own(&e), [(0, &last)], 30, 1);
         let frames = frame_ranges(&e.keep, 30, 1, frames_ceil(200.0, 30, 1));
         let before: u64 = frames[..199].iter().map(|(a, b)| b - a).sum();
         let (a, _) = frames[199];
@@ -595,7 +618,7 @@ mod tests {
             word(19.0, 19.5, "a"),
             word(20.5, 20.8, "b"), // speaker 2: new cue
         ];
-        let c = cues(&e, w.iter().map(|w| (0, w)), 30, 1);
+        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1);
         assert_eq!(
             solo(&c),
             vec!["uno dos tres", "cuatro", "cinco seis", "siete", "a", "b"]
@@ -613,7 +636,7 @@ mod tests {
         let w: Vec<Word> = (0..20)
             .map(|k| word(k as f64 * 0.3, k as f64 * 0.3 + 0.25, "la"))
             .collect();
-        let c = cues(&e, w.iter().map(|w| (0, w)), 30, 1);
+        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1);
         assert!(c.len() >= 3);
         assert!(c.iter().all(|c| c.end - c.start <= 2.0 + 1e-9), "{c:?}");
     }
@@ -624,7 +647,7 @@ mod tests {
         // "sí", one speaker after the other, not at once.
         let e = edit(&[(0.0, 40.0)], Captions::default());
         let (a, b) = (word(19.9, 20.0, "sí"), word(20.0, 20.2, "no"));
-        let c = cues(&e, [(0, &a), (0, &b)], 30, 1);
+        let c = cues(&e, &own(&e), [(0, &a), (0, &b)], 30, 1);
         assert_eq!(solo(&c), vec!["sí", "no"]);
         assert!((c[0].end - c[0].start - READABLE_S).abs() < 1e-9, "{c:?}");
         assert!((c[1].start - c[0].end).abs() < 1e-9);
@@ -636,7 +659,7 @@ mod tests {
         // Kept 0-10 s; a last word at 9.8-9.9 would be held to 10.6.
         let e = edit(&[(0.0, 10.0)], Captions::default());
         let w = word(9.8, 9.9, "fin");
-        let c = cues(&e, [(0, &w)], 30, 1);
+        let c = cues(&e, &own(&e), [(0, &w)], 30, 1);
         assert!((c[0].end - 10.0).abs() < 1e-9, "{c:?}");
     }
 
@@ -649,7 +672,7 @@ mod tests {
             word(20.0, 20.4, "no"),
             word(25.0, 25.1, "ya"),
         ];
-        let c = cues(&e, w.iter().map(|w| (0, w)), 30, 1);
+        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1);
         assert_eq!(c.len(), 3);
         for p in c.windows(2) {
             assert!(p[0].end <= p[1].start + 1e-9, "{c:?}");
@@ -680,7 +703,7 @@ mod tests {
         // "sí" starts before "qué" ends: at once. "vale" comes after a pause of speaker 2's own.
         let two = [word(10.6, 10.9, "sí"), word(12.0, 12.3, "vale")];
         let words = one.iter().map(|w| (0, w)).chain(two.iter().map(|w| (3, w)));
-        let c = cues(&e, words, 30, 1);
+        let c = cues(&e, &own(&e), words, 30, 1);
         assert_eq!(c.len(), 2, "{c:?}");
         assert_eq!(
             parts(&c[0]),
@@ -690,7 +713,7 @@ mod tests {
         assert!((c[0].start - 10.0).abs() < 1e-9 && (c[0].end - 11.6).abs() < 1e-9);
         assert_eq!(parts(&c[1]), vec![(2, "vale".into())]);
         // Each part in its own colour, a line break between them and no blank line.
-        let text = write(&c, &e);
+        let text = write(&c, &e, &own(&e));
         assert!(
             text.contains(
                 "<font color=\"#F2B33D\">hola qué tal bien</font>\r\n\
@@ -700,7 +723,7 @@ mod tests {
         );
         // One after the other on two tracks is not at once: a cue each.
         let (a, b) = (word(20.0, 20.4, "ya"), word(20.5, 20.8, "no"));
-        let c = cues(&e, [(0, &a), (3, &b)], 30, 1);
+        let c = cues(&e, &own(&e), [(0, &a), (3, &b)], 30, 1);
         assert_eq!(c.len(), 2, "{c:?}");
     }
 
@@ -721,7 +744,7 @@ mod tests {
         // "sí" runs to 1.3 s, past the new cue's start at 1.2 s.
         let two = [word(0.5, 1.3, "sí"), word(1.4, 1.7, "claro")];
         let words = one.iter().map(|w| (0, w)).chain(two.iter().map(|w| (3, w)));
-        let c = cues(&e, words, 30, 1);
+        let c = cues(&e, &own(&e), words, 30, 1);
         let got: Vec<_> = c.iter().map(parts).collect();
         assert_eq!(
             got,
@@ -755,7 +778,7 @@ mod tests {
             .map(|k| word(k as f64 * 0.3 + 0.15, k as f64 * 0.3 + 0.4, "sí"))
             .collect();
         let words = one.iter().map(|w| (0, w)).chain(two.iter().map(|w| (3, w)));
-        let c = cues(&e, words, 30, 1);
+        let c = cues(&e, &own(&e), words, 30, 1);
         assert!(c.len() >= 3, "{c:?}");
         for cue in &c {
             assert!(cue.end - cue.start <= 2.0 + 1e-9, "{c:?}");
@@ -779,7 +802,7 @@ mod tests {
             end: 10.0,
         }];
         let (a, b) = (word(9.6, 9.7, "a"), word(9.75, 9.9, "b"));
-        let c = cues(&e, [(0, &a), (3, &b)], 30, 1);
+        let c = cues(&e, &own(&e), [(0, &a), (3, &b)], 30, 1);
         assert_eq!(c.len(), 1, "{c:?}");
         assert_eq!(parts(&c[0]), vec![(1, "a".into()), (2, "b".into())]);
         assert!((c[0].end - 10.0).abs() < 1e-9, "{c:?}");
@@ -803,7 +826,7 @@ mod tests {
             word(5.45, 5.8, "mira"),
             word(8.0, 8.3, "vale"), // speaker 1 alone again, after a pause
         ];
-        let c = cues(&e, w.iter().map(|w| (0, w)), 30, 1);
+        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1);
         let got: Vec<_> = c.iter().map(parts).collect();
         assert_eq!(
             got,
@@ -834,11 +857,58 @@ mod tests {
             word(1.7, 1.8, "dos\r\nlíneas"),
             word(1.9, 2.0, "a<b"),
         ];
-        let c = cues(&e, w.iter().map(|w| (0, w)), 30, 1);
+        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1);
         assert_eq!(parts(&c[0]), vec![(0, "hey vale dos líneas ab".into())]);
-        let text = write(&c, &e);
+        let text = write(&c, &e, &own(&e));
         assert!(!text.contains("<font"), "no speaker, no colour");
-        assert!(cues(&e, [], 30, 1).is_empty());
+        assert!(cues(&e, &own(&e), [], 30, 1).is_empty());
         assert_eq!(stamp(3723.4567), "01:02:03,457");
+    }
+
+    #[test]
+    fn bold_and_italic_wrap_each_line_outside_its_colour() {
+        let w = [word(1.0, 1.4, "hola"), word(21.0, 21.4, "sí")];
+        let styled = |bold, italic| {
+            let e = edit(
+                &[(0.0, 40.0)],
+                Captions {
+                    bold,
+                    italic,
+                    ..Default::default()
+                },
+            );
+            write(
+                &cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1),
+                &e,
+                &own(&e),
+            )
+        };
+        let both = styled(true, true);
+        assert!(
+            both.contains("<b><i><font color=\"#F2B33D\">hola</font></i></b>\r\n"),
+            "{both}"
+        );
+        assert!(both.contains("<b><i><font color=\"#5FB3F2\">sí</font></i></b>\r\n"));
+        assert!(styled(true, false).contains("<b><font color=\"#F2B33D\">hola</font></b>\r\n"));
+        assert!(styled(false, true).contains("<i><font color=\"#F2B33D\">hola</font></i>\r\n"));
+        let plain = styled(false, false);
+        assert!(!plain.contains("<b>") && !plain.contains("<i>"));
+        assert!(plain.contains("\r\n<font color=\"#F2B33D\">hola</font>\r\n"));
+        // A word nobody was heard saying keeps the style without a colour.
+        let mut e = edit(
+            &[(0.0, 100.0)],
+            Captions {
+                italic: true,
+                ..Default::default()
+            },
+        );
+        e.speakers = Speakers::default();
+        let text = write(
+            &cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1),
+            &e,
+            &own(&e),
+        );
+        assert!(text.contains("\r\n<i>hola</i>\r\n"), "{text}");
+        assert!(!text.contains("<font"));
     }
 }

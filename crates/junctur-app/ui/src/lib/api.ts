@@ -67,8 +67,10 @@ export interface EditState {
   speakers: Speaker[];
   /** Changes when the words' speaker labels would (turns changed on disk), not on a rename. */
   speakersKey: string;
-  /** Caption settings (the edit list's `captions` line). */
+  /** Caption settings: the edit list's `captions` line, else the user's defaults (2i). */
   captions: Captions;
+  /** The list has its own caption settings; without, it follows the defaults. */
+  captionsOwn: boolean;
 }
 
 export interface Speaker {
@@ -115,10 +117,47 @@ export interface RecordingInfo {
 
 /** How the caption file is cut (src: junctur-core edit/captions.rs). */
 export interface Captions {
+  /** Export: a render writes the SRT beside the video. */
   on: boolean;
+  /** Show the captions over the picture as it plays (5d). */
+  preview: boolean;
   chars: number;
   lines: number;
   seconds: number;
+  /** Every caption bold / italic in the SRT (5d: Resolve's import applies both). */
+  bold: boolean;
+  italic: boolean;
+}
+
+/** A caption as the SRT export cuts it (junctur-core export/srt.rs), output seconds; one part per
+ * speaker talking in it, so several only where people talk at once (5e). */
+export interface Cue {
+  start: number;
+  end: number;
+  parts: { speaker: number; lines: string[] }[];
+}
+
+/** A Whisper model the Settings dialog offers (src/settings.rs). */
+export interface ModelChoice {
+  key: string;
+  label: string;
+  note: string;
+}
+
+/** What the Settings dialog edits (2i), kept in junctur/config.json. */
+export interface Settings {
+  whisperModel: string;
+  /** The caption settings a recording without its own starts from. */
+  captions: Captions;
+}
+
+export interface SettingsView {
+  settings: Settings;
+  models: ModelChoice[];
+  /** The config file; null with no config folder. */
+  path: string | null;
+  /** Why the file could not be read (saving replaces it). */
+  error: string | null;
 }
 
 /** A voice Junctur remembers (5b), used to name speakers in every recording. */
@@ -273,16 +312,21 @@ export const recolorSpeaker = (id: number, color: string) =>
 export const setCaptions = (captions: Captions) => invoke<void>("set_captions", { captions });
 /** Writes the captions as one SRT at `path`, people talking at once stacked in one caption (5e). */
 export const exportCaptions = (path: string) => invoke<Exported>("export_captions", { path });
+/** The captions as the export cuts them, for the preview over the picture (5d). */
+export const captionCues = () => invoke<Cue[]>("caption_cues");
 export const voices = () => invoke<Voice[]>("voices");
 /** Remembers `name`'s voice from words `first..=last` and relabels the speakers; resolves to a line for the user. */
 export const enrollVoice = (first: number, last: number, name: string) =>
   invoke<string>("enroll_voice", { first, last, name });
 export const forgetVoice = (name: string) => invoke<void>("forget_voice", { name });
+/** Hears the open recording's speakers again from the audio, cut at the seconds pinned to people (5c). Slow. */
+export const reanalyzeSpeakers = () => invoke<void>("reanalyze_speakers");
 export const undo = () => invoke<void>("undo");
 export const redo = () => invoke<void>("redo");
-/** The shares of the window (0..1) on the right and at the bottom to keep free of video. */
-export const setVideoMargins = (right: number, bottom: number) =>
-  invoke<void>("set_video_margins", { right, bottom });
+/** The shares of the window (0..1) on the right, at the bottom and at the top (the title bar) to
+ * keep free of video. */
+export const setVideoMargins = (right: number, bottom: number, top: number) =>
+  invoke<void>("set_video_margins", { right, bottom, top });
 export const setSolo = (track: number, on: boolean) => invoke<void>("set_solo", { track, on });
 export const turns = () => invoke<Turns>("turns");
 export const wavesState = () => invoke<WavesState | null>("waves_state");
@@ -300,8 +344,18 @@ export const recentInfo = (path: string) => invoke<RecordingInfo>("recent_info",
 export const thumbnail = (path: string) => invoke<ArrayBuffer>("thumbnail", { path });
 /** Opens the open recording's project folder in the file manager. */
 export const reveal = () => invoke<void>("reveal");
-export const setMenuCheck = (id: "panel" | "talking", checked: boolean) =>
-  invoke<void>("set_menu_check", { id, checked });
+/** Closes the open recording: back to the start window (2i). */
+export const closeFile = () => invoke<void>("close_file");
+export const settings = () => invoke<SettingsView>("settings");
+/** Writes the settings to junctur/config.json; never analyses anything. */
+export const saveSettings = (settings: Settings) => invoke<SettingsView>("save_settings", { settings });
+/** The Captions panel's "Save as default". */
+export const saveCaptionDefaults = (captions: Captions) =>
+  invoke<SettingsView>("save_caption_defaults", { captions });
+/** Why `path`'s analysis is out of date with the settings now (2d's notice). */
+export const outdated = (path: string) => invoke<string[]>("outdated", { path });
+/** Windows' snap layouts for the window (the pointer resting on the title bar's maximise button). */
+export const snapLayouts = () => invoke<void>("snap_layouts");
 export const uiLog = (message: string) => invoke<void>("ui_log", { message });
 
 export const onPlayerState = (f: (s: PlayerState) => void): Promise<UnlistenFn> =>
@@ -323,6 +377,6 @@ export const onLevels = (f: (levels: (number | null)[]) => void): Promise<Unlist
 export const onWaves = (f: (s: WavesState) => void): Promise<UnlistenFn> =>
   listen<WavesState>("waves", (e) => f(e.payload));
 
-/** A menu item chosen (src/menu.rs): `open`, `panel`, `talking`. */
+/** A menu item chosen by test mode's `menu=<id>` (src/testmode.rs); ids as in menus.ts. */
 export const onMenu = (f: (id: string) => void): Promise<UnlistenFn> =>
   listen<string>("menu", (e) => f(e.payload));

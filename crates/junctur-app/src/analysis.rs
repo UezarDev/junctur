@@ -332,6 +332,16 @@ impl Analysis {
         })
     }
 
+    /// Runs `f` behind the lane runs' first halves take (2j: tracks to edit list, the speakers
+    /// stage among them): after the first half in progress, if any, and with none starting until
+    /// it returns. For work that loads the speaker models outside a run (5c: a recording's
+    /// speakers heard again). Not behind the transcription lane: like a first half, it is minutes,
+    /// and Uezar's rule is that those never wait on another recording's transcription.
+    pub fn exclusive<T>(&self, f: impl FnOnce() -> T) -> T {
+        let _turn = lock(&self.first);
+        f()
+    }
+
     fn run(&self, p: &Project, notify: &Notify, keep_list: bool) {
         let k = p.file.clone();
         let result = self.halves(p, notify, keep_list);
