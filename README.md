@@ -95,7 +95,9 @@ app's Captions panel or by hand). It is one file for one Resolve subtitle track,
 at a time: when people talk at once (on separate voice tracks, or where `analyze` heard two voices on
 the mix), one caption holds them all, each speaker on their own line(s) in their colour, lasting until
 the last of them stops. Each word is shown once, under its one speaker. Per-speaker files that earlier
-versions wrote beside it (`<out> (<name>).srt`) are not deleted; the export lists them. Captions are
+versions wrote beside it (`<out> (<name>).srt`) are not deleted; the export lists them. Bold, italic
+and underline (`bold=on`, `italic=on`, `underline=on` on the `captions` line) wrap every line outside
+its colour, `<b><i><u><font color>`; nothing else an SRT could say reaches Resolve. Captions are
 optional: with `captions on`, `render` also writes the file beside the video.
 Checked in DaVinci Resolve (File > Import > Subtitle keeps the colours); Premiere Pro is unverified and
 likely shows its default caption style. SRT carries no size or position.

@@ -406,7 +406,8 @@ pub async fn recolor_speaker(app: State<'_, App>, id: u32, color: String) -> Res
     e.recolor_speaker(e.file(), id, &color)
 }
 
-/// Sets the caption settings: export and preview switches, bold and italic, how cues are cut.
+/// Sets the caption settings: export and preview switches, bold, italic and underline, how cues are
+/// cut.
 #[tauri::command]
 pub async fn set_captions(app: State<'_, App>, captions: Captions) -> Result<(), String> {
     let e = app.editable()?;

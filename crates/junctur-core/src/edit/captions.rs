@@ -1,7 +1,7 @@
 //! How captions are cut into cues and styled, as the edit list keeps it (5a, 5d). Colours are per
 //! speaker ([`super::SpeakerName::color`]); this is the rest of what shapes the caption file, and
-//! only what an SRT carries into DaVinci Resolve: text, timing, colour, bold and italic. 5d's
-//! research (`.planning/research/resolve-caption-styling.md`) found nothing else an SRT import
+//! only what an SRT carries into DaVinci Resolve: text, timing, colour, bold, italic and underline
+//! (5f). 5d's research (`.planning/research/resolve-caption-styling.md`) found nothing else an SRT import
 //! keeps: size, font family, outline, shadow, background and position are Resolve's subtitle
 //! Track Style, which no import sets, and a position tag (`{\an8}`) shows as literal text. So they
 //! are not settings here; offering them would promise what Resolve drops.
@@ -35,6 +35,9 @@ pub struct Captions {
     pub bold: bool,
     /// Every caption italic (`<i>`), likewise.
     pub italic: bool,
+    /// Every caption underlined (`<u>`, 5f): Uezar's import of 5d's test file showed Resolve
+    /// underlines in the speaker's colour.
+    pub underline: bool,
 }
 
 /// 42 characters and two lines is the common broadcast and streaming limit, readable at a glance;
@@ -49,6 +52,7 @@ impl Default for Captions {
             seconds: 6.0,
             bold: false,
             italic: false,
+            underline: false,
         }
     }
 }
@@ -144,11 +148,14 @@ mod tests {
                 ..Default::default()
             }
         );
-        assert!(!old.preview && !old.bold && !old.italic);
+        assert!(!old.preview && !old.bold && !old.italic && !old.underline);
         let all: Captions = serde_json::from_str(
             r#"{"on":false,"preview":true,"chars":42,"lines":2,"seconds":6,"bold":true,"italic":true}"#,
         )
         .unwrap();
-        assert!(all.preview && all.bold && all.italic);
+        assert!(all.preview && all.bold && all.italic && !all.underline);
+        // 5f's underline beside them.
+        let u: Captions = serde_json::from_str(r#"{"underline":true}"#).unwrap();
+        assert!(u.underline && !u.bold);
     }
 }

@@ -4,7 +4,7 @@
 //! imported a test file with `<font color>` per cue and the colours came through; the same test as
 //! WebVTT (`::cue` classes) did not. Premiere Pro is unverified; reports say its import gives every
 //! caption its default style. Only what an SRT carries into Resolve is written: text, timing,
-//! colour, and bold or italic (5d). Each line gets its own `<font>` tag, since a tag spanning a line break is the case
+//! colour, and bold, italic (5d) or underline (5f). Each line gets its own `<font>` tag, since a tag spanning a line break is the case
 //! importers disagree on.
 //!
 //! One SRT holds one Resolve subtitle track, and a track shows one caption at a time: Uezar's
@@ -446,18 +446,20 @@ fn stamp(s: f64) -> String {
 /// follow one another line by line, so a change of speaker is a line break: no blank line between
 /// them, which would end the cue.
 ///
-/// Bold and italic (5d) wrap every line outside its colour, `<b><i><font …>line</font></i></b>`:
-/// the order Resolve's own SRT export writes (`<b>` around the whole text), each line closed on its
-/// own like the colour. Resolve's import applies both (5d's research); nothing else is written,
+/// Bold and italic (5d) and underline (5f) wrap every line outside its colour,
+/// `<b><i><u><font …>line</font></u></i></b>`: the order Resolve's own SRT export writes (`<b>`
+/// around the whole text), `<u>` innermost so 5d's form is unchanged without it (Uezar's import
+/// found the order makes no difference), each line closed on its own like the colour. Resolve's
+/// import applies all three (5d's research, Uezar's underline test); nothing else is written,
 /// since the rest of what Resolve styles is its subtitle Track Style, which an SRT cannot set.
 /// `c` is resolved by the caller, as for [`cues`].
 pub fn write(cues: &[Cue], edit: &EditList, c: &Captions) -> String {
-    let (open, close) = match (c.bold, c.italic) {
-        (true, true) => ("<b><i>", "</i></b>"),
-        (true, false) => ("<b>", "</b>"),
-        (false, true) => ("<i>", "</i>"),
-        (false, false) => ("", ""),
-    };
+    let tags: Vec<&str> = [("b", c.bold), ("i", c.italic), ("u", c.underline)]
+        .into_iter()
+        .filter_map(|(t, on)| on.then_some(t))
+        .collect();
+    let open: String = tags.iter().map(|t| format!("<{t}>")).collect();
+    let close: String = tags.iter().rev().map(|t| format!("</{t}>")).collect();
     let mut out = String::new();
     for (n, c) in cues.iter().enumerate() {
         let _ = write!(
@@ -910,5 +912,48 @@ mod tests {
         );
         assert!(text.contains("\r\n<i>hola</i>\r\n"), "{text}");
         assert!(!text.contains("<font"));
+    }
+
+    #[test]
+    fn underline_wraps_inside_bold_and_italic_outside_the_colour() {
+        let w = [word(1.0, 1.4, "hola")];
+        let styled = |c: Captions, speakers: bool| {
+            let mut e = edit(&[(0.0, 40.0)], c);
+            if !speakers {
+                e.speakers = Speakers::default();
+            }
+            write(
+                &cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1),
+                &e,
+                &own(&e),
+            )
+        };
+        let all = styled(
+            Captions {
+                bold: true,
+                italic: true,
+                underline: true,
+                ..Default::default()
+            },
+            true,
+        );
+        assert!(
+            all.contains("<b><i><u><font color=\"#F2B33D\">hola</font></u></i></b>\r\n"),
+            "{all}"
+        );
+        let only = Captions {
+            underline: true,
+            ..Default::default()
+        };
+        assert!(styled(only, true).contains("\r\n<u><font color=\"#F2B33D\">hola</font></u>\r\n"));
+        assert!(styled(only, false).contains("\r\n<u>hola</u>\r\n"));
+        let bold = Captions {
+            bold: true,
+            underline: true,
+            ..Default::default()
+        };
+        assert!(
+            styled(bold, true).contains("<b><u><font color=\"#F2B33D\">hola</font></u></b>\r\n")
+        );
     }
 }
