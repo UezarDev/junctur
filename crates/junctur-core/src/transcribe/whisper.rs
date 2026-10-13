@@ -106,33 +106,72 @@ pub struct Choice {
     pub note: Option<String>,
 }
 
+/// Why the GPU was or was not looked at, so a CPU run can say why it is one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gpu {
+    /// The caller asked for the CPU (`--cpu`): nothing to warn about.
+    Off,
+    /// Built without `cuda`. 2l: the app's normal build was one, and its CPU runs said nothing.
+    NotBuilt,
+    /// A GPU answered but the CUDA runtime DLL whisper.cpp delay-loads is not there (named).
+    NoRuntime(&'static str),
+    /// Looked: `free` says what was found.
+    Looked,
+}
+
 pub fn choose(pref: ModelPref, device: DevicePref) -> (Choice, &'static Model) {
-    let gpu = cfg!(feature = "cuda") && device == DevicePref::Auto;
-    let free = if gpu { vram::free_mib() } else { None };
+    let mut gpu = match device {
+        DevicePref::Cpu => Gpu::Off,
+        DevicePref::Auto if !cfg!(feature = "cuda") => Gpu::NotBuilt,
+        DevicePref::Auto => Gpu::Looked,
+    };
+    let mut free = if gpu == Gpu::Looked {
+        vram::free_mib()
+    } else {
+        None
+    };
+    // 2l: without cuBLAS whisper.cpp dies on its first GPU call instead of failing, so the GPU is only
+    // offered to it when the DLL can be found.
+    if free.is_some() {
+        if let Some(dll) = runtime::whisper_cuda_missing() {
+            (gpu, free) = (Gpu::NoRuntime(dll), None);
+        }
+    }
     pick(pref, free, gpu)
 }
 
-/// The choice for `free` MiB of VRAM (None: no GPU answered). `gpu` says one was looked for, so its
-/// absence is worth a note. Pure, so the fallback table is testable without a GPU.
+/// The choice for `free` MiB of VRAM (None: no GPU answered, or none was asked). `gpu` says why, so a
+/// CPU run that the user did not ask for carries a note. Pure, so the fallback table is testable
+/// without a GPU.
 ///
 /// `Auto` without room on the card runs turbo on CPU rather than 1b's 5-bit large-v3: the 5-bit model
 /// would not fit either (see [`TURBO_MIB`]), and on CPU turbo's 4 decoder layers make it the faster.
-fn pick(pref: ModelPref, free: Option<u64>, gpu: bool) -> (Choice, &'static Model) {
+fn pick(pref: ModelPref, free: Option<u64>, gpu: Gpu) -> (Choice, &'static Model) {
     let m = pref.model();
-    let (device, note) = match (pref, free) {
-        (ModelPref::Auto, Some(f)) if f < TURBO_MIB => (
+    let (device, note) = match (pref, free, gpu) {
+        (_, None, Gpu::NotBuilt) => (
+            Device::Cpu,
+            Some("this build has no GPU support (built without `--features cuda`): running on CPU (slow)".to_string()),
+        ),
+        (_, None, Gpu::NoRuntime(dll)) => (
+            Device::Cpu,
+            Some(format!(
+                "NVIDIA GPU found but the CUDA 13 runtime ({dll}) is not installed: running on CPU (slow)"
+            )),
+        ),
+        (ModelPref::Auto, Some(f), _) if f < TURBO_MIB => (
             Device::Cpu,
             Some(format!(
                 "only {f} MiB of VRAM free, under the {TURBO_MIB} MiB Whisper needs: running on CPU (slow)"
             )),
         ),
-        (ModelPref::Auto, None) => (
+        (ModelPref::Auto, None, Gpu::Looked) => (
             Device::Cpu,
-            gpu.then(|| "no usable NVIDIA GPU found: running on CPU (slow)".to_string()),
+            Some("no usable NVIDIA GPU found: running on CPU (slow)".to_string()),
         ),
         // Explicit models, and `Auto` with room: the GPU whenever one answers.
-        (_, Some(_)) => (Device::Cuda, None),
-        (_, None) => (Device::Cpu, None),
+        (_, Some(_), _) => (Device::Cuda, None),
+        (_, None, _) => (Device::Cpu, None),
     };
     let choice = Choice {
         model: model_name(m),
@@ -242,7 +281,7 @@ fn err(e: whisper_rs::WhisperError) -> Error {
 mod tests {
     use super::*;
 
-    fn picked(pref: ModelPref, free: Option<u64>, gpu: bool) -> (String, Device, bool) {
+    fn picked(pref: ModelPref, free: Option<u64>, gpu: Gpu) -> (String, Device, bool) {
         let (c, _) = pick(pref, free, gpu);
         (c.model, c.device, c.note.is_some())
     }
@@ -252,20 +291,20 @@ mod tests {
         let turbo = || "large-v3-turbo".to_string();
         assert_eq!(ModelPref::default(), ModelPref::Auto);
         assert_eq!(
-            picked(ModelPref::Auto, Some(TURBO_MIB), true),
+            picked(ModelPref::Auto, Some(TURBO_MIB), Gpu::Looked),
             (turbo(), Device::Cuda, false)
         );
         assert_eq!(
-            picked(ModelPref::Auto, Some(TURBO_MIB - 1), true),
+            picked(ModelPref::Auto, Some(TURBO_MIB - 1), Gpu::Looked),
             (turbo(), Device::Cpu, true)
         );
         assert_eq!(
-            picked(ModelPref::Auto, None, true),
+            picked(ModelPref::Auto, None, Gpu::Looked),
             (turbo(), Device::Cpu, true)
         );
-        // A CPU-only build or `--cpu`: nothing to warn about.
+        // `--cpu`: nothing to warn about.
         assert_eq!(
-            picked(ModelPref::Auto, None, false),
+            picked(ModelPref::Auto, None, Gpu::Off),
             (turbo(), Device::Cpu, false)
         );
     }
@@ -273,17 +312,31 @@ mod tests {
     #[test]
     fn explicit_models_ignore_free_vram() {
         assert_eq!(
-            picked(ModelPref::LargeV3, Some(100), true),
+            picked(ModelPref::LargeV3, Some(100), Gpu::Looked),
             ("large-v3".into(), Device::Cuda, false)
         );
         assert_eq!(
-            picked(ModelPref::LargeV3Q5, None, true),
+            picked(ModelPref::LargeV3Q5, None, Gpu::Looked),
             ("large-v3-q5_0".into(), Device::Cpu, false)
         );
         assert_eq!(
-            picked(ModelPref::LargeV3Turbo, Some(100), true),
+            picked(ModelPref::LargeV3Turbo, Some(100), Gpu::Looked),
             ("large-v3-turbo".into(), Device::Cuda, false)
         );
+    }
+
+    /// 2l: a CPU-only build, or a GPU without the CUDA runtime, ran on CPU and said nothing.
+    #[test]
+    fn a_cpu_run_nobody_asked_for_says_why() {
+        for pref in [ModelPref::Auto, ModelPref::LargeV3, ModelPref::LargeV3Turbo] {
+            let (c, _) = pick(pref, None, Gpu::NotBuilt);
+            assert_eq!(c.device, Device::Cpu);
+            assert!(c.note.unwrap().contains("--features cuda"));
+            let (c, _) = pick(pref, None, Gpu::NoRuntime("cublas64_13.dll"));
+            assert_eq!(c.device, Device::Cpu);
+            assert!(c.note.unwrap().contains("cublas64_13.dll"));
+            assert_eq!(pick(pref, None, Gpu::Off).0.note, None);
+        }
     }
 
     #[test]
@@ -311,7 +364,7 @@ mod tests {
             ModelPref::LargeV3,
             ModelPref::LargeV3Q5,
         ] {
-            let (c, _) = pick(pref, None, false);
+            let (c, _) = pick(pref, None, Gpu::Off);
             assert_eq!(c.model.parse::<ModelPref>(), Ok(pref));
             assert_eq!(c.model, pref.name());
         }
