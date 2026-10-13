@@ -5,12 +5,13 @@
   // frame edit each, the same undoable edit the range toolbar's Cut range / Keep cut makes, then
   // the next clip plays; Back and Skip move without deciding. It sits in the range toolbar's one
   // place over the lanes (2n), which hides while it shows. A cut clip is what is being judged, so
-  // review plays the whole file: it turns Skip cuts off and puts it back as it was when it ends,
-  // and the speed back to 1x (there is no other speed control). App hands it the keys first.
+  // review plays the whole file: the player (`play_between`) turns Skip cuts off for it and
+  // `end_review` puts it back as it was and the speed back to 1x (there is no other speed control).
+  // App hands it the keys first.
   import { onMount, untrack } from "svelte";
   import * as api from "./api";
   import { clips, holding, now, SPEEDS, type Clip } from "./review";
-  import { timecode, toFrame, toSeconds } from "./time";
+  import { clock, timecode, toFrame, toSeconds } from "./time";
 
   let {
     player,
@@ -44,21 +45,27 @@
   const live = $derived(clip && edit ? now(edit, clip) : null);
   const changed = $derived(clip && live ? (clip.kept ? live !== "kept" : live !== "cut") : false);
   const left = $derived(Math.round(Math.min(Math.max(at.x - width / 2, at.min), Math.max(at.min, at.max - width))));
+  // The recording under review: another one opening (or a close) ends it.
+  const path = untrack(() => player?.path ?? null);
+  let gone = false;
 
   function length(c: Clip): string {
     if (!fps) return "";
     const s = toSeconds(c.end - c.start, fps);
-    if (s < 60) return `${s.toFixed(1)} s`;
-    const m = Math.floor(s / 60);
-    return `${m}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+    return s < 60 ? `${s.toFixed(1)} s` : clock(s);
   }
 
-  async function call(f: () => Promise<void>) {
-    try {
-      await f();
-    } catch (e) {
-      onError(String(e));
-    }
+  // Every player call of the review in one line, in order (2o repair): its start, each move or
+  // edit, and its end, so the end never overtakes a start or an edit still on its way. The
+  // player keeps the review's own state (the skip toggle before it, the loop, the speed), and an
+  // open or close ends it there too, so nothing here can land on another recording's toggle.
+  let line: Promise<void> = Promise.resolve();
+  function queue(f: () => Promise<void>): Promise<void> {
+    const p = line.then(f);
+    line = p.catch(() => {});
+    return p.catch((e) => {
+      if (!gone) onError(String(e));
+    });
   }
 
   function play(c: Clip): Promise<void> {
@@ -66,47 +73,58 @@
   }
 
   // Shows clip `to` and plays it; past the last one the loop ends and playback pauses.
-  async function go(to: number) {
+  function go(to: number): Promise<void> {
     index = Math.max(0, Math.min(list.length, to));
-    if (index < list.length) return play(list[index]);
-    await api.endLoop();
-    if (player && !player.paused) await api.togglePause();
+    return index < list.length ? play(list[index]) : api.pauseReview();
   }
 
-  async function step(f: () => Promise<void>) {
-    if (busy) return;
+  // A decision, a move, an undo or a redo: one at a time (`busy` greys the buttons and makes keys
+  // wait their turn by dropping them), each after the one before in the line.
+  function step(f: () => Promise<void>) {
+    if (busy || gone) return;
     busy = true;
-    try {
-      await f();
-    } catch (e) {
-      onError(String(e));
-    } finally {
-      busy = false;
-    }
+    void queue(f).finally(() => (busy = false));
   }
 
   // Keep (true) or Remove the clip shown, then the next. One already so sends no edit, so the
-  // undo history holds only real changes.
+  // undo history holds only real changes; what it is now is asked of the engine, not taken from
+  // the last edit event, which may not have come in yet.
   function decide(keep: boolean) {
     const c = clip;
     if (!c) return;
-    void step(async () => {
-      const is = edit ? now(edit, c) : null;
+    step(async () => {
+      const is = now(await api.editState(), c);
       if (is !== (keep ? "kept" : "cut")) await api.editFrames(c.start, c.end, keep);
-      await go(index + 1);
+      await go(list.indexOf(c) + 1);
     });
   }
-  const back = () => void step(() => go(index - 1));
-  const skip = () => void step(() => go(index + 1));
+  const back = () => step(() => go(index - 1));
+  const skip = () => step(() => go(index + 1));
+  const undo = () => step(api.undo);
+  const redo = () => step(api.redo);
   function setSpeed(x: number) {
     speed = x;
-    void call(() => api.setSpeed(x));
+    void queue(() => api.setSpeed(x));
+  }
+  // A clicked button loses the focus, so Enter or Space on the next clip is not a second click.
+  function press(e: MouseEvent, f: () => void) {
+    (e.currentTarget as HTMLElement).blur();
+    f();
   }
 
-  /** A key while reviewing: true when review took it. Ctrl combinations (undo, redo, the menus)
-   * stay the editor's. */
+  /** A key while reviewing: true when review took it. Undo and redo are review's too (they wait
+   * for a decision on its way); other Ctrl combinations (the menus) stay the editor's. */
   export function key(e: KeyboardEvent): boolean {
-    if (e.ctrlKey || e.metaKey || e.altKey) return false;
+    const ctrl = e.ctrlKey || e.metaKey;
+    if (ctrl && !e.altKey && (e.code === "KeyY" || (e.code === "KeyZ" && e.shiftKey))) {
+      if (edit?.canRedo) redo();
+      return true;
+    }
+    if (ctrl && !e.altKey && e.code === "KeyZ") {
+      if (edit?.canUndo) undo();
+      return true;
+    }
+    if (ctrl || e.altKey) return false;
     switch (e.code) {
       case "KeyK":
       case "ArrowRight":
@@ -124,14 +142,14 @@
         skip();
         return true;
       case "Space":
-        if (clip) void call(api.togglePause);
+        if (clip) void queue(api.togglePause);
         return true;
       case "Escape":
       case "KeyR":
         onDone();
         return true;
       case "KeyS":
-        // Skip cuts stays off while reviewing (the loop is in source time).
+        // Skip cuts stays off while reviewing (the player refuses it too).
         return true;
     }
     const n = /^Digit([1-9])$/.exec(e.code);
@@ -142,35 +160,18 @@
     return false;
   }
 
-  // Another list under review (a re-analysis wrote a new one): its frames are not these clips'.
+  // Another list under review (a re-analysis wrote a new one) or another recording open: their
+  // frames are not these clips'.
   $effect(() => {
-    if (edit && edit.totalFrames !== total) untrack(onDone);
+    if ((edit && edit.totalFrames !== total) || (player?.path ?? null) !== path) untrack(onDone);
   });
 
   onMount(() => {
-    const skipped = !!start?.skip;
-    let gone = false;
-    void (async () => {
-      try {
-        if (skipped) {
-          await api.setSkip(false);
-          // The whole file loads again: a seek sent before it is playing would be lost.
-          for (let i = 0; i < 60 && !gone; i++) {
-            const s = await api.playerState();
-            if (!s.cuts && s.position != null) break;
-            await new Promise((r) => setTimeout(r, 50));
-          }
-        }
-        if (!gone && index < list.length) await play(list[index]);
-      } catch (e) {
-        onError(String(e));
-      }
-    })();
+    // The player turns Skip cuts off and loads the whole file at the clip's start if it has to.
+    if (index < list.length) void queue(() => play(list[index]));
     return () => {
       gone = true;
-      void api.endLoop().catch(() => {});
-      void api.setSpeed(1).catch(() => {});
-      if (skipped) void api.setSkip(true).catch(() => {});
+      void queue(api.endReview);
     };
   });
 </script>
@@ -186,19 +187,19 @@
     {:else}
       <span class="all">{list.length ? `All ${list.length} clips reviewed` : "No clips to review"}</span>
     {/if}
-    <button disabled={busy || index === 0} onclick={back} title="The clip before (up arrow)">Back</button>
-    <button class="remove" disabled={busy || !clip} onclick={() => decide(false)} title="Cut this clip and go on (left arrow, Delete)"
+    <button disabled={busy || index === 0} onclick={(e) => press(e, back)} title="The clip before (up arrow)">Back</button>
+    <button class="remove" disabled={busy || !clip} onclick={(e) => press(e, () => decide(false))} title="Cut this clip and go on (left arrow, Delete)"
       >Remove</button
     >
-    <button class="keep" disabled={busy || !clip} onclick={() => decide(true)} title="Keep this clip and go on (right arrow, K)">Keep</button>
-    <button disabled={busy || !clip} onclick={skip} title="The next clip, deciding nothing (down arrow)">Skip</button>
+    <button class="keep" disabled={busy || !clip} onclick={(e) => press(e, () => decide(true))} title="Keep this clip and go on (right arrow, K)">Keep</button>
+    <button disabled={busy || !clip} onclick={(e) => press(e, skip)} title="The next clip, deciding nothing (down arrow)">Skip</button>
     <span class="speeds" role="group" aria-label="Playback speed">
       {#each SPEEDS as x, i (x)}
-        <button class:on={speed === x} aria-pressed={speed === x} onclick={() => setSpeed(x)} title="Play at {x}x ({i + 1})">{x}x</button>
+        <button class:on={speed === x} aria-pressed={speed === x} onclick={(e) => press(e, () => setSpeed(x))} title="Play at {x}x ({i + 1})">{x}x</button>
       {/each}
     </span>
-    <button class="i" disabled={!edit?.canUndo} onclick={() => call(api.undo)} title="Undo (Ctrl+Z)" aria-label="Undo">↶</button>
-    <button class="i" disabled={!edit?.canRedo} onclick={() => call(api.redo)} title="Redo (Ctrl+Y)" aria-label="Redo">↷</button>
+    <button class="i" disabled={busy || !edit?.canUndo} onclick={(e) => press(e, undo)} title="Undo (Ctrl+Z)" aria-label="Undo">↶</button>
+    <button class="i" disabled={busy || !edit?.canRedo} onclick={(e) => press(e, redo)} title="Redo (Ctrl+Y)" aria-label="Redo">↷</button>
     <button onclick={onDone} title="Leave review (Esc, R)">Done</button>
   </div>
 </div>

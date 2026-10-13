@@ -129,6 +129,8 @@ struct Ctl {
     edit: Edit,
     /// The user's toggle; on by default.
     skip: bool,
+    /// In review (2o): the toggle as it was before review set it off.
+    review: Option<bool>,
     /// The form of the last load asked for: what plays once in-flight loads land.
     requested: Form,
     watch: Option<watch::Watch>,
@@ -280,6 +282,7 @@ impl Player {
                 fps: None,
                 edit: Edit::default(),
                 skip: true,
+                review: None,
                 requested: Form::Source,
                 watch: None,
                 status: EditorStatus::default(),
@@ -329,6 +332,9 @@ impl Player {
         let mut ed = lock(&self.editor);
         ed.reset(edit_path.clone());
         let mut c = lock(&self.ctl);
+        // A review of the recording before ends with it (2o), its skip toggle back for this one; the
+        // load below clears the loop again anyway, so a failure here does not stop the open.
+        let _ = self.leave_review(&mut c);
         c.file = Some(path.to_string());
         c.fps = fps;
         c.edit = read.unwrap_or_default();
@@ -639,6 +645,7 @@ impl Core {
         let mut ed = lock(&self.editor);
         ed.reset(None);
         let mut c = lock(&self.ctl);
+        let left = self.leave_review(&mut c);
         c.watch = None;
         c.file = None;
         c.edit_path = None;
@@ -663,7 +670,7 @@ impl Core {
         drop(ed);
         self.emit_state();
         self.emit_mixer();
-        stopped
+        stopped.and(left)
     }
 
     /// Fixes the spelling of transcript word `index` (5h) in the edit list and saves it; returns the
@@ -982,6 +989,9 @@ impl Core {
 
     pub fn set_skip(&self, on: bool) -> Result<(), String> {
         let mut c = lock(&self.ctl);
+        if c.review.is_some() {
+            return Err("Skip cuts stays off while reviewing".into());
+        }
         c.skip = on;
         let want = c.wanted();
         let r = if c.file.is_some() && !same_form(&want, &c.requested) {
@@ -1011,24 +1021,67 @@ impl Core {
 
     /// Plays source seconds `start` to `end` over and over (2o's review of one clip): mpv's own
     /// A-B loop, so it turns back on the exact frame and also at the end of the file, where
-    /// `keep-open` would otherwise pause. Source time, so for the whole file playing only (review
-    /// turns skipping off first); the next load clears it (`load`).
+    /// `keep-open` would otherwise pause. The loop is in source time and a cut clip is what is being
+    /// judged, so the first call puts the player in review: the whole file plays (the skip toggle
+    /// is remembered and set off, loading the whole file at `start` when only the kept ranges were
+    /// playing) until `end_review`, or until a recording opens or closes. Under the control lock, so
+    /// a review's start and end, and an open or close, never cross.
     pub fn play_between(&self, start: f64, end: f64) -> Result<(), String> {
         if !(start.is_finite() && end.is_finite() && start >= 0.0 && end > start) {
             return Err(format!("no clip from {start} to {end}"));
         }
-        // The seek first: one refused (no file playing yet) leaves no loop behind.
-        self.mpv
-            .command(&["seek", &format!("{start:.6}"), "absolute+exact"])?;
-        lock(&self.state).expect(start);
+        let mut c = lock(&self.ctl);
+        if c.file.is_none() {
+            return Err("no file is open".into());
+        }
+        if c.review.is_none() {
+            c.review = Some(c.skip);
+            c.skip = false;
+            self.emit_edit(&c);
+        }
+        if same_form(&Form::Source, &c.requested) {
+            // The seek first: one refused leaves no loop behind.
+            self.mpv
+                .command(&["seek", &format!("{start:.6}"), "absolute+exact"])?;
+            lock(&self.state).expect(start);
+        } else {
+            // A seek sent while this load begins would be lost; the load starts at `start`.
+            self.load(&mut c, Form::Source, Some(start), false)?;
+        }
         self.mpv.set_string("ab-loop-a", &format!("{start:.6}"))?;
         self.mpv.set_string("ab-loop-b", &format!("{end:.6}"))?;
         self.mpv.set_string("pause", "no")
     }
 
-    /// Stops `play_between`'s loop; playback goes on from where it is.
-    pub fn end_loop(&self) -> Result<(), String> {
-        clear_loop(&self.mpv)
+    /// Stops `play_between`'s loop and pauses, staying in review (2o: past the last clip).
+    pub fn pause_review(&self) -> Result<(), String> {
+        clear_loop(&self.mpv)?;
+        self.mpv.set_string("pause", "yes")
+    }
+
+    /// Leaves review (2o): no loop, speed 1x, the skip toggle as it was before. Nothing to do when
+    /// not reviewing (an open or close already ended it).
+    pub fn end_review(&self) -> Result<(), String> {
+        let mut c = lock(&self.ctl);
+        self.leave_review(&mut c)?;
+        let want = c.wanted();
+        let r = if c.file.is_some() && !same_form(&want, &c.requested) {
+            self.reload(&mut c, want)
+        } else {
+            Ok(())
+        };
+        self.emit_edit(&c);
+        r
+    }
+
+    /// Ends a review in `c`, if one is on, without reloading: the caller loads what it wants next.
+    fn leave_review(&self, c: &mut Ctl) -> Result<(), String> {
+        if let Some(skip) = c.review.take() {
+            c.skip = skip;
+            clear_loop(&self.mpv)?;
+            self.mpv.set_string("speed", "1")?;
+        }
+        Ok(())
     }
 
     /// Playback speed (2o: review's speed control), with mpv's pitch correction.

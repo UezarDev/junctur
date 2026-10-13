@@ -345,16 +345,23 @@ pub async fn toggle_pause(app: State<'_, App>) -> Result<(), String> {
     app.with(|p| p.toggle_pause())
 }
 
-/// Plays source seconds `start` to `end` on a loop (2o: review's one clip), from `start`.
+/// Plays source seconds `start` to `end` on a loop (2o: review's one clip), from `start`; the
+/// first call puts the player in review (the whole file plays until `end_review`).
 #[tauri::command]
 pub async fn play_between(app: State<'_, App>, start: f64, end: f64) -> Result<(), String> {
     app.with(|p| p.play_between(start, end))
 }
 
-/// Stops `play_between`'s loop.
+/// Stops the loop and pauses, still in review (past the last clip).
 #[tauri::command]
-pub async fn end_loop(app: State<'_, App>) -> Result<(), String> {
-    app.with(|p| p.end_loop())
+pub async fn pause_review(app: State<'_, App>) -> Result<(), String> {
+    app.with(|p| p.pause_review())
+}
+
+/// Leaves review: no loop, 1x, the skip toggle as it was.
+#[tauri::command]
+pub async fn end_review(app: State<'_, App>) -> Result<(), String> {
+    app.with(|p| p.end_review())
 }
 
 /// Playback speed, a quarter to four times (2o).

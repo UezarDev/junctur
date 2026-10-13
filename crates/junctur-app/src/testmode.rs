@@ -26,8 +26,8 @@
 //! `menu=close`, back to the start window, and `menu=settings`, the Settings dialog). The final
 //! report adds how far the waveforms are (`waves`) and the settings the dialog shows (`settings`;
 //! set `JUNCTUR_CONFIG` to a scratch file before anything saves them);
-//! `speed=1.5`, `loop=<a>-<b>` (source seconds) and `unloop` (2o) drive review's speed and loop of
-//! one clip, each step's report adding what mpv has then (`speedLoop`: speed, `ab-loop-a`, `-b`);
+//! `speed=1.5`, `loop=<a>-<b>` (source seconds: into review, the whole file playing) and `unloop`
+//! (out of it, the skip toggle back) drive review's speed and loop of one clip (2o), each step's report adding what mpv has then (`speedLoop`: speed, `ab-loop-a`, `-b`);
 //! the picture's shape is in the `state` (`width`, `height`, `aspect`). Each step's
 //! report adds the edit state it left, and the final report re-reads `edit.junctur` from disk
 //! (`disk`: does it parse, and is it the list in play), counts the loads asked of mpv (a save must
@@ -104,7 +104,7 @@ enum Action {
     Solo(usize, bool),
     /// A menu item chosen (2g), by id.
     Menu(String),
-    /// 2o: playback speed, and review's loop of one clip (source seconds) or its end.
+    /// 2o: playback speed, and review's loop of one clip (source seconds) or review's end.
     Speed(f64),
     Loop(f64, f64),
     Unloop,
@@ -297,7 +297,7 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
         Action::Solo(track, on) => p.set_solo(*track, *on),
         Action::Speed(x) => p.set_speed(*x),
         Action::Loop(a, b) => p.play_between(*a, *b),
-        Action::Unloop => p.end_loop(),
+        Action::Unloop => p.end_review(),
         _ => unreachable!("run above"),
     })?
 }

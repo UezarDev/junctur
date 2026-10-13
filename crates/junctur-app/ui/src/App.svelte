@@ -128,7 +128,8 @@
   // Into review (on an editable list) or out of it; a selection would only sit under it unseen.
   function toggleReview() {
     if (reviewing) reviewing = false;
-    else if (edit?.editable && edit.fps && player?.path) {
+    // Not while a recording opens: review's first clip would play on the one coming.
+    else if (edit?.editable && edit.fps && player?.path && !opening) {
       selection = null;
       reviewing = true;
     }
