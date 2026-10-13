@@ -39,9 +39,24 @@ impl Fix {
     }
 }
 
-/// A word's start to the millisecond, as the list writes it.
+/// A word's start to the millisecond, as the list writes it ([`written`]).
 fn key(track: usize, start: f64) -> (usize, i64) {
-    (track, (start * 1000.0).round() as i64)
+    (track, millis(start))
+}
+
+/// Seconds to whole milliseconds, half away from zero.
+fn millis(start: f64) -> i64 {
+    (start * 1000.0).round() as i64
+}
+
+/// A fix's start as the list writes it: its key's millisecond, as seconds. Not `{:.3}`, which rounds
+/// a half millisecond to even (12.3125 to 12.312) where the key rounds it away (12313), so a fix
+/// written that way would name another millisecond when read back and stop applying.
+pub(super) fn written(start: f64) -> String {
+    let ms = millis(start);
+    let sign = if ms < 0 { "-" } else { "" };
+    let ms = ms.unsigned_abs();
+    format!("{sign}{}.{:03}", ms / 1000, ms % 1000)
 }
 
 /// `text` as a fix keeps it: trimmed, on one line (the list's line ends it), runs of space as one, at
@@ -161,6 +176,16 @@ mod tests {
         assert!(set_fix(&mut f, 0, 3.0, "a", "Tsun\nheto").unwrap());
         assert_eq!(f[0].text, "Tsun heto");
         assert!(set_fix(&mut f, 0, 3.0, "a", &"x".repeat(MAX_FIX + 1)).is_err());
+    }
+
+    #[test]
+    fn a_half_millisecond_start_is_written_as_its_key() {
+        assert_eq!(written(12.3125), "12.313");
+        assert_eq!(written(2.5), "2.500");
+        assert_eq!(written(0.0004), "0.000");
+        assert_eq!(written(-1.5), "-1.500");
+        let start: f64 = written(12.3125).parse().unwrap();
+        assert_eq!(key(0, start), key(0, 12.3125));
     }
 
     #[test]

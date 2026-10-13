@@ -1,7 +1,7 @@
 //! The edit list's text form. One fact per line, so a git diff of a hand edit is one line:
 //!
 //! ```text
-//! junctur-edit 2
+//! junctur-edit 3
 //! source C:\Videos\stream.mp4
 //! duration 6304.021
 //! settings pad_before=0.25 pad_after=0.35 merge_gap=1 snap=0.15 crossfade=0.03 window=5
@@ -102,7 +102,13 @@ pub fn write(e: &EditList) -> String {
         let mut fixes = e.fixes.clone();
         fixes::sort(&mut fixes);
         for f in &fixes {
-            let _ = writeln!(out, "fix {} {:.3} {}", f.track, f.start, f.text);
+            let _ = writeln!(
+                out,
+                "fix {} {} {}",
+                f.track,
+                fixes::written(f.start),
+                f.text
+            );
         }
     }
     let _ = writeln!(out, "# window <start> <score> <speech share> <words>");
@@ -401,18 +407,9 @@ mod tests {
             ..sample()
         };
         let text = own.to_text();
+        assert!(text.starts_with("junctur-edit 2\n"), "{text}");
         assert!(
-            text.starts_with(
-                "junctur-edit 2
-"
-            ),
-            "{text}"
-        );
-        assert!(
-            text.contains(
-                "captions off chars=42 lines=2 seconds=6
-"
-            ),
+            text.contains("captions off chars=42 lines=2 seconds=6\n"),
             "{text}"
         );
         assert_eq!(parse(&text).unwrap().captions, Some(Captions::default()));
@@ -525,6 +522,19 @@ mod tests {
         assert_eq!(parse(&back.to_text()).unwrap(), back);
         // Without fixes a list is the version it was.
         assert!(sample().to_text().starts_with("junctur-edit 1\n"));
+        // A start half a millisecond in survives the round trip (written as its key's millisecond).
+        let half = EditList {
+            fixes: vec![Fix {
+                track: 0,
+                start: 12.3125,
+                text: "Uezar".into(),
+            }],
+            ..sample()
+        };
+        let text = half.to_text();
+        assert!(text.contains("fix 0 12.313 Uezar\n"), "{text}");
+        let back = parse(&text).unwrap();
+        assert!(back.fixes[0].same_word(&half.fixes[0]));
         let head = "junctur-edit 3\nsource x.mp4\n";
         let e = parse(&format!("{head}fix 2 10.5   Delay  \n")).unwrap();
         assert_eq!(e.fixes[0].text, "Delay");
