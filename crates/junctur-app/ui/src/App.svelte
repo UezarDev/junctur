@@ -203,9 +203,11 @@
     );
   });
 
-  // The edit state's speakers key the words' labels were made with: when it moves (an outside
-  // change to the turns), the labels are fetched again. A rename does not move it.
+  // The edit state's speakers and fixes keys the words were made with: when one moves (an outside
+  // change to the turns, a word fixed here or by hand, 5h), the labels and text are fetched again.
+  // A rename does not move them.
   let labelledWith = "";
+  const wordsKey = () => `${edit?.speakersKey ?? ""}|${edit?.fixesKey ?? ""}`;
 
   async function loadTranscript() {
     growing++; // an ask from before this one is not taken (growTranscript)
@@ -215,7 +217,7 @@
     wordsLoading = true;
     try {
       const t0 = performance.now();
-      labelledWith = edit?.speakersKey ?? "";
+      labelledWith = wordsKey();
       const view = await api.transcript();
       const t1 = performance.now();
       if (gen !== loadGen) return;
@@ -232,7 +234,7 @@
   }
 
   $effect(() => {
-    const key = edit?.speakersKey ?? "";
+    const key = wordsKey();
     if (!words || wordsLoading || key === labelledWith) return;
     labelledWith = key;
     const before = words;
@@ -240,7 +242,12 @@
       (view) => {
         // Only onto the same transcript (another file may have opened meanwhile).
         if (view && words === before && view.speaker.length === before.text.length) {
-          words = { ...before, speaker: Uint32Array.from(view.speaker), also: Uint32Array.from(view.also ?? []) };
+          words = {
+            ...before,
+            text: view.text,
+            speaker: Uint32Array.from(view.speaker),
+            also: Uint32Array.from(view.also ?? []),
+          };
         }
       },
       (e) => (failure = String(e)),

@@ -172,6 +172,9 @@ pub struct EditState {
     /// Changes when the list's turns (or speaker tracks) do, so the page asks for the words'
     /// labels again after an outside change; a rename leaves it as it was.
     pub speakers_key: String,
+    /// Changes when the list's fixed words do (5h), so the page asks for the words' text again,
+    /// after a fix of its own or an outside change.
+    pub fixes_key: String,
     /// The caption settings: the list's own, else the user's defaults (also with no list).
     pub captions: edit::Captions,
     /// The list has caption settings of its own; without, it follows the defaults (2i).
@@ -237,32 +240,50 @@ impl EditState {
                 .list
                 .as_ref()
                 .map_or_else(String::new, |l| speakers_key(&l.speakers)),
+            fixes_key: edit
+                .list
+                .as_ref()
+                .map_or_else(String::new, |l| fixes_key(&l.fixes)),
             captions: own.clone().unwrap_or_else(|| defaults.clone()),
             captions_own: own.is_some(),
         }
     }
 }
 
-/// FNV-1a over the turns and speaker tracks (not the names): what the words' labels depend on.
-/// A string, since a 64-bit number does not survive JSON into JavaScript exactly.
-fn speakers_key(s: &edit::Speakers) -> String {
+/// FNV-1a over 64-bit values, as a string, since a 64-bit number does not survive JSON into
+/// JavaScript exactly.
+fn key(values: impl IntoIterator<Item = u64>) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut eat = |x: u64| {
+    for x in values {
         for b in x.to_le_bytes() {
             h ^= b as u64;
             h = h.wrapping_mul(0x100_0000_01b3);
         }
-    };
-    for n in &s.names {
-        eat(n.id as u64);
-        eat(n.track.map_or(u64::MAX, |t| t as u64));
-    }
-    for t in &s.turns {
-        eat(t.start.to_bits());
-        eat(t.end.to_bits());
-        eat(t.speaker as u64);
     }
     format!("{h:016x}")
+}
+
+/// Over the turns and speaker tracks (not the names): what the words' labels depend on.
+fn speakers_key(s: &edit::Speakers) -> String {
+    let names = s
+        .names
+        .iter()
+        .flat_map(|n| [n.id as u64, n.track.map_or(u64::MAX, |t| t as u64)]);
+    let turns = s
+        .turns
+        .iter()
+        .flat_map(|t| [t.start.to_bits(), t.end.to_bits(), t.speaker as u64]);
+    key(names.chain(turns))
+}
+
+/// Over the fixed words (5h): what the words' text depends on.
+fn fixes_key(fixes: &[edit::Fix]) -> String {
+    key(fixes.iter().flat_map(|f| {
+        [f.track as u64, f.start.to_bits()]
+            .into_iter()
+            .chain(f.text.bytes().map(u64::from))
+            .chain([u64::MAX])
+    }))
 }
 
 #[cfg(test)]
@@ -287,6 +308,7 @@ mod tests {
             keep,
             speakers: Default::default(),
             captions: Default::default(),
+            fixes: Vec::new(),
             windows: vec![],
         }
         .to_text()

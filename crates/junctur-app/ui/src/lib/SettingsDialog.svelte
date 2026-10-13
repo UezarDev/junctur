@@ -1,8 +1,8 @@
 <script lang="ts">
   // Settings (2i): a dialog over the editor or the start window, opened from the title bar's gear
   // (or File > Settings…, Ctrl+,). What it edits is junctur/config.json, the file `junctur analyze`
-  // reads too (src/settings.rs): the Whisper model and the caption defaults a recording without its
-  // own starts from. Saving never analyses anything; App.svelte asks again whether the open
+  // reads too (src/settings.rs): the Whisper model, the word list Whisper is told (5h) and the
+  // caption defaults a recording without its own starts from. Saving never analyses anything; App.svelte asks again whether the open
   // recording is out of date, and 2d's notice in Properties offers the re-analysis.
   import { onMount } from "svelte";
   import * as api from "./api";
@@ -14,6 +14,9 @@
   let draft = $state<api.Settings | null>(null);
   let error = $state<string | null>(null);
   let saving = $state(false);
+  // The word list as the text box holds it, one entry per line; the core trims it and drops blank
+  // lines and repeats when it saves.
+  let wordsText = $state("");
   const model = $derived(view?.models.find((m) => m.key === draft?.whisperModel) ?? null);
 
   onMount(() => {
@@ -21,6 +24,7 @@
       (v) => {
         view = v;
         draft = structuredClone(v.settings);
+        wordsText = v.settings.words.join("\n");
       },
       (e) => (error = String(e)),
     );
@@ -32,7 +36,7 @@
     saving = true;
     error = null;
     try {
-      onSaved(await api.saveSettings($state.snapshot(draft)));
+      onSaved(await api.saveSettings({ ...$state.snapshot(draft), words: wordsText.split("\n") }));
       onClose();
     } catch (e) {
       error = String(e);
@@ -69,6 +73,15 @@
       <p class="note">
         Used by the next analysis. Recordings already transcribed keep their transcript until you re-analyse
         them (Properties says when one was made with another model).
+      </p>
+      <label class="words">
+        <span>Word list</span>
+        <textarea rows="5" spellcheck="false" bind:value={wordsText} placeholder="Uezar&#10;Tsunheto"></textarea>
+      </label>
+      <p class="note">
+        Names and terms Whisper should spell this way, one per line, told to it before every stretch it hears. Used by
+        the next transcription; recordings already transcribed are not redone. A word you fix in the transcript (double-click
+        it) is added at the top on its own. When the list is too long for Whisper the first entries win.
       </p>
 
       <h3>Caption defaults</h3>
@@ -127,6 +140,16 @@
     align-items: center;
     gap: 12px;
     margin: 6px 0;
+  }
+  .words {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: 10px 0 4px;
+  }
+  .words textarea {
+    resize: vertical;
+    font: inherit;
   }
   .note {
     margin: 4px 0;

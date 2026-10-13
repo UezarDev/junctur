@@ -227,6 +227,7 @@ mod tests {
                 turns: Vec::new(),
             },
             captions: None,
+            fixes: Vec::new(),
             windows: Vec::new(),
         }
     }
