@@ -220,7 +220,8 @@
       <p class="note">
         Remembering a voice relabels at once and keeps the words you picked as that person's. Analysing again
         also reads the recording again, with its voice windows cut where your picks begin and end: it takes
-        about as long as the first speaker analysis, and remembering voices waits until it is done.
+        about as long as the first speaker analysis, and remembering or forgetting a voice is not possible
+        until it is done.
       </p>
     {/if}
   </div>

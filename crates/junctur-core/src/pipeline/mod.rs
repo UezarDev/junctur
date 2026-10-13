@@ -80,9 +80,20 @@ impl Project {
         serde_json::from_slice(&std::fs::read(self.speech_path()).ok()?).ok()
     }
 
-    /// Who talks when, as the `speakers` stage left it; `None` before it ran.
+    /// Who talks when, as the `speakers` stage left it; `None` before it ran (or when the file
+    /// cannot be read: the stage sets such a file aside, [`speakers_stage`]).
     pub fn speakers(&self) -> Option<Found> {
-        serde_json::from_slice(&std::fs::read(self.speakers_path()).ok()?).ok()
+        self.speakers_file().ok().flatten()
+    }
+
+    /// `speakers.json`: `None` when there is none, an error when it is there but unreadable. Since
+    /// 5c it holds the user's pins, so an unreadable one is not the same as none.
+    fn speakers_file(&self) -> Result<Option<Found>> {
+        match std::fs::read(self.speakers_path()) {
+            Ok(b) => Ok(Some(serde_json::from_slice(&b)?)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub fn edit(&self) -> Result<EditList> {
@@ -211,7 +222,19 @@ fn speakers_stage(
     opts: &PipelineOptions,
     log: &mut dyn FnMut(&str),
 ) -> Result<Found> {
-    let previous = p.speakers();
+    // An unreadable file holds pins (5c) nothing else knows: kept aside under another name and
+    // said, not silently replaced by a file without them.
+    let previous = match p.speakers_file() {
+        Ok(f) => f,
+        Err(e) => {
+            let kept = set_aside(&p.speakers_path())?;
+            log(&format!(
+                "speakers.json could not be read ({e}): kept as {}; the seconds pinned to people in it are not used",
+                kept.display()
+            ));
+            None
+        }
+    };
     let cached = previous
         .clone()
         .filter(|_| !opts.force)
@@ -222,7 +245,7 @@ fn speakers_stage(
             jobs.skip(&p.dir, "speakers", log)?;
             let again = speakers::label(&f, &embeddings, &opts.voices);
             if again != f {
-                std::fs::write(p.speakers_path(), serde_json::to_vec_pretty(&again)?)?;
+                write_speakers(p, &again)?;
             }
             again
         }
@@ -247,7 +270,7 @@ fn speakers_stage(
             if let Some(old) = &previous {
                 speakers::remember_known(&mut f, old);
             }
-            std::fs::write(p.speakers_path(), serde_json::to_vec_pretty(&f)?)?;
+            write_speakers(p, &f)?;
             Ok(f)
         })?,
     };
@@ -340,10 +363,50 @@ pub fn labelled_renamed(p: &Project, voices: &[Voice], from: &str, to: &str) -> 
     speakers::relabel(&found, &p.dir, voices)
 }
 
+/// Writes `speakers.json` whole through a temporary file of its own renamed over it (retried
+/// briefly when a reader holds it on Windows, like the voices file): since 5c it holds the user's
+/// pins, and a write torn by a crash would lose them.
+fn write_speakers(p: &Project, found: &Found) -> Result<()> {
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = p.speakers_path();
+    let tmp = path.with_extension(format!("json.{}-{n}.tmp", std::process::id()));
+    std::fs::write(&tmp, serde_json::to_vec_pretty(found)?)?;
+    let mut tries = 0;
+    loop {
+        match std::fs::rename(&tmp, &path) {
+            Ok(()) => return Ok(()),
+            Err(_) if tries < 5 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(40));
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e.into());
+            }
+        }
+    }
+}
+
+/// Renames `path` to the first free `<name>.unreadable`, `<name>.unreadable2`, ... beside it;
+/// returns the new path.
+fn set_aside(path: &Path) -> Result<PathBuf> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let free = (1..)
+        .map(|n| match n {
+            1 => path.with_file_name(format!("{name}.unreadable")),
+            n => path.with_file_name(format!("{name}.unreadable{n}")),
+        })
+        .find(|p| !p.exists())
+        .expect("some name is free");
+    std::fs::rename(path, &free)?;
+    Ok(free)
+}
+
 /// Saves `found` as the project's speakers (`speakers.json`), when it differs from what is there.
 pub fn save_speakers(p: &Project, found: &Found) -> Result<()> {
     if p.speakers().as_ref() != Some(found) {
-        std::fs::write(p.speakers_path(), serde_json::to_vec_pretty(found)?)?;
+        write_speakers(p, found)?;
     }
     Ok(())
 }
@@ -643,6 +706,52 @@ mod tests {
         // A list that does not parse is the user's too.
         back_up_hand_edit(&dir, "junctur-edit 1\nkeep x\n", regenerate).unwrap();
         assert!(bak("edit.junctur.bak3").is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_speakers_file_is_set_aside_and_writes_leave_no_temporary() {
+        let dir = std::env::temp_dir().join(format!("junctur-spk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = Project {
+            file: PathBuf::from("in.mp4"),
+            dir: dir.clone(),
+            cache_dir: dir.clone(),
+        };
+        assert!(p.speakers_file().unwrap().is_none());
+        std::fs::write(p.speakers_path(), "{ nope").unwrap();
+        assert!(p.speakers_file().is_err());
+        assert!(p.speakers().is_none());
+        let kept = set_aside(&p.speakers_path()).unwrap();
+        assert_eq!(kept, dir.join("speakers.json.unreadable"));
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "{ nope");
+        assert!(!p.speakers_path().exists());
+        let mut found = Found {
+            people: vec![],
+            heard: None,
+            known: vec![],
+            method: Method::None,
+            tracks: vec![],
+            turns: vec![],
+            speech: String::new(),
+            pins: vec![],
+        };
+        found.pin("Ana", &[(1.0, 2.0)]);
+        write_speakers(&p, &found).unwrap();
+        write_speakers(&p, &found).unwrap();
+        assert_eq!(p.speakers(), Some(found));
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
+        // A second unreadable file does not replace the first one set aside.
+        std::fs::write(p.speakers_path(), "x").unwrap();
+        assert_eq!(
+            set_aside(&p.speakers_path()).unwrap(),
+            dir.join("speakers.json.unreadable2")
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

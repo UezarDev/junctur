@@ -111,7 +111,7 @@ impl Found {
         let mut mine: Vec<(f64, f64)> = stretches
             .iter()
             .copied()
-            .filter(|(a, b)| b > a)
+            .filter(|(a, b)| b - a > SLIVER_S)
             .chain(
                 self.pins
                     .iter()
@@ -181,9 +181,11 @@ fn outside(start: f64, end: f64, cut: &[(f64, f64)]) -> Vec<(f64, f64)> {
 }
 
 /// Speech regions for hearing, cut at every pin's edges (5c), with the pins that lie outside the
-/// regions added (the user says someone talks there): no embedding window straddles a pin's edge,
-/// and the pinned seconds get windows of their own. A piece under 0.5 s still gets none and one
-/// under 1.5 s one centred window ([`diarize::segments`]), which reaches past it.
+/// regions added (the user says someone talks there), so the windows of a piece 1.5 s or longer
+/// stay inside it and the pinned seconds get windows of their own. Not every window: a piece under
+/// 0.5 s gets none, and one under 1.5 s gets one centred window ([`diarize::segments`]) that
+/// reaches past its edges, since every window is 1.5 s (one input shape on CUDA). Such a window's
+/// label is still overruled inside the pin ([`label`]).
 pub fn seeded(regions: &[Region], pins: &[Pin]) -> Vec<Region> {
     let mut edges: Vec<f64> = pins.iter().flat_map(|p| [p.start, p.end]).collect();
     edges.sort_by(f64::total_cmp);
@@ -318,10 +320,12 @@ pub fn find(
             speech: speech_key(speech),
             heard: None,
             known: Vec::new(),
-            pins: Vec::new(),
+            pins: pins.to_vec(),
         },
+        // Pins are the user's whatever the plan: kept for when the tracks are heard by voice again.
         Plan::ByTrack(tracks) => Found {
             speech: speech_key(speech),
+            pins: pins.to_vec(),
             ..by_track(&tracks)
         },
         Plan::Diarize(one) => {
@@ -430,9 +434,14 @@ pub fn relabel(found: &Found, dir: &Path, voices: &[Voice]) -> Result<Found> {
 /// stretch where two people talk at once are left out: their voiceprint is two people's.
 ///
 /// A short selection (5c: one word is allowed) often has no such window: windows are 1.5 s. Then
-/// every window reaching into a stretch at all, overlaps included, each counted by the seconds of
-/// the stretches it covers, so a word moves a voice built from more only a little. Empty when no
-/// window reaches the stretches either (the caller embeds the audio there: [`embed_stretches`]).
+/// the windows reaching into it that touch no overlap stretch, each counted by the seconds of the
+/// selection it covers, so a word moves a voice built from more only a little. Such a window is
+/// mostly the seconds around the word, usually the same person still talking but not always.
+/// Embedding just the word instead was measured in the repair pass and is far worse: CAM++ on
+/// 0.4 s gives prints too noisy to recognise anyone (five words each on the sample: the brother
+/// right 1% of his frames, against 34% from the windows around the same words). Empty when no
+/// such window either (overlaps on both sides, or no window there at all): the caller then embeds
+/// the selected audio itself ([`embed_stretches`]).
 pub fn voice_sample(
     found: &Found,
     dir: &Path,
@@ -453,34 +462,33 @@ pub fn voice_sample(
     let e = heard_embeddings(heard, dir).ok_or_else(not_heard)?;
     let mut out = Vec::new();
     let mut seconds = 0.0;
-    let covered = |w: &Region| -> f64 {
-        stretches
-            .iter()
-            .map(|&(a, b)| (w.end.min(b) - w.start.max(a)).max(0.0))
-            .sum()
-    };
     // Overlaps are sorted by start and none is longer than a segmentation window, so only those
     // starting within that much before a window can touch it.
     let longest = diarize::segment::WINDOW_S;
-    for (w, emb) in heard.windows.iter().zip(&e) {
-        let mid = (w.start + w.end) / 2.0;
-        let chosen = stretches.iter().any(|&(a, b)| a <= mid && mid <= b);
+    let shared = |w: &Region| {
         let upto = heard.overlaps.partition_point(|o| o.start < w.end);
-        let shared = heard.overlaps[..upto]
+        heard.overlaps[..upto]
             .iter()
             .rev()
             .take_while(|o| o.start > w.start - longest)
-            .any(|o| o.end > w.start);
-        if chosen && !shared {
+            .any(|o| o.end > w.start)
+    };
+    for (w, emb) in heard.windows.iter().zip(&e) {
+        let mid = (w.start + w.end) / 2.0;
+        let chosen = stretches.iter().any(|&(a, b)| a <= mid && mid <= b);
+        if chosen && !shared(w) {
             seconds += w.end - w.start;
             out.push(emb.clone());
         }
     }
     if out.is_empty() {
         for (w, emb) in heard.windows.iter().zip(&e) {
-            let c = covered(w);
-            if c > 0.0 {
-                seconds += c;
+            let covered: f64 = stretches
+                .iter()
+                .map(|&(a, b)| (w.end.min(b) - w.start.max(a)).max(0.0))
+                .sum();
+            if covered > 0.0 && !shared(w) {
+                seconds += covered;
                 out.push(emb.clone());
             }
         }
@@ -488,9 +496,9 @@ pub fn voice_sample(
     Ok((out, seconds))
 }
 
-/// Embeddings of `stretches` of `track` read straight from `file`, and their seconds: the last
-/// resort for a voice sample (5c) where hearing made no window (a region under 0.5 s, a word
-/// outside the speech regions). Each stretch is read at least [`MIN_CLIP_S`] long, centred on it.
+/// Embeddings of `stretches` of `track` read straight from `file`, and their seconds: the voice
+/// sample (5c) when no cached window lies inside the selection (one word, a region under 0.5 s, a
+/// word outside the speech regions). Each stretch is read at least [`MIN_CLIP_S`] long, centred on it.
 /// CPU: one short clip is not worth starting the GPU for. 5b rejected decoding at enrollment as
 /// the way to get a sample, since the stage already has the numbers; this is only for what it
 /// never saw.
@@ -827,6 +835,41 @@ mod tests {
     }
 
     #[test]
+    fn pins_survive_every_plan() {
+        let pins = vec![Pin {
+            start: 1.0,
+            end: 2.0,
+            name: "Ana".into(),
+        }];
+        let track = |track| SpeechTrack {
+            track,
+            regions: vec![Region {
+                start: 0.0,
+                end: 3.0,
+            }],
+            share: 0.5,
+        };
+        for (tracks, voice) in [(vec![], vec![]), (vec![track(1), track(2)], vec![1, 2])] {
+            let speech = Speech {
+                tracks,
+                seconds: 10.0,
+            };
+            let f = find(
+                Path::new("missing.mp4"),
+                &speech,
+                &voice,
+                &[],
+                &pins,
+                Path::new("."),
+                Path::new("."),
+                DevicePref::Cpu,
+            )
+            .unwrap();
+            assert_eq!(f.pins, pins, "{:?}", f.method);
+        }
+    }
+
+    #[test]
     fn a_mix_is_never_a_speaker_beside_voice_tracks() {
         let track = |track| SpeechTrack {
             track,
@@ -1127,9 +1170,9 @@ mod tests {
         assert_eq!(f.pins.len(), 3);
         f.rename_pins("ANA", "Anita");
         assert_eq!(pins(&f)[0], (2.0, 5.5, "Anita"));
-        // An empty stretch pins nothing.
+        // An empty stretch, or a sliver under a millisecond, pins nothing.
         let (mut g, _) = heard(vec![]);
-        g.pin("Ana", &[(3.0, 3.0)]);
+        g.pin("Ana", &[(3.0, 3.0), (5.0, 5.0005)]);
         assert!(g.pins.is_empty());
     }
 
@@ -1185,7 +1228,7 @@ mod tests {
     }
 
     #[test]
-    fn a_short_selection_still_gives_a_voice_sample() {
+    fn a_short_selection_takes_the_clear_windows_around_it() {
         let d = scratch("short");
         let o = Overlap {
             start: 3.2,
@@ -1195,18 +1238,19 @@ mod tests {
         };
         let (found, e) = heard(vec![o]);
         save_embeddings(&d, &e).unwrap();
-        // One word, 3.3-3.6: the window 3-4.5 has its middle outside it and touches the overlap,
-        // so no clean window; it is taken anyway, weighing the 0.3 s it covers.
-        let (sample, secs) = voice_sample(&found, &d, &[(3.3, 3.6)]).unwrap();
-        assert_eq!(sample, vec![e[2].clone()]);
-        assert!((secs - 0.3).abs() < 1e-9, "{secs}");
-        // A word across two windows: both, by what each covers.
+        // One word, 3.3-3.6, in a window whose middle is outside it and which touches the
+        // overlap (two people), and a word where hearing made no window: nothing, the caller
+        // embeds the word's own audio.
+        for word in [(3.3, 3.6), (31.0, 31.4)] {
+            let (sample, secs) = voice_sample(&found, &d, &[word]).unwrap();
+            assert!(sample.is_empty() && secs == 0.0, "{word:?}");
+        }
+        // A word across two windows clear of overlaps: both, by the seconds each covers.
         let (sample, secs) = voice_sample(&found, &d, &[(5.8, 6.2)]).unwrap();
-        assert_eq!(sample.len(), 2);
+        assert_eq!(sample, vec![e[3].clone(), e[4].clone()]);
         assert!((secs - 0.4).abs() < 1e-9, "{secs}");
-        // Where hearing made no window: nothing here (the caller reads the audio).
-        let (sample, _) = voice_sample(&found, &d, &[(31.0, 31.4)]).unwrap();
-        assert!(sample.is_empty());
+        // A longer pick still takes its clean windows.
+        assert_eq!(voice_sample(&found, &d, &[(4.0, 8.0)]).unwrap().0.len(), 2);
         let _ = std::fs::remove_dir_all(&d);
     }
 

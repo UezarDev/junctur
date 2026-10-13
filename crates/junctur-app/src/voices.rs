@@ -80,8 +80,9 @@ fn not_while_rehearing() -> Result<(), String> {
     Ok(())
 }
 
-/// Clears [`REHEARING`] however the hearing ends.
-struct Rehearing;
+/// Clears [`REHEARING`] however the hearing ends; [`rehear`] hands it to its caller, which holds it
+/// until the speakers are in an edit list.
+pub struct Rehearing;
 impl Drop for Rehearing {
     fn drop(&mut self) {
         REHEARING.store(false, Ordering::SeqCst);
@@ -90,22 +91,32 @@ impl Drop for Rehearing {
 
 /// Hears `file`'s speakers again from the audio (5c, "Analyse speakers again"), the windows cut at
 /// the seconds pinned to people, labelled with the voices as they are; saves `speakers.json` and
-/// returns the speakers. Slow (the recording is read again: about as long as the speakers stage
-/// took), so the caller runs it off the async runtime.
-pub fn rehear(file: &str) -> Result<Found, String> {
+/// returns the speakers, with the guard that keeps enrolling and forgetting off until the caller
+/// drops it. Slow (the recording is read again: about as long as the speakers stage took), so the
+/// caller runs it off the async runtime.
+pub fn rehear(file: &str) -> Result<(Found, Rehearing), String> {
     if REHEARING.swap(true, Ordering::SeqCst) {
         return Err("the speakers are already being analysed again".into());
     }
-    let _done = Rehearing;
+    let done = Rehearing;
     let p = project(file)?;
     let v = {
         let _held = crate::lock::lock(&LOCK);
         load()?.1
     };
-    pipeline::rehear(&p, &usable(&v), DevicePref::Auto, &mut |l| {
+    let found = pipeline::rehear(&p, &usable(&v), DevicePref::Auto, &mut |l| {
         eprintln!("junctur-app: speakers again: {l}")
     })
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    Ok((found, done))
+}
+
+/// Puts `found` into the edit list on disk of `file`, a recording no longer open (as the CLI does
+/// after enrolling).
+pub fn respeak_on_disk(file: &str, found: &Found) -> Result<(), String> {
+    pipeline::respeak(&project(file)?, found)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// Labels `file`'s speakers with `v` (when it has speakers that can be), then saves the voices,
