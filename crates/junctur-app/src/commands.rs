@@ -435,10 +435,11 @@ pub async fn export_captions(app: State<'_, App>, path: String) -> Result<Export
 }
 
 /// The captions as the export cuts them, for the preview over the picture (5d): output seconds,
-/// each cue's parts a speaker's lines, placed where the Resolve send puts them (5g).
+/// each cue's parts a speaker's lines, placed where the Resolve send puts them (5g) on the
+/// preview's picture, `aspect` its height over its width.
 #[tauri::command]
-pub async fn caption_cues(app: State<'_, App>) -> Result<Vec<Placed>, String> {
-    app.core()?.caption_cues()
+pub async fn caption_cues(app: State<'_, App>, aspect: f64) -> Result<Vec<Placed>, String> {
+    app.core()?.caption_cues(aspect)
 }
 
 /// Sends the captions into DaVinci Resolve as Text+ clips (5g), through the Junctur script running

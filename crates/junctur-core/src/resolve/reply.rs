@@ -67,6 +67,9 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Timeline {
     pub name: String,
+    /// Resolve's id for it (its name when Resolve gives none), so `place` can refuse a timeline
+    /// switched to after `info`.
+    pub id: String,
     /// Frames per second, as an exact rate (29.97 is 30000/1001).
     pub fps: f64,
     /// The timeline's first frame (Resolve starts at 01:00:00:00, 86400 at 24 fps).
@@ -91,6 +94,9 @@ pub struct Sent {
     pub removed: usize,
     pub failed: usize,
     pub first_error: Option<String>,
+    /// Text+ inputs the template did not take (a user's own title may lack some): those clips are
+    /// placed with the template's own value for them.
+    pub unstyled: Vec<String>,
     /// The timeline they went on.
     pub timeline: String,
 }
@@ -111,6 +117,7 @@ pub fn timeline(a: &HashMap<String, String>) -> Result<Timeline, String> {
     let fps = rate(get("fps")).ok_or_else(|| format!("Resolve's frame rate {:?}", get("fps")))?;
     Ok(Timeline {
         name: get("name").to_string(),
+        id: get("id").to_string(),
         fps,
         start: num("start")?.round() as i64,
         end: num("end")?.round() as i64,
@@ -130,6 +137,16 @@ pub fn sent(a: &HashMap<String, String>, timeline: &str) -> Sent {
         removed: n("removed"),
         failed: n("failed"),
         first_error: a.get("firstError").filter(|e| !e.is_empty()).cloned(),
+        unstyled: a
+            .get("unstyled")
+            .map(|u| {
+                u.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default(),
         timeline: timeline.to_string(),
     }
 }
@@ -165,7 +182,7 @@ mod tests {
             "{{ Global = {{ AutoSubsBridge = {{ Ack = \"9\", }}, JuncturBridge = {{ \
              JuncturAck = \"1\", NotJuncturAck = \"x\", JuncturAck = \"2\", \
              JuncturReply = \"2:{}\", }}, }} }}",
-            hex("placed\t3\nfirstError\t\nremoved\t1")
+            hex("placed\t3\nfirstError\t\nremoved\t1\nunstyled\tUnderline, Thickness2")
         );
         assert_eq!(pref(&text, "JuncturAck"), Some("2"));
         assert!(acked(&text, "2") && !acked(&text, "1"));
@@ -174,6 +191,7 @@ mod tests {
         let s = sent(&a, "Main");
         assert_eq!((s.placed, s.removed, s.failed), (3, 1, 0));
         assert_eq!(s.first_error, None);
+        assert_eq!(s.unstyled, ["Underline", "Thickness2"]);
         // Another request's answer, or one cut off mid-write, is not this one's.
         assert!(answer(&text, "1").is_none());
         assert!(answer("JuncturReply = \"2:7061f\"", "2").is_none());
@@ -184,10 +202,10 @@ mod tests {
     fn timeline_info_and_frame_rates() {
         let text = format!(
             "JuncturReply = \"5:{}\"",
-            hex("name\tMain édit\nfps\t29.97\nstart\t108000\nend\t110000\nwidth\t1920\nheight\t1080\ntemplate\tJunctur Caption\ntemplateFps\t")
+            hex("name\tMain édit\nid\tT-1\nfps\t29.97\nstart\t108000\nend\t110000\nwidth\t1920\nheight\t1080\ntemplate\tJunctur Caption\ntemplateFps\t")
         );
         let t = timeline(&answer(&text, "5").unwrap()).unwrap();
-        assert_eq!(t.name, "Main édit");
+        assert_eq!((t.name.as_str(), t.id.as_str()), ("Main édit", "T-1"));
         assert!((t.fps - 30000.0 / 1001.0).abs() < 1e-9);
         assert_eq!(
             (t.start, t.end, t.width, t.height),

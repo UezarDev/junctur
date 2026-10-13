@@ -34,7 +34,9 @@
   const shape = $derived.by(() => {
     if (!on || !edit || !captions) return null;
     const fps = edit.fps ? `${edit.fps.num}/${edit.fps.den}` : "";
-    const place = `${captions.size}|${captions.position}|${captions.layout}|${captions.protagonist}`;
+    // The picture's shape too: side by side, lines are wrapped to the columns' width.
+    const aspect = picture.w > 0 ? (picture.h / picture.w).toFixed(3) : "";
+    const place = `${captions.size}|${captions.position}|${captions.layout}|${captions.protagonist}|${aspect}`;
     return `${edit.ranges.join(",")}|${fps}|${captions.chars}|${captions.lines}|${captions.seconds}|${edit.speakersKey}|${place}`;
   });
   let cues = $state.raw<api.Cue[]>([]);
@@ -47,7 +49,7 @@
     }
     const n = ++asked;
     api
-      .captionCues()
+      .captionCues(picture.w > 0 ? picture.h / picture.w : 9 / 16)
       .then((c) => {
         if (n === asked) cues = c;
       })

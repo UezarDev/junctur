@@ -53,6 +53,8 @@ pub struct Job {
     pub recording: String,
     /// The template's clip name in the media pool; empty for Junctur's own.
     pub template: String,
+    /// The timeline the `info` request saw: `place` refuses another (the user switched meanwhile).
+    pub timeline: String,
     /// Track names, one per speaker; the script finds each by name or adds it.
     pub tracks: Vec<String>,
     pub look: Look,
@@ -66,6 +68,21 @@ pub fn recording_key(edit: &EditList) -> String {
     digest[..6].iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The template the settings name, as both requests send it: empty for Junctur's own.
+pub fn template(c: &Captions) -> &str {
+    c.template.trim()
+}
+
+/// Each speaker's track name: their id keeps two speakers with one name (or none) apart, their
+/// name keeps it readable in Resolve. Words with no speaker go on `Junctur`.
+fn track_name(edit: &EditList, id: u32) -> String {
+    match (id, edit.speakers.name(id).map(str::trim)) {
+        (0, _) => "Junctur".to_string(),
+        (id, Some(n)) if !n.is_empty() => format!("Junctur {id} {n}"),
+        (id, _) => format!("Junctur {id}"),
+    }
+}
+
 /// Every placed caption as clips on `timeline`.
 pub fn build(placed: &[Placed], edit: &EditList, c: &Captions, timeline: &Timeline) -> Job {
     let mut speakers: Vec<u32> = placed
@@ -74,13 +91,7 @@ pub fn build(placed: &[Placed], edit: &EditList, c: &Captions, timeline: &Timeli
         .collect();
     speakers.sort_unstable();
     speakers.dedup();
-    let tracks: Vec<String> = speakers
-        .iter()
-        .map(|&id| match edit.speakers.name(id) {
-            Some(n) if id > 0 => format!("Junctur {n}"),
-            _ => "Junctur".to_string(),
-        })
-        .collect();
+    let tracks: Vec<String> = speakers.iter().map(|&id| track_name(edit, id)).collect();
     let frame = |s: f64| timeline.start + (s * timeline.fps).round() as i64;
     let mut clips = Vec::new();
     for (t, &id) in speakers.iter().enumerate() {
@@ -89,8 +100,9 @@ pub fn build(placed: &[Placed], edit: &EditList, c: &Captions, timeline: &Timeli
             .color(id)
             .filter(|_| id > 0)
             .unwrap_or("#FFFFFF"));
-        // Each track's clips in time order, never overlapping: cue ends and starts round onto the
-        // same frame at most, and a clip that rounds to nothing gets a frame if there is room.
+        // Each track's clips in time order, never overlapping: a clip that rounds to nothing gets one
+        // frame, and one that would start inside the previous clip starts at its end instead (shifted,
+        // not dropped; only a clip past the timeline's end is left out).
         let mut last_end = i64::MIN;
         for p in placed {
             let Some(part) = p.parts.iter().find(|q| q.speaker == id) else {
@@ -122,7 +134,8 @@ pub fn build(placed: &[Placed], edit: &EditList, c: &Captions, timeline: &Timeli
     }
     Job {
         recording: recording_key(edit),
-        template: c.template.clone(),
+        template: template(c).to_string(),
+        timeline: timeline.id.clone(),
         tracks,
         look: Look {
             font: c.font.trim().to_string(),
@@ -182,6 +195,7 @@ impl Job {
         vec![
             ("recording", self.recording.as_str().into()),
             ("template", self.template.as_str().into()),
+            ("timeline", self.timeline.as_str().into()),
             (
                 "tracks",
                 Value::List(self.tracks.iter().map(|t| t.as_str().into()).collect()),
@@ -242,6 +256,7 @@ mod tests {
     fn timeline(fps: f64) -> Timeline {
         Timeline {
             name: "Main".into(),
+            id: "T-1".into(),
             fps,
             start: 86400,
             end: 86400 + 100 * 24,
@@ -278,7 +293,7 @@ mod tests {
             placed(3.02, 4.0, &[(0, "…")]),
         ];
         let j = build(&cues, &edit(), &Captions::default(), &timeline(24.0));
-        assert_eq!(j.tracks, ["Junctur", "Junctur Ana", "Junctur Bo"]);
+        assert_eq!(j.tracks, ["Junctur", "Junctur 1 Ana", "Junctur 2 Bo"]);
         let got: Vec<_> = j
             .clips
             .iter()
@@ -297,10 +312,39 @@ mod tests {
         let bo = &j.clips[3];
         assert_eq!((bo.fill, bo.y), ([0.0, 1.0, 128.0 / 255.0], 0.1));
         assert_eq!(j.clips[0].fill, [1.0, 1.0, 1.0]);
-        assert_eq!(bo.key, "Junctur Bo|86436|86472");
+        assert_eq!(bo.key, "Junctur 2 Bo|86436|86472");
         assert_eq!(bo.length, 36);
         assert_eq!(j.recording, recording_key(&edit()));
         assert_eq!(j.recording.len(), 12);
+    }
+
+    #[test]
+    fn speakers_sharing_a_name_or_having_none_get_tracks_of_their_own() {
+        let mut e = edit();
+        e.speakers.names[1].name = "Ana".into();
+        e.speakers.names.push(SpeakerName {
+            id: 3,
+            name: " ".into(),
+            track: None,
+            color: "#FFFFFF".into(),
+        });
+        let cues = [placed(0.0, 1.0, &[(1, "a"), (2, "b"), (3, "c"), (4, "d")])];
+        let j = build(&cues, &e, &Captions::default(), &timeline(24.0));
+        assert_eq!(
+            j.tracks,
+            ["Junctur 1 Ana", "Junctur 2 Ana", "Junctur 3", "Junctur 4"]
+        );
+        // The template is trimmed once, for both requests; the timeline `info` saw goes along.
+        let c = Captions {
+            template: "  My Title ".into(),
+            ..Default::default()
+        };
+        assert_eq!(template(&c), "My Title");
+        let j = build(&cues, &e, &c, &timeline(24.0));
+        assert_eq!(
+            (j.template.as_str(), j.timeline.as_str()),
+            ("My Title", "T-1")
+        );
     }
 
     #[test]
@@ -346,7 +390,8 @@ mod tests {
         let j = build(&[], &edit(), &c, &timeline(24.0));
         assert_eq!(j.look.style, "Bold Italic");
         assert!(j.look.underline);
-        // 8 % of a 1080-high frame, measured against its 1920 width.
+        // 8 % of a 1080-high frame, measured against its 1920 width: an assumption about Text+'s
+        // `Size` (Fusion sizing text by the frame width) that only a real Resolve can confirm.
         assert!((j.look.size - 0.08 * 1080.0 / 1920.0).abs() < 1e-12);
         let (color, thickness) = j.look.outline.unwrap();
         assert_eq!(color, [1.0, 1.0, 1.0]);
@@ -385,6 +430,7 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("[\"text\"] = \"say \\\"hi\\\"\""), "{text}");
+        assert!(text.contains("[\"timeline\"] = \"T-1\""), "{text}");
         assert!(
             text.contains("[\"outline\"] = true, [\"outlineColor\"] = {0.000000"),
             "{text}"

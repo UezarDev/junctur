@@ -166,6 +166,8 @@ export interface Sent {
   removed: number;
   failed: number;
   firstError: string | null;
+  /** Text+ inputs the template did not take (a user's own title may lack some). */
+  unstyled: string[];
   timeline: string;
 }
 
@@ -358,8 +360,9 @@ export const recolorSpeaker = (id: number, color: string) =>
 export const setCaptions = (captions: Captions) => invoke<void>("set_captions", { captions });
 /** Writes the captions as one SRT at `path`, people talking at once stacked in one caption (5e). */
 export const exportCaptions = (path: string) => invoke<Exported>("export_captions", { path });
-/** The captions as the export cuts them, for the preview over the picture (5d). */
-export const captionCues = () => invoke<Cue[]>("caption_cues");
+/** The captions as the export cuts them, for the preview over the picture (5d), placed on a
+ * picture `aspect` (height over width) in shape (5g). */
+export const captionCues = (aspect: number) => invoke<Cue[]>("caption_cues", { aspect });
 /** Sends the captions into DaVinci Resolve as Text+ clips through the Junctur script there (5g). */
 export const sendToResolve = () => invoke<Sent>("send_to_resolve");
 /** Installs the Junctur script into Resolve's Scripts folder; resolves to its path. */

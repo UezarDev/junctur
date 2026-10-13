@@ -95,6 +95,10 @@
       sentLines = [
         `On "${r.timeline}": ${n(r.placed, "placed")}, ${n(r.restyled, "updated")}, ${n(r.removed, "removed")}.`,
         ...(r.failed > 0 ? [`${n(r.failed, "not placed")}: ${r.firstError ?? "no reason given"}`] : []),
+        ...(r.failed === 0 && r.firstError ? [r.firstError] : []),
+        ...(r.unstyled.length > 0
+          ? [`The template has no ${r.unstyled.join(", ")}: those keep the template's own look.`]
+          : []),
       ];
     } catch (e) {
       onError(String(e));
@@ -259,7 +263,7 @@
       {#if installed}<p class="done">Installed: {installed}</p>{/if}
       <p class="note">
         Places every caption on the open Resolve timeline as a Text+ clip, each speaker on their own video track
-        ("Junctur" and their name) in their colour, styled as above, at the edited timeline's times: put the
+        ("Junctur", their number and name) in their colour, styled as above, at the edited timeline's times: put the
         edited video (render or FCPXML) at the start of that timeline. Once per Resolve session, choose Workspace
         &gt; Scripts &gt; Junctur in Resolve and leave it running; Junctur installs the script when you send.
         Sending again updates the captions already there instead of adding more. The template is Junctur's

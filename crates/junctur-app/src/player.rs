@@ -677,25 +677,30 @@ impl Core {
     }
 
     /// The captions of the list in play as the SRT export cuts them (5d's preview over the
-    /// picture), each speaker placed as the Resolve send places them (5g): the same cues on the same
-    /// output timeline, so the preview shows what Resolve will, cue for cue.
-    pub fn caption_cues(&self) -> Result<Vec<Placed>, String> {
-        let (list, captions, words, fps) = self.caption_source()?;
-        let tracked = words.tracks.iter().copied().zip(words.list.iter());
-        let cues = srt::cues(&list, &captions, tracked, fps.num, fps.den);
-        Ok(layout::place(&cues, &list, &captions))
+    /// picture), each speaker placed as the Resolve send places them (5g) on a picture `aspect`
+    /// (height over width) in shape: the same cues on the same output timeline, so the preview
+    /// shows what Resolve will, cue for cue.
+    pub fn caption_cues(&self, aspect: f64) -> Result<Vec<Placed>, String> {
+        let (list, captions, cues) = self.cut_captions()?;
+        Ok(layout::place(&cues, &list, &captions, aspect))
     }
 
-    /// Sends the captions of the list in play into DaVinci Resolve as Text+ clips (5g): the same
-    /// placed cues the preview draws, to the Junctur script running in Resolve. Blocks until Resolve
+    /// Sends the captions of the list in play into DaVinci Resolve as Text+ clips (5g), laid out
+    /// for the Resolve timeline's shape, to the Junctur script running there. Blocks until Resolve
     /// answers (minutes for a long recording), so the command runs it off the async runtime.
     pub fn send_to_resolve(&self) -> Result<junctur_core::resolve::Sent, String> {
-        let (list, captions, words, fps) = self.caption_source()?;
+        let (list, captions, cues) = self.cut_captions()?;
         captions.check()?;
+        junctur_core::resolve::send(&cues, &list, &captions)
+    }
+
+    /// The list in play, its caption settings and its cues as the SRT export cuts them: what the
+    /// preview and the Resolve send each lay out.
+    fn cut_captions(&self) -> Result<(Arc<EditList>, Captions, Vec<srt::Cue>), String> {
+        let (list, captions, words, fps) = self.caption_source()?;
         let tracked = words.tracks.iter().copied().zip(words.list.iter());
         let cues = srt::cues(&list, &captions, tracked, fps.num, fps.den);
-        let placed = layout::place(&cues, &list, &captions);
-        junctur_core::resolve::send(&placed, &list, &captions)
+        Ok((list, captions, cues))
     }
 
     /// What a caption file is cut from: the list in play, its caption settings (its own, else the

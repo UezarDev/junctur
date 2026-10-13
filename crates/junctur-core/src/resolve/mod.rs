@@ -19,18 +19,22 @@ pub use install::{install, Installed};
 pub use reply::{Sent, Timeline};
 
 use crate::edit::{Captions, EditList};
-use crate::export::layout::Placed;
+use crate::export::layout;
+use crate::export::srt::Cue;
 
 /// Installs (or refreshes) the script, asks Resolve for the open timeline and the template, then
-/// places `placed` on it.
-pub fn send(placed: &[Placed], edit: &EditList, c: &Captions) -> Result<Sent, String> {
-    if placed.is_empty() {
+/// places `cues` on it, laid out for that timeline's shape (side-by-side lines are wrapped to its
+/// width).
+pub fn send(cues: &[Cue], edit: &EditList, c: &Captions) -> Result<Sent, String> {
+    if cues.is_empty() {
         return Err("no captions to send: the transcript has no kept words yet".into());
     }
     install()?;
-    let info = bridge::request("info", vec![("template", c.template.trim().into())])?;
+    let info = bridge::request("info", vec![("template", job::template(c).into())])?;
     let timeline = reply::timeline(&info)?;
-    let job = job::build(placed, edit, c, &timeline);
+    let aspect = timeline.height as f64 / timeline.width.max(1) as f64;
+    let placed = layout::place(cues, edit, c, aspect);
+    let job = job::build(&placed, edit, c, &timeline);
     let done = bridge::request("place", job.to_lua())?;
     Ok(reply::sent(&done, &timeline.name))
 }
