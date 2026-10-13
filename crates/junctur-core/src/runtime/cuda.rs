@@ -63,8 +63,10 @@ fn extend_path() {
 #[cfg(windows)]
 const WHISPER_DLL: &str = "cublas64_13.dll";
 
-/// [`WHISPER_DLL`] when it is neither beside the executable nor on PATH (after [`prepare`]), the
-/// places the delay-load looks besides the system folders, where the CUDA installer never puts it.
+/// [`WHISPER_DLL`] when it is neither beside the executable nor on PATH (after [`prepare`]). The
+/// delay-load also searches System32, the Windows folder and the current directory; those are not
+/// checked, because the CUDA installer puts the DLL in none of them. A copy placed only there is
+/// reported missing, and Whisper runs on the CPU: the safe side of the guess.
 #[cfg(windows)]
 pub fn whisper_dll_missing() -> Option<&'static str> {
     prepare();
