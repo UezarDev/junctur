@@ -163,14 +163,14 @@ fn labelled(
 
 /// Remembers `name`'s voice from source seconds `a..b` of `file` (any length, 5c), pins those
 /// seconds to them and labels its speakers again. Returns the new speakers and a line for the user.
-pub fn enroll(file: &str, name: &str, (a, b): (f64, f64)) -> Result<(Found, String), String> {
+pub fn enroll(file: &str, name: &str, stretches: &[(f64, f64)]) -> Result<(Found, String), String> {
     let _held = crate::lock::lock(&LOCK);
     not_while_rehearing()?;
     let p = project(file)?;
     let (path, mut v) = load()?;
     let before = v.get(name).map_or(0.0, |x| x.seconds);
     let (found, added) =
-        pipeline::enroll(&p, &mut v, name, &[(a, b)]).map_err(|e| e.to_string())?;
+        pipeline::enroll(&p, &mut v, name, stretches).map_err(|e| e.to_string())?;
     v.save(&path).map_err(|e| e.to_string())?;
     pipeline::save_speakers(&p, &found).map_err(|e| e.to_string())?;
     let voice = v.get(name).expect("just enrolled");

@@ -358,6 +358,15 @@ export const togglePause = () => invoke<void>("toggle_pause");
 /** Resolves to the source time the seek lands on (inside a cut while skipping: the next range). */
 export const seek = (seconds: number, exact: boolean) =>
   invoke<number>("seek", { seconds, exact });
+/** 2o: plays source seconds `start` to `end` on a loop from `start`. The first call puts the player
+ * in review (the whole file plays, Skip cuts off and refused) until `endReview`, which also puts
+ * the speed to 1x and Skip cuts back; opening or closing a recording ends it too. `pauseReview`
+ * stops the loop and pauses, still in review. */
+export const playBetween = (start: number, end: number) => invoke<void>("play_between", { start, end });
+export const pauseReview = () => invoke<void>("pause_review");
+export const endReview = () => invoke<void>("end_review");
+/** Playback speed, 0.25 to 4 (2o). */
+export const setSpeed = (speed: number) => invoke<void>("set_speed", { speed });
 export const mixer = () => invoke<MixerState>("mixer");
 /** Mutes or unmutes track `track` (0-based) in the preview; remembered for the recording. */
 export const setMuted = (track: number, muted: boolean) =>
@@ -365,9 +374,10 @@ export const setMuted = (track: number, muted: boolean) =>
 export const setSkip = (on: boolean) => invoke<void>("set_skip", { on });
 export const editState = () => invoke<EditState>("edit_state");
 export const transcript = () => invoke<TranscriptView | null>("transcript");
-/** Cuts (`keep` false) or keeps words `first..=last`, snapped into the pauses around them. */
-export const editWords = (first: number, last: number, keep: boolean) =>
-  invoke<void>("edit_words", { first, last, keep });
+/** Cuts (`keep` false) or keeps every run of words (`[first, last]` each), snapped into the pauses
+ * around them, as one undo step (2p). */
+export const editWords = (runs: [number, number][], keep: boolean) =>
+  invoke<void>("edit_words", { runs, keep });
 /** Cuts or keeps source frames `[start, end)` exactly. */
 export const editFrames = (start: number, end: number, keep: boolean) =>
   invoke<void>("edit_frames", { start, end, keep });
@@ -422,9 +432,10 @@ export const translationLanguages = () => (languages ??= invoke<Language[]>("tra
 /** Installs the Junctur script into Resolve's Scripts folder; resolves to its path. */
 export const installResolveScript = () => invoke<string>("install_resolve_script");
 export const voices = () => invoke<Voice[]>("voices");
-/** Remembers `name`'s voice from words `first..=last` and relabels the speakers; resolves to a line for the user. */
-export const enrollVoice = (first: number, last: number, name: string) =>
-  invoke<string>("enroll_voice", { first, last, name });
+/** Remembers `name`'s voice from every run of words (`[first, last]` each, 2p: one enrolment) and
+ * relabels the speakers; resolves to a line for the user. */
+export const enrollVoice = (runs: [number, number][], name: string) =>
+  invoke<string>("enroll_voice", { runs, name });
 export const forgetVoice = (name: string) => invoke<void>("forget_voice", { name });
 /** Hears the open recording's speakers again from the audio, cut at the seconds pinned to people (5c). Slow. */
 export const reanalyzeSpeakers = () => invoke<void>("reanalyze_speakers");

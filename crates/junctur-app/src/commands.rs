@@ -345,6 +345,31 @@ pub async fn toggle_pause(app: State<'_, App>) -> Result<(), String> {
     app.with(|p| p.toggle_pause())
 }
 
+/// Plays source seconds `start` to `end` on a loop (2o: review's one clip), from `start`; the
+/// first call puts the player in review (the whole file plays until `end_review`).
+#[tauri::command]
+pub async fn play_between(app: State<'_, App>, start: f64, end: f64) -> Result<(), String> {
+    app.with(|p| p.play_between(start, end))
+}
+
+/// Stops the loop and pauses, still in review (past the last clip).
+#[tauri::command]
+pub async fn pause_review(app: State<'_, App>) -> Result<(), String> {
+    app.with(|p| p.pause_review())
+}
+
+/// Leaves review: no loop, 1x, the skip toggle as it was.
+#[tauri::command]
+pub async fn end_review(app: State<'_, App>) -> Result<(), String> {
+    app.with(|p| p.end_review())
+}
+
+/// Playback speed, a quarter to four times (2o).
+#[tauri::command]
+pub async fn set_speed(app: State<'_, App>, speed: f64) -> Result<(), String> {
+    app.with(|p| p.set_speed(speed))
+}
+
 /// Returns the source time the seek lands on (a cut lands on the next kept range while skipping).
 #[tauri::command]
 pub async fn seek(app: State<'_, App>, seconds: f64, exact: bool) -> Result<f64, String> {
@@ -371,16 +396,16 @@ pub async fn transcript(app: State<'_, App>) -> Result<Option<TranscriptView>, S
     Ok(app.core()?.transcript())
 }
 
-/// Cuts (`keep` false) or keeps transcript words `first..=last`, snapped into the pauses around.
+/// Cuts (`keep` false) or keeps every run of transcript words in `runs` (`[first, last]` each),
+/// snapped into the pauses around them, as one undo step (2p: a selection of several stretches).
 #[tauri::command]
 pub async fn edit_words(
     app: State<'_, App>,
-    first: usize,
-    last: usize,
+    runs: Vec<(usize, usize)>,
     keep: bool,
 ) -> Result<(), String> {
     let e = app.editable()?;
-    e.edit(e.file(), Step::Do(Op::Words { first, last, keep }))
+    e.edit_words(e.file(), &runs, keep)
 }
 
 /// Cuts or keeps source frames `[start, end)` exactly (timeline selections, nudges, restoring a
@@ -549,17 +574,16 @@ pub async fn voices() -> Result<Vec<VoiceView>, String> {
     crate::voices::list()
 }
 
-/// Remembers `name`'s voice from transcript words `first..=last` and labels the speakers again;
-/// returns a line for the user.
+/// Remembers `name`'s voice from the runs of transcript words in `runs` (`[first, last]` each, 2p)
+/// and labels the speakers again; returns a line for the user.
 #[tauri::command]
 pub async fn enroll_voice(
     app: State<'_, App>,
-    first: usize,
-    last: usize,
+    runs: Vec<(usize, usize)>,
     name: String,
 ) -> Result<String, String> {
     let e = app.editable()?;
-    e.enroll_voice(e.file(), first, last, &name)
+    e.enroll_voice(e.file(), &runs, &name)
 }
 
 /// Hears the open recording's speakers again from the audio, cut at the seconds pinned to people
