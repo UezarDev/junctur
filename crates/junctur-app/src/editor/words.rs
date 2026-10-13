@@ -32,18 +32,18 @@ impl Words {
     /// that start before `through`, where every track is done. Later words a track already has are
     /// left for the piece they belong to: every word still to come starts at or after `through`,
     /// so the next read only adds words at the end and the indices the page holds stay valid. With
-    /// no run's chunks (it just finished) the finished transcript, whole.
-    pub fn load_so_far(project_dir: &Path, through: f64) -> Option<Self> {
-        let Some(segs) = transcribe::so_far(project_dir) else {
-            return Self::load(project_dir);
-        };
+    /// no run's chunks yet, none: never the `transcript.json` of an earlier run, whose words the
+    /// new ones would replace under those indices (2j repair). The run's end reads the finished
+    /// transcript ([`Self::load`]).
+    pub fn load_so_far(project_dir: &Path, through: f64) -> Self {
+        let segs = transcribe::so_far(project_dir).unwrap_or_default();
         let mut w = Self::from_segments(&segs);
         let n = w.list.partition_point(|x| x.start < through);
         w.list.truncate(n);
         w.tracks.truncate(n);
         w.ends_by.truncate(n);
         w.until = Some(through);
-        Some(w)
+        w
     }
 
     fn from_segments(segs: &[transcribe::Segment]) -> Self {
@@ -198,7 +198,7 @@ mod tests {
         let path = dir.join("transcript.partial.jsonl");
         std::fs::write(&path, lines.join("\n") + "\n").unwrap();
         // Whole up to 302 s (track 1's next chunk would start there): 302's own word waits.
-        let early = Words::load_so_far(&dir, 302.0).unwrap();
+        let early = Words::load_so_far(&dir, 302.0);
         let text = |w: &Words| w.list.iter().map(|w| w.text.clone()).collect::<Vec<_>>();
         assert_eq!(text(&early), ["uno", "tres", "dos", "cuatro"]);
         // The last word's span stops where the transcript does.
@@ -213,12 +213,21 @@ mod tests {
             [lines.join("\n"), seg(1, 320.0, &[(320.0, "seis")])].join("\n") + "\n",
         )
         .unwrap();
-        let later = Words::load_so_far(&dir, 600.0).unwrap();
+        let later = Words::load_so_far(&dir, 600.0);
         assert_eq!(text(&later)[..4], text(&early)[..]);
         assert_eq!(text(&later)[4..], ["cinco", "seis"]);
-        // The run finished meanwhile (no partial left): the whole transcript instead.
+        // No chunks of this run yet (it waits for the lane): no words, even beside an earlier
+        // run's finished transcript, which the new words would replace under the same indices.
         std::fs::remove_file(&path).unwrap();
-        assert!(Words::load_so_far(&dir, 600.0).is_none());
+        std::fs::write(
+            dir.join("transcript.json"),
+            r#"{"choice":{"model":"m","device":"cpu","note":null},"languages":["es"],
+            "segments":[{"track":0,"start":0,"end":1,"lang":"es","model":"m",
+            "words":[{"start":0.1,"end":0.5,"text":"viejo","p":1.0}]}],"audio_s":1,"elapsed_s":1}"#,
+        )
+        .unwrap();
+        assert_eq!(Words::load(&dir).unwrap().list.len(), 1);
+        assert!(Words::load_so_far(&dir, 0.0).list.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

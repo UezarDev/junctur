@@ -208,11 +208,7 @@ pub fn prepare(
     };
     let edit = jobs.stage(&p.dir, "edit", log, |log| {
         let d = draft(p, &report, &speech, speakers.as_ref(), None, &opts.cut);
-        if opts.keep_list && d.users {
-            log("edit list: it holds your edits, kept as it is");
-            return Ok(p.edit().unwrap_or(d.list));
-        }
-        write_draft(p, d)
+        keep_or_write(p, d, opts.keep_list, log)
     })?;
     Ok(Prepared {
         report,
@@ -254,8 +250,12 @@ pub fn finish(
             steps,
             transcribed,
         )?;
-        if let Some(e) = count_words(p, &speech, &t, log)? {
-            edit = e;
+        // The counts are for later modes, nothing reads them yet: a list that cannot be written
+        // now is no reason to fail a finished transcription.
+        match count_words(p, &speech, &t, log) {
+            Ok(Some(e)) => edit = e,
+            Ok(None) => {}
+            Err(e) => log(&format!("edit list: word counts not written ({e})")),
         }
         Some(t)
     };
@@ -266,6 +266,24 @@ pub fn finish(
         transcript,
         edit,
     })
+}
+
+/// The `edit` stage's write: with `keep_list`, a list on disk holding the user's edits is kept as
+/// it is. Only one that parses: a list that does not (a run killed mid-write before 1d, a broken
+/// hand edit) is backed up and re-cut as before 2j, or the recording would never have a list.
+fn keep_or_write(
+    p: &Project,
+    d: Draft,
+    keep_list: bool,
+    log: &mut dyn FnMut(&str),
+) -> Result<EditList> {
+    if keep_list && d.users {
+        if let Ok(kept) = p.edit() {
+            log("edit list: it holds your edits, kept as it is");
+            return Ok(kept);
+        }
+    }
+    write_draft(p, d)
 }
 
 /// Puts the transcript's word counts into the score windows of the edit list on disk, changing
@@ -931,6 +949,38 @@ mod tests {
             why[0].starts_with("The transcript could not be read"),
             "{why:?}"
         );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_resumed_run_keeps_the_users_list_but_not_a_broken_one() {
+        let (d, p) = scratch_project("keeplist");
+        let fresh = || edit::parse(&list(CutSettings::default(), 5.0)).unwrap();
+        let draft_over = |old: &str| Draft {
+            list: fresh(),
+            old: Some(old.to_string()),
+            users: true,
+        };
+        let mut log = |_: &str| {};
+        // The user cut while it transcribed, then the app closed: resumed, their list stays.
+        let mine = list(CutSettings::default(), 2.0);
+        std::fs::write(p.edit_path(), &mine).unwrap();
+        let kept = keep_or_write(&p, draft_over(&mine), true, &mut log).unwrap();
+        assert_eq!(kept.keep[0].end, 2.0);
+        assert_eq!(std::fs::read_to_string(p.edit_path()).unwrap(), mine);
+        assert!(!p.dir.join("edit.junctur.bak").exists());
+        // A re-analysis (not kept): backed up and re-cut.
+        let recut = keep_or_write(&p, draft_over(&mine), false, &mut log).unwrap();
+        assert_eq!(recut.keep[0].end, 5.0);
+        assert_eq!(
+            std::fs::read_to_string(p.dir.join("edit.junctur.bak")).unwrap(),
+            mine
+        );
+        // A list that does not parse is never kept, or the recording would never get one.
+        std::fs::write(p.edit_path(), "junctur-edit 1\nkeep x\n").unwrap();
+        let recut = keep_or_write(&p, draft_over("junctur-edit 1\nkeep x\n"), true, &mut log);
+        assert_eq!(recut.unwrap().keep[0].end, 5.0);
+        assert!(p.dir.join("edit.junctur.bak2").exists());
         std::fs::remove_dir_all(&d).unwrap();
     }
 

@@ -22,6 +22,7 @@ use crate::state::PlayerState;
 use crate::voices::VoiceView;
 use crate::waves::{self, WavesState};
 use junctur_core::pipeline::StageState;
+use junctur_core::transcribe;
 
 /// The player, or why it could not start (libmpv missing, no GL): the window still opens and
 /// says so instead of the app failing to launch.
@@ -96,7 +97,7 @@ pub fn notifier(handle: AppHandle) -> Notify {
                 core.tracks_known(Path::new(&p.file));
             }
             if !p.phase.busy() || change == Change::Listed {
-                core.analysed(Path::new(&p.file));
+                core.analysed(Path::new(&p.file), p.words_through());
             }
         }
         let _ = handle.emit(analysis::EVENT, p);
@@ -172,7 +173,11 @@ pub async fn open_file(
             .stages
             .iter()
             .any(|st| st.name == "transcribe" && st.state != StageState::Done);
-        if unanalysed || untranscribed {
+        // Not while another process transcribes it (`junctur analyze`): the stage reads
+        // `running` then too, and a second Whisper on its partial would only be refused (2j
+        // repair). A run of this app's own is returned by `start` as it is.
+        let elsewhere = || transcribe::transcribing_elsewhere(Path::new(&s.dir));
+        if unanalysed || (untranscribed && (app.analysis.busy(file) || !elsewhere())) {
             // The file plays even when its analysis cannot start; the panel says why.
             analysis = Some(
                 app.analysis
@@ -183,14 +188,16 @@ pub async fn open_file(
             outdated = analysis::outdated(file);
         }
     }
-    // Opened while it transcribes (from another recording, say): the words so far, not the
-    // finished transcript's file, which may be an older run's or missing.
-    if let Some(t) = analysis
-        .as_ref()
-        .filter(|a| a.phase.busy())
-        .and_then(|a| a.transcribed)
-    {
-        app.core()?.transcribed(&absolute, Some(t));
+    // Opened while its run is past its edit list (from another recording, say): the words so
+    // far, not the finished transcript's file, which may be an older run's or missing. Asked
+    // again after: a run that ended meanwhile has told the player already, or tells it after
+    // this, either way last.
+    if let Some(t) = analysis.as_ref().and_then(Progress::words_through) {
+        let core = app.core()?;
+        core.transcribed(&absolute, Some(t));
+        if let Some(now) = app.analysis.progress(file).filter(|p| !p.phase.busy()) {
+            core.transcribed(&absolute, now.words_through());
+        }
     }
     let (project, project_error) = match status {
         Ok(s) => (Some(s), None),

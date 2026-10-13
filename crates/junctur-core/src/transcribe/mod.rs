@@ -204,6 +204,10 @@ pub fn transcribe(
 ) -> Result<Transcript> {
     let Reports { reach, transcribed } = reports;
     let partial = partial_path(project);
+    // One transcription of a recording at a time across processes (2j repair): the app resumes an
+    // unfinished one on open, which must not start a second Whisper on the partial a `junctur
+    // analyze` is writing. Held until this returns; the OS lets go if the process dies.
+    let _mine = Transcribing::claim(project)?;
     if opts.force {
         let _ = std::fs::remove_file(&partial);
         let _ = std::fs::remove_file(path(project));
@@ -304,10 +308,52 @@ pub fn transcribe(
         elapsed_s: t0.elapsed().as_secs_f64(),
         resumed_chunks,
     };
-    std::fs::write(path(project), serde_json::to_vec_pretty(&t)?)?;
+    crate::output::write_replacing(&path(project), serde_json::to_vec_pretty(&t)?)?;
     std::fs::write(project.join("transcript.txt"), t.render())?;
-    let _ = std::fs::remove_file(&partial);
+    // Left behind, the next run would take it for an interrupted one and redo the finishing (no
+    // Whisper: every chunk is in it), and the editor would read it as words so far.
+    if let Err(e) = crate::output::remove_retrying(&partial) {
+        log(&format!("could not remove {}: {e}", partial.display()));
+    }
     Ok(t)
+}
+
+/// The lock file a transcription holds in a project folder ([`Transcribing`]).
+fn lock_path(project: &Path) -> std::path::PathBuf {
+    project.join("transcript.lock")
+}
+
+/// A transcription of a project in progress, in this process: the OS lock on its lock file.
+struct Transcribing {
+    /// Held, never read: the lock goes with the handle.
+    _file: std::fs::File,
+}
+
+impl Transcribing {
+    fn claim(project: &Path) -> Result<Self> {
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(lock_path(project))?;
+        match f.try_lock() {
+            Ok(()) => Ok(Self { _file: f }),
+            Err(std::fs::TryLockError::WouldBlock) => Err(Error::Model(
+                "another Junctur is transcribing this recording".into(),
+            )),
+            Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
+        }
+    }
+}
+
+/// Whether another process (or another run here) is transcribing project folder `project` now:
+/// its lock is held. For the app, which resumes an unfinished transcription on open (2j repair).
+pub fn transcribing_elsewhere(project: &Path) -> bool {
+    match Transcribing::claim(project) {
+        Ok(_) => false,
+        Err(Error::Model(_)) => true,
+        Err(_) => false,
+    }
 }
 
 /// Every chunk of `sources` in the order Whisper hears them: piece by piece ([`PIECE`]), within a
@@ -599,7 +645,7 @@ fn open_partial(path: &Path, header: &Header, done: &[Segment]) -> Result<std::f
     // Through a temp file, so a kill now still leaves the old partial to resume from.
     let tmp = path.with_extension("jsonl.tmp");
     std::fs::write(&tmp, body)?;
-    std::fs::rename(&tmp, path)?;
+    crate::output::rename_over(&tmp, path)?;
     Ok(std::fs::OpenOptions::new().append(true).open(path)?)
 }
 
@@ -763,7 +809,7 @@ mod tests {
     }
 
     #[test]
-    fn whisper_hears_a_piece_of_every_track_before_the_next_piece() {
+    fn the_work_goes_piece_by_piece_and_no_language_group_spans_two() {
         use crate::vad::Region;
         let speech = |spans: &[(f64, f64)]| {
             spans
@@ -797,6 +843,23 @@ mod tests {
             .chunks
             .iter()
             .all(|c| piece(c.start) == piece(g.chunks[0].start))));
+    }
+
+    #[test]
+    fn one_transcription_of_a_recording_at_a_time() {
+        let dir = std::env::temp_dir().join(format!("junctur-tlock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!transcribing_elsewhere(&dir));
+        let held = Transcribing::claim(&dir).unwrap();
+        assert!(transcribing_elsewhere(&dir), "the lock is seen");
+        assert!(
+            Transcribing::claim(&dir).is_err(),
+            "a second run is refused"
+        );
+        drop(held);
+        assert!(!transcribing_elsewhere(&dir), "let go when done");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

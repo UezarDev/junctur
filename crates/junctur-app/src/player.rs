@@ -529,9 +529,12 @@ impl Core {
 
     /// An analysis of `file` (absolute) ended (2d), or wrote its edit list (2j). If it is the open
     /// recording, the words and envelope read so far are dropped (a re-analysis may have replaced
-    /// them; the words are the finished transcript's from now on) and the edit list on disk is
-    /// taken now rather than at the watch's next poll.
-    pub fn analysed(&self, file: &Path) {
+    /// them) and the edit list on disk is taken now rather than at the watch's next poll. The
+    /// words are read again up to `through` ([`Self::transcribed`]): `None` once the transcript is
+    /// whole; while a run's transcription is to come or failed part way, the words so far, never
+    /// an older run's `transcript.json`, which the new words would replace under the page's word
+    /// indices (2j repair).
+    pub fn analysed(&self, file: &Path, through: Option<f64>) {
         if !self.is_open(file) {
             return;
         }
@@ -539,7 +542,7 @@ impl Core {
             let mut ed = lock(&self.editor);
             ed.words = None;
             ed.envelope = None;
-            ed.through = None;
+            ed.through = through;
         }
         self.reload_edit();
     }
@@ -606,6 +609,10 @@ impl Core {
         &self,
         f: impl FnOnce(&mut Editor, &EditList, Fps) -> Result<Option<Edited>, String>,
     ) -> Result<(), String> {
+        // From reading what is on disk to saving over it, so word counts the app's own analysis
+        // writes (`edit::amend`, 2j) never land between and get saved over. Taken before the
+        // editor: the watch takes the editor alone, and an amend this alone.
+        let _writing = junctur_core::edit::hold();
         let mut ed = lock(&self.editor);
         let synced = self.sync(&mut ed, "before an edit");
         let (list, fps) = {
@@ -651,7 +658,7 @@ impl Core {
         };
         let w = words
             .then(|| match through {
-                Some(t) => Words::load_so_far(&dir, t),
+                Some(t) => Some(Words::load_so_far(&dir, t)),
                 None => Words::load(&dir),
             })
             .flatten()

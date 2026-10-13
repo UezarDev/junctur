@@ -88,7 +88,7 @@ fn latest_backup(edit_path: &Path) -> Option<String> {
 /// reader (or a crash) never sees a half-written or missing list; a failed save removes the
 /// temporary file and leaves the list as it was.
 pub fn save(path: &Path, list: &EditList) -> std::io::Result<Saved> {
-    let _one = writing();
+    let _one = hold();
     save_now(path, list)
 }
 
@@ -96,9 +96,35 @@ pub fn save(path: &Path, list: &EditList) -> std::io::Result<Saved> {
 /// app's own analysis fills in word counts ([`amend`]); either one reading and writing back over the
 /// other would lose a cut or the counts. Other processes (the CLI on a list the app has open) were
 /// never guarded and are not now.
-fn writing() -> std::sync::MutexGuard<'static, ()> {
-    static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    WRITING.lock().unwrap_or_else(|e| e.into_inner())
+static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+thread_local! {
+    /// This thread holds [`WRITING`] (through a [`Held`]).
+    static HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// [`WRITING`], held until dropped; on a thread that holds it already, a no-op, so [`save`] and
+/// [`amend`] work inside a [`hold`].
+pub struct Held(Option<std::sync::MutexGuard<'static, ()>>);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if self.0.is_some() {
+            HELD.with(|h| h.set(false));
+        }
+    }
+}
+
+/// Holds the edit-list writer lock from reading a list to saving over it (2j repair): the app's
+/// editor takes an outside change on disk and then saves the list it made from it, and word counts
+/// [`amend`] wrote between the two would be saved over and lost.
+pub fn hold() -> Held {
+    if HELD.with(|h| h.get()) {
+        return Held(None);
+    }
+    let g = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    HELD.with(|h| h.set(true));
+    Held(Some(g))
 }
 
 /// What [`amend`] did.
@@ -121,7 +147,7 @@ pub enum Amended {
 /// wrote it. Anything else is left. For the pipeline putting word counts into a list the user may
 /// be editing (2j); under the same lock as [`save`].
 pub fn amend(path: &Path, change: impl FnOnce(&mut EditList)) -> std::io::Result<Amended> {
-    let _one = writing();
+    let _one = hold();
     let old = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Amended::Missing),

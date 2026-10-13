@@ -190,6 +190,7 @@
   let labelledWith = "";
 
   async function loadTranscript() {
+    growing++; // an ask from before this one is not taken (growTranscript)
     words = null;
     selection = null;
     wordsLoading = true;
@@ -260,11 +261,15 @@
   // The words again while the recording transcribes (2j): a piece more of them, or the finished
   // transcript after the pieces. Only words at the end are new (their indices are the core's
   // promise), so the selection and what the panel shows stay; nothing is blanked meanwhile.
+  // Asks in flight can answer out of order (a piece lands while the last ask is on its way): only
+  // the latest ask's answer is taken, or a shorter list could replace a longer one.
+  let growing = 0;
   async function growTranscript() {
     const file = opened?.file;
+    const ask = ++growing;
     try {
       const view = await api.transcript();
-      if (opened?.file === file) words = view ? toWords(view) : null;
+      if (opened?.file === file && ask === growing) words = view ? toWords(view) : null;
     } catch (e) {
       failure = String(e);
     }
@@ -281,6 +286,10 @@
       if (p.phase === "done") opened = { ...opened, outdated: [] };
       if (was?.transcribed != null && p.phase === "done") void growTranscript();
       else void loadTranscript();
+    } else if (p.listed && !was?.listed) {
+      // The run's list is written: from here the words are this run's, none until its first
+      // piece, never an older run's transcript under indices the new words would reuse (2j).
+      void loadTranscript();
     } else if (p.transcribed != null && p.transcribed !== was?.transcribed) {
       void growTranscript();
     }
@@ -529,7 +538,9 @@
           loading={wordsLoading}
           analysing={busy(analysis)}
           listed={analysis?.listed ?? false}
-          through={busy(analysis) ? (analysis?.transcribed ?? null) : null}
+          waiting={analysis?.phase === "waiting"}
+          failed={analysis?.phase === "failed"}
+          through={analysis?.listed && (busy(analysis) || analysis.phase === "failed") ? (analysis.transcribed ?? null) : null}
           {player}
           {edit}
           {selection}

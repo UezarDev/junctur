@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use junctur_core::config;
-use junctur_core::pipeline::{self, PipelineOptions, Project, Step};
+use junctur_core::pipeline::{self, PipelineOptions, Project, Step, Steps};
 use serde::Serialize;
 
 use crate::lock::lock;
@@ -74,6 +74,20 @@ pub struct Progress {
     pub transcribed: Option<f64>,
 }
 
+impl Progress {
+    /// How far the editor's words go for this run ([`crate::player::Core::transcribed`]): once the
+    /// run's list is written and while its transcription is to come, runs or failed part way, the
+    /// words so far (none before the first piece); else (not this far, or done) the finished
+    /// transcript. Never an older run's `transcript.json` under the new words' indices (2j repair).
+    pub fn words_through(&self) -> Option<f64> {
+        if self.listed && (self.phase.busy() || self.phase == Phase::Failed) {
+            Some(self.transcribed.unwrap_or(0.0))
+        } else {
+            None
+        }
+    }
+}
+
 /// What a request to analyse again did.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -119,6 +133,9 @@ pub struct Analysis {
     /// The user's options a run starts from ([`user_options`]); tests pass their own, so they
     /// never read the user's config or voices files.
     user: fn() -> Result<PipelineOptions, String>,
+    /// The pipeline a run goes through ([`pipeline_halves`]); tests pass their own, to drive the
+    /// lanes without media or models.
+    halves: Halves,
 }
 
 impl Default for Analysis {
@@ -130,8 +147,37 @@ impl Default for Analysis {
             order: Default::default(),
             cache_dir: None,
             user: user_options,
+            halves: pipeline_halves,
         }
     }
+}
+
+/// A run's second half (the transcription), as its first half leaves it: told the log, the steps
+/// and where the transcript is whole.
+type Second<'a> =
+    Box<dyn FnOnce(&mut dyn FnMut(&str), Steps, &mut dyn FnMut(f64)) -> Result<(), String> + 'a>;
+
+/// A run's first half (tracks to edit list), returning its second.
+type Halves = for<'a> fn(
+    &'a Project,
+    &'a PipelineOptions,
+    &mut dyn FnMut(&str),
+    Steps,
+) -> Result<Second<'a>, String>;
+
+/// `pipeline::prepare`, then `pipeline::finish` as the second half.
+fn pipeline_halves<'a>(
+    p: &'a Project,
+    o: &'a PipelineOptions,
+    log: &mut dyn FnMut(&str),
+    steps: Steps,
+) -> Result<Second<'a>, String> {
+    let prepared = pipeline::prepare(p, o, log, steps).map_err(|e| e.to_string())?;
+    Ok(Box::new(move |log, steps, transcribed| {
+        pipeline::finish(p, o, prepared, log, steps, transcribed)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }))
 }
 
 /// The options `junctur analyze` starts from: model from the config file, remembered voices.
@@ -292,13 +338,19 @@ impl Analysis {
         if let Err(e) = &result {
             eprintln!("junctur-app analysis failed: {e}");
         }
-        self.update(&k, notify.as_ref(), Change::Run, |r| {
-            r.transcribed = None;
-            match &result {
-                Ok(()) => r.phase = Phase::Done,
-                Err(e) => {
-                    r.phase = Phase::Failed;
-                    r.error = Some(e.clone());
+        self.update(&k, notify.as_ref(), Change::Run, |r| match &result {
+            Ok(()) => {
+                r.phase = Phase::Done;
+                r.transcribed = None;
+            }
+            Err(e) => {
+                r.phase = Phase::Failed;
+                r.error = Some(e.clone());
+                // A transcription that failed part way keeps the pieces it finished in the
+                // editor (2j repair); one that failed before any is "none yet", not an older
+                // run's transcript.
+                if r.listed {
+                    r.transcribed = r.transcribed.or(Some(0.0));
                 }
             }
         });
@@ -319,10 +371,10 @@ impl Analysis {
             self.update(&k, notify, Change::Run, |r| r.line = Some(line.to_string()));
         };
         let o = self.options(p, keep_list)?;
-        let prepared = {
+        let second = {
             let _turn = lock(&self.first);
             self.update(&k, notify, Change::Run, |r| r.phase = Phase::Running);
-            pipeline::prepare(p, &o, &mut log, &steps).map_err(|e| e.to_string())?
+            (self.halves)(p, &o, &mut log, &steps)?
         };
         // Taken at once when free, so a lone recording never shows as waiting.
         let (_turn, waited) = match self.transcription.try_lock() {
@@ -343,9 +395,7 @@ impl Analysis {
         let mut transcribed = |t: f64| {
             self.update(&k, notify, Change::Transcribed, |r| r.transcribed = Some(t));
         };
-        pipeline::finish(p, &o, prepared, &mut log, &steps, &mut transcribed)
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+        second(&mut log, &steps, &mut transcribed)
     }
 
     /// Changes `k`'s progress, reads its project status again and tells `notify` what moved
@@ -455,27 +505,83 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// Lets the fake transcriptions below end.
+    static RELEASE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    /// A pipeline whose first half is instant and whose transcription lands its first piece, then
+    /// runs until [`RELEASE`]; recordings named `fail*` then fail.
+    fn fake_halves<'a>(
+        p: &'a Project,
+        _: &'a PipelineOptions,
+        _: &mut dyn FnMut(&str),
+        _: Steps,
+    ) -> Result<Second<'a>, String> {
+        Ok(Box::new(move |_, _, transcribed| {
+            transcribed(300.0);
+            while !RELEASE.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let name = p.file.file_name().unwrap().to_string_lossy();
+            if name.starts_with("fail") {
+                Err("Whisper failed".into())
+            } else {
+                Ok(())
+            }
+        }))
+    }
+
+    fn wait_for(what: &str, ok: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !ok() {
+            assert!(std::time::Instant::now() < deadline, "never: {what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     #[test]
     fn a_first_half_never_waits_behind_a_transcription() {
         let d = std::env::temp_dir().join(format!("junctur-app-lanes-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        let file = d.join("rec.mp4");
-        std::fs::write(&file, b"not a video").unwrap();
-        let a = Analysis::with_cache(d.join("cache"));
-        // Another recording is transcribing, for as long as this test runs.
-        let _transcribing = lock(&a.transcription);
-        a.start(&file, Arc::new(|_: &Progress, _| {})).unwrap();
-        // The tracks stage runs (and fails on this file) all the same.
-        let deadline = std::time::Instant::now() + Duration::from_secs(60);
-        while a.busy(&file) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "held behind the transcription"
-            );
-            std::thread::sleep(Duration::from_millis(20));
+        let (one, two) = (d.join("one.mp4"), d.join("fail-two.mp4"));
+        for f in [&one, &two] {
+            std::fs::write(f, b"not a video").unwrap();
         }
-        assert_eq!(a.progress(&file).unwrap().phase, Phase::Failed);
+        let mut a = Analysis::with_cache(d.join("cache"));
+        a.halves = fake_halves;
+        let seen = Arc::new(Mutex::new(Vec::<Phase>::new()));
+        let noted = seen.clone();
+        let file = key(&two).display().to_string();
+        let notify: Notify = Arc::new(move |p: &Progress, _| {
+            if p.file == file {
+                lock(&noted).push(p.phase);
+            }
+        });
+        a.start(&one, notify.clone()).unwrap();
+        wait_for("one transcribing", || {
+            a.progress(&one)
+                .is_some_and(|p| p.transcribed == Some(300.0))
+        });
+        assert!(a.editable(&one), "edited while it transcribes");
+        // The second recording's first half runs at once; its transcription waits, editable.
+        a.start(&two, notify).unwrap();
+        wait_for("two waiting", || {
+            a.progress(&two).is_some_and(|p| p.phase == Phase::Waiting)
+        });
+        let p = a.progress(&two).unwrap();
+        assert!(p.listed && a.editable(&two));
+        assert_eq!(a.progress(&one).unwrap().phase, Phase::Running);
+        RELEASE.store(true, std::sync::atomic::Ordering::Relaxed);
+        wait_for("both ended", || !a.busy(&one) && !a.busy(&two));
+        let one = a.progress(&one).unwrap();
+        assert_eq!((one.phase, one.transcribed), (Phase::Done, None));
+        // Failed part way: the piece it finished stays the editor's.
+        let two = a.progress(&two).unwrap();
+        assert_eq!((two.phase, two.transcribed), (Phase::Failed, Some(300.0)));
+        let phases = lock(&seen).clone();
+        let at = |x| phases.iter().position(|p| *p == x).unwrap();
+        assert!(at(Phase::Queued) < at(Phase::Waiting));
+        assert!(phases[at(Phase::Waiting)..].contains(&Phase::Running));
         let _ = std::fs::remove_dir_all(&d);
     }
 

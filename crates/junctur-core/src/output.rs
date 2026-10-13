@@ -33,6 +33,22 @@ pub fn rename_over(tmp: &Path, path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Removes `path`, retrying while a reader holds it, as [`rename_over`] does; gone already is done.
+pub fn remove_retrying(path: &Path) -> std::io::Result<()> {
+    let mut tries = 1;
+    loop {
+        match std::fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if tries >= RENAME_TRIES => return Err(e),
+            Err(_) => {
+                tries += 1;
+                std::thread::sleep(RENAME_WAIT);
+            }
+        }
+    }
+}
+
 /// A temporary name beside `path` no other writer uses: this process and a counter, so two
 /// writers (two threads, or the app and the CLI) never write one temporary file.
 fn temp_beside(path: &Path) -> PathBuf {

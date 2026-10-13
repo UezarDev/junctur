@@ -17,6 +17,8 @@
     loading,
     analysing = false,
     listed = false,
+    waiting = false,
+    failed = false,
     through = null,
     player,
     edit,
@@ -30,6 +32,10 @@
     analysing?: boolean;
     /** Its edit list is made: the transcript comes a 5-minute piece at a time (2j). */
     listed?: boolean;
+    /** Its transcription waits for another recording's (2j). */
+    waiting?: boolean;
+    /** Its analysis failed (a transcription that stopped part way keeps its pieces). */
+    failed?: boolean;
     /** While it transcribes: the words shown are every one before this many seconds (2j). */
     through?: number | null;
     player: api.PlayerState | null;
@@ -302,11 +308,13 @@
       <p class="note">Reading the transcript…</p>
     {:else if !words || (through != null && words.text.length === 0)}
       <p class="note">
-        {analysing && listed
-          ? "Transcribing: the words show here five minutes at a time. Cut and keep on the timeline meanwhile."
-          : analysing
-            ? "Analysing this recording: the transcript shows here when it is done."
-            : "No transcript for this recording yet. Re-analyse it (project panel) to edit by text."}
+        {waiting
+          ? "Waiting to transcribe: another recording's transcription comes first. Cut and keep on the timeline meanwhile; the words show here five minutes at a time once it starts."
+          : analysing && listed
+            ? "Transcribing: the words show here five minutes at a time. Cut and keep on the timeline meanwhile."
+            : analysing
+              ? "Analysing this recording: the transcript shows here when it is done."
+              : "No transcript for this recording yet. Re-analyse it (project panel) to edit by text."}
       </p>
     {:else if laid}
       <div class="spacer" style:height="{laid.rows.length * ROW}px">
@@ -379,7 +387,11 @@
         {/each}
       </div>
       {#if through != null}
-        <p class="note">Transcribed to {stamp(through * 1000)}; the rest follows as it is done.</p>
+        <p class="note">
+          {failed
+            ? `Transcribed to ${stamp(through * 1000)}; the transcription stopped there (Properties says why).`
+            : `Transcribed to ${stamp(through * 1000)}; the rest follows as it is done.`}
+        </p>
       {/if}
     {/if}
   </div>
