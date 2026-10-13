@@ -191,6 +191,17 @@ pub async fn enroll_voice(
     app.core()?.enroll_voice(first, last, &name)
 }
 
+/// Hears the open recording's speakers again from the audio, cut at the seconds pinned to people
+/// (5c, "Analyse speakers again"), and puts them into the list in play. Takes about as long as the
+/// speakers stage, so it runs on a blocking thread, not the async runtime's workers.
+#[tauri::command]
+pub async fn reanalyze_speakers(app: State<'_, App>) -> Result<(), String> {
+    let core = app.core()?;
+    tauri::async_runtime::spawn_blocking(move || core.reanalyze_speakers())
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Forgets voice `name`, relabelling the open recording.
 #[tauri::command]
 pub async fn forget_voice(app: State<'_, App>, name: String) -> Result<(), String> {

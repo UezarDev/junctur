@@ -6,7 +6,9 @@
   // Size, font and position are set in Resolve (an SRT import drops them). Export writes one file
   // (5e): a Resolve subtitle track shows one caption at a time, so people talking at once share one
   // caption, a line each; 5b's per-speaker files left beside it are listed. The remembered voices
-  // are listed with Forget.
+  // are listed with Forget, and the speakers can be analysed again from the audio (5c), the seconds
+  // picked for each voice cutting the windows; that reads the recording again, so it is a button,
+  // never automatic.
   import { save } from "@tauri-apps/plugin-dialog";
   import * as api from "./api";
 
@@ -35,6 +37,21 @@
       .then((v) => (voiceList = v))
       .catch(() => (voiceList = []));
   });
+
+  let rehearing = $state(false);
+  let reheard = $state<string | null>(null);
+  async function rehear() {
+    rehearing = true;
+    reheard = null;
+    try {
+      await api.reanalyzeSpeakers();
+      reheard = "Speakers analysed again.";
+    } catch (e) {
+      onError(String(e));
+    } finally {
+      rehearing = false;
+    }
+  }
 
   async function forget(name: string) {
     await call(() => api.forgetVoice(name));
@@ -184,8 +201,9 @@
       {#if voiceList.length === 0}
         <p class="note">
           None yet. Select some words only one person says in the transcript and choose "Remember voice…": every
-          recording then names that person's speaker the same, in the same colour. Half a minute from a few
-          places works best; add more by remembering the same name again.
+          recording then names that person's speaker the same, in the same colour. Any length works, even one
+          word, and the words picked are that person's from then on; half a minute from a few places makes the
+          voice recognisable elsewhere. Add more by remembering the same name again.
         </p>
       {/if}
       {#each voiceList as v (v.name)}
@@ -195,6 +213,15 @@
           <button onclick={() => forget(v.name)} title="Forget {v.name}'s voice in every recording">Forget</button>
         </div>
       {/each}
+      <button class="export" onclick={rehear} disabled={rehearing || !source}>
+        {rehearing ? "Analysing speakers…" : "Analyse speakers again"}
+      </button>
+      {#if reheard}<p class="done">{reheard}</p>{/if}
+      <p class="note">
+        Remembering a voice relabels at once and keeps the words you picked as that person's. Analysing again
+        also reads the recording again, with its voice windows cut where your picks begin and end: it takes
+        about as long as the first speaker analysis, and remembering voices waits until it is done.
+      </p>
     {/if}
   </div>
 </section>

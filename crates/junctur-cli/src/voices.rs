@@ -1,8 +1,10 @@
 //! `junctur voices`: the voices Junctur remembers (5b), listed, enrolled from a recording, or
 //! forgotten. The app enrolls from a selection in the transcript; this is the same from stretches
-//! given by hand, for scripts and for checking the labelling without the app.
+//! given by hand, for scripts and for checking the labelling without the app. `--rehear` is the
+//! app's "Analyse speakers again" (5c): the speakers heard again from the audio, cut at the pins.
 
-use junctur_core::pipeline::{self, Project};
+use junctur_core::pipeline::{self, Found, Project};
+use junctur_core::runtime::DevicePref;
 use junctur_core::voices::{self, Voice, Voices};
 
 use crate::args::Args;
@@ -27,6 +29,22 @@ pub fn usable() -> Vec<Voice> {
     }
 }
 
+/// What the speakers are now (`describe`: a line on how they were found), and the edit list
+/// updated with them.
+fn print_speakers(p: &Project, found: &Found, describe: bool) -> Result<(), String> {
+    if describe {
+        println!("{}", pipeline::describe(found));
+    }
+    if let Some((e, backup)) = pipeline::respeak(p, found).map_err(|e| e.to_string())? {
+        let names: Vec<&str> = e.speakers.names.iter().map(|n| n.name.as_str()).collect();
+        println!("speakers: {}", names.join(", "));
+        if let Some(b) = backup {
+            println!("the previous edit list was kept as {}", b.display());
+        }
+    }
+    Ok(())
+}
+
 /// `<start>-<end>[,<start>-<end>...]` in seconds.
 fn stretches(s: &str) -> Result<Vec<(f64, f64)>, String> {
     s.split(',')
@@ -43,7 +61,15 @@ fn stretches(s: &str) -> Result<Vec<(f64, f64)>, String> {
 }
 
 pub fn run(a: Args) -> Result<(), String> {
-    a.reject_unknown(&["--add", "--at", "--forget", "--project", "--cache-dir"])?;
+    a.reject_unknown(&[
+        "--add",
+        "--at",
+        "--forget",
+        "--rehear",
+        "--cpu",
+        "--project",
+        "--cache-dir",
+    ])?;
     let file = path()?;
     let mut v = Voices::load(&file).map_err(|e| e.to_string())?;
     if let Some(name) = a.value("--forget") {
@@ -58,26 +84,39 @@ pub fn run(a: Args) -> Result<(), String> {
             .ok_or("--add needs --at <start>-<end>[,...]")?;
         let p = Project::open(&a.file()?, a.path("--cache-dir"), a.path("--project"))
             .map_err(|e| e.to_string())?;
-        let found =
+        let (found, added) =
             pipeline::enroll(&p, &mut v, name, &stretches(at)?).map_err(|e| e.to_string())?;
         // The voices first: labels are only saved once the voices they stand on are.
         v.save(&file).map_err(|e| e.to_string())?;
         pipeline::save_speakers(&p, &found).map_err(|e| e.to_string())?;
         let voice = v.get(name).expect("just enrolled");
         println!(
-            "remembered {} ({:.1} s of speech in all; {})",
+            "remembered {} from {added:.1} s ({:.1} s of speech in all; {}); those seconds are pinned to them in this recording",
             voice.name,
             voice.seconds,
             file.display()
         );
-        println!("{}", pipeline::describe(&found));
-        if let Some((e, backup)) = pipeline::respeak(&p, &found).map_err(|e| e.to_string())? {
-            let names: Vec<&str> = e.speakers.names.iter().map(|n| n.name.as_str()).collect();
-            println!("speakers: {}", names.join(", "));
-            if let Some(b) = backup {
-                println!("the previous edit list was kept as {}", b.display());
-            }
+        if voice.seconds < voices::SHORT_SECONDS {
+            println!(
+                "a very short clip: other recordings may not recognise {} until more is added",
+                voice.name
+            );
         }
+        print_speakers(&p, &found, true)?;
+        return Ok(());
+    } else if a.has("--rehear") {
+        let p = Project::open(&a.file()?, a.path("--cache-dir"), a.path("--project"))
+            .map_err(|e| e.to_string())?;
+        let usable: Vec<Voice> = v.usable().into_iter().cloned().collect();
+        let device = if a.has("--cpu") {
+            DevicePref::Cpu
+        } else {
+            DevicePref::Auto
+        };
+        // The stage's log already ends with what it found.
+        let found = pipeline::rehear(&p, &usable, device, &mut |l| println!("{l}"))
+            .map_err(|e| e.to_string())?;
+        print_speakers(&p, &found, false)?;
         return Ok(());
     }
     if v.voices.is_empty() {

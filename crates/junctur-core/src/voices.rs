@@ -21,8 +21,10 @@ use crate::{models, Error, Result};
 /// Names the voices file instead of the default one (tests and the app's test mode).
 pub const ENV: &str = "JUNCTUR_VOICES";
 
-/// Enrolling from less than this much speech gives a voiceprint too noisy to trust.
-pub const MIN_SECONDS: f64 = 3.0;
+/// Under this much speech a voiceprint is rough: the app and the CLI say so. Not a floor: since 5c
+/// a clip of any length is remembered (Uezar: "even one word"), because the seconds picked are also
+/// pinned to the person in that recording, which holds however rough the print is.
+pub const SHORT_SECONDS: f64 = 3.0;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Voice {
@@ -132,13 +134,16 @@ impl Voices {
     /// voice is built up from several selections: in a conversation a person rarely talks alone for
     /// the half minute a good print wants (5b's measurement), and one selection is one stretch.
     /// Forgetting starts over. A new person gets the first palette colour no other voice has.
+    /// Any length of speech will do (5c); only no sample at all is refused.
     pub fn enroll(&mut self, name: &str, embeddings: &[&[f32]], seconds: f64) -> Result<&Voice> {
         let name = check_name(name).map_err(Error::Edit)?.to_string();
-        if seconds < MIN_SECONDS || embeddings.is_empty() {
+        if embeddings.is_empty() {
             return Err(Error::Edit(format!(
-                "select at least {MIN_SECONDS:.0} s where only {name} talks to remember the voice (this has {seconds:.1} s)"
+                "there is no speech to remember {name}'s voice from there"
             )));
         }
+        // A zero-length sample would weigh nothing against a voice built from more.
+        let seconds = seconds.max(0.01);
         let print = voiceprint(embeddings);
         let model = models::SPEAKER_EMBEDDING.sha256.to_string();
         let i = match self.find(&name) {
@@ -286,8 +291,10 @@ mod tests {
         let u = v.get("uezar").unwrap();
         assert_eq!((u.name.as_str(), u.seconds), ("Uezar", 10.0));
         assert!((u.print[0] - u.print[1]).abs() < 1e-6 && (u.print[0] - 0.70710677).abs() < 1e-5);
-        // Too little speech, or a name the edit file cannot hold.
-        assert!(v.enroll("Bea", &ee, 1.0).is_err());
+        // Any length of speech is remembered (5c), however short; no sample, or a name the edit
+        // file cannot hold, is not.
+        assert_eq!(v.enroll("Bea", &ee, 0.3).unwrap().seconds, 0.3);
+        assert!(v.forget("bea"));
         assert!(v.enroll("color=x", &ee, 5.0).is_err());
         assert!(v.enroll("Bea", &[], 5.0).is_err());
         assert!(v.forget("ana") && !v.forget("ana"));

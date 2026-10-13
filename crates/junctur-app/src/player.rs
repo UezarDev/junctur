@@ -468,6 +468,15 @@ impl Core {
         Ok(line)
     }
 
+    /// Hears the open recording's speakers again from the audio (5c), the windows cut at the
+    /// seconds pinned to people, and puts them into the list in play. Slow: the caller keeps it off
+    /// the async runtime.
+    pub fn reanalyze_speakers(&self) -> Result<(), String> {
+        let file = self.file().ok_or("no recording is open")?;
+        let found = voices::rehear(&file)?;
+        self.respeak(&found)
+    }
+
     /// Forgets voice `name` and labels the open recording's speakers again without it.
     pub fn forget_voice(&self, name: &str) -> Result<(), String> {
         match voices::forget(self.file().as_deref(), name)? {

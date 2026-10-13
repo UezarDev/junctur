@@ -154,6 +154,8 @@ export const voices = () => invoke<Voice[]>("voices");
 export const enrollVoice = (first: number, last: number, name: string) =>
   invoke<string>("enroll_voice", { first, last, name });
 export const forgetVoice = (name: string) => invoke<void>("forget_voice", { name });
+/** Hears the open recording's speakers again from the audio, cut at the seconds pinned to people (5c). Slow. */
+export const reanalyzeSpeakers = () => invoke<void>("reanalyze_speakers");
 export const undo = () => invoke<void>("undo");
 export const redo = () => invoke<void>("redo");
 /** The share of the window's width (0..1) on the right to keep free of video. */
