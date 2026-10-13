@@ -13,7 +13,7 @@
   let {
     player,
     edit,
-    span,
+    spans,
     view,
     onZoom,
     reviewing,
@@ -23,8 +23,8 @@
   }: {
     player: api.PlayerState | null;
     edit: api.EditState | null;
-    /** The selection in source seconds, drawn on the timeline. */
-    span: { start: number; end: number } | null;
+    /** The selection in source seconds, a span per stretch, drawn on the timeline. */
+    spans: { start: number; end: number }[];
     /** The window the lanes show (source seconds). */
     view: { start: number; end: number } | null;
     /** Zoom the lanes: a factor on the window's length, or `whole` for the whole recording. */
@@ -90,7 +90,7 @@
     Review
   </button>
   <Clocks {player} {edit} />
-  <Timeline {player} {edit} {span} {view} {onSelect} {onError} />
+  <Timeline {player} {edit} {spans} {view} {onSelect} {onError} />
   <span class="zoom" role="group" aria-label="Zoom the track lanes">
     <button disabled={!loaded} onclick={() => onZoom(2)} title="Zoom the lanes out (Ctrl+wheel on them)" aria-label="Zoom out">−</button>
     <button disabled={!loaded} onclick={() => onZoom(0.5)} title="Zoom the lanes in (Ctrl+wheel on them)" aria-label="Zoom in">+</button>

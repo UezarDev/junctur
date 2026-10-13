@@ -1,13 +1,15 @@
 <script lang="ts">
   // Editing controls over the lanes (2g, mock B), replacing 2c's fixed edit row. They sit in one
   // place, centred over the lanes (2n; 2g floated them beside the selection or the playhead, so
-  // they slid along while playing). With a selection (transcript words or a stretch of the lanes
-  // or timeline): what is selected, Cut, Keep, Remember voice… (5b: name whoever says the selected
-  // words; their voice is remembered for every recording), Undo and Redo. With none: the stretch
+  // they slid along while playing). With a selection (a stretch of the lanes or timeline, or
+  // transcript words while the Transcript tab is not showing): what is selected, Cut, Keep, Undo
+  // and Redo. Words selected with the Transcript tab showing have their controls at its bottom
+  // (WordBar, 2p, with the one-click speakers that replaced 5b's Remember voice… here), so this bar
+  // then holds Undo and Redo only and the two never show the same thing twice. With none: the stretch
   // under the playhead (a kept range or a cut) with buttons that nudge either end by a frame
   // (shift: ten) and cut or keep it whole, and Undo and Redo. Every action is one edit the
-  // engine saves to edit.junctur at once. Its notices (an outside change, a backup made, the voice
-  // result) show on a line above it. The keyboard does the same without it (Delete, K, Ctrl+Z/Y).
+  // engine saves to edit.junctur at once. Its notices (an outside change, a backup made) show on a
+  // line above it. The keyboard does the same without it (Delete, K, Ctrl+Z/Y).
   import * as api from "./api";
   import * as sel from "./selection";
   import { nudge, under } from "./nudge";
@@ -17,6 +19,7 @@
     player,
     edit,
     selection,
+    wordsShown = false,
     at,
     onSelect,
     onError,
@@ -24,6 +27,8 @@
     player: api.PlayerState | null;
     edit: api.EditState | null;
     selection: sel.Selection | null;
+    /** The Transcript tab is showing, with its own bar for a selection of words (2p). */
+    wordsShown?: boolean;
     /** Where to sit: centred on `x` (window pixels), kept between `min` and `max`, its bottom at
      * `bottom`. */
     at: { x: number; min: number; max: number; bottom: number };
@@ -38,31 +43,8 @@
   const stretch = $derived(edit && frame != null && !selection ? under(edit, frame) : null);
   const left = $derived(Math.round(Math.min(Math.max(at.x - width / 2, at.min), Math.max(at.min, at.max - width))));
 
-  // Remembering a voice: the name field is open while `naming`; `said` is the engine's answer.
-  let naming = $state(false);
-  let name = $state("");
-  let said = $state<string | null>(null);
-  let known = $state<string[]>([]);
-  async function startNaming() {
-    naming = true;
-    said = null;
-    const fromVoices = await api.voices().then((v) => v.map((x) => x.name)).catch(() => [] as string[]);
-    known = [...new Set([...fromVoices, ...(edit?.speakers ?? []).map((s) => s.name)])];
-  }
-  function focus(el: HTMLInputElement) {
-    el.focus();
-  }
-  async function remember() {
-    const n = name.trim();
-    if (!n || selection?.kind !== "words") return;
-    const { first, last } = selection;
-    naming = false;
-    try {
-      said = await api.enrollVoice(first, last, n);
-    } catch (e) {
-      onError(String(e));
-    }
-  }
+  // The selection this bar acts on: words are the Transcript's own while it shows them.
+  const mine = $derived(selection?.kind === "words" && wordsShown ? null : selection);
 
   async function call(f: () => Promise<void>) {
     try {
@@ -77,53 +59,19 @@
     const step = nudge(stretch, edge, dir * (e.shiftKey ? 10 : 1), edit.totalFrames);
     if (step) call(() => api.editFrames(step.start, step.end, step.keep));
   }
-
-  // A new selection closes a naming left open for the old one.
-  $effect(() => {
-    void selection;
-    naming = false;
-  });
 </script>
 
 {#if edit?.editable}
   <div class="float" style:left="{left}px" style:bottom="{at.bottom}px" bind:clientWidth={width}>
-    {#if message || said}
-      <div class="message" class:bad={!!edit.error}>{said ?? message}</div>
+    {#if message}
+      <div class="message" class:bad={!!edit.error}>{message}</div>
     {/if}
     <div class="bar">
-      {#if selection}
-        <span class="what mono">{sel.describe(selection, fps)}</span>
-        <button onclick={() => selection && call(() => sel.apply(selection, false))} title="Cut the selection (Delete)">Cut</button>
-        <button onclick={() => selection && call(() => sel.apply(selection, true))} title="Keep the selection (K)">Keep</button>
-        {#if naming}
-          <span class="naming">
-            <input
-              use:focus
-              list="junctur-voice-names"
-              placeholder="Whose voice is this?"
-              maxlength="60"
-              bind:value={name}
-              onkeydown={(e) => {
-                e.stopPropagation();
-                if (e.key === "Enter") remember();
-                if (e.key === "Escape") naming = false;
-              }}
-            />
-            <datalist id="junctur-voice-names">
-              {#each known as k (k)}<option value={k}></option>{/each}
-            </datalist>
-            <button disabled={!name.trim()} onclick={remember}>Remember</button>
-            <button onclick={() => (naming = false)}>Cancel</button>
-          </span>
-        {:else}
-          <button
-            disabled={selection.kind !== "words"}
-            onclick={startNaming}
-            title={selection.kind === "words"
-              ? "Name whoever says these words (only one person, the more the better): their voice is remembered for every recording"
-              : "Select words in the transcript to remember a voice"}>Remember voice…</button
-          >
-        {/if}
+      {#if mine}
+        {@const m = mine}
+        <span class="what mono">{sel.describe(m, fps)}</span>
+        <button onclick={() => call(() => sel.apply(m, false))} title="Cut the selection (Delete)">Cut</button>
+        <button onclick={() => call(() => sel.apply(m, true))} title="Keep the selection (K)">Keep</button>
       {:else if stretch && fps}
         <span class="kind" class:cut={!stretch.kept}>{stretch.kept ? `Range ${stretch.index}` : "Cut"}</span>
         <button class="n" onclick={(e) => move("start", -1, e)} title="Start one frame earlier (shift: 10)">◀</button>
@@ -140,7 +88,7 @@
       {/if}
       <button class="i" disabled={!edit.canUndo} onclick={() => call(api.undo)} title="Undo (Ctrl+Z)" aria-label="Undo">↶</button>
       <button class="i" disabled={!edit.canRedo} onclick={() => call(api.redo)} title="Redo (Ctrl+Y)" aria-label="Redo">↷</button>
-      {#if selection}
+      {#if mine}
         <button class="i x" onclick={() => onSelect(null)} title="Clear the selection (Esc)" aria-label="Clear the selection">×</button>
       {/if}
     </div>
@@ -195,14 +143,6 @@
   }
   .mono {
     font-size: 12px;
-  }
-  .naming {
-    display: inline-flex;
-    gap: 4px;
-    align-items: center;
-  }
-  .naming input {
-    width: 160px;
   }
   button {
     padding: 3px 9px;

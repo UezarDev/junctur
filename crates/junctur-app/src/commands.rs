@@ -396,16 +396,16 @@ pub async fn transcript(app: State<'_, App>) -> Result<Option<TranscriptView>, S
     Ok(app.core()?.transcript())
 }
 
-/// Cuts (`keep` false) or keeps transcript words `first..=last`, snapped into the pauses around.
+/// Cuts (`keep` false) or keeps every run of transcript words in `runs` (`[first, last]` each),
+/// snapped into the pauses around them, as one undo step (2p: a selection of several stretches).
 #[tauri::command]
 pub async fn edit_words(
     app: State<'_, App>,
-    first: usize,
-    last: usize,
+    runs: Vec<(usize, usize)>,
     keep: bool,
 ) -> Result<(), String> {
     let e = app.editable()?;
-    e.edit(e.file(), Step::Do(Op::Words { first, last, keep }))
+    e.edit_words(e.file(), &runs, keep)
 }
 
 /// Cuts or keeps source frames `[start, end)` exactly (timeline selections, nudges, restoring a
@@ -574,17 +574,16 @@ pub async fn voices() -> Result<Vec<VoiceView>, String> {
     crate::voices::list()
 }
 
-/// Remembers `name`'s voice from transcript words `first..=last` and labels the speakers again;
-/// returns a line for the user.
+/// Remembers `name`'s voice from the runs of transcript words in `runs` (`[first, last]` each, 2p)
+/// and labels the speakers again; returns a line for the user.
 #[tauri::command]
 pub async fn enroll_voice(
     app: State<'_, App>,
-    first: usize,
-    last: usize,
+    runs: Vec<(usize, usize)>,
     name: String,
 ) -> Result<String, String> {
     let e = app.editable()?;
-    e.enroll_voice(e.file(), first, last, &name)
+    e.enroll_voice(e.file(), &runs, &name)
 }
 
 /// Hears the open recording's speakers again from the audio, cut at the seconds pinned to people

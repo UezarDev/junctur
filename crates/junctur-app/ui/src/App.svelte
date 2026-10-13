@@ -86,7 +86,8 @@
   const PANEL = 400;
   const loaded = $derived(!!player?.path);
   const panelWidth = $derived(loaded && panelOpen ? Math.min(PANEL, windowWidth * 0.45) : 0);
-  const span = $derived(sel.seconds(selection, words, edit?.fps ?? null));
+  // A span per selected stretch (2p: words can be several), for the lanes and timeline to draw.
+  const spans = $derived(sel.seconds(selection, words, edit?.fps ?? null));
   const speakers = $derived(edit?.speakers ?? []);
   // The layout from plain numbers: each is a derived value that only moves when it changes, so the
   // player's state (sent many times a second for the position) never lays the editor out again.
@@ -599,7 +600,7 @@
       <Transport
         {player}
         {edit}
-        {span}
+        {spans}
         view={{ start: view.start, end: view.start + view.len }}
         onZoom={zoom}
         {reviewing}
@@ -622,7 +623,7 @@
           head={L.head}
           thin={L.portrait}
           {wavesVersion}
-          {span}
+          {spans}
           onView={setView}
           onSelect={(s) => (selection = s)}
           onError={(e) => (failure = e)}
@@ -632,7 +633,12 @@
     {#if reviewing}
       <Review bind:this={reviewer} {player} {edit} at={actionsAt} onDone={() => (reviewing = false)} onError={(e) => (failure = e)} />
     {:else}
-      <ActionBar {player} {edit} {selection} at={actionsAt} onSelect={(s) => (selection = s)} onError={(e) => (failure = e)} />
+      <ActionBar
+        {player}
+        {edit}
+        {selection}
+        wordsShown={panelWidth > 0 && tab === "transcript"}
+        at={actionsAt} onSelect={(s) => (selection = s)} onError={(e) => (failure = e)} />
     {/if}
   {/if}
 
@@ -668,6 +674,7 @@
           {player}
           {edit}
           {selection}
+          {reviewing}
           onSelect={(s) => (selection = s)}
           onError={(e) => (failure = e)}
         />

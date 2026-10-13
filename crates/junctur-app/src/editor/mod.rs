@@ -114,6 +114,43 @@ impl Editor {
             Step::Undo => (self.undo.last().cloned().ok_or("nothing to undo")?, false),
             Step::Redo => (self.redo.last().cloned().ok_or("nothing to redo")?, false),
         };
+        self.commit(list, step, keep, unsnapped, fps)
+    }
+
+    /// Applies every op of `ops` in order to `list` and saves the result as **one** undo step (2p:
+    /// a selection of several stretches is cut or kept at once, and one undo puts all of it back).
+    /// All or nothing: an op refused (a stretch under a frame, a word out of range) refuses the
+    /// whole batch and nothing is written. `None` when together they change nothing; no ops is that.
+    /// Each op sees the ranges the ones before it left, so overlapping ops land as they would one
+    /// after another.
+    pub fn edit_all(
+        &mut self,
+        list: &EditList,
+        ops: &[Op],
+        fps: Fps,
+    ) -> Result<Option<Edited>, String> {
+        let Some(&first) = ops.first() else {
+            return Ok(None);
+        };
+        let mut now = list.clone();
+        let mut unsnapped = false;
+        for &op in ops {
+            let (keep, u) = self.apply(&now, op, fps)?;
+            now.keep = keep;
+            unsnapped |= u;
+        }
+        self.commit(list, Step::Do(first), now.keep, unsnapped, fps)
+    }
+
+    /// Saves `keep` as the list's new ranges after `step` and moves the history (see [`Self::edit`]).
+    fn commit(
+        &mut self,
+        list: &EditList,
+        step: Step,
+        keep: Vec<Range>,
+        unsnapped: bool,
+        fps: Fps,
+    ) -> Result<Option<Edited>, String> {
         if keep == list.keep {
             // Nothing to write; an undo or redo step that is already in play is still used up,
             // so the next one moves on.
@@ -428,6 +465,66 @@ mod tests {
         assert!(!e.can_redo());
         e.changed_elsewhere();
         assert!(!e.can_undo());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn several_stretches_are_one_undo_step_or_none() {
+        let d = scratch("many");
+        let path = d.join("edit.junctur");
+        let mut e = Editor::default();
+        e.reset(Some(path.clone()));
+        let l0 = list(vec![r(0.0, 20.0)]);
+        let cut = |start, end| Op::Frames {
+            start,
+            end,
+            keep: false,
+        };
+        // No ops, or ops that change nothing, write nothing and leave no undo step.
+        assert!(e.edit_all(&l0, &[], FPS).unwrap().is_none());
+        assert!(!path.exists());
+        // Two stretches apart and a third overlapping the first: one save, one undo step.
+        let ops = [cut(30, 60), cut(300, 330), cut(45, 90)];
+        let l1 = e.edit_all(&l0, &ops, FPS).unwrap().expect("a change").list;
+        assert_eq!(l1.keep, vec![r(0.0, 1.0), r(3.0, 10.0), r(11.0, 20.0)]);
+        assert_eq!(reread(&path), l1);
+        assert!(e.edit_all(&l1, &ops, FPS).unwrap().is_none(), "already cut");
+        let back = step(&mut e, &l1, Step::Undo, FPS);
+        assert_eq!(back.keep, l0.keep, "one undo puts every stretch back");
+        assert!(!e.can_undo() && e.can_redo());
+        assert_eq!(step(&mut e, &back, Step::Redo, FPS), l1);
+
+        // One stretch refused refuses them all: nothing is written.
+        e.words = Some(Arc::new(Words::from_words(vec![
+            Word {
+                start: 12.0,
+                end: 12.5,
+                text: "uno".into(),
+                p: 1.0,
+            },
+            Word {
+                start: 12.51,
+                end: 12.52,
+                text: "y".into(),
+                p: 1.0,
+            },
+            Word {
+                start: 12.53,
+                end: 13.0,
+                text: "dos".into(),
+                p: 1.0,
+            },
+        ])));
+        let text = std::fs::read_to_string(&path).unwrap();
+        let words = |first, last| Op::Words {
+            first,
+            last,
+            keep: false,
+        };
+        let refused = e.edit_all(&l1, &[cut(450, 480), words(1, 1)], FPS);
+        assert!(refused.unwrap_err().contains("frame"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        assert!(e.can_undo() && !e.can_redo(), "history as the redo left it");
         let _ = std::fs::remove_dir_all(&d);
     }
 

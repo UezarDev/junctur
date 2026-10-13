@@ -278,7 +278,7 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
         }
         Action::Enroll(first, last, name) => {
             return edit(&|e| {
-                e.enroll_voice(e.file(), *first, *last, name)
+                e.enroll_voice(e.file(), &[(*first, *last)], name)
                     .map(|line| eprintln!("junctur-app test: {line}"))
             })
         }

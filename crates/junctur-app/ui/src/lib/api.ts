@@ -374,9 +374,10 @@ export const setMuted = (track: number, muted: boolean) =>
 export const setSkip = (on: boolean) => invoke<void>("set_skip", { on });
 export const editState = () => invoke<EditState>("edit_state");
 export const transcript = () => invoke<TranscriptView | null>("transcript");
-/** Cuts (`keep` false) or keeps words `first..=last`, snapped into the pauses around them. */
-export const editWords = (first: number, last: number, keep: boolean) =>
-  invoke<void>("edit_words", { first, last, keep });
+/** Cuts (`keep` false) or keeps every run of words (`[first, last]` each), snapped into the pauses
+ * around them, as one undo step (2p). */
+export const editWords = (runs: [number, number][], keep: boolean) =>
+  invoke<void>("edit_words", { runs, keep });
 /** Cuts or keeps source frames `[start, end)` exactly. */
 export const editFrames = (start: number, end: number, keep: boolean) =>
   invoke<void>("edit_frames", { start, end, keep });
@@ -431,9 +432,10 @@ export const translationLanguages = () => (languages ??= invoke<Language[]>("tra
 /** Installs the Junctur script into Resolve's Scripts folder; resolves to its path. */
 export const installResolveScript = () => invoke<string>("install_resolve_script");
 export const voices = () => invoke<Voice[]>("voices");
-/** Remembers `name`'s voice from words `first..=last` and relabels the speakers; resolves to a line for the user. */
-export const enrollVoice = (first: number, last: number, name: string) =>
-  invoke<string>("enroll_voice", { first, last, name });
+/** Remembers `name`'s voice from every run of words (`[first, last]` each, 2p: one enrolment) and
+ * relabels the speakers; resolves to a line for the user. */
+export const enrollVoice = (runs: [number, number][], name: string) =>
+  invoke<string>("enroll_voice", { runs, name });
 export const forgetVoice = (name: string) => invoke<void>("forget_voice", { name });
 /** Hears the open recording's speakers again from the audio, cut at the seconds pinned to people (5c). Slow. */
 export const reanalyzeSpeakers = () => invoke<void>("reanalyze_speakers");

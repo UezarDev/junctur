@@ -499,6 +499,22 @@ impl Core {
         self.change(file, |ed, list, fps| ed.edit(list, step, fps))
     }
 
+    /// Cuts (`keep` false) or keeps every run of transcript words in `runs` (`first..=last` each)
+    /// as one undo step (2p: a selection of several stretches). See [`Editor::edit_all`].
+    pub fn edit_words(
+        &self,
+        file: Option<&str>,
+        runs: &[(usize, usize)],
+        keep: bool,
+    ) -> Result<(), String> {
+        self.prepare();
+        let ops: Vec<Op> = runs
+            .iter()
+            .map(|&(first, last)| Op::Words { first, last, keep })
+            .collect();
+        self.change(file, |ed, list, fps| ed.edit_all(list, &ops, fps))
+    }
+
     /// Renames speaker `id` in the edit list and saves it (first taking any outside change). A
     /// speaker that is a remembered person renames the person (5b), in every recording.
     pub fn rename_speaker(&self, file: Option<&str>, id: u32, name: &str) -> Result<(), String> {
@@ -520,16 +536,20 @@ impl Core {
         }
     }
 
-    /// Remembers `name`'s voice from transcript words `first..=last` of the open recording (5b)
-    /// and labels its speakers again; returns a line for the user. Works from the windows the
-    /// speakers stage kept, so nothing is decoded and it takes a moment at most.
+    /// Remembers `name`'s voice from the runs of transcript words in `runs` (`first..=last` each)
+    /// of the open recording (5b; 2p: several runs, one selection of all of someone's lines, are
+    /// one enrolment and one line back) and labels its speakers again; returns a line for the user.
+    /// Works from the windows the speakers stage kept, so nothing is decoded and it takes a moment
+    /// at most.
     pub fn enroll_voice(
         &self,
         file: Option<&str>,
-        first: usize,
-        last: usize,
+        runs: &[(usize, usize)],
         name: &str,
     ) -> Result<String, String> {
+        if runs.is_empty() {
+            return Err("select the words they say first".into());
+        }
         let file = file.ok_or("no recording is open")?;
         self.prepare();
         let words = lock(&self.editor)
@@ -540,10 +560,12 @@ impl Core {
         if self.file().as_deref() != Some(file) {
             return Err(OPENED_MEANWHILE.into());
         }
-        let stretch = words
-            .stretch(first, last)
+        let stretches = runs
+            .iter()
+            .map(|&(first, last)| words.stretch(first, last))
+            .collect::<Option<Vec<_>>>()
             .ok_or("no such words in the transcript")?;
-        let (found, line) = voices::enroll(file, name, stretch)?;
+        let (found, line) = voices::enroll(file, name, &stretches)?;
         self.respeak(Some(file), &found)?;
         Ok(line)
     }

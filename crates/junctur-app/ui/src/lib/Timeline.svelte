@@ -14,14 +14,15 @@
   let {
     player,
     edit,
-    span,
+    spans,
     view = null,
     onSelect,
     onError,
   }: {
     player: api.PlayerState | null;
     edit: api.EditState | null;
-    span: { start: number; end: number } | null;
+    /** The selection, a span per stretch (2p). */
+    spans: { start: number; end: number }[];
     /** The stretch the track lanes show, outlined (source seconds). */
     view?: { start: number; end: number } | null;
     onSelect: (s: Selection | null) => void;
@@ -207,12 +208,14 @@
   aria-valuenow={shown}
 >
   <canvas bind:this={canvas}></canvas>
-  {#if span && duration}
-    <div
-      class="sel"
-      style:left="{(Math.max(0, span.start) / duration) * 100}%"
-      style:width="{(Math.max(0, span.end - span.start) / duration) * 100}%"
-    ></div>
+  {#if duration}
+    {#each spans as span, k (k)}
+      <div
+        class="sel"
+        style:left="{(Math.max(0, span.start) / duration) * 100}%"
+        style:width="{(Math.max(0, span.end - span.start) / duration) * 100}%"
+      ></div>
+    {/each}
   {/if}
   {#if view && duration && view.end - view.start < duration * 0.999}
     <div
