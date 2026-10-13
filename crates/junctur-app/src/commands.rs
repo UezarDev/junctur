@@ -11,7 +11,7 @@ use junctur_core::export::srt::Cue;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::analysis::{self, Analysis, Change, Notify, Progress, Reanalysed};
+use crate::analysis::{self, Analysis, Change, Notify, Progress, Reanalysed, Transcription};
 use crate::cuts::EditState;
 use crate::editor::{Op, Step, TranscriptView};
 use crate::lock::lock;
@@ -69,7 +69,9 @@ impl App {
 /// Sends a run's progress to the page. When the run's list is written or the run ends, the player
 /// first takes what it wrote (the edit list, the envelope, a new transcript) if that recording is
 /// open, and when a piece of the transcript lands it reads the words up to it: the page fetches
-/// the transcript again on these events, and must not get the words read before them.
+/// the transcript again on these events, and must not get the words read before them. Every change
+/// but a step also sends the transcription lane (2k: who is on it, paused or not), which the
+/// Properties tab shows whichever recording is open.
 pub fn notifier(handle: AppHandle) -> Notify {
     Arc::new(move |p: &Progress, change| {
         // A step only moves a bar (2h): reading the track roles on each of the ~hundred per track
@@ -77,6 +79,9 @@ pub fn notifier(handle: AppHandle) -> Notify {
         if change == Change::Steps {
             let _ = handle.emit(analysis::EVENT, p);
             return;
+        }
+        if let Some(app) = handle.try_state::<App>() {
+            let _ = handle.emit(analysis::LANE_EVENT, app.analysis.transcription());
         }
         let core = handle.try_state::<App>().and_then(|a| a.core().ok());
         if change == Change::Transcribed {
@@ -238,6 +243,26 @@ pub async fn forget_recent(path: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn analysis(app: State<'_, App>, path: String) -> Result<Option<Progress>, String> {
     Ok(app.analysis.progress(Path::new(&path)))
+}
+
+/// Who is on the transcription lane, in turn, and whether it is paused (2k).
+#[tauri::command]
+pub async fn transcription(app: State<'_, App>) -> Result<Transcription, String> {
+    Ok(app.analysis.transcription())
+}
+
+/// Pauses or resumes the transcription lane from any recording (2k): the transcribing one stops
+/// after the chunk it is on. The lane as it is now, also sent to the page as the event.
+#[tauri::command]
+pub async fn pause_transcription(
+    handle: AppHandle,
+    app: State<'_, App>,
+    paused: bool,
+) -> Result<Transcription, String> {
+    app.analysis.pause(paused);
+    let now = app.analysis.transcription();
+    let _ = handle.emit(analysis::LANE_EVENT, now.clone());
+    Ok(now)
 }
 
 /// Analyses `path` again with the settings now. Without `replace`, an edit list holding the user's

@@ -182,10 +182,13 @@ fn sort(segs: &mut [Segment]) {
 /// ([`Reached`]; every track at the start and a chunk's track after each chunk, 2h), and where the
 /// transcript is whole on every track (2j): `transcribed(t)` says every word before `t` seconds is
 /// in, at the start of a run with work to do and each time `t` enters a new [`PIECE`]. Not at the
-/// end: the finished transcript says that.
+/// end: the finished transcript says that. `between` is called before Whisper loads and after each
+/// chunk while chunks remain, the only points a run can stop at (a chunk is one Whisper call); it
+/// may block, and the run goes on when it returns (the app's pause, 2k).
 pub struct Reports<'a> {
     pub reach: &'a mut dyn FnMut(usize, f64),
     pub transcribed: &'a mut dyn FnMut(f64),
+    pub between: &'a mut dyn FnMut(),
 }
 
 /// Transcribe the speech regions of `sources`, piece by piece ([`PIECE`]), resuming an interrupted
@@ -202,7 +205,11 @@ pub fn transcribe(
     log: &mut dyn FnMut(&str),
     reports: Reports,
 ) -> Result<Transcript> {
-    let Reports { reach, transcribed } = reports;
+    let Reports {
+        reach,
+        transcribed,
+        between,
+    } = reports;
     let partial = partial_path(project);
     // One transcription of a recording at a time across processes (2j repair): the app resumes an
     // unfinished one on open, which must not start a second Whisper on the partial a `junctur
@@ -260,6 +267,9 @@ pub fn transcribe(
         note: None,
     };
     if left > 0 {
+        // A pause that came first holds here, before the model takes the card.
+        between();
+        let mut remaining = left;
         let model;
         (choice, model) = choose(pref, opts.device);
         if let Some(note) = &choice.note {
@@ -289,6 +299,10 @@ pub fn transcribe(
             }
             done.push(seg);
             progress.at(done.len());
+            remaining -= 1;
+            if remaining > 0 {
+                between();
+            }
             Ok(())
         };
         let run = Run {

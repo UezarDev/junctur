@@ -185,7 +185,7 @@ pub fn run_with(
     steps: Steps,
 ) -> Result<Outcome> {
     let prepared = prepare(p, opts, log, steps)?;
-    finish(p, opts, prepared, log, steps, &mut |_| {})
+    finish(p, opts, prepared, log, steps, &mut |_| {}, &mut || {})
 }
 
 /// A run's first half: tracks, speech, speakers and the edit list, written at its end without word
@@ -230,8 +230,9 @@ pub fn prepare(
 }
 
 /// A run's second half: Whisper over the speech, piece by piece (`transcribed` is told where the
-/// transcript is whole, [`transcribe::Reports`]), then the words counted into the edit list's score
-/// windows in place ([`count_words`]). Never re-cuts: edits made since [`prepare`] stay.
+/// transcript is whole, `between` is called between chunks and may block: the app's pause, 2k;
+/// [`transcribe::Reports`]), then the words counted into the edit list's score windows in place
+/// ([`count_words`]). Never re-cuts: edits made since [`prepare`] stay.
 pub fn finish(
     p: &Project,
     opts: &PipelineOptions,
@@ -239,6 +240,7 @@ pub fn finish(
     log: &mut dyn FnMut(&str),
     steps: Steps,
     transcribed: &mut dyn FnMut(f64),
+    between: &mut dyn FnMut(),
 ) -> Result<Outcome> {
     let Prepared {
         report,
@@ -260,6 +262,7 @@ pub fn finish(
             log,
             steps,
             transcribed,
+            between,
         )?;
         // The counts are for later modes, nothing reads them yet: a list that cannot be written
         // now is no reason to fail a finished transcription.
@@ -623,6 +626,7 @@ fn transcribe_stage(
     log: &mut dyn FnMut(&str),
     steps: Steps,
     transcribed: &mut dyn FnMut(f64),
+    between: &mut dyn FnMut(),
 ) -> Result<Transcript> {
     let t_opts = TranscribeOptions {
         model: opts.model,
@@ -650,6 +654,7 @@ fn transcribe_stage(
             transcribe::Reports {
                 reach: &mut |track, at| steps(steps::step(report, "transcribe", track, at)),
                 transcribed: &mut *transcribed,
+                between: &mut *between,
             },
         )
     })

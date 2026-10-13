@@ -3,11 +3,14 @@
   // beside Transcript and Captions. The recording, the analysis steps in the order they run with
   // their state and, under the running one, each track's progress (2h), the out-of-date notice and
   // Re-analyse, the speakers, the waveforms' read, and the project folder with a button that opens it.
+  // Above the analysis, the transcription job running in the background, whichever recording it is,
+  // with its pause (2k).
   import * as api from "./api";
   import { clock } from "./time";
   import { busy as running, current, whole } from "./steps";
   import { name as trackName } from "./tracks";
   import TrackSteps from "./TrackSteps.svelte";
+  import TranscriptionJob from "./TranscriptionJob.svelte";
 
   let {
     player,
@@ -16,6 +19,7 @@
     status,
     error,
     analysis,
+    lane,
     outdated,
     waves,
     onReanalyse,
@@ -28,6 +32,8 @@
     /** The project could not be opened (the file still plays). */
     error: string | null;
     analysis: api.Progress | null;
+    /** The transcription lane (2k), whichever recording is open. */
+    lane: api.Transcription | null;
     outdated: string[];
     waves: api.WavesState | null;
     onReanalyse: () => void;
@@ -108,6 +114,10 @@
       <dd>{mixer?.tracks.length ?? player?.audioTracks.length ?? 0}</dd>
     </dl>
   </section>
+
+  {#if lane && lane.jobs.length > 0}
+    <TranscriptionJob {lane} open={analysis?.file ?? null} {onError} />
+  {/if}
 
   <section>
     <h3>

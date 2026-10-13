@@ -14,9 +14,12 @@
 //! list at once (Uezar: the fast steps are not held back by "another transcript ... going in the
 //! back") and its transcription queues; once its list is written it can be edited while the rest
 //! runs, the words growing a 5-minute piece at a time ([`Progress::transcribed`]). Rejected:
-//! cancelling (the pipeline has no point to stop at between its stages' own steps; 2k's pause will
-//! stop the transcription lane between chunks), and both halves on one gate (2d), which held a new
-//! recording's minutes behind another's hours.
+//! cancelling (the pipeline has no point to stop at between its stages' own steps), and both halves
+//! on one gate (2d), which held a new recording's minutes behind another's hours.
+//!
+//! The transcription lane is a [`Lane`] (2k): first come, first served, and paused from any
+//! recording, the transcribing one stopping between chunks ([`Analysis::pause`]); the page sees
+//! who is on it through [`Analysis::transcription`].
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -26,11 +29,15 @@ use junctur_core::config;
 use junctur_core::pipeline::{self, PipelineOptions, Project, Step, Steps};
 use serde::Serialize;
 
+use crate::lane::Lane;
 use crate::lock::lock;
 use crate::project::{self, ProjectStatus};
 
 /// The event every change of a run's progress is sent as.
 pub const EVENT: &str = "analysis";
+
+/// The event the transcription lane's [`Transcription`] is sent as (2k).
+pub const LANE_EVENT: &str = "transcription";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -88,6 +95,20 @@ impl Progress {
     }
 }
 
+/// The transcription lane as the page shows it, whichever recording is open (2k).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Transcription {
+    /// Pause was asked for: the transcribing recording stops after its chunk, the rest wait.
+    pub paused: bool,
+    /// The transcribing recording has stopped at a chunk boundary (paused, and no longer
+    /// finishing a chunk).
+    pub stopped: bool,
+    /// The recordings on the lane, the transcribing one first, then those waiting in the order
+    /// they will run.
+    pub jobs: Vec<Progress>,
+}
+
 /// What a request to analyse again did.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -121,8 +142,9 @@ pub struct Analysis {
     runs: Arc<Mutex<HashMap<PathBuf, Progress>>>,
     /// Held through a run's first half (tracks to edit list).
     first: Arc<Mutex<()>>,
-    /// Held through a run's transcription: the one shared background job (2j).
-    transcription: Arc<Mutex<()>>,
+    /// Held through a run's transcription: the one shared background job (2j), in turn and
+    /// pausable (2k).
+    transcription: Arc<Lane>,
     /// Held from taking a snapshot of a run until `notify` has it, so snapshots reach the page in
     /// the order they were taken: the speech stage reports from a thread per track, and an older
     /// snapshot sent last would move a bar back (79 % after 100 %). Not `runs` itself: the app's
@@ -152,10 +174,17 @@ impl Default for Analysis {
     }
 }
 
-/// A run's second half (the transcription), as its first half leaves it: told the log, the steps
-/// and where the transcript is whole.
-type Second<'a> =
-    Box<dyn FnOnce(&mut dyn FnMut(&str), Steps, &mut dyn FnMut(f64)) -> Result<(), String> + 'a>;
+/// A run's second half (the transcription), as its first half leaves it: told the log, the steps,
+/// where the transcript is whole, and called between chunks (where a pause holds it, 2k).
+type Second<'a> = Box<
+    dyn FnOnce(
+            &mut dyn FnMut(&str),
+            Steps,
+            &mut dyn FnMut(f64),
+            &mut dyn FnMut(),
+        ) -> Result<(), String>
+        + 'a,
+>;
 
 /// A run's first half (tracks to edit list), returning its second.
 type Halves = for<'a> fn(
@@ -173,8 +202,8 @@ fn pipeline_halves<'a>(
     steps: Steps,
 ) -> Result<Second<'a>, String> {
     let prepared = pipeline::prepare(p, o, log, steps).map_err(|e| e.to_string())?;
-    Ok(Box::new(move |log, steps, transcribed| {
-        pipeline::finish(p, o, prepared, log, steps, transcribed)
+    Ok(Box::new(move |log, steps, transcribed, between| {
+        pipeline::finish(p, o, prepared, log, steps, transcribed, between)
             .map(|_| ())
             .map_err(|e| e.to_string())
     }))
@@ -332,6 +361,28 @@ impl Analysis {
         })
     }
 
+    /// Pauses or resumes the transcription lane (2k): the transcribing recording stops after the
+    /// chunk it is on, the ones waiting keep waiting. Nothing on the lane: nothing to pause. Whether
+    /// anything changed.
+    pub fn pause(&self, paused: bool) -> bool {
+        self.transcription.pause(paused)
+    }
+
+    /// Who is on the transcription lane, in turn, with each one's progress.
+    pub fn transcription(&self) -> Transcription {
+        let v = self.transcription.view();
+        let runs = lock(&self.runs);
+        Transcription {
+            paused: v.paused,
+            stopped: v.stopped,
+            jobs: v
+                .queue
+                .iter()
+                .filter_map(|k| runs.get(k).cloned())
+                .collect(),
+        }
+    }
+
     /// Runs `f` behind the lane runs' first halves take (2j: tracks to edit list, the speakers
     /// stage among them): after the first half in progress, if any, and with none starting until
     /// it returns. For work that loads the speaker models outside a run (5c: a recording's
@@ -386,17 +437,16 @@ impl Analysis {
             self.update(&k, notify, Change::Run, |r| r.phase = Phase::Running);
             (self.halves)(p, &o, &mut log, &steps)?
         };
-        // Taken at once when free, so a lone recording never shows as waiting.
-        let (_turn, waited) = match self.transcription.try_lock() {
-            Ok(turn) => (turn, false),
-            Err(_) => {
-                self.update(&k, notify, Change::Listed, |r| {
-                    r.listed = true;
-                    r.phase = Phase::Waiting;
-                });
-                (lock(&self.transcription), true)
-            }
-        };
+        // Waiting is said only when there is someone ahead, so a lone recording never shows as
+        // waiting.
+        let mut waited = false;
+        let _turn = self.transcription.enter(&k, || {
+            waited = true;
+            self.update(&k, notify, Change::Listed, |r| {
+                r.listed = true;
+                r.phase = Phase::Waiting;
+            });
+        });
         let change = if waited { Change::Run } else { Change::Listed };
         self.update(&k, notify, change, |r| {
             r.listed = true;
@@ -405,7 +455,13 @@ impl Analysis {
         let mut transcribed = |t: f64| {
             self.update(&k, notify, Change::Transcribed, |r| r.transcribed = Some(t));
         };
-        second(&mut log, &steps, &mut transcribed)
+        // A pause holds the run here; the page hears when it has stopped (`Change::Run` sends the
+        // lane again).
+        let mut between = || {
+            self.transcription
+                .hold(|| self.update(&k, notify, Change::Run, |_| {}))
+        };
+        second(&mut log, &steps, &mut transcribed, &mut between)
     }
 
     /// Changes `k`'s progress, reads its project status again and tells `notify` what moved
@@ -519,17 +575,19 @@ mod tests {
     static RELEASE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
     /// A pipeline whose first half is instant and whose transcription lands its first piece, then
-    /// runs until [`RELEASE`]; recordings named `fail*` then fail.
+    /// runs chunk after chunk (each a few ms) until [`RELEASE`]; recordings named `fail*` then
+    /// fail.
     fn fake_halves<'a>(
         p: &'a Project,
         _: &'a PipelineOptions,
         _: &mut dyn FnMut(&str),
         _: Steps,
     ) -> Result<Second<'a>, String> {
-        Ok(Box::new(move |_, _, transcribed| {
+        Ok(Box::new(move |_, _, transcribed, between| {
             transcribed(300.0);
             while !RELEASE.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(5));
+                between();
             }
             let name = p.file.file_name().unwrap().to_string_lossy();
             if name.starts_with("fail") {
@@ -592,6 +650,87 @@ mod tests {
         let at = |x| phases.iter().position(|p| *p == x).unwrap();
         assert!(at(Phase::Queued) < at(Phase::Waiting));
         assert!(phases[at(Phase::Waiting)..].contains(&Phase::Running));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Lets the transcriptions of [`counted_halves`] end; how many chunks `one*` has done.
+    static END: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static CHUNKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// [`fake_halves`] with its own end, counting the chunks of recordings named `one*`.
+    fn counted_halves<'a>(
+        p: &'a Project,
+        _: &'a PipelineOptions,
+        _: &mut dyn FnMut(&str),
+        _: Steps,
+    ) -> Result<Second<'a>, String> {
+        let one = p
+            .file
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("one");
+        Ok(Box::new(move |_, _, transcribed, between| {
+            transcribed(300.0);
+            while !END.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(2));
+                if one {
+                    CHUNKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                between();
+            }
+            Ok(())
+        }))
+    }
+
+    #[test]
+    fn a_pause_holds_the_transcribing_recording_and_the_ones_waiting() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let d = std::env::temp_dir().join(format!("junctur-app-pause-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let (one, two) = (d.join("one.mp4"), d.join("two.mp4"));
+        for f in [&one, &two] {
+            std::fs::write(f, b"not a video").unwrap();
+        }
+        let mut a = Analysis::with_cache(d.join("cache"));
+        a.halves = counted_halves;
+        let notify: Notify = Arc::new(|_: &Progress, _| {});
+        assert!(!a.pause(true), "nothing transcribing: nothing to pause");
+        a.start(&one, notify.clone()).unwrap();
+        wait_for("one transcribing", || CHUNKS.load(SeqCst) > 0);
+        a.start(&two, notify).unwrap();
+        wait_for("two waiting", || {
+            a.progress(&two).is_some_and(|p| p.phase == Phase::Waiting)
+        });
+        let files = |t: &Transcription| t.jobs.iter().map(|p| p.file.clone()).collect::<Vec<_>>();
+        let (k1, k2) = (
+            key(&one).display().to_string(),
+            key(&two).display().to_string(),
+        );
+        assert_eq!(files(&a.transcription()), [k1.clone(), k2.clone()]);
+
+        assert!(a.pause(true));
+        wait_for("one stopped", || a.transcription().stopped);
+        let at = CHUNKS.load(SeqCst);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(CHUNKS.load(SeqCst), at, "no chunk while paused");
+        let t = a.transcription();
+        assert!(t.paused);
+        assert_eq!(files(&t), [k1, k2]);
+        // Still a busy run, editable, its pieces kept; the one behind it still waits.
+        let p = a.progress(&one).unwrap();
+        assert_eq!((p.phase, p.transcribed), (Phase::Running, Some(300.0)));
+        assert!(a.editable(&one));
+        assert_eq!(a.progress(&two).unwrap().phase, Phase::Waiting);
+
+        assert!(a.pause(false));
+        wait_for("one going again", || CHUNKS.load(SeqCst) > at);
+        assert!(!a.transcription().stopped);
+        END.store(true, SeqCst);
+        wait_for("both ended", || !a.busy(&one) && !a.busy(&two));
+        let t = a.transcription();
+        assert!(t.jobs.is_empty() && !t.paused);
         let _ = std::fs::remove_dir_all(&d);
     }
 

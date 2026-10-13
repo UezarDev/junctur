@@ -52,14 +52,22 @@ export function rank(p: api.Progress | null): number {
   return { queued: 1, waiting: 3, done: 5, failed: 5 }[p.phase];
 }
 
+/** Whether the transcription lane holds `file` paused (2k): `pausing` while it finishes its chunk,
+ * `paused` once stopped; null when it is not the one transcribing or the lane is not paused. */
+export function paused(lane: api.Transcription | null, file: string | null | undefined): "pausing" | "paused" | null {
+  if (!lane?.paused || !file || lane.jobs[0]?.file !== file) return null;
+  return lane.stopped ? "paused" : "pausing";
+}
+
 /** One line on the run: "Transcribing · 43%", "Finding speech…", "Waiting for another analysis",
- * "Waiting to transcribe"; null when nothing is running. */
-export function label(p: api.Progress | null): string | null {
+ * "Waiting to transcribe", "Transcription paused · 43%"; null when nothing is running. */
+export function label(p: api.Progress | null, pause: "pausing" | "paused" | null = null): string | null {
   if (p?.phase === "queued") return "Waiting for another analysis";
   if (p?.phase === "waiting") return "Waiting to transcribe";
   if (p?.phase !== "running") return null;
   const stage = running(p);
-  const name = stage ? (STEP[stage] ?? stage) : "Analysing";
+  let name = stage ? (STEP[stage] ?? stage) : "Analysing";
+  if (pause) name = pause === "paused" ? "Transcription paused" : "Pausing transcription";
   const pct = whole(current(p));
   return pct == null ? `${name}…` : `${name} · ${pct}%`;
 }

@@ -38,6 +38,9 @@
   let mixer = $state.raw<api.MixerState | null>(null);
   // The open recording's analysis (2d): its stages' states replace the ones read at opening.
   let analysis = $state.raw<api.Progress | null>(null);
+  // The transcription lane (2k): who transcribes and who waits, whichever recording is open, for
+  // the Properties tab's job panel; each job's progress kept current from the analysis events.
+  let lane = $state.raw<api.Transcription | null>(null);
   // The waveforms' read (2g); `wavesVersion` moves each time more of them is there to draw.
   let waves = $state.raw<api.WavesState | null>(null);
   let wavesVersion = $state(0);
@@ -306,6 +309,9 @@
   }
 
   function onProgress(p: api.Progress) {
+    if (lane?.jobs.some((j) => j.file === p.file)) {
+      lane = { ...lane, jobs: lane.jobs.map((j) => (j.file === p.file ? p : j)) };
+    }
     if (!opened || p.file !== opened.file) return;
     const was = analysis;
     analysis = p;
@@ -327,7 +333,7 @@
 
   // What the chip on the picture says while the open recording is analysed (mock L), with a thin
   // bar per track under it when there are several (2h).
-  const chip = $derived(steps.label(analysis));
+  const chip = $derived(steps.label(analysis, steps.paused(lane, analysis?.file)));
   const chipSteps = $derived(steps.current(analysis));
 
   // Re-analyse: the pipeline with the settings now, in the background. When the edit list holds
@@ -468,6 +474,8 @@
   });
 
   onMount(() => {
+    // A transcription started before the page (a reload) has sent no event yet; one that has wins.
+    api.transcription().then((t) => (lane ??= t), () => {});
     api.playerState().then(
       async (s) => {
         player = s;
@@ -487,6 +495,7 @@
       api.onEditState((s) => (edit = s)),
       api.onMixer((s) => (mixer = s)),
       api.onAnalysis(onProgress),
+      api.onTranscription((t) => (lane = t)),
       api.onWaves((w) => {
         if (opened && w.file === opened.file) {
           waves = w;
@@ -639,6 +648,7 @@
             status={project}
             error={opened.projectError}
             {analysis}
+            {lane}
             outdated={opened.outdated}
             {waves}
             onReanalyse={reanalyse}
