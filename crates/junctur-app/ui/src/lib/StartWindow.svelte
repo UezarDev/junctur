@@ -11,6 +11,8 @@
   import { onMount } from "svelte";
   import * as api from "./api";
   import { clock } from "./time";
+  import * as steps from "./steps";
+  import TrackSteps from "./TrackSteps.svelte";
 
   let {
     ready,
@@ -101,25 +103,11 @@
     }
   }
 
-  const STEP: Record<string, string> = {
-    tracks: "Reading tracks",
-    speech: "Finding speech",
-    speakers: "Speakers",
-    transcribe: "Transcribing",
-    edit: "Cutting",
-  };
-
   /** The badge: where the analysis stands. */
   function badge(r: api.Recent, row: Row | undefined): { text: string; cls: string } {
     if (r.missing) return { text: "Not found", cls: "bad" };
-    const p = row?.progress;
-    if (p?.phase === "queued") return { text: "Waiting to analyse", cls: "busy" };
-    if (p?.phase === "running") {
-      const stage = p.project?.stages.find((s) => s.state === "running");
-      const pct = p.line?.match(/^transcribing .*\((\d+)%\)/)?.[1];
-      const name = stage ? (STEP[stage.name] ?? stage.name) : "Analysing";
-      return { text: pct && stage?.name === "transcribe" ? `${name} ${pct}%` : name, cls: "busy" };
-    }
+    const busy = steps.label(row?.progress ?? null);
+    if (busy) return { text: busy, cls: "busy" };
     const i = row?.info;
     if (!i) return { text: "…", cls: "muted" };
     if (i.ranges === 0) return { text: "Ready · nothing kept", cls: "muted" };
@@ -154,6 +142,9 @@
               <span class="what">
                 <span class="name">{r.name}</span>
                 <span class="meta mono">{row?.info?.duration ? clock(row.info.duration) : "--:--"} · {r.folder}</span>
+                {#if steps.current(row?.progress ?? null).length}
+                  <span class="bars"><TrackSteps steps={steps.current(row?.progress ?? null)} compact /></span>
+                {/if}
               </span>
               <span class="badge {b.cls}"><span class="dot"></span>{b.text}</span>
             </button>
@@ -269,6 +260,10 @@
   .meta {
     font-size: 12px;
     color: var(--muted);
+  }
+  .bars {
+    margin-top: 5px;
+    max-width: 240px;
   }
   .badge {
     flex: none;

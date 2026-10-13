@@ -238,32 +238,49 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
         );
         return Ok(());
     }
+    // Edits as the frontend's commands make them, through `App::editable` (2m repair): refused
+    // while the recording's list is to come, and holding a run of it off while they work.
+    let edit = |f: &dyn Fn(&crate::commands::Editable) -> Result<(), String>| {
+        let state = app.try_state::<App>().ok_or("app not set up")?;
+        let e = state.editable()?;
+        f(&e)
+    };
+    match a {
+        Action::Edit(step) => return edit(&|e| e.edit(e.file(), *step)),
+        Action::Rename(id, name) => return edit(&|e| e.rename_speaker(e.file(), *id, name)),
+        Action::Recolor(id, color) => return edit(&|e| e.recolor_speaker(e.file(), *id, color)),
+        Action::Captions(on) => {
+            return edit(&|e| {
+                let c = e.edit_state().captions;
+                e.set_captions(e.file(), junctur_core::edit::Captions { on: *on, ..c })
+            })
+        }
+        Action::Preview(on) => {
+            return edit(&|e| {
+                let c = e.edit_state().captions;
+                e.set_captions(e.file(), junctur_core::edit::Captions { preview: *on, ..c })
+            })
+        }
+        Action::Enroll(first, last, name) => {
+            return edit(&|e| {
+                e.enroll_voice(e.file(), *first, *last, name)
+                    .map(|line| eprintln!("junctur-app test: {line}"))
+            })
+        }
+        Action::Forget(name) => return edit(&|e| e.forget_voice(e.file(), name)),
+        _ => {}
+    }
     with_player(app, |p| match a {
         Action::Seek(s) => p.seek(*s, true).map(|_| ()),
         Action::KeySeek(s) => p.seek(*s, false).map(|_| ()),
         Action::Skip(on) => p.set_skip(*on),
         Action::Pause => p.toggle_pause(),
-        Action::Edit(step) => p.edit(*step),
-        Action::Rename(id, name) => p.rename_speaker(*id, name),
-        Action::Recolor(id, color) => p.recolor_speaker(*id, color),
-        Action::Captions(on) => {
-            let c = p.edit_state().captions;
-            p.set_captions(junctur_core::edit::Captions { on: *on, ..c })
-        }
-        Action::Preview(on) => {
-            let c = p.edit_state().captions;
-            p.set_captions(junctur_core::edit::Captions { preview: *on, ..c })
-        }
         Action::Srt(path) => p.export_captions(std::path::Path::new(path)).map(|f| {
             eprintln!("junctur-app test: wrote {} captions to {path}", f.cues);
         }),
-        Action::Enroll(first, last, name) => p
-            .enroll_voice(*first, *last, name)
-            .map(|line| eprintln!("junctur-app test: {line}")),
-        Action::Forget(name) => p.forget_voice(name),
         Action::Mute(track, muted) => p.set_muted(*track, *muted),
         Action::Solo(track, on) => p.set_solo(*track, *on),
-        Action::Reanalyse | Action::Menu(_) => unreachable!("run above"),
+        _ => unreachable!("run above"),
     })?
 }
 

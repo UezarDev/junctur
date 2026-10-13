@@ -19,6 +19,8 @@
   import Strips from "./lib/Strips.svelte";
   import Avatars from "./lib/Avatars.svelte";
   import ActionBar from "./lib/ActionBar.svelte";
+  import TrackSteps from "./lib/TrackSteps.svelte";
+  import * as steps from "./lib/steps";
   import TitleBar from "./lib/TitleBar.svelte";
   import SettingsDialog from "./lib/SettingsDialog.svelte";
   import { layout, TITLE } from "./lib/layout";
@@ -36,6 +38,9 @@
   let mixer = $state.raw<api.MixerState | null>(null);
   // The open recording's analysis (2d): its stages' states replace the ones read at opening.
   let analysis = $state.raw<api.Progress | null>(null);
+  // The transcription lane (2k): who transcribes and who waits, whichever recording is open, for
+  // the Properties tab's job panel; each job's progress kept current from the analysis events.
+  let lane = $state.raw<api.Transcription | null>(null);
   // The waveforms' read (2g); `wavesVersion` moves each time more of them is there to draw.
   let waves = $state.raw<api.WavesState | null>(null);
   let wavesVersion = $state(0);
@@ -203,6 +208,7 @@
   let labelledWith = "";
 
   async function loadTranscript() {
+    growing++; // an ask from before this one is not taken (growTranscript)
     const gen = loadGen;
     words = null;
     selection = null;
@@ -281,38 +287,54 @@
     }
   }
 
-  const busy = (p: api.Progress | null) => p?.phase === "queued" || p?.phase === "running";
-  const rank = (p: api.Progress | null) =>
-    p ? { queued: 1, running: 2, done: 3, failed: 3 }[p.phase] : 0;
+  const busy = steps.busy;
+  const rank = steps.rank;
+
+  // The words again while the recording transcribes (2j): a piece more of them, or the finished
+  // transcript after the pieces. Only words at the end are new (their indices are the core's
+  // promise), so the selection and what the panel shows stay; nothing is blanked meanwhile.
+  // Asks in flight can answer out of order (a piece lands while the last ask is on its way): only
+  // the latest ask's answer is taken, or a shorter list could replace a longer one.
+  let growing = 0;
+  async function growTranscript() {
+    const file = opened?.file;
+    const gen = loadGen;
+    const ask = ++growing;
+    try {
+      const view = await api.transcript();
+      if (opened?.file === file && gen === loadGen && ask === growing) words = view ? toWords(view) : null;
+    } catch (e) {
+      failure = String(e);
+    }
+  }
 
   function onProgress(p: api.Progress) {
+    if (lane?.jobs.some((j) => j.file === p.file)) {
+      lane = { ...lane, jobs: lane.jobs.map((j) => (j.file === p.file ? p : j)) };
+    }
     if (!opened || p.file !== opened.file) return;
     const was = analysis;
     analysis = p;
     if (busy(was) && !busy(p)) {
       // The run ended: what the panel said was out of date was its business; the transcript may
-      // be new (the edit list comes in through the watch).
+      // be new (the edit list comes in through the watch). One that grew piece by piece is the
+      // same words with more at the end.
       if (p.phase === "done") opened = { ...opened, outdated: [] };
+      if (was?.transcribed != null && p.phase === "done") void growTranscript();
+      else void loadTranscript();
+    } else if (p.listed && !was?.listed) {
+      // The run's list is written: from here the words are this run's, none until its first
+      // piece, never an older run's transcript under indices the new words would reuse (2j).
       void loadTranscript();
+    } else if (p.transcribed != null && p.transcribed !== was?.transcribed) {
+      void growTranscript();
     }
   }
 
-  // What the chip on the picture says while the open recording is analysed (mock L).
-  const STEP: Record<string, string> = {
-    tracks: "Reading tracks",
-    speech: "Finding speech",
-    speakers: "Telling speakers apart",
-    transcribe: "Transcribing",
-    edit: "Cutting",
-  };
-  const chip = $derived.by(() => {
-    if (!busy(analysis)) return null;
-    if (analysis!.phase === "queued") return "Waiting for another analysis";
-    const running = analysis!.project?.stages.find((s) => s.state === "running");
-    const m = analysis!.line?.match(/^transcribing .*\((\d+)%\)/);
-    const name = running ? (STEP[running.name] ?? running.name) : "Analysing";
-    return running?.name === "transcribe" && m ? `${name} · ${m[1]}%` : `${name}…`;
-  });
+  // What the chip on the picture says while the open recording is analysed (mock L), with a thin
+  // bar per track under it when there are several (2h).
+  const chip = $derived(steps.label(analysis, steps.paused(lane, analysis?.file)));
+  const chipSteps = $derived(steps.current(analysis));
 
   // Re-analyse: the pipeline with the settings now, in the background. When the edit list holds
   // the user's edits, ask before they are replaced (they are kept as a backup).
@@ -452,6 +474,8 @@
   });
 
   onMount(() => {
+    // A transcription started before the page (a reload) has sent no event yet; one that has wins.
+    api.transcription().then((t) => (lane ??= t), () => {});
     api.playerState().then(
       async (s) => {
         player = s;
@@ -471,6 +495,7 @@
       api.onEditState((s) => (edit = s)),
       api.onMixer((s) => (mixer = s)),
       api.onAnalysis(onProgress),
+      api.onTranscription((t) => (lane = t)),
       api.onWaves((w) => {
         if (opened && w.file === opened.file) {
           waves = w;
@@ -527,7 +552,10 @@
     {#if chip}
       <div class="chip" style:right="{windowWidth - (L.picture.x + L.picture.w) + 14}px" style:top="{L.picture.y + 14}px">
         <span class="spin" aria-hidden="true"></span>
-        <span>{chip}</span>
+        <span class="what">
+          <span>{chip}</span>
+          {#if chipSteps.length > 1}<TrackSteps steps={chipSteps} compact />{/if}
+        </span>
         <button
           onclick={() => {
             tab = "properties";
@@ -596,6 +624,10 @@
           {words}
           loading={wordsLoading}
           analysing={busy(analysis)}
+          listed={analysis?.listed ?? false}
+          waiting={analysis?.phase === "waiting"}
+          failed={analysis?.phase === "failed"}
+          through={analysis?.listed && (busy(analysis) || analysis.phase === "failed") ? (analysis.transcribed ?? null) : null}
           {player}
           {edit}
           {selection}
@@ -616,6 +648,7 @@
             status={project}
             error={opened.projectError}
             {analysis}
+            {lane}
             outdated={opened.outdated}
             {waves}
             onReanalyse={reanalyse}
@@ -682,6 +715,12 @@
     border-radius: 8px;
     background: rgba(16, 17, 20, 0.86);
     border: 1px solid var(--line);
+  }
+  .chip .what {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 9em;
   }
   .chip button {
     padding: 2px 8px;

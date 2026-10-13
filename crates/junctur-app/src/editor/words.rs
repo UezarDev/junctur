@@ -16,18 +16,42 @@ pub struct Words {
     /// The latest end among words `0..=i`. With several tracks a long word can outlast the words
     /// that start after it, so speech up to word `i` ends here, not at word `i`'s own end.
     ends_by: Vec<f64>,
+    /// The words so far of a recording still transcribing (2j): every word before this many
+    /// seconds is here, and words not yet transcribed start at or after it.
+    until: Option<f64>,
 }
 
 impl Words {
     /// The project's `transcript.json`, or `None` when there is none (or it does not read).
     pub fn load(project_dir: &Path) -> Option<Self> {
         let t = transcribe::load(project_dir)?;
-        let words = t
-            .segments
+        Some(Self::from_segments(&t.segments))
+    }
+
+    /// The words so far of a recording still transcribing (2j): those of the run's finished chunks
+    /// that start before `through`, where every track is done. Later words a track already has are
+    /// left for the piece they belong to: every word still to come starts at or after `through`,
+    /// so the next read only adds words at the end and the indices the page holds stay valid. With
+    /// no run's chunks yet, none: never the `transcript.json` of an earlier run, whose words the
+    /// new ones would replace under those indices (2j repair). The run's end reads the finished
+    /// transcript ([`Self::load`]).
+    pub fn load_so_far(project_dir: &Path, through: f64) -> Self {
+        let segs = transcribe::so_far(project_dir).unwrap_or_default();
+        let mut w = Self::from_segments(&segs);
+        let n = w.list.partition_point(|x| x.start < through);
+        w.list.truncate(n);
+        w.tracks.truncate(n);
+        w.ends_by.truncate(n);
+        w.until = Some(through);
+        w
+    }
+
+    fn from_segments(segs: &[transcribe::Segment]) -> Self {
+        let words = segs
             .iter()
             .flat_map(|s| s.words.iter().map(|w| (s.track, w.clone())))
             .collect();
-        Some(Self::from_tracked(words))
+        Self::from_tracked(words)
     }
 
     /// Words all heard on track 0.
@@ -51,6 +75,7 @@ impl Words {
             list,
             tracks,
             ends_by,
+            until: None,
         }
     }
 
@@ -64,7 +89,9 @@ impl Words {
     /// The source span that cutting (`keep` false) or keeping words `first..=last` changes, placed
     /// by [`word_span`]: speech before the run ends at the latest end of any earlier word (any
     /// track), the run lasts until the latest end up to its last word, and speech after it starts
-    /// with the next word (sorted by start, so the earliest). `None` for an index out of range.
+    /// with the next word (sorted by start, so the earliest; for the last word so far of a
+    /// recording still transcribing, where the transcript stops, 2j: what follows is not known
+    /// yet, so the span never reaches past it). `None` for an index out of range.
     pub fn span(
         &self,
         first: usize,
@@ -78,7 +105,9 @@ impl Words {
         let start = self.list.get(first)?.start;
         let end = *self.ends_by.get(last)?;
         let before = first.checked_sub(1).map(|i| self.ends_by[i]);
+        // A word started before the transcript stops may end after it.
         let after = self.list.get(last + 1).map(|w| w.start);
+        let after = after.or(self.until.map(|u| u.max(end)));
         Some(word_span(
             before,
             (start, end),
@@ -140,6 +169,66 @@ mod tests {
             text: text.into(),
             p: 1.0,
         }
+    }
+
+    #[test]
+    fn words_so_far_only_grow_at_the_end() {
+        let dir = std::env::temp_dir().join(format!("junctur-sofar-words-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let seg = |track: usize, start: f64, words: &[(f64, &str)]| {
+            let words: Vec<String> = words
+                .iter()
+                .map(|(s, t)| serde_json::to_string(&word(*s, s + 0.4, t)).unwrap())
+                .collect();
+            format!(
+                r#"{{"track":{track},"start":{start},"end":{},"lang":"es","model":"m","words":[{}]}}"#,
+                start + 20.0,
+                words.join(",")
+            )
+        };
+        let header = r#"{"version":2,"languages":"es+en","model":"m","device":"cpu"}"#;
+        // Piece 0 on both tracks, and track 0 already into piece 1 (its chunk at 302 s).
+        let lines = [
+            header.to_string(),
+            seg(0, 1.0, &[(1.0, "uno"), (290.0, "dos")]),
+            seg(0, 302.0, &[(302.0, "cinco")]),
+            seg(1, 280.0, &[(285.0, "tres"), (301.0, "cuatro")]),
+        ];
+        let path = dir.join("transcript.partial.jsonl");
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        // Whole up to 302 s (track 1's next chunk would start there): 302's own word waits.
+        let early = Words::load_so_far(&dir, 302.0);
+        let text = |w: &Words| w.list.iter().map(|w| w.text.clone()).collect::<Vec<_>>();
+        assert_eq!(text(&early), ["uno", "tres", "dos", "cuatro"]);
+        // The last word's span stops where the transcript does.
+        let s = CutSettings::default();
+        let (_, b) = early
+            .span(3, 3, false, &Envelope::default(), &s, 1000.0)
+            .unwrap();
+        assert!(b <= 302.0, "{b}");
+        // Track 1 reaches its next piece: the earlier words keep their indices.
+        std::fs::write(
+            &path,
+            [lines.join("\n"), seg(1, 320.0, &[(320.0, "seis")])].join("\n") + "\n",
+        )
+        .unwrap();
+        let later = Words::load_so_far(&dir, 600.0);
+        assert_eq!(text(&later)[..4], text(&early)[..]);
+        assert_eq!(text(&later)[4..], ["cinco", "seis"]);
+        // No chunks of this run yet (it waits for the lane): no words, even beside an earlier
+        // run's finished transcript, which the new words would replace under the same indices.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(
+            dir.join("transcript.json"),
+            r#"{"choice":{"model":"m","device":"cpu","note":null},"languages":["es"],
+            "segments":[{"track":0,"start":0,"end":1,"lang":"es","model":"m",
+            "words":[{"start":0.1,"end":0.5,"text":"viejo","p":1.0}]}],"audio_s":1,"elapsed_s":1}"#,
+        )
+        .unwrap();
+        assert_eq!(Words::load(&dir).unwrap().list.len(), 1);
+        assert!(Words::load_so_far(&dir, 0.0).list.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn sample() -> Words {

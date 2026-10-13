@@ -39,8 +39,14 @@ const HOP: usize = (vad::RATE as f64 * ENVELOPE_HOP) as usize;
 /// Speech regions on each of `tracks` and the loudest-track envelope. Each track runs on a thread
 /// of its own (its own decode and Silero session): a 30 h recording with two speech tracks took
 /// twice one track's time when they ran one after the other. The first track to fail stops the
-/// others at their next read, rather than letting them decode on to the end.
-pub fn detect(file: &Path, tracks: &[usize], cache_dir: &Path) -> Result<(Speech, Envelope)> {
+/// others at their next read, rather than letting them decode on to the end. `read` is told each
+/// track's seconds decoded so far (2h), from that track's thread.
+pub fn detect(
+    file: &Path,
+    tracks: &[usize],
+    cache_dir: &Path,
+    read: &(dyn Fn(usize, f64) + Sync),
+) -> Result<(Speech, Envelope)> {
     let model = models::ensure(&models::SILERO_VAD, cache_dir)?;
     let failed = AtomicBool::new(false);
     let results: Vec<Result<Option<Track>>> = std::thread::scope(|scope| {
@@ -49,7 +55,7 @@ pub fn detect(file: &Path, tracks: &[usize], cache_dir: &Path) -> Result<(Speech
             .map(|&track| {
                 let (model, failed) = (&model, &failed);
                 scope.spawn(move || {
-                    let r = one_track(file, track, model, failed);
+                    let r = one_track(file, track, model, failed, read);
                     if r.is_err() {
                         failed.store(true, Ordering::Relaxed);
                     }
@@ -106,11 +112,18 @@ struct Track {
 
 /// One decode of `track` feeds both the VAD and the envelope. None when `stop` was set (another
 /// track failed) before it finished.
-fn one_track(file: &Path, track: usize, model: &Path, stop: &AtomicBool) -> Result<Option<Track>> {
+fn one_track(
+    file: &Path,
+    track: usize,
+    model: &Path,
+    stop: &AtomicBool,
+    read: &(dyn Fn(usize, f64) + Sync),
+) -> Result<Option<Track>> {
     let mut vad = Vad::open(model)?;
     let mut r = PcmReader::open(file, track, vad::RATE, 1, Span::default())?;
     let (mut probs, mut env, mut n) = (Vec::new(), Vec::new(), 0usize);
     let mut x = Vec::with_capacity(READ);
+    read(track, 0.0);
     loop {
         if stop.load(Ordering::Relaxed) {
             return Ok(None);
@@ -126,6 +139,7 @@ fn one_track(file: &Path, track: usize, model: &Path, stop: &AtomicBool) -> Resu
                 .map(|hop| (hop.iter().map(|s| s * s).sum::<f32>() / hop.len() as f32).sqrt()),
         );
         n += x.len();
+        read(track, n as f64 / vad::RATE as f64);
     }
     r.finish()?;
     let len = n as f64 / vad::RATE as f64;

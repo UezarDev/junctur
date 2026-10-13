@@ -31,14 +31,18 @@ pub const GROUP_AUDIO: f64 = 30.0;
 /// A group never reaches further than this, so a recording that switches language is followed.
 pub const GROUP_SPAN: f64 = 120.0;
 
-/// Group each track's chunks (in time order) for language detection.
+/// Group each track's chunks (in time order) for language detection. A group never crosses into
+/// another piece of the recording (2j, [`super::piece`]), so a piece is whole when its last group is.
 pub fn groups(work: &[(usize, Chunk)]) -> Vec<Group> {
     let mut out: Vec<Group> = Vec::new();
     for &(track, c) in work {
         if let Some(g) = out.last_mut().filter(|g| g.track == track) {
             let audio: f64 = g.chunks.iter().map(|x| x.end - x.start).sum();
             let first = g.chunks[0].start;
-            if audio + (c.end - c.start) <= GROUP_AUDIO && c.end - first <= GROUP_SPAN {
+            if audio + (c.end - c.start) <= GROUP_AUDIO
+                && c.end - first <= GROUP_SPAN
+                && super::piece(c.start) == super::piece(first)
+            {
                 g.chunks.push(c);
                 continue;
             }
@@ -236,6 +240,11 @@ mod tests {
         // A chunk alone over half the window still gets its own group.
         assert_eq!(groups(&[(0, c(0.0, 28.0)), (0, c(29.0, 57.0))]).len(), 2);
         assert!(groups(&[]).is_empty());
+        // Close in time and short, but on either side of 5:00: two pieces, two groups (2j).
+        assert_eq!(
+            groups(&[(0, c(290.0, 299.0)), (0, c(300.5, 305.0))]).len(),
+            2
+        );
     }
 
     /// Samples numbered from 0 at 16 kHz, `len` in all; `fail` makes the end a decode failure.

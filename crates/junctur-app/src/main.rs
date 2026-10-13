@@ -8,6 +8,7 @@ mod analysis;
 mod commands;
 mod cuts;
 mod editor;
+mod lane;
 mod lock;
 mod mixer;
 mod mpv;
@@ -112,6 +113,8 @@ fn main() {
             commands::forget_recent,
             commands::analysis,
             commands::reanalyse,
+            commands::transcription,
+            commands::pause_transcription,
             commands::toggle_pause,
             commands::seek,
             commands::mixer,

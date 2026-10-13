@@ -180,12 +180,14 @@ impl Clips<'_> {
 
 /// Embeds every [`segments`] window of a 16 kHz mono stream (which starts at time 0) over its
 /// speech `regions` and, with `segmenter`, finds the overlapping talk, all in one read: both kinds
-/// of clip are taken in order of start from one buffer, so the recording is decoded once.
+/// of clip are taken in order of start from one buffer, so the recording is decoded once. `heard`
+/// is told each clip's start (seconds) as it is taken: how far through the stream this is (2h).
 pub fn analyze(
     reader: &mut PcmReader,
     regions: &[Region],
     embedder: &mut Embedder,
     mut segmenter: Option<&mut Segmenter>,
+    heard: &mut dyn FnMut(f64),
 ) -> Result<Analysis> {
     let windows = segments(regions);
     let seg_windows = if segmenter.is_some() {
@@ -211,6 +213,7 @@ pub fn analyze(
         // The earlier start first, so the buffer never has to go back.
         match (emb_at, seg_at, segmenter.as_deref_mut()) {
             (Some(a), s, _) if s.is_none_or(|s| a <= s) => {
+                heard(a as f64 / RATE as f64);
                 emb_clips.push(clips.clip(a, len)?);
                 i += 1;
                 if emb_clips.len() == BATCH {
@@ -218,6 +221,7 @@ pub fn analyze(
                 }
             }
             (_, Some(a), Some(seg)) => {
+                heard(a as f64 / RATE as f64);
                 seg_clips.push((seg_windows[j], clips.clip(a, segment::window_samples())?));
                 j += 1;
                 if seg_clips.len() == segment::BATCH {
@@ -261,7 +265,7 @@ pub fn diarize(
     regions: &[Region],
     embedder: &mut Embedder,
 ) -> Result<Diarization> {
-    let a = analyze(reader, regions, embedder, None)?;
+    let a = analyze(reader, regions, embedder, None, &mut |_| {})?;
     let labels = two_pass(&a.embeddings, FIRST, MERGE, MINOR_SHARE);
     Ok(summarize(&a.windows, &labels))
 }

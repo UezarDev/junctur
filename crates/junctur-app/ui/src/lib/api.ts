@@ -241,7 +241,19 @@ export interface MixerState {
   source: "provisional" | "roles" | "remembered";
 }
 
-export type Phase = "queued" | "running" | "done" | "failed";
+/** `queued`: behind another recording's first steps; `waiting`: its edit list is made (editable) and its
+ * transcription waits for another recording's (2j). */
+export type Phase = "queued" | "running" | "waiting" | "done" | "failed";
+
+/** How far one track has got through one stage (junctur-core pipeline/steps.rs, 2h): `at` seconds
+ * of the track's `of` are behind it. */
+export interface Step {
+  stage: string;
+  /** 0-based audio ordinal. */
+  track: number;
+  at: number;
+  of: number;
+}
 
 /** An analysis run by the app (src/analysis.rs). */
 export interface Progress {
@@ -251,6 +263,22 @@ export interface Progress {
   line: string | null;
   error: string | null;
   project: ProjectStatus | null;
+  /** Per track, the latest stage it reported; only the running stage's are current (lib/steps.ts). */
+  steps: Step[];
+  /** The run's edit list is made: it can be edited while the rest runs (2j). */
+  listed: boolean;
+  /** While transcribing: every word before this many seconds is in, on every track (2j). */
+  transcribed: number | null;
+}
+
+/** The transcription lane, whichever recording is open (src/analysis.rs, 2k). */
+export interface Transcription {
+  /** Pause was asked for: the transcribing recording stops after its chunk, the rest wait. */
+  paused: boolean;
+  /** It has stopped (no longer finishing a chunk). */
+  stopped: boolean;
+  /** The transcribing recording first, then the ones waiting, in the order they will run. */
+  jobs: Progress[];
 }
 
 export interface Reanalysed {
@@ -268,6 +296,10 @@ export const analysis = (path: string) => invoke<Progress | null>("analysis", { 
 /** Analyses `path` again; without `replace`, an edit list with the user's edits starts nothing. */
 export const reanalyse = (path: string, replace: boolean) =>
   invoke<Reanalysed>("reanalyse", { path, replace });
+export const transcription = () => invoke<Transcription>("transcription");
+/** Pauses or resumes the transcription lane, from any recording (2k). */
+export const pauseTranscription = (paused: boolean) =>
+  invoke<Transcription>("pause_transcription", { paused });
 export const togglePause = () => invoke<void>("toggle_pause");
 /** Resolves to the source time the seek lands on (inside a cut while skipping: the next range). */
 export const seek = (seconds: number, exact: boolean) =>
@@ -348,6 +380,9 @@ export const onEditState = (f: (s: EditState) => void): Promise<UnlistenFn> =>
 
 export const onAnalysis = (f: (p: Progress) => void): Promise<UnlistenFn> =>
   listen<Progress>("analysis", (e) => f(e.payload));
+
+export const onTranscription = (f: (t: Transcription) => void): Promise<UnlistenFn> =>
+  listen<Transcription>("transcription", (e) => f(e.payload));
 
 export const onMixer = (f: (s: MixerState) => void): Promise<UnlistenFn> =>
   listen<MixerState>("mixer-state", (e) => f(e.payload));

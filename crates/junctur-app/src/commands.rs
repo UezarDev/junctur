@@ -11,7 +11,7 @@ use junctur_core::export::srt::Cue;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::analysis::{self, Analysis, Notify, Progress, Reanalysed};
+use crate::analysis::{self, Analysis, Change, Notify, Progress, Reanalysed, Transcription};
 use crate::cuts::EditState;
 use crate::editor::{Op, Step, TranscriptView};
 use crate::lock::lock;
@@ -24,6 +24,7 @@ use crate::state::PlayerState;
 use crate::voices::VoiceView;
 use crate::waves::{self, WavesState};
 use junctur_core::pipeline::StageState;
+use junctur_core::transcribe;
 
 /// The player, or why it could not start (libmpv missing, no GL): the window still opens and
 /// says so instead of the app failing to launch.
@@ -49,27 +50,85 @@ impl App {
         self.with(|p| Ok(p.core()))
     }
 
-    /// [`App::core`] for a command that changes the edit list: refused while the open recording
-    /// is being analysed, whose `edit` stage rewrites the list (an edit made meanwhile would only
-    /// be backed up and replaced).
-    fn editable(&self) -> Result<Arc<Core>, String> {
+    /// [`App::core`] for a command that changes the edit list: refused while the open recording's
+    /// run has not yet written its list, whose `edit` stage would replace it (an edit made
+    /// meanwhile would only be backed up and replaced). Once written, nothing later in the run
+    /// replaces it (2j): edits go on while it transcribes.
+    ///
+    /// The command holds what this returns while it works: a run of the recording asked for
+    /// meanwhile waits for it (2m, [`Analysis::edit`]), so a voice enrolled just as a re-analysis
+    /// starts is in `speakers.json` before the run's speakers stage reads it. The recording is
+    /// the one open now, and the edit is made to that one or refused, never to another opened
+    /// meanwhile ([`Editable::file`]).
+    pub(crate) fn editable(&self) -> Result<Editable, String> {
         let core = self.core()?;
-        if core
-            .file()
-            .is_some_and(|f| self.analysis.busy(Path::new(&f)))
-        {
-            return Err("analysing this recording: edits wait until it finishes".into());
-        }
-        Ok(core)
+        let file = core.file();
+        let editing = match &file {
+            Some(f) => Some(self.analysis.edit(Path::new(f)).ok_or(
+                "analysing this recording: edits wait until its edit list is made".to_string(),
+            )?),
+            None => None,
+        };
+        Ok(Editable {
+            core,
+            file,
+            _editing: editing,
+        })
     }
 }
 
-/// Sends a run's progress to the page. When it ends, the player first takes what it wrote (the
-/// edit list, a new transcript) if that recording is open: the page fetches the transcript again
-/// on this event, and must not get the words read before the run.
+/// The player's core for one edit of the open recording, and the mark that holds a run of that
+/// recording off until the edit is done ([`App::editable`]).
+pub(crate) struct Editable {
+    core: Arc<Core>,
+    file: Option<String>,
+    _editing: Option<analysis::Editing>,
+}
+
+impl Editable {
+    /// The recording this edit is for, as it was opened; the core's edits take it and refuse
+    /// when another is open by the time they write (2m repair).
+    pub(crate) fn file(&self) -> Option<&str> {
+        self.file.as_deref()
+    }
+}
+
+impl std::ops::Deref for Editable {
+    type Target = Core;
+    fn deref(&self) -> &Core {
+        &self.core
+    }
+}
+
+/// Sends a run's progress to the page. When the run's list is written or the run ends, the player
+/// first takes what it wrote (the edit list, the envelope, a new transcript) if that recording is
+/// open, and when a piece of the transcript lands it reads the words up to it: the page fetches
+/// the transcript again on these events, and must not get the words read before them. Every change
+/// but a step also sends the transcription lane (2k: who is on it, paused or not), which the
+/// Properties tab shows whichever recording is open.
 pub fn notifier(handle: AppHandle) -> Notify {
-    Arc::new(move |p: &Progress| {
-        if let Some(core) = handle.try_state::<App>().and_then(|a| a.core().ok()) {
+    Arc::new(move |p: &Progress, change| {
+        // A step only moves a bar (2h): reading the track roles on each of the ~hundred per track
+        // and stage would read the tracks report from disk every time.
+        if change == Change::Steps {
+            let _ = handle.emit(analysis::EVENT, p);
+            return;
+        }
+        if let Some(lane) = handle
+            .try_state::<App>()
+            .and_then(|a| a.analysis.lane_moved())
+        {
+            let _ = handle.emit(analysis::LANE_EVENT, lane);
+        }
+        let core = handle.try_state::<App>().and_then(|a| a.core().ok());
+        if change == Change::Transcribed {
+            if let Some(core) = core {
+                core.transcribed(Path::new(&p.file), p.transcribed);
+            }
+            let _ = handle.emit(analysis::EVENT, p);
+            return;
+        }
+        if let Some(core) = core {
             // The track roles come from a run's first stage: the mutes follow them as soon as it
             // is done, not when Whisper is (2e). Read on each line from then on, which is cheap
             // and catches a re-analysis whose roles moved; nothing is sent unless they did.
@@ -81,8 +140,8 @@ pub fn notifier(handle: AppHandle) -> Notify {
             if tracks_done {
                 core.tracks_known(Path::new(&p.file));
             }
-            if !p.phase.busy() {
-                core.analysed(Path::new(&p.file));
+            if !p.phase.busy() || change == Change::Listed {
+                core.analysed(Path::new(&p.file), p.words_through());
             }
         }
         let _ = handle.emit(analysis::EVENT, p);
@@ -156,7 +215,18 @@ pub async fn open_file(
             .iter()
             .any(|st| st.name == "edit" && st.state == StageState::Done);
         let unanalysed = s.edit.is_none() && (s.edit_error.is_none() || !finished);
-        if unanalysed {
+        // 2j: the list comes before the transcript, so a list does not mean a finished run. One
+        // whose transcription never finished (a closed app, a failed Whisper) is resumed: every
+        // finished stage and chunk is reused and the user's edits are kept.
+        let untranscribed = s
+            .stages
+            .iter()
+            .any(|st| st.name == "transcribe" && st.state != StageState::Done);
+        // Not while another process transcribes it (`junctur analyze`): the stage reads
+        // `running` then too, and a second Whisper on its partial would only be refused (2j
+        // repair). A run of this app's own is returned by `start` as it is.
+        let elsewhere = || transcribe::transcribing_elsewhere(Path::new(&s.dir));
+        if unanalysed || (untranscribed && (app.analysis.busy(file) || !elsewhere())) {
             // The file plays even when its analysis cannot start; the panel says why.
             analysis = Some(
                 app.analysis
@@ -165,6 +235,17 @@ pub async fn open_file(
             );
         } else if !app.analysis.busy(file) {
             outdated = analysis::outdated(file);
+        }
+    }
+    // Opened while its run is past its edit list (from another recording, say): the words so
+    // far, not the finished transcript's file, which may be an older run's or missing. Asked
+    // again after: a run that ended meanwhile has told the player already, or tells it after
+    // this, either way last.
+    if let Some(t) = analysis.as_ref().and_then(Progress::words_through) {
+        let core = app.core()?;
+        core.transcribed(&absolute, Some(t));
+        if let Some(now) = app.analysis.progress(file).filter(|p| !p.phase.busy()) {
+            core.transcribed(&absolute, now.words_through());
         }
     }
     let (project, project_error) = match status {
@@ -199,6 +280,29 @@ pub async fn forget_recent(path: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn analysis(app: State<'_, App>, path: String) -> Result<Option<Progress>, String> {
     Ok(app.analysis.progress(Path::new(&path)))
+}
+
+/// Who is on the transcription lane, in turn, and whether it is paused (2k).
+#[tauri::command]
+pub async fn transcription(app: State<'_, App>) -> Result<Transcription, String> {
+    Ok(app.analysis.transcription())
+}
+
+/// Pauses or resumes the transcription lane from any recording (2k): the transcribing one stops
+/// after the chunk it is on. The lane as it is now, also sent to the page as the event.
+#[tauri::command]
+pub async fn pause_transcription(
+    handle: AppHandle,
+    app: State<'_, App>,
+    paused: bool,
+) -> Result<Transcription, String> {
+    let sent = std::cell::RefCell::new(None);
+    app.analysis.pause(paused, &|t| {
+        let _ = handle.emit(analysis::LANE_EVENT, t);
+        *sent.borrow_mut() = Some(t.clone());
+    });
+    sent.into_inner()
+        .ok_or_else(|| "the transcription lane was not read".to_string())
 }
 
 /// Analyses `path` again with the settings now. Without `replace`, an edit list holding the user's
@@ -271,8 +375,8 @@ pub async fn edit_words(
     last: usize,
     keep: bool,
 ) -> Result<(), String> {
-    app.editable()?
-        .edit(Step::Do(Op::Words { first, last, keep }))
+    let e = app.editable()?;
+    e.edit(e.file(), Step::Do(Op::Words { first, last, keep }))
 }
 
 /// Cuts or keeps source frames `[start, end)` exactly (timeline selections, nudges, restoring a
@@ -284,26 +388,29 @@ pub async fn edit_frames(
     end: u64,
     keep: bool,
 ) -> Result<(), String> {
-    app.editable()?
-        .edit(Step::Do(Op::Frames { start, end, keep }))
+    let e = app.editable()?;
+    e.edit(e.file(), Step::Do(Op::Frames { start, end, keep }))
 }
 
 /// Renames speaker `id` in the edit list.
 #[tauri::command]
 pub async fn rename_speaker(app: State<'_, App>, id: u32, name: String) -> Result<(), String> {
-    app.editable()?.rename_speaker(id, &name)
+    let e = app.editable()?;
+    e.rename_speaker(e.file(), id, &name)
 }
 
 /// Sets speaker `id`'s caption colour (`#RRGGBB`).
 #[tauri::command]
 pub async fn recolor_speaker(app: State<'_, App>, id: u32, color: String) -> Result<(), String> {
-    app.editable()?.recolor_speaker(id, &color)
+    let e = app.editable()?;
+    e.recolor_speaker(e.file(), id, &color)
 }
 
 /// Sets the caption settings: export and preview switches, bold and italic, how cues are cut.
 #[tauri::command]
 pub async fn set_captions(app: State<'_, App>, captions: Captions) -> Result<(), String> {
-    app.editable()?.set_captions(captions)
+    let e = app.editable()?;
+    e.set_captions(e.file(), captions)
 }
 
 /// What an export wrote: the file's captions (one file since 5e).
@@ -347,21 +454,27 @@ pub async fn enroll_voice(
     last: usize,
     name: String,
 ) -> Result<String, String> {
-    app.editable()?.enroll_voice(first, last, &name)
+    let e = app.editable()?;
+    e.enroll_voice(e.file(), first, last, &name)
 }
 
 /// Hears the open recording's speakers again from the audio, cut at the seconds pinned to people
 /// (5c, "Analyse speakers again"), and puts them into the list in play. Takes about as long as the
 /// speakers stage, so it runs on a blocking thread, not the async runtime's workers. Refused while
-/// the open recording is being analysed (2d: that run writes its speakers too), and run behind the
-/// analysis gate, so it never loads the models beside a run (one at a time on the GPU).
+/// the open recording's run has not written its edit list (2d: that run writes its speakers too;
+/// 2j: past it, only the transcription is left, which does not), and run behind the first halves'
+/// lane ([`Analysis::exclusive`]), never beside another speakers stage. It may run beside that
+/// recording's transcription: both record their stage in `jobs.json`, each change read, made and
+/// written back under one lock (2m repair), so neither puts back the other's stage as it was.
 #[tauri::command]
 pub async fn reanalyze_speakers(app: State<'_, App>) -> Result<(), String> {
-    let core = app.editable()?;
+    let e = app.editable()?;
     let analysis = app.analysis.clone();
-    tauri::async_runtime::spawn_blocking(move || analysis.exclusive(|| core.reanalyze_speakers()))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        analysis.exclusive(|| e.reanalyze_speakers(e.file()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Forgets voice `name`, relabelling the open recording.
@@ -372,17 +485,20 @@ pub async fn forget_voice(app: State<'_, App>, name: String) -> Result<(), Strin
     if app.core().is_err() {
         return crate::voices::forget(None, &name).map(|_| ());
     }
-    app.editable()?.forget_voice(&name)
+    let e = app.editable()?;
+    e.forget_voice(e.file(), &name)
 }
 
 #[tauri::command]
 pub async fn undo(app: State<'_, App>) -> Result<(), String> {
-    app.editable()?.edit(Step::Undo)
+    let e = app.editable()?;
+    e.edit(e.file(), Step::Undo)
 }
 
 #[tauri::command]
 pub async fn redo(app: State<'_, App>) -> Result<(), String> {
-    app.editable()?.edit(Step::Redo)
+    let e = app.editable()?;
+    e.edit(e.file(), Step::Redo)
 }
 
 /// The shares of the window on the right (the side panel) and at the bottom (play bar and lanes)

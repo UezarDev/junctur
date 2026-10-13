@@ -1,10 +1,16 @@
 <script lang="ts">
   // The Properties tab (2g, mock L): what was 2a-2d's project panel floating over the picture, now
   // beside Transcript and Captions. The recording, the analysis steps in the order they run with
-  // their state and the transcript's progress (2d), the out-of-date notice and Re-analyse, the
-  // speakers, the waveforms' read, and the project folder with a button that opens it.
+  // their state and, under the running one, each track's progress (2h), the out-of-date notice and
+  // Re-analyse, the speakers, the waveforms' read, and the project folder with a button that opens it.
+  // Above the analysis, the transcription job running in the background, whichever recording it is,
+  // with its pause (2k).
   import * as api from "./api";
   import { clock } from "./time";
+  import { busy as running, current, whole } from "./steps";
+  import { name as trackName } from "./tracks";
+  import TrackSteps from "./TrackSteps.svelte";
+  import TranscriptionJob from "./TranscriptionJob.svelte";
 
   let {
     player,
@@ -13,6 +19,7 @@
     status,
     error,
     analysis,
+    lane,
     outdated,
     waves,
     onReanalyse,
@@ -25,13 +32,15 @@
     /** The project could not be opened (the file still plays). */
     error: string | null;
     analysis: api.Progress | null;
+    /** The transcription lane (2k), whichever recording is open. */
+    lane: api.Transcription | null;
     outdated: string[];
     waves: api.WavesState | null;
     onReanalyse: () => void;
     onError: (message: string) => void;
   } = $props();
 
-  const busy = $derived(analysis?.phase === "queued" || analysis?.phase === "running");
+  const busy = $derived(running(analysis));
   const NAMES: Record<string, string> = {
     tracks: "Tracks",
     speech: "Speech",
@@ -39,11 +48,13 @@
     transcribe: "Transcript",
     edit: "Edit list",
   };
-  // The pipeline's own progress line while Whisper runs: "transcribing 12/40 chunks (30%)".
-  const percent = $derived.by(() => {
-    const m = analysis?.line?.match(/^transcribing .*\((\d+)%\)/);
-    return busy && m ? Number(m[1]) : null;
-  });
+  // The running stage's tracks (2h), named as their lanes are.
+  const steps = $derived(current(analysis));
+  function trackLabel(track: number): string {
+    const t = mixer?.tracks.find((m) => m.index === track);
+    return t ? `${track + 1} ${trackName(t, player?.audioTracks ?? [])}` : `Track ${track + 1}`;
+  }
+  const total = $derived(whole(steps));
   const file = $derived(player?.path ? (player.path.split(/[\\/]/).pop() ?? player.path) : "");
   const fps = $derived(edit?.fps ? edit.fps.num / edit.fps.den : null);
   const size = $derived(player?.width && player?.height ? `${player.width}×${player.height}` : null);
@@ -104,10 +115,15 @@
     </dl>
   </section>
 
+  {#if lane && lane.jobs.length > 0}
+    <TranscriptionJob {lane} open={analysis?.file ?? null} {onError} />
+  {/if}
+
   <section>
     <h3>
       Analysis
       {#if analysis?.phase === "queued"}<span class="note">waiting for another recording</span>{/if}
+      {#if analysis?.phase === "waiting"}<span class="note">transcription waits for another recording</span>{/if}
     </h3>
     {#if error}
       <p class="failed">{error}</p>
@@ -115,14 +131,15 @@
       <ul class="stages">
         {#each status.stages as s (s.name)}
           {@const st = state(s.state)}
+          {@const mine = st.cls === "running" && steps.length > 0 && steps[0].stage === s.name}
           <li>
             <span class="icon {st.cls}" aria-hidden="true"></span>
             <span class="nm">{NAMES[s.name] ?? s.name}</span>
             <span class="st {st.cls}">
-              {#if s.name === "transcribe" && st.cls === "running" && percent != null}{percent}%{:else}{st.label}{/if}
+              {#if mine && total != null}{total}%{:else}{st.label}{/if}
             </span>
-            {#if s.name === "transcribe" && st.cls === "running" && percent != null}
-              <span class="progress"><span style:width="{percent}%"></span></span>
+            {#if mine}
+              <span class="tracks"><TrackSteps {steps} name={trackLabel} /></span>
             {/if}
           </li>
         {/each}
@@ -268,17 +285,8 @@
       transform: rotate(360deg);
     }
   }
-  .progress {
+  .tracks {
     grid-column: 2 / 4;
-    height: 3px;
-    border-radius: 2px;
-    background: rgba(255, 255, 255, 0.08);
-  }
-  .progress span {
-    display: block;
-    height: 100%;
-    border-radius: 2px;
-    background: var(--accent);
   }
   .st {
     font-size: 12px;

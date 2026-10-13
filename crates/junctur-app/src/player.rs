@@ -385,6 +385,9 @@ impl Drop for Player {
     }
 }
 
+/// An edit refused because another recording was opened while it was asked for (2m).
+pub const OPENED_MEANWHILE: &str = "another recording was opened meanwhile: nothing was changed";
+
 impl Core {
     pub fn state(&self) -> PlayerState {
         lock(&self.state).clone()
@@ -404,9 +407,10 @@ impl Core {
     /// Takes the edit list on disk when someone other than the app changed it (the watch, and
     /// every edit before it applies, so an outside change inside the watch's settle time is played
     /// and edited on, not overwritten unseen). The app's own last save is skipped. A list that
-    /// parses and differs from the one in play ends the undo history; one that does not parse
-    /// keeps the ranges in play (`cuts::merge`) and says why in the edit state.
-    /// `by` names the caller in the log line an outside change leaves.
+    /// parses and keeps other ranges than the one in play ends the undo history, which holds kept
+    /// ranges only: one that changed only the rest (2j: the run's word counts landing) keeps it.
+    /// One that does not parse keeps the ranges in play (`cuts::merge`) and says why in the edit
+    /// state. `by` names the caller in the log line an outside change leaves.
     fn sync(&self, ed: &mut Editor, by: &str) -> Result<(), String> {
         let (file, path, fps) = {
             let c = lock(&self.ctl);
@@ -425,8 +429,11 @@ impl Core {
         }
         c.fps = c.fps.or(fps);
         let new_list = read.as_ref().and_then(|e| e.list.as_deref());
-        if new_list.is_some() && new_list != c.edit.list.as_deref() {
+        let in_play = c.edit.list.as_deref();
+        if new_list.is_some() && new_list != in_play {
             eprintln!("junctur-app: edit.junctur changed on disk, taken ({by})");
+        }
+        if new_list.is_some() && new_list.map(|l| &l.keep) != in_play.map(|l| &l.keep) {
             ed.changed_elsewhere();
             // A first list (the app's own analysis just wrote it, 2d) had no history to clear.
             let notice =
@@ -468,49 +475,59 @@ impl Core {
 
     /// Applies an edit, undo or redo to the edit list (first taking any outside change on disk),
     /// saves it and plays the result.
-    pub fn edit(&self, step: Step) -> Result<(), String> {
+    pub fn edit(&self, file: Option<&str>, step: Step) -> Result<(), String> {
         if let Step::Do(Op::Words { .. }) = step {
             self.prepare();
         }
-        self.change(|ed, list, fps| ed.edit(list, step, fps))
+        self.change(file, |ed, list, fps| ed.edit(list, step, fps))
     }
 
     /// Renames speaker `id` in the edit list and saves it (first taking any outside change). A
     /// speaker that is a remembered person renames the person (5b), in every recording.
-    pub fn rename_speaker(&self, id: u32, name: &str) -> Result<(), String> {
+    pub fn rename_speaker(&self, file: Option<&str>, id: u32, name: &str) -> Result<(), String> {
         let name = junctur_core::edit::check_name(name)?;
-        match self.file().map(|f| voices::rename(&f, id, name)) {
-            Some(Ok(Some(found))) => self.respeak(&found),
+        match file.map(|f| voices::rename(f, id, name)) {
+            Some(Ok(Some(found))) => self.respeak(file, &found),
             Some(Err(e)) => Err(e),
-            _ => self.change(|ed, list, _| ed.rename(list, id, name)),
+            _ => self.change(file, |ed, list, _| ed.rename(list, id, name)),
         }
     }
 
     /// Sets speaker `id`'s caption colour in the edit list and saves it; a remembered person's
     /// colour is theirs in every recording (5b).
-    pub fn recolor_speaker(&self, id: u32, color: &str) -> Result<(), String> {
-        match self.file().map(|f| voices::recolor(&f, id, color)) {
-            Some(Ok(Some(found))) => self.respeak(&found),
+    pub fn recolor_speaker(&self, file: Option<&str>, id: u32, color: &str) -> Result<(), String> {
+        match file.map(|f| voices::recolor(f, id, color)) {
+            Some(Ok(Some(found))) => self.respeak(file, &found),
             Some(Err(e)) => Err(e),
-            _ => self.change(|ed, list, _| ed.recolor(list, id, color)),
+            _ => self.change(file, |ed, list, _| ed.recolor(list, id, color)),
         }
     }
 
     /// Remembers `name`'s voice from transcript words `first..=last` of the open recording (5b)
     /// and labels its speakers again; returns a line for the user. Works from the windows the
     /// speakers stage kept, so nothing is decoded and it takes a moment at most.
-    pub fn enroll_voice(&self, first: usize, last: usize, name: &str) -> Result<String, String> {
+    pub fn enroll_voice(
+        &self,
+        file: Option<&str>,
+        first: usize,
+        last: usize,
+        name: &str,
+    ) -> Result<String, String> {
+        let file = file.ok_or("no recording is open")?;
         self.prepare();
         let words = lock(&self.editor)
             .words
             .clone()
             .ok_or("this recording has no transcript")?;
+        // After taking the words: had another recording been opened before, they would be its.
+        if self.file().as_deref() != Some(file) {
+            return Err(OPENED_MEANWHILE.into());
+        }
         let stretch = words
             .stretch(first, last)
             .ok_or("no such words in the transcript")?;
-        let file = self.file().ok_or("no recording is open")?;
-        let (found, line) = voices::enroll(&file, name, stretch)?;
-        self.respeak(&found)?;
+        let (found, line) = voices::enroll(file, name, stretch)?;
+        self.respeak(Some(file), &found)?;
         Ok(line)
     }
 
@@ -522,30 +539,32 @@ impl Core {
     /// the speakers go into the list in play only when that list is the heard recording's, checked
     /// under the editor's lock; otherwise into its edit list on disk. The re-hearing guard is held
     /// until then, so no enrollment slips in between.
-    pub fn reanalyze_speakers(&self) -> Result<(), String> {
-        let file = self.file().ok_or("no recording is open")?;
-        let (found, _rehearing) = voices::rehear(&file)?;
+    pub fn reanalyze_speakers(&self, file: Option<&str>) -> Result<(), String> {
+        let file = file.ok_or("no recording is open")?;
+        let (found, _rehearing) = voices::rehear(file)?;
         let mut here = false;
-        if self.file().as_deref() == Some(file.as_str()) {
-            self.change(|ed, list, _| {
-                if !junctur_core::output::same_file(&list.source, Path::new(&file)) {
-                    return Ok(None);
-                }
-                here = true;
-                let speakers = pipeline::speakers_for(Some(&found), Some(&list.speakers));
-                ed.respeak(list, speakers)
-            })?;
+        let changed = self.change(Some(file), |ed, list, _| {
+            if !junctur_core::output::same_file(&list.source, Path::new(file)) {
+                return Ok(None);
+            }
+            here = true;
+            let speakers = pipeline::speakers_for(Some(&found), Some(&list.speakers));
+            ed.respeak(list, speakers)
+        });
+        match changed {
+            Err(e) if e == OPENED_MEANWHILE => {}
+            r => r?,
         }
         if !here {
-            voices::respeak_on_disk(&file, &found)?;
+            voices::respeak_on_disk(file, &found)?;
         }
         Ok(())
     }
 
     /// Forgets voice `name` and labels the open recording's speakers again without it.
-    pub fn forget_voice(&self, name: &str) -> Result<(), String> {
-        match voices::forget(self.file().as_deref(), name)? {
-            Some(found) => self.respeak(&found),
+    pub fn forget_voice(&self, file: Option<&str>, name: &str) -> Result<(), String> {
+        match voices::forget(file, name)? {
+            Some(found) => self.respeak(file, &found),
             None => Ok(()),
         }
     }
@@ -555,26 +574,47 @@ impl Core {
         lock(&self.ctl).file.clone()
     }
 
-    /// An analysis of `file` (absolute) ended (2d). If it is the open recording, the words and
-    /// envelope read so far are dropped (a re-analysis may have replaced them) and the edit list on
-    /// disk is taken now rather than at the watch's next poll.
-    pub fn analysed(&self, file: &Path) {
-        let open = self.file();
-        if open.and_then(|f| std::path::absolute(f).ok()).as_deref() != Some(file) {
+    /// An analysis of `file` (absolute) ended (2d), or wrote its edit list (2j). If it is the open
+    /// recording, the words and envelope read so far are dropped (a re-analysis may have replaced
+    /// them) and the edit list on disk is taken now rather than at the watch's next poll. The
+    /// words are read again up to `through` ([`Self::transcribed`]): `None` once the transcript is
+    /// whole; while a run's transcription is to come or failed part way, the words so far, never
+    /// an older run's `transcript.json`, which the new words would replace under the page's word
+    /// indices (2j repair).
+    pub fn analysed(&self, file: &Path, through: Option<f64>) {
+        if !self.is_open(file) {
             return;
         }
         {
             let mut ed = lock(&self.editor);
             ed.words = None;
             ed.envelope = None;
+            ed.through = through;
         }
         self.reload_edit();
     }
 
+    /// `file` (absolute) is transcribed up to `through` seconds on every track (2j: a piece
+    /// landed): if it is the open recording, its words are read again, up to there, when next
+    /// asked for. `None`: the finished transcript's.
+    pub fn transcribed(&self, file: &Path, through: Option<f64>) {
+        if !self.is_open(file) {
+            return;
+        }
+        let mut ed = lock(&self.editor);
+        ed.words = None;
+        ed.through = through;
+    }
+
+    fn is_open(&self, file: &Path) -> bool {
+        let open = self.file();
+        open.and_then(|f| std::path::absolute(f).ok()).as_deref() == Some(file)
+    }
+
     /// Puts newly labelled speakers into the list in play (names of speakers nobody enrolled are
     /// kept by id, as a re-cut does) and saves it; the kept ranges and the undo history stay.
-    fn respeak(&self, found: &Found) -> Result<(), String> {
-        self.change(|ed, list, _| {
+    fn respeak(&self, file: Option<&str>, found: &Found) -> Result<(), String> {
+        self.change(file, |ed, list, _| {
             let speakers = pipeline::speakers_for(Some(found), Some(&list.speakers));
             ed.respeak(list, speakers)
         })
@@ -616,8 +656,8 @@ impl Core {
     }
 
     /// Sets the edit list's caption settings and saves them.
-    pub fn set_captions(&self, captions: Captions) -> Result<(), String> {
-        self.change(|ed, list, _| ed.set_captions(list, captions))
+    pub fn set_captions(&self, file: Option<&str>, captions: Captions) -> Result<(), String> {
+        self.change(file, |ed, list, _| ed.set_captions(list, captions))
     }
 
     /// Writes the captions of the list in play to `out` as one SRT (5a, 5e), on the edited timeline
@@ -666,14 +706,25 @@ impl Core {
 
     /// Takes any outside change on disk, lets `f` change and save the list in play, and plays
     /// the result.
+    /// `file`: the recording the command was let edit ([`crate::commands::App::editable`], 2m);
+    /// when another has been opened since, nothing is changed ([`OPENED_MEANWHILE`]), as the
+    /// edit would land on a recording whose runs it does not hold off.
     fn change(
         &self,
+        file: Option<&str>,
         f: impl FnOnce(&mut Editor, &EditList, Fps) -> Result<Option<Edited>, String>,
     ) -> Result<(), String> {
+        // From reading what is on disk to saving over it, so word counts the app's own analysis
+        // writes (`edit::amend`, 2j) never land between and get saved over. Taken before the
+        // editor: the watch takes the editor alone, and an amend this alone.
+        let _writing = junctur_core::edit::hold();
         let mut ed = lock(&self.editor);
         let synced = self.sync(&mut ed, "before an edit");
         let (list, fps) = {
             let c = lock(&self.ctl);
+            if c.file.as_deref() != file {
+                return Err(OPENED_MEANWHILE.into());
+            }
             let list = c.edit.list.clone().ok_or_else(|| {
                 c.edit.error.clone().unwrap_or_else(|| {
                     "no edit list yet: run the pipeline on this recording".into()
@@ -703,21 +754,32 @@ impl Core {
 
     /// Reads the transcript and the speech envelope, if not yet in the editor, outside its lock
     /// (a 30 h transcript or envelope is tens of MB) so the watch and other edits are not held up.
+    /// While the recording transcribes (2j) the words are the ones so far, up to where every track
+    /// is done ([`Words::load_so_far`]).
     fn prepare(&self) {
-        let (dir, words, env) = {
+        let (dir, words, env, through) = {
             let ed = lock(&self.editor);
             let Some(dir) = ed.project_dir().map(PathBuf::from) else {
                 return;
             };
-            (dir, ed.words.is_none(), ed.envelope.is_none())
+            (dir, ed.words.is_none(), ed.envelope.is_none(), ed.through)
         };
-        let w = words.then(|| Words::load(&dir).map(Arc::new)).flatten();
+        let w = words
+            .then(|| match through {
+                Some(t) => Some(Words::load_so_far(&dir, t)),
+                None => Words::load(&dir),
+            })
+            .flatten()
+            .map(Arc::new);
         let e = env
             .then(|| pipeline::envelope(&dir).map(Arc::new))
             .flatten();
         let mut ed = lock(&self.editor);
         if ed.project_dir() == Some(dir.as_path()) {
-            ed.words = ed.words.take().or(w);
+            // A piece that landed meanwhile asks for the words again, up to further on.
+            if ed.through == through {
+                ed.words = ed.words.take().or(w);
+            }
             ed.envelope = ed.envelope.take().or(e);
         }
     }

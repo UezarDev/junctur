@@ -299,7 +299,9 @@ fn plan<'a>(speech: &'a Speech, voice: &[usize]) -> Plan<'a> {
 /// Who talks when in `file`, from the speech stage's regions, labelled with `voices`. `voice` names
 /// the speech tracks whose role is a single voice; the others are mixes. When the speakers are told
 /// apart by voice, the window embeddings are written to project folder `dir` for [`relabel`], and
-/// the windows are cut at `pins` (5c: [`seeded`]), which the result keeps.
+/// the windows are cut at `pins` (5c: [`seeded`]), which the result keeps. `heard` is told the
+/// track being heard and how far through it the hearing is (2h); speakers told apart by track hear
+/// nothing, so it is not called.
 #[allow(clippy::too_many_arguments)]
 pub fn find(
     file: &Path,
@@ -310,6 +312,7 @@ pub fn find(
     dir: &Path,
     cache_dir: &Path,
     device: DevicePref,
+    heard: &mut dyn FnMut(usize, f64),
 ) -> Result<Found> {
     let found = match plan(speech, voice) {
         Plan::Nothing => Found {
@@ -336,8 +339,14 @@ pub fn find(
             let mut r = PcmReader::open(file, one.track, RATE, 1, Span::default())?;
             // Not `finish`ed: hearing stops reading after the last speech window, and the decoder
             // is dropped (killed) rather than waited for.
+            let track = one.track;
+            heard(track, 0.0);
             let regions = seeded(&one.regions, pins);
-            let a = diarize::analyze(&mut r, &regions, &mut emb, Some(&mut seg))?;
+            let a = diarize::analyze(&mut r, &regions, &mut emb, Some(&mut seg), &mut |at| {
+                heard(track, at)
+            })?;
+            // The rest of the track has no speech to hear: done.
+            heard(track, f64::INFINITY);
             let embeddings = save_embeddings(dir, &a.embeddings)?;
             let unlabelled = Found {
                 method: Method::Voices,
@@ -827,6 +836,7 @@ mod tests {
             Path::new("."),
             Path::new("."),
             DevicePref::Cpu,
+            &mut |_, _| panic!("nothing to hear"),
         )
         .unwrap();
         assert_eq!(f.method, Method::None);
@@ -863,6 +873,7 @@ mod tests {
                 Path::new("."),
                 Path::new("."),
                 DevicePref::Cpu,
+                &mut |_, _| {},
             )
             .unwrap();
             assert_eq!(f.pins, pins, "{:?}", f.method);

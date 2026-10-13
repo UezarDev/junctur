@@ -11,8 +11,9 @@ use crate::Result;
 /// The file in a project folder.
 pub(crate) const FILE: &str = "jobs.json";
 
-/// Stage names, in run order.
-pub const STAGES: [&str; 5] = ["tracks", "speech", "speakers", "transcribe", "edit"];
+/// Stage names, in run order. The edit list comes before the transcript (2j): it needs none of it
+/// but the word counts, filled in once the transcript is whole.
+pub const STAGES: [&str; 5] = ["tracks", "speech", "speakers", "edit", "transcribe"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -43,7 +44,14 @@ impl Jobs {
     pub fn load(dir: &Path) -> Self {
         std::fs::read(dir.join(FILE))
             .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
+            .and_then(|b| serde_json::from_slice::<Jobs>(&b).ok())
+            .map(|mut j| {
+                // A file written before 2j lists `transcribe` before `edit`: run order now.
+                // Stable, and names this version does not know go last.
+                let order = |n: &str| STAGES.iter().position(|&x| x == n).unwrap_or(usize::MAX);
+                j.stages.sort_by_key(|s| order(&s.name));
+                j
+            })
             .unwrap_or_else(|| Jobs {
                 file: PathBuf::new(),
                 stages: STAGES
@@ -62,6 +70,12 @@ impl Jobs {
         self.stages.iter().find(|s| s.name == name)
     }
 
+    /// Records stage `name`'s state in `dir`'s `jobs.json`, and takes the file as it now is.
+    ///
+    /// Read, changed and written back under one process-wide lock (2m), never this copy written
+    /// whole: a run's second half and 5c's speakers heard again each hold a copy loaded at their
+    /// start, and the speakers' write would put back `transcribe: running` after the
+    /// transcription had finished (the panel showing it running, a resume on the next open).
     pub fn set(
         &mut self,
         dir: &Path,
@@ -70,6 +84,12 @@ impl Jobs {
         seconds: Option<f64>,
         note: Option<String>,
     ) -> Result<()> {
+        let file = (!self.file.as_os_str().is_empty()).then(|| self.file.clone());
+        *self = record(dir, file, name, state, seconds, note)?;
+        Ok(())
+    }
+
+    fn put(&mut self, name: &str, state: StageState, seconds: Option<f64>, note: Option<String>) {
         if !self.stages.iter().any(|s| s.name == name) {
             // A stage added after this project's `jobs.json` was written (5a's `speakers`): put it
             // in run order, or its state would be dropped on every run.
@@ -96,13 +116,11 @@ impl Jobs {
             }
             s.note = note;
         }
-        // Whole or not at all: a half-written file would read back as every stage pending.
-        crate::output::write_replacing(&dir.join(FILE), serde_json::to_vec_pretty(self)?)?;
-        Ok(())
     }
 
     /// Run one stage, recording it as running, then done (with its time) or failed. The stage
-    /// logs through the same `log`.
+    /// logs through the same `log`. A stage that panics is recorded failed on the way out (2m),
+    /// not left `running` as if the run had been killed.
     pub fn stage<T>(
         &mut self,
         dir: &Path,
@@ -115,7 +133,10 @@ impl Jobs {
         self.set(dir, name, StageState::Running, None, None)?;
         log(&format!("stage {name} ..."));
         let t0 = Instant::now();
-        match f(log) {
+        let unwinding = Unwinding { dir, name };
+        let result = f(log);
+        std::mem::forget(unwinding);
+        match result {
             Ok(v) => {
                 let secs = t0.elapsed().as_secs_f64();
                 self.set(dir, name, StageState::Done, Some(secs), None)?;
@@ -134,6 +155,44 @@ impl Jobs {
         log(&format!("stage {name}: reusing the earlier result"));
         let state = StageState::Done;
         self.set(dir, name, state, None, Some("reused".into()))
+    }
+}
+
+/// One change to `jobs.json` at a time in this process (2m: see [`Jobs::set`]).
+static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Loads `dir`'s `jobs.json`, records one stage's state in it and writes it back whole, under
+/// [`WRITING`]; returns what was written. `file` names the recording when the caller knows it.
+fn record(
+    dir: &Path,
+    file: Option<PathBuf>,
+    name: &str,
+    state: StageState,
+    seconds: Option<f64>,
+    note: Option<String>,
+) -> Result<Jobs> {
+    let _writing = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    let mut now = Jobs::load(dir);
+    if let Some(f) = file {
+        now.file = f;
+    }
+    now.put(name, state, seconds, note);
+    // Whole or not at all: a half-written file would read back as every stage pending.
+    crate::output::write_replacing(&dir.join(FILE), serde_json::to_vec_pretty(&now)?)?;
+    Ok(now)
+}
+
+/// Armed while a stage runs; dropped only when the stage unwinds (a panic), when it records the
+/// stage failed ([`Jobs::stage`]).
+struct Unwinding<'a> {
+    dir: &'a Path,
+    name: &'a str,
+}
+
+impl Drop for Unwinding<'_> {
+    fn drop(&mut self) {
+        let note = Some("stopped on an internal error".to_string());
+        let _ = record(self.dir, None, self.name, StageState::Failed, None, note);
     }
 }
 
@@ -177,6 +236,45 @@ mod tests {
     }
 
     #[test]
+    fn two_copies_never_write_over_each_others_stages() {
+        let dir = std::env::temp_dir().join(format!("junctur-jobs-two-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A run's second half and the speakers heard again, each loaded while transcribing.
+        let mut run = Jobs::load(&dir);
+        run.set(&dir, "transcribe", StageState::Running, None, None)
+            .unwrap();
+        let mut rehear = Jobs::load(&dir);
+        run.set(&dir, "transcribe", StageState::Done, Some(1.0), None)
+            .unwrap();
+        rehear
+            .set(&dir, "speakers", StageState::Done, Some(2.0), None)
+            .unwrap();
+        let back = Jobs::load(&dir);
+        assert_eq!(back.get("transcribe").unwrap().state, StageState::Done);
+        assert_eq!(back.get("speakers").unwrap().state, StageState::Done);
+        assert_eq!(rehear, back, "a copy takes the file as written");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_stage_that_panics_is_recorded_failed() {
+        let dir = std::env::temp_dir().join(format!("junctur-jobs-panic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let caught = std::panic::catch_unwind(|| {
+            let mut j = Jobs::load(&dir);
+            let _: Result<()> = j.stage(&dir, "speech", &mut |_| {}, |_| panic!("boom"));
+        });
+        assert!(caught.is_err());
+        assert_eq!(
+            Jobs::load(&dir).get("speech").unwrap().state,
+            StageState::Failed
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn a_stage_an_older_file_does_not_list_is_added_in_run_order() {
         let dir = std::env::temp_dir().join(format!("junctur-jobs-old-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -190,6 +288,7 @@ mod tests {
         j.set(&dir, "speakers", StageState::Done, Some(2.0), None)
             .unwrap();
         let back = Jobs::load(&dir);
+        // Also put in today's order: the file had `transcribe` before `edit` (before 2j).
         let names: Vec<&str> = back.stages.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, STAGES);
         assert_eq!(back.get("speakers").unwrap().state, StageState::Done);

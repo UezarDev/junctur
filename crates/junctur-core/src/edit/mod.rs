@@ -22,7 +22,7 @@ pub use captions::{default_color, parse_color, Captions};
 pub use format::{parse, FORMAT_VERSION};
 pub use frames::{frame_ranges, frame_span, frames_ceil, frames_floor};
 pub use reduce::{keep_ranges, snap_boundary, word_span, Envelope, ENVELOPE_HOP};
-pub use save::{backup_path, save, unstamped, Saved};
+pub use save::{amend, backup_path, hold, save, unstamped, Amended, Held, Saved};
 pub use scores::windows;
 pub use speakers::{
     check_name, default_name, Labeller, Person, SpeakerName, Speakers, Turn, MAX_NAME,
