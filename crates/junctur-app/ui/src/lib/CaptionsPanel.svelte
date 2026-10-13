@@ -2,10 +2,11 @@
   // The caption styling panel (5a, 5d): exporting captions with a render, previewing them over the
   // picture (two switches since 5d), each speaker's colour and name with a sample of how it reads,
   // bold, italic and underline (5f), how cues are cut, and exporting the SRT. Everything is saved to edit.junctur
-  // at once (the `captions` and `speaker` lines), so it is readable and survives a re-cut. Only
-  // what an SRT carries into DaVinci Resolve is offered: text, timing, colour, bold, italic and
-  // underline (5d's research, 5f). Size, font, outline, shadow, background and position are Resolve's subtitle
-  // Track Style, which no import sets; the note says so rather than offering settings Resolve drops. Export writes one file
+  // at once (the `captions` and `speaker` lines), so it is readable and survives a re-cut. An SRT
+  // carries only text, timing, colour, bold, italic and underline into DaVinci Resolve (5d, 5f); the
+  // font, size, position, outline and where people talking at once go (5g) reach it through "Send to
+  // Resolve", Text+ clips placed by the Junctur script running in Resolve, and drive the preview.
+  // Export writes one file
   // (5e): a Resolve subtitle track shows one caption at a time, so people talking at once share one
   // caption, a line each; 5b's per-speaker files left beside it are listed. The remembered voices
   // are listed with Forget, and the speakers can be analysed again from the audio (5c), the seconds
@@ -16,7 +17,7 @@
   // defaults.
   import { save } from "@tauri-apps/plugin-dialog";
   import * as api from "./api";
-  import { captionFace } from "./captionStyle";
+  import { captionFace, captionFont } from "./captionStyle";
   import CaptionRules from "./CaptionRules.svelte";
 
   let {
@@ -33,6 +34,8 @@
   const speakers = $derived(edit?.speakers ?? []);
   const usable = $derived(!!edit?.editable && !!captions);
   const face = $derived(captionFace(captions ?? { bold: false, italic: false, underline: false }));
+  const font = $derived(captions ? captionFont(captions) : "inherit");
+  const names = $derived(speakers.map((s) => s.name));
   let exported = $state<string[] | null>(null);
   let busy = $state(false);
   let savedDefault = $state(false);
@@ -78,6 +81,35 @@
   function setCaptions(change: Partial<api.Captions>) {
     if (!captions) return;
     call(() => api.setCaptions({ ...captions, ...change }));
+  }
+
+  // Send to Resolve (5g): one at a time; the reply says what landed.
+  let sending = $state(false);
+  let sentLines = $state<string[] | null>(null);
+  async function sendResolve() {
+    sending = true;
+    sentLines = null;
+    try {
+      const r = await api.sendToResolve();
+      const n = (k: number, what: string) => `${k.toLocaleString()} ${what}`;
+      sentLines = [
+        `On "${r.timeline}": ${n(r.placed, "placed")}, ${n(r.restyled, "updated")}, ${n(r.removed, "removed")}.`,
+        ...(r.failed > 0 ? [`${n(r.failed, "not placed")}: ${r.firstError ?? "no reason given"}`] : []),
+      ];
+    } catch (e) {
+      onError(String(e));
+    } finally {
+      sending = false;
+    }
+  }
+  let installed = $state<string | null>(null);
+  async function installScript() {
+    installed = null;
+    try {
+      installed = await api.installResolveScript();
+    } catch (e) {
+      onError(String(e));
+    }
   }
 
   async function saveDefault() {
@@ -163,6 +195,7 @@
           style:font-weight={face.weight}
           style:font-style={face.style}
           style:text-decoration={face.decoration}
+          style:font-family={font}
         >
           {s.name}: ¿qué tal? Hola a todos
         </div>
@@ -170,12 +203,20 @@
 
       <h3>Style</h3>
       <CaptionRules value={captions} part="style" onChange={(c) => setCaptions(c)} {onError} />
+      <CaptionRules value={captions} part="look" onChange={(c) => setCaptions(c)} {onError} />
       <p class="note">
-        Colour, bold, italic and underline are all an SRT brings into Resolve. Font, size, outline, shadow, background and
-        position are the subtitle track's style in Resolve (select the track, Inspector &gt; Track): set them there
-        once for every caption. Resolve has been reported to give bold or italic (perhaps underlined) captions their own style rather
-        than the track's: if a Track Style change then misses them, turn these off. The preview shows Resolve's
-        default look.
+        The preview and "Send to Resolve" use all of these. An SRT brings only the colour, bold, italic and underline
+        into Resolve: there the font, size, outline and position are the subtitle track's style (select the track,
+        Inspector &gt; Track). Resolve has been reported to give bold or italic (perhaps underlined) SRT captions
+        their own style rather than the track's: if a Track Style change then misses them, turn these off.
+      </p>
+
+      <h3>People talking at once</h3>
+      <CaptionRules value={captions} part="overlap" {names} onChange={(c) => setCaptions(c)} {onError} />
+      <p class="note">
+        Where their captions go in the preview and in Resolve. The protagonist keeps the normal spot and the others
+        move round them. Side by side needs short lines (about 20 characters per line) not to run into each other.
+        The SRT always stacks them in one caption, first to speak on top.
       </p>
 
       <h3>How captions are cut</h3>
@@ -202,6 +243,28 @@
         In DaVinci Resolve import the file (File &gt; Import &gt; Subtitle) onto one subtitle track at the start
         of the timeline; the colours, bold, italic and underline come through. An SRT carries no size or position: set
         those in Resolve. Premiere Pro is untested and likely shows its default style.
+      </p>
+
+      <h3>Send to Resolve</h3>
+      <CaptionRules value={captions} part="resolve" onChange={(c) => setCaptions(c)} {onError} />
+      <button class="export" onclick={sendResolve} disabled={sending || !source}>
+        {sending ? "Sending…" : "Send to Resolve"}
+      </button>
+      {#if sentLines}
+        {#each sentLines as line (line)}<p class="done">{line}</p>{/each}
+      {/if}
+      <button onclick={installScript} title="Puts the Junctur script into Resolve's Scripts folder; sending does this too">
+        Install script in Resolve
+      </button>
+      {#if installed}<p class="done">Installed: {installed}</p>{/if}
+      <p class="note">
+        Places every caption on the open Resolve timeline as a Text+ clip, each speaker on their own video track
+        ("Junctur" and their name) in their colour, styled as above, at the edited timeline's times: put the
+        edited video (render or FCPXML) at the start of that timeline. Once per Resolve session, choose Workspace
+        &gt; Scripts &gt; Junctur in Resolve and leave it running; Junctur installs the script when you send.
+        Sending again updates the captions already there instead of adding more. The template is Junctur's
+        own Text+ unless you name a Text+ title from Resolve's media pool; your template keeps its shadow and
+        background, these settings set the rest.
       </p>
 
       <h3>Remembered voices</h3>

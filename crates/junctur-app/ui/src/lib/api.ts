@@ -129,14 +129,44 @@ export interface Captions {
   italic: boolean;
   /** Every caption underlined (5f: Uezar's import showed Resolve underlines in the speaker's colour). */
   underline: boolean;
+  /** 5g's look, for the Resolve Text+ send and the preview; the SRT ignores it. */
+  font: string;
+  /** Text height in % of the picture height. */
+  size: number;
+  /** Picture bottom to caption bottom, % of the picture height. */
+  position: number;
+  outline: boolean;
+  /** 1 to 10. */
+  outlineWidth: number;
+  outlineColor: string;
+  /** Where people talking at once go. */
+  layout: CaptionLayout;
+  /** A speaker's name: they keep the normal spot when people talk at once; empty for none. */
+  protagonist: string;
+  /** A Fusion Title's clip name in Resolve's media pool; empty for Junctur's own Text+. */
+  template: string;
 }
 
+export type CaptionLayout = "stacked" | "side" | "topBottom";
+
 /** A caption as the SRT export cuts it (junctur-core export/srt.rs), output seconds; one part per
- * speaker talking in it, so several only where people talk at once (5e). */
+ * speaker talking in it, so several only where people talk at once (5e), each placed where the
+ * Resolve send puts it (5g, export/layout.rs): the centre as fractions of the picture, x from the
+ * left, y from the bottom. */
 export interface Cue {
   start: number;
   end: number;
-  parts: { speaker: number; lines: string[] }[];
+  parts: { speaker: number; lines: string[]; x: number; y: number }[];
+}
+
+/** What a send to Resolve did (junctur-core resolve/reply.rs). */
+export interface Sent {
+  placed: number;
+  restyled: number;
+  removed: number;
+  failed: number;
+  firstError: string | null;
+  timeline: string;
 }
 
 /** A Whisper model the Settings dialog offers (src/settings.rs). */
@@ -330,6 +360,10 @@ export const setCaptions = (captions: Captions) => invoke<void>("set_captions", 
 export const exportCaptions = (path: string) => invoke<Exported>("export_captions", { path });
 /** The captions as the export cuts them, for the preview over the picture (5d). */
 export const captionCues = () => invoke<Cue[]>("caption_cues");
+/** Sends the captions into DaVinci Resolve as Text+ clips through the Junctur script there (5g). */
+export const sendToResolve = () => invoke<Sent>("send_to_resolve");
+/** Installs the Junctur script into Resolve's Scripts folder; resolves to its path. */
+export const installResolveScript = () => invoke<string>("install_resolve_script");
 export const voices = () => invoke<Voice[]>("voices");
 /** Remembers `name`'s voice from words `first..=last` and relabels the speakers; resolves to a line for the user. */
 export const enrollVoice = (first: number, last: number, name: string) =>

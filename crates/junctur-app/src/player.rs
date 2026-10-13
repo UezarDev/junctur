@@ -25,7 +25,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use junctur_core::edit::{Captions, EditList, Speakers};
-use junctur_core::export::srt::{self, Cue};
+use junctur_core::export::layout::{self, Placed};
+use junctur_core::export::srt;
 use junctur_core::export::{self, CaptionFiles};
 use junctur_core::pipeline::{self, Found};
 use serde::Serialize;
@@ -676,12 +677,25 @@ impl Core {
     }
 
     /// The captions of the list in play as the SRT export cuts them (5d's preview over the
-    /// picture): the same cues on the same output timeline, so the preview shows what Resolve
-    /// will, cue for cue.
-    pub fn caption_cues(&self) -> Result<Vec<Cue>, String> {
+    /// picture), each speaker placed as the Resolve send places them (5g): the same cues on the same
+    /// output timeline, so the preview shows what Resolve will, cue for cue.
+    pub fn caption_cues(&self) -> Result<Vec<Placed>, String> {
         let (list, captions, words, fps) = self.caption_source()?;
         let tracked = words.tracks.iter().copied().zip(words.list.iter());
-        Ok(srt::cues(&list, &captions, tracked, fps.num, fps.den))
+        let cues = srt::cues(&list, &captions, tracked, fps.num, fps.den);
+        Ok(layout::place(&cues, &list, &captions))
+    }
+
+    /// Sends the captions of the list in play into DaVinci Resolve as Text+ clips (5g): the same
+    /// placed cues the preview draws, to the Junctur script running in Resolve. Blocks until Resolve
+    /// answers (minutes for a long recording), so the command runs it off the async runtime.
+    pub fn send_to_resolve(&self) -> Result<junctur_core::resolve::Sent, String> {
+        let (list, captions, words, fps) = self.caption_source()?;
+        captions.check()?;
+        let tracked = words.tracks.iter().copied().zip(words.list.iter());
+        let cues = srt::cues(&list, &captions, tracked, fps.num, fps.den);
+        let placed = layout::place(&cues, &list, &captions);
+        junctur_core::resolve::send(&placed, &list, &captions)
     }
 
     /// What a caption file is cut from: the list in play, its caption settings (its own, else the
@@ -700,7 +714,8 @@ impl Core {
         };
         let captions = list
             .captions
-            .unwrap_or_else(|| *lock(&self.caption_defaults));
+            .clone()
+            .unwrap_or_else(|| lock(&self.caption_defaults).clone());
         Ok((list, captions, words, fps))
     }
 
@@ -855,7 +870,7 @@ impl Core {
 
     pub fn edit_state(&self) -> EditState {
         let c = lock(&self.ctl);
-        let defaults = *lock(&self.caption_defaults);
+        let defaults = lock(&self.caption_defaults).clone();
         EditState::new(&c.edit, c.skip, c.fps, &c.status, &defaults)
     }
 
@@ -1016,7 +1031,7 @@ impl Core {
     }
 
     fn emit_edit(&self, c: &Ctl) {
-        let defaults = *lock(&self.caption_defaults);
+        let defaults = lock(&self.caption_defaults).clone();
         let _ = self.app.emit(
             EDIT_EVENT,
             EditState::new(&c.edit, c.skip, c.fps, &c.status, &defaults),
