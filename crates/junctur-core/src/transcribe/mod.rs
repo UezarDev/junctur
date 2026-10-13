@@ -146,7 +146,10 @@ pub fn load(project: &Path) -> Option<Transcript> {
 }
 
 /// Transcribe the speech regions of `sources`, resuming an interrupted run and reusing a finished
-/// one that answers `opts`. `log` gets the model note and progress every 5%.
+/// one that answers `opts`. `log` gets the model note and progress every 5%; `reach` is told how
+/// far each track's transcript reaches ([`Reached`]), every track at the start and a chunk's track
+/// after each chunk (2h).
+#[allow(clippy::too_many_arguments)]
 pub fn transcribe(
     file: &Path,
     sources: &[Source],
@@ -155,6 +158,7 @@ pub fn transcribe(
     cache_dir: &Path,
     opts: &TranscribeOptions,
     log: &mut dyn FnMut(&str),
+    reach: &mut dyn FnMut(usize, f64),
 ) -> Result<Transcript> {
     let partial = project.join("transcript.partial.jsonl");
     if opts.force {
@@ -200,6 +204,10 @@ pub fn transcribe(
         })
         .collect();
     let left = todo.iter().flatten().filter(|&&t| t).count();
+    let mut reached = Reached::new(sources, &work, &done, total);
+    for (track, at) in reached.all() {
+        reach(track, at);
+    }
     // Nothing left to hear: no GPU query, no model load. The choice is the one that did the work.
     let mut choice = Choice {
         model: want.model.clone(),
@@ -224,6 +232,9 @@ pub fn transcribe(
             // One write for the line and its newline, so a kill tears at most this line.
             out.write_all(format!("{}\n", serde_json::to_string(&seg)?).as_bytes())?;
             out.flush()?;
+            if let Some(at) = reached.finish(seg.track, seg.start) {
+                reach(seg.track, at);
+            }
             done.push(seg);
             progress.at(done.len());
             Ok(())
@@ -417,6 +428,80 @@ impl<'a> Progress<'a> {
     }
 }
 
+/// How far each track's transcript reaches: the start of its earliest chunk not transcribed yet
+/// (everything before it is done, silence included), or `total` once its last chunk is. Not the
+/// latest chunk's end: a resumed run can have later chunks done than earlier ones, and a track that
+/// goes quiet at 80 % would never read more than 80 %. Not a chunk count: a chunk is 1 to 28 s.
+struct Reached {
+    tracks: Vec<TrackChunks>,
+    total: f64,
+}
+
+/// One track's chunks for [`Reached`]: their starts in time order, whether each is done, and the
+/// first not done.
+struct TrackChunks {
+    track: usize,
+    chunks: Vec<(f64, bool)>,
+    first: usize,
+}
+
+impl TrackChunks {
+    fn position(&self, total: f64) -> f64 {
+        self.chunks.get(self.first).map_or(total, |c| c.0)
+    }
+}
+
+impl Reached {
+    fn new(sources: &[Source], work: &[(usize, Chunk)], done: &[Segment], total: f64) -> Self {
+        let tracks = sources
+            .iter()
+            .map(|s| {
+                let mut chunks: Vec<(f64, bool)> = work
+                    .iter()
+                    .filter(|(t, _)| *t == s.track)
+                    .map(|(_, c)| {
+                        let finished = done
+                            .iter()
+                            .any(|d| d.track == s.track && d.start == c.start);
+                        (c.start, finished)
+                    })
+                    .collect();
+                chunks.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let first = chunks.iter().take_while(|c| c.1).count();
+                TrackChunks {
+                    track: s.track,
+                    chunks,
+                    first,
+                }
+            })
+            .collect();
+        Self { tracks, total }
+    }
+
+    /// Every track and how far it reaches.
+    fn all(&self) -> Vec<(usize, f64)> {
+        self.tracks
+            .iter()
+            .map(|t| (t.track, t.position(self.total)))
+            .collect()
+    }
+
+    /// Marks `track`'s chunk at `start` done; how far the track reaches now, when it moved.
+    fn finish(&mut self, track: usize, start: f64) -> Option<f64> {
+        let total = self.total;
+        let t = self.tracks.iter_mut().find(|t| t.track == track)?;
+        let before = t.position(total);
+        if let Some(c) = t.chunks.iter_mut().find(|c| c.0 == start) {
+            c.1 = true;
+        }
+        while t.chunks.get(t.first).is_some_and(|c| c.1) {
+            t.first += 1;
+        }
+        let now = t.position(total);
+        (now != before).then_some(now)
+    }
+}
+
 /// An earlier run's header and the chunks it finished, or None when there is no readable partial
 /// (missing, or a header this version cannot read). A torn last line (killed mid-write) is dropped.
 fn read_partial(path: &Path) -> Option<(Header, Vec<Segment>)> {
@@ -540,6 +625,49 @@ mod tests {
         std::fs::write(&p, "{\"version\":1,\"languages\":\"es+en\"}\n").unwrap();
         assert!(read_partial(&p).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_track_reaches_its_first_chunk_not_done_and_its_end_when_all_are() {
+        let chunk = |start: f64| Chunk {
+            start,
+            end: start + 10.0,
+        };
+        let seg = |track, start| Segment {
+            track,
+            start,
+            end: start + 10.0,
+            lang: "es".into(),
+            model: "m".into(),
+            words: vec![],
+        };
+        let source = |track| Source {
+            track,
+            regions: vec![],
+        };
+        // Track 0: chunks at 0, 50 and 200; the one at 50 done by an interrupted run. Track 1: one
+        // chunk. Track 2: no speech, so nothing to wait for.
+        let work = [
+            (0, chunk(0.0)),
+            (0, chunk(50.0)),
+            (0, chunk(200.0)),
+            (1, chunk(30.0)),
+        ];
+        let mut r = Reached::new(
+            &[source(0), source(1), source(2)],
+            &work,
+            &[seg(0, 50.0)],
+            300.0,
+        );
+        assert_eq!(r.all(), vec![(0, 0.0), (1, 30.0), (2, 300.0)]);
+        // The first chunk done: the silence after it and the resumed chunk are behind us too.
+        assert_eq!(r.finish(0, 0.0), Some(200.0));
+        // The last one: the whole track, though its speech ended at 210 s.
+        assert_eq!(r.finish(0, 200.0), Some(300.0));
+        assert_eq!(r.finish(1, 30.0), Some(300.0));
+        // A chunk of a track not asked for, or done twice, moves nothing.
+        assert_eq!(r.finish(5, 0.0), None);
+        assert_eq!(r.finish(1, 30.0), None);
     }
 
     #[test]

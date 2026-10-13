@@ -17,6 +17,8 @@
   import Strips from "./lib/Strips.svelte";
   import Avatars from "./lib/Avatars.svelte";
   import ActionBar from "./lib/ActionBar.svelte";
+  import TrackSteps from "./lib/TrackSteps.svelte";
+  import * as steps from "./lib/steps";
   import { layout } from "./lib/layout";
   import { Talk, same } from "./lib/talking";
   import * as sel from "./lib/selection";
@@ -268,22 +270,10 @@
     }
   }
 
-  // What the chip on the picture says while the open recording is analysed (mock L).
-  const STEP: Record<string, string> = {
-    tracks: "Reading tracks",
-    speech: "Finding speech",
-    speakers: "Telling speakers apart",
-    transcribe: "Transcribing",
-    edit: "Cutting",
-  };
-  const chip = $derived.by(() => {
-    if (!busy(analysis)) return null;
-    if (analysis!.phase === "queued") return "Waiting for another analysis";
-    const running = analysis!.project?.stages.find((s) => s.state === "running");
-    const m = analysis!.line?.match(/^transcribing .*\((\d+)%\)/);
-    const name = running ? (STEP[running.name] ?? running.name) : "Analysing";
-    return running?.name === "transcribe" && m ? `${name} · ${m[1]}%` : `${name}…`;
-  });
+  // What the chip on the picture says while the open recording is analysed (mock L), with a thin
+  // bar per track under it when there are several (2h).
+  const chip = $derived(steps.label(analysis));
+  const chipSteps = $derived(steps.current(analysis));
 
   // Re-analyse: the pipeline with the settings now, in the background. When the edit list holds
   // the user's edits, ask before they are replaced (they are kept as a backup).
@@ -450,7 +440,10 @@
     {#if chip}
       <div class="chip" style:right="{windowWidth - (L.picture.x + L.picture.w) + 14}px" style:top="{L.picture.y + 14}px">
         <span class="spin" aria-hidden="true"></span>
-        <span>{chip}</span>
+        <span class="what">
+          <span>{chip}</span>
+          {#if chipSteps.length > 1}<TrackSteps steps={chipSteps} compact />{/if}
+        </span>
         <button
           onclick={() => {
             tab = "properties";
@@ -594,6 +587,12 @@
     border-radius: 8px;
     background: rgba(16, 17, 20, 0.86);
     border: 1px solid var(--line);
+  }
+  .chip .what {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 9em;
   }
   .chip button {
     padding: 2px 8px;

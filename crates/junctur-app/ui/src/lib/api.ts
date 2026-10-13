@@ -204,6 +204,16 @@ export interface MixerState {
 
 export type Phase = "queued" | "running" | "done" | "failed";
 
+/** How far one track has got through one stage (junctur-core pipeline/steps.rs, 2h): `at` seconds
+ * of the track's `of` are behind it. */
+export interface Step {
+  stage: string;
+  /** 0-based audio ordinal. */
+  track: number;
+  at: number;
+  of: number;
+}
+
 /** An analysis run by the app (src/analysis.rs). */
 export interface Progress {
   file: string;
@@ -212,6 +222,8 @@ export interface Progress {
   line: string | null;
   error: string | null;
   project: ProjectStatus | null;
+  /** Per track, the latest stage it reported; only the running stage's are current (lib/steps.ts). */
+  steps: Step[];
 }
 
 export interface Reanalysed {

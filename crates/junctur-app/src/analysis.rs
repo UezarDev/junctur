@@ -1,7 +1,8 @@
 //! Analysis run by the app itself (2d): a recording opened without an edit list is analysed in the
 //! background while it already plays, and an analysed one can be analysed again when the settings
 //! moved. Each run is `pipeline::run` on its own thread with the options `junctur analyze` uses
-//! (`config::analysis_options`), and its log lines become [`Progress`] for the project panel.
+//! (`config::analysis_options`), and its log lines become [`Progress`] for the project panel, with
+//! how far each track has got through the running stage (2h: the pipeline's [`Step`]s).
 //!
 //! Its own module because none of it is the player's: a run outlives the recording being open (it
 //! resumes where it stopped if the app closes, as the CLI's does), and several recordings may be
@@ -14,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use junctur_core::config;
-use junctur_core::pipeline::{self, PipelineOptions, Project};
+use junctur_core::pipeline::{self, PipelineOptions, Project, Step};
 use serde::Serialize;
 
 use crate::lock::lock;
@@ -51,6 +52,9 @@ pub struct Progress {
     pub error: Option<String>,
     /// The project as `jobs.json` and the files say now: each stage's state.
     pub project: Option<ProjectStatus>,
+    /// Per track, in track order, the latest stage it reported and how far through it it is (2h).
+    /// Only the running stage's are current; the page shows those.
+    pub steps: Vec<Step>,
 }
 
 /// What a request to analyse again did.
@@ -143,6 +147,7 @@ impl Analysis {
             line: None,
             error: Some(error),
             project: self.status(&k),
+            steps: Vec::new(),
         };
         lock(&self.runs).insert(k, r.clone());
         r
@@ -172,6 +177,7 @@ impl Analysis {
                 line: None,
                 error: None,
                 project: self.status(&k),
+                steps: Vec::new(),
             };
             runs.insert(k.clone(), r.clone());
             r
@@ -223,16 +229,18 @@ impl Analysis {
         let k = p.file.clone();
         self.update(&k, notify.as_ref(), |r| r.phase = Phase::Running);
         let name = k.file_name().map(|n| n.to_string_lossy().into_owned());
+        let steps = |s: Step| self.step(&k, s, notify.as_ref());
         let result = self.options(p).and_then(|o| {
-            pipeline::run(p, &o, &mut |line| {
+            let mut log = |line: &str| {
                 eprintln!(
                     "junctur-app analysis ({}): {line}",
                     name.as_deref().unwrap_or("")
                 );
                 self.update(&k, notify.as_ref(), |r| r.line = Some(line.to_string()));
-            })
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+            };
+            pipeline::run_with(p, &o, &mut log, &steps)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
         });
         if let Err(e) = &result {
             eprintln!("junctur-app analysis failed: {e}");
@@ -257,6 +265,34 @@ impl Analysis {
             };
             f(r);
             r.project = status.or(r.project.take());
+            r.clone()
+        };
+        notify(&now);
+    }
+
+    /// Takes a track's step and tells `notify` only when its stage or whole percentage moved: at
+    /// most a hundred events per track and stage however long the recording, where the speech
+    /// stage reports every minute of audio. The project status is not read again (stage changes
+    /// come through the log lines, [`Self::update`]).
+    fn step(&self, k: &Path, s: Step, notify: &dyn Fn(&Progress)) {
+        let now = {
+            let mut runs = lock(&self.runs);
+            let Some(r) = runs.get_mut(k) else {
+                return;
+            };
+            match r.steps.iter_mut().find(|x| x.track == s.track) {
+                Some(x) => {
+                    let moved = x.stage != s.stage || x.percent() != s.percent();
+                    *x = s;
+                    if !moved {
+                        return;
+                    }
+                }
+                None => {
+                    r.steps.push(s);
+                    r.steps.sort_by_key(|x| x.track);
+                }
+            }
             r.clone()
         };
         notify(&now);
@@ -314,6 +350,51 @@ mod tests {
         assert!(phases.contains(&Phase::Running));
         assert!(!a.busy(&file));
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn steps_are_sent_when_a_track_moves_a_whole_percent_or_a_stage() {
+        let a = Analysis::with_cache(std::env::temp_dir().join("junctur-app-steps-unused"));
+        let k = PathBuf::from("rec.mp4");
+        lock(&a.runs).insert(
+            k.clone(),
+            Progress {
+                file: "rec.mp4".into(),
+                phase: Phase::Running,
+                line: None,
+                error: None,
+                project: None,
+                steps: Vec::new(),
+            },
+        );
+        let sent = Mutex::new(Vec::<Vec<Step>>::new());
+        let notify = |p: &Progress| lock(&sent).push(p.steps.clone());
+        let step = |stage, track, at| Step {
+            stage,
+            track,
+            at,
+            of: 1000.0,
+        };
+        a.step(&k, step("speech", 1, 0.0), &notify);
+        a.step(&k, step("speech", 0, 0.0), &notify);
+        // Under a whole percent: kept, not sent.
+        a.step(&k, step("speech", 0, 9.0), &notify);
+        a.step(&k, step("speech", 0, 10.0), &notify);
+        // A new stage at the same percentage is sent.
+        a.step(&k, step("transcribe", 0, 10.0), &notify);
+        let sent = lock(&sent).clone();
+        assert_eq!(sent.len(), 4);
+        let last = sent.last().unwrap();
+        assert_eq!(last.iter().map(|s| s.track).collect::<Vec<_>>(), [0, 1]);
+        assert_eq!(last[0], step("transcribe", 0, 10.0));
+        // 1 % (10 s) is the third event.
+        assert_eq!(sent[2][0].at, 10.0);
+        // A file with no run takes nothing.
+        a.step(
+            &PathBuf::from("other.mp4"),
+            step("speech", 0, 500.0),
+            &|_| panic!("no run"),
+        );
     }
 
     #[test]

@@ -9,6 +9,7 @@ mod adopt;
 mod jobs;
 mod speakers;
 mod speech;
+mod steps;
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -16,6 +17,7 @@ use std::time::Instant;
 pub use jobs::{Jobs, StageRecord, StageState, STAGES};
 pub use speakers::{hearing_key, speech_key, Found, Heard, Method};
 pub use speech::{Speech, SpeechTrack};
+pub use steps::{Step, Steps};
 
 use crate::edit::{self, CutSettings, EditList, Speakers};
 use crate::runtime::DevicePref;
@@ -143,19 +145,30 @@ pub fn cached_tracks(p: &Project) -> Option<TrackReport> {
 
 /// Run every stage in order. `log` gets one line per event, for the CLI to print.
 pub fn run(p: &Project, opts: &PipelineOptions, log: &mut dyn FnMut(&str)) -> Result<Outcome> {
+    run_with(p, opts, log, steps::none())
+}
+
+/// [`run`], telling `steps` how far each track has got through the speech, speakers and
+/// transcribe stages as they go (2h: the app's progress bars).
+pub fn run_with(
+    p: &Project,
+    opts: &PipelineOptions,
+    log: &mut dyn FnMut(&str),
+    steps: Steps,
+) -> Result<Outcome> {
     let mut jobs = p.jobs();
     jobs.file = p.file.clone();
 
     let report = jobs.stage(&p.dir, "tracks", log, |_| {
         tracks::analyze(&p.file, &tracks_options(p, opts.force))
     })?;
-    let speech = speech_stage(p, &mut jobs, &report, opts.force, log)?;
+    let speech = speech_stage(p, &mut jobs, &report, opts.force, log, steps)?;
     // Speakers are an extra, not core: when they cannot be found (the model cannot be fetched
     // offline, say), the run goes on without them and the edit list keeps the names it had.
     let speakers = if opts.no_speakers {
         None
     } else {
-        match speakers_stage(p, &mut jobs, &report, &speech, opts, log) {
+        match speakers_stage(p, &mut jobs, &report, &speech, opts, log, steps) {
             Ok(f) => Some(f),
             Err(e) => {
                 log(&format!("speakers: {e}; going on without them"));
@@ -166,7 +179,9 @@ pub fn run(p: &Project, opts: &PipelineOptions, log: &mut dyn FnMut(&str)) -> Re
     let transcript = if opts.no_transcript {
         None
     } else {
-        Some(transcribe_stage(p, &mut jobs, &report, &speech, opts, log)?)
+        Some(transcribe_stage(
+            p, &mut jobs, &report, &speech, opts, log, steps,
+        )?)
     };
     let edit = jobs.stage(&p.dir, "edit", log, |_| {
         cut(
@@ -194,6 +209,7 @@ fn speech_stage(
     report: &TrackReport,
     force: bool,
     log: &mut dyn FnMut(&str),
+    steps: Steps,
 ) -> Result<Speech> {
     let sources = speech_tracks(report);
     if sources.is_empty() {
@@ -205,7 +221,8 @@ fn speech_stage(
             s
         }
         _ => jobs.stage(&p.dir, "speech", log, |_| {
-            let (s, env) = speech::detect(&p.file, &sources, &p.cache_dir)?;
+            let read = |track, at| steps(steps::step(report, "speech", track, at));
+            let (s, env) = speech::detect(&p.file, &sources, &p.cache_dir, &read)?;
             speech::save_envelope(&p.envelope_path(), &env)?;
             std::fs::write(p.speech_path(), serde_json::to_vec_pretty(&s)?)?;
             Ok(s)
@@ -230,6 +247,7 @@ fn speakers_stage(
     speech: &Speech,
     opts: &PipelineOptions,
     log: &mut dyn FnMut(&str),
+    steps: Steps,
 ) -> Result<Found> {
     let previous = p.speakers();
     let cached = previous
@@ -255,6 +273,7 @@ fn speakers_stage(
                 &p.dir,
                 &p.cache_dir,
                 opts.device,
+                &mut |track, at| steps(steps::step(report, "speakers", track, at)),
             )?;
             // Heard again: the voice names the old labels knew still are the voices', not
             // names for whatever cluster now sits there.
@@ -373,6 +392,7 @@ fn transcribe_stage(
     speech: &Speech,
     opts: &PipelineOptions,
     log: &mut dyn FnMut(&str),
+    steps: Steps,
 ) -> Result<Transcript> {
     let t_opts = TranscribeOptions {
         model: opts.model,
@@ -397,6 +417,7 @@ fn transcribe_stage(
             &p.cache_dir,
             &t_opts,
             log,
+            &mut |track, at| steps(steps::step(report, "transcribe", track, at)),
         )
     })
 }
