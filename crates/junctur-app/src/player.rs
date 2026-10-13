@@ -385,6 +385,9 @@ impl Drop for Player {
     }
 }
 
+/// An edit refused because another recording was opened while it was asked for (2m).
+pub const OPENED_MEANWHILE: &str = "another recording was opened meanwhile: nothing was changed";
+
 impl Core {
     pub fn state(&self) -> PlayerState {
         lock(&self.state).clone()
@@ -472,49 +475,59 @@ impl Core {
 
     /// Applies an edit, undo or redo to the edit list (first taking any outside change on disk),
     /// saves it and plays the result.
-    pub fn edit(&self, step: Step) -> Result<(), String> {
+    pub fn edit(&self, file: Option<&str>, step: Step) -> Result<(), String> {
         if let Step::Do(Op::Words { .. }) = step {
             self.prepare();
         }
-        self.change(|ed, list, fps| ed.edit(list, step, fps))
+        self.change(file, |ed, list, fps| ed.edit(list, step, fps))
     }
 
     /// Renames speaker `id` in the edit list and saves it (first taking any outside change). A
     /// speaker that is a remembered person renames the person (5b), in every recording.
-    pub fn rename_speaker(&self, id: u32, name: &str) -> Result<(), String> {
+    pub fn rename_speaker(&self, file: Option<&str>, id: u32, name: &str) -> Result<(), String> {
         let name = junctur_core::edit::check_name(name)?;
-        match self.file().map(|f| voices::rename(&f, id, name)) {
-            Some(Ok(Some(found))) => self.respeak(&found),
+        match file.map(|f| voices::rename(f, id, name)) {
+            Some(Ok(Some(found))) => self.respeak(file, &found),
             Some(Err(e)) => Err(e),
-            _ => self.change(|ed, list, _| ed.rename(list, id, name)),
+            _ => self.change(file, |ed, list, _| ed.rename(list, id, name)),
         }
     }
 
     /// Sets speaker `id`'s caption colour in the edit list and saves it; a remembered person's
     /// colour is theirs in every recording (5b).
-    pub fn recolor_speaker(&self, id: u32, color: &str) -> Result<(), String> {
-        match self.file().map(|f| voices::recolor(&f, id, color)) {
-            Some(Ok(Some(found))) => self.respeak(&found),
+    pub fn recolor_speaker(&self, file: Option<&str>, id: u32, color: &str) -> Result<(), String> {
+        match file.map(|f| voices::recolor(f, id, color)) {
+            Some(Ok(Some(found))) => self.respeak(file, &found),
             Some(Err(e)) => Err(e),
-            _ => self.change(|ed, list, _| ed.recolor(list, id, color)),
+            _ => self.change(file, |ed, list, _| ed.recolor(list, id, color)),
         }
     }
 
     /// Remembers `name`'s voice from transcript words `first..=last` of the open recording (5b)
     /// and labels its speakers again; returns a line for the user. Works from the windows the
     /// speakers stage kept, so nothing is decoded and it takes a moment at most.
-    pub fn enroll_voice(&self, first: usize, last: usize, name: &str) -> Result<String, String> {
+    pub fn enroll_voice(
+        &self,
+        file: Option<&str>,
+        first: usize,
+        last: usize,
+        name: &str,
+    ) -> Result<String, String> {
+        let file = file.ok_or("no recording is open")?;
         self.prepare();
         let words = lock(&self.editor)
             .words
             .clone()
             .ok_or("this recording has no transcript")?;
+        // After taking the words: had another recording been opened before, they would be its.
+        if self.file().as_deref() != Some(file) {
+            return Err(OPENED_MEANWHILE.into());
+        }
         let stretch = words
             .stretch(first, last)
             .ok_or("no such words in the transcript")?;
-        let file = self.file().ok_or("no recording is open")?;
-        let (found, line) = voices::enroll(&file, name, stretch)?;
-        self.respeak(&found)?;
+        let (found, line) = voices::enroll(file, name, stretch)?;
+        self.respeak(Some(file), &found)?;
         Ok(line)
     }
 
@@ -526,30 +539,32 @@ impl Core {
     /// the speakers go into the list in play only when that list is the heard recording's, checked
     /// under the editor's lock; otherwise into its edit list on disk. The re-hearing guard is held
     /// until then, so no enrollment slips in between.
-    pub fn reanalyze_speakers(&self) -> Result<(), String> {
-        let file = self.file().ok_or("no recording is open")?;
-        let (found, _rehearing) = voices::rehear(&file)?;
+    pub fn reanalyze_speakers(&self, file: Option<&str>) -> Result<(), String> {
+        let file = file.ok_or("no recording is open")?;
+        let (found, _rehearing) = voices::rehear(file)?;
         let mut here = false;
-        if self.file().as_deref() == Some(file.as_str()) {
-            self.change(|ed, list, _| {
-                if !junctur_core::output::same_file(&list.source, Path::new(&file)) {
-                    return Ok(None);
-                }
-                here = true;
-                let speakers = pipeline::speakers_for(Some(&found), Some(&list.speakers));
-                ed.respeak(list, speakers)
-            })?;
+        let changed = self.change(Some(file), |ed, list, _| {
+            if !junctur_core::output::same_file(&list.source, Path::new(file)) {
+                return Ok(None);
+            }
+            here = true;
+            let speakers = pipeline::speakers_for(Some(&found), Some(&list.speakers));
+            ed.respeak(list, speakers)
+        });
+        match changed {
+            Err(e) if e == OPENED_MEANWHILE => {}
+            r => r?,
         }
         if !here {
-            voices::respeak_on_disk(&file, &found)?;
+            voices::respeak_on_disk(file, &found)?;
         }
         Ok(())
     }
 
     /// Forgets voice `name` and labels the open recording's speakers again without it.
-    pub fn forget_voice(&self, name: &str) -> Result<(), String> {
-        match voices::forget(self.file().as_deref(), name)? {
-            Some(found) => self.respeak(&found),
+    pub fn forget_voice(&self, file: Option<&str>, name: &str) -> Result<(), String> {
+        match voices::forget(file, name)? {
+            Some(found) => self.respeak(file, &found),
             None => Ok(()),
         }
     }
@@ -598,8 +613,8 @@ impl Core {
 
     /// Puts newly labelled speakers into the list in play (names of speakers nobody enrolled are
     /// kept by id, as a re-cut does) and saves it; the kept ranges and the undo history stay.
-    fn respeak(&self, found: &Found) -> Result<(), String> {
-        self.change(|ed, list, _| {
+    fn respeak(&self, file: Option<&str>, found: &Found) -> Result<(), String> {
+        self.change(file, |ed, list, _| {
             let speakers = pipeline::speakers_for(Some(found), Some(&list.speakers));
             ed.respeak(list, speakers)
         })
@@ -641,8 +656,8 @@ impl Core {
     }
 
     /// Sets the edit list's caption settings and saves them.
-    pub fn set_captions(&self, captions: Captions) -> Result<(), String> {
-        self.change(|ed, list, _| ed.set_captions(list, captions))
+    pub fn set_captions(&self, file: Option<&str>, captions: Captions) -> Result<(), String> {
+        self.change(file, |ed, list, _| ed.set_captions(list, captions))
     }
 
     /// Writes the captions of the list in play to `out` as one SRT (5a, 5e), on the edited timeline
@@ -691,8 +706,12 @@ impl Core {
 
     /// Takes any outside change on disk, lets `f` change and save the list in play, and plays
     /// the result.
+    /// `file`: the recording the command was let edit ([`crate::commands::App::editable`], 2m);
+    /// when another has been opened since, nothing is changed ([`OPENED_MEANWHILE`]), as the
+    /// edit would land on a recording whose runs it does not hold off.
     fn change(
         &self,
+        file: Option<&str>,
         f: impl FnOnce(&mut Editor, &EditList, Fps) -> Result<Option<Edited>, String>,
     ) -> Result<(), String> {
         // From reading what is on disk to saving over it, so word counts the app's own analysis
@@ -703,6 +722,9 @@ impl Core {
         let synced = self.sync(&mut ed, "before an edit");
         let (list, fps) = {
             let c = lock(&self.ctl);
+            if c.file.as_deref() != file {
+                return Err(OPENED_MEANWHILE.into());
+            }
             let list = c.edit.list.clone().ok_or_else(|| {
                 c.edit.error.clone().unwrap_or_else(|| {
                     "no edit list yet: run the pipeline on this recording".into()

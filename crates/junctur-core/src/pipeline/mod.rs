@@ -567,6 +567,9 @@ pub fn save_speakers(p: &Project, found: &Found) -> Result<()> {
 /// that changes it. For the CLI after enrolling. `None` when there is no readable edit list;
 /// else the list and where a replaced hand edit was kept, if one was.
 pub fn respeak(p: &Project, found: &Found) -> Result<Option<(EditList, Option<PathBuf>)>> {
+    // From the read to the save (2m): word counts the app's own analysis writes meanwhile
+    // ([`edit::amend`], 2j) would otherwise be saved over.
+    let _writing = edit::hold();
     let Ok(mut e) = p.edit() else {
         return Ok(None);
     };

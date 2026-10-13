@@ -57,17 +57,21 @@ impl App {
     ///
     /// The command holds what this returns while it works: a run of the recording asked for
     /// meanwhile waits for it (2m, [`Analysis::edit`]), so a voice enrolled just as a re-analysis
-    /// starts is in `speakers.json` before the run's speakers stage reads it.
-    fn editable(&self) -> Result<Editable, String> {
+    /// starts is in `speakers.json` before the run's speakers stage reads it. The recording is
+    /// the one open now, and the edit is made to that one or refused, never to another opened
+    /// meanwhile ([`Editable::file`]).
+    pub(crate) fn editable(&self) -> Result<Editable, String> {
         let core = self.core()?;
-        let editing = match core.file() {
-            Some(f) => Some(self.analysis.edit(Path::new(&f)).ok_or(
+        let file = core.file();
+        let editing = match &file {
+            Some(f) => Some(self.analysis.edit(Path::new(f)).ok_or(
                 "analysing this recording: edits wait until its edit list is made".to_string(),
             )?),
             None => None,
         };
         Ok(Editable {
             core,
+            file,
             _editing: editing,
         })
     }
@@ -75,9 +79,18 @@ impl App {
 
 /// The player's core for one edit of the open recording, and the mark that holds a run of that
 /// recording off until the edit is done ([`App::editable`]).
-struct Editable {
+pub(crate) struct Editable {
     core: Arc<Core>,
+    file: Option<String>,
     _editing: Option<analysis::Editing>,
+}
+
+impl Editable {
+    /// The recording this edit is for, as it was opened; the core's edits take it and refuse
+    /// when another is open by the time they write (2m repair).
+    pub(crate) fn file(&self) -> Option<&str> {
+        self.file.as_deref()
+    }
 }
 
 impl std::ops::Deref for Editable {
@@ -362,8 +375,8 @@ pub async fn edit_words(
     last: usize,
     keep: bool,
 ) -> Result<(), String> {
-    app.editable()?
-        .edit(Step::Do(Op::Words { first, last, keep }))
+    let e = app.editable()?;
+    e.edit(e.file(), Step::Do(Op::Words { first, last, keep }))
 }
 
 /// Cuts or keeps source frames `[start, end)` exactly (timeline selections, nudges, restoring a
@@ -375,26 +388,29 @@ pub async fn edit_frames(
     end: u64,
     keep: bool,
 ) -> Result<(), String> {
-    app.editable()?
-        .edit(Step::Do(Op::Frames { start, end, keep }))
+    let e = app.editable()?;
+    e.edit(e.file(), Step::Do(Op::Frames { start, end, keep }))
 }
 
 /// Renames speaker `id` in the edit list.
 #[tauri::command]
 pub async fn rename_speaker(app: State<'_, App>, id: u32, name: String) -> Result<(), String> {
-    app.editable()?.rename_speaker(id, &name)
+    let e = app.editable()?;
+    e.rename_speaker(e.file(), id, &name)
 }
 
 /// Sets speaker `id`'s caption colour (`#RRGGBB`).
 #[tauri::command]
 pub async fn recolor_speaker(app: State<'_, App>, id: u32, color: String) -> Result<(), String> {
-    app.editable()?.recolor_speaker(id, &color)
+    let e = app.editable()?;
+    e.recolor_speaker(e.file(), id, &color)
 }
 
 /// Sets the caption settings: export and preview switches, bold and italic, how cues are cut.
 #[tauri::command]
 pub async fn set_captions(app: State<'_, App>, captions: Captions) -> Result<(), String> {
-    app.editable()?.set_captions(captions)
+    let e = app.editable()?;
+    e.set_captions(e.file(), captions)
 }
 
 /// What an export wrote: the file's captions (one file since 5e).
@@ -438,7 +454,8 @@ pub async fn enroll_voice(
     last: usize,
     name: String,
 ) -> Result<String, String> {
-    app.editable()?.enroll_voice(first, last, &name)
+    let e = app.editable()?;
+    e.enroll_voice(e.file(), first, last, &name)
 }
 
 /// Hears the open recording's speakers again from the audio, cut at the seconds pinned to people
@@ -446,14 +463,18 @@ pub async fn enroll_voice(
 /// speakers stage, so it runs on a blocking thread, not the async runtime's workers. Refused while
 /// the open recording's run has not written its edit list (2d: that run writes its speakers too;
 /// 2j: past it, only the transcription is left, which does not), and run behind the first halves'
-/// lane ([`Analysis::exclusive`]), never beside another speakers stage.
+/// lane ([`Analysis::exclusive`]), never beside another speakers stage. It may run beside that
+/// recording's transcription: both record their stage in `jobs.json`, each change read, made and
+/// written back under one lock (2m repair), so neither puts back the other's stage as it was.
 #[tauri::command]
 pub async fn reanalyze_speakers(app: State<'_, App>) -> Result<(), String> {
-    let core = app.editable()?;
+    let e = app.editable()?;
     let analysis = app.analysis.clone();
-    tauri::async_runtime::spawn_blocking(move || analysis.exclusive(|| core.reanalyze_speakers()))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        analysis.exclusive(|| e.reanalyze_speakers(e.file()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Forgets voice `name`, relabelling the open recording.
@@ -464,17 +485,20 @@ pub async fn forget_voice(app: State<'_, App>, name: String) -> Result<(), Strin
     if app.core().is_err() {
         return crate::voices::forget(None, &name).map(|_| ());
     }
-    app.editable()?.forget_voice(&name)
+    let e = app.editable()?;
+    e.forget_voice(e.file(), &name)
 }
 
 #[tauri::command]
 pub async fn undo(app: State<'_, App>) -> Result<(), String> {
-    app.editable()?.edit(Step::Undo)
+    let e = app.editable()?;
+    e.edit(e.file(), Step::Undo)
 }
 
 #[tauri::command]
 pub async fn redo(app: State<'_, App>) -> Result<(), String> {
-    app.editable()?.edit(Step::Redo)
+    let e = app.editable()?;
+    e.edit(e.file(), Step::Redo)
 }
 
 /// The shares of the window on the right (the side panel) and at the bottom (play bar and lanes)
