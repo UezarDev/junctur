@@ -25,6 +25,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use junctur_core::edit::{Captions, EditList, Speakers};
+use junctur_core::export::srt::{self, Cue};
 use junctur_core::export::{self, CaptionFiles};
 use junctur_core::pipeline::{self, Found};
 use serde::Serialize;
@@ -510,6 +511,34 @@ impl Core {
         Ok(line)
     }
 
+    /// Hears the open recording's speakers again from the audio (5c), the windows cut at the
+    /// seconds pinned to people, and puts them into the list in play. Slow: the caller keeps it off
+    /// the async runtime.
+    ///
+    /// The recording open when it ends may not be the one heard (another was opened meanwhile):
+    /// the speakers go into the list in play only when that list is the heard recording's, checked
+    /// under the editor's lock; otherwise into its edit list on disk. The re-hearing guard is held
+    /// until then, so no enrollment slips in between.
+    pub fn reanalyze_speakers(&self) -> Result<(), String> {
+        let file = self.file().ok_or("no recording is open")?;
+        let (found, _rehearing) = voices::rehear(&file)?;
+        let mut here = false;
+        if self.file().as_deref() == Some(file.as_str()) {
+            self.change(|ed, list, _| {
+                if !junctur_core::output::same_file(&list.source, Path::new(&file)) {
+                    return Ok(None);
+                }
+                here = true;
+                let speakers = pipeline::speakers_for(Some(&found), Some(&list.speakers));
+                ed.respeak(list, speakers)
+            })?;
+        }
+        if !here {
+            voices::respeak_on_disk(&file, &found)?;
+        }
+        Ok(())
+    }
+
     /// Forgets voice `name` and labels the open recording's speakers again without it.
     pub fn forget_voice(&self, name: &str) -> Result<(), String> {
         match voices::forget(self.file().as_deref(), name)? {
@@ -557,17 +586,7 @@ impl Core {
     /// at the frame rate the player rounds to. Read and written outside the locks once the words
     /// and the list are in hand.
     pub fn export_captions(&self, out: &Path) -> Result<CaptionFiles, String> {
-        self.prepare();
-        // An `Arc` of the words, not a copy; the lock is held only to take it.
-        let words = lock(&self.editor)
-            .words
-            .clone()
-            .ok_or("captions need a transcript: run the pipeline on this recording")?;
-        let (list, fps) = {
-            let c = lock(&self.ctl);
-            let list = c.edit.list.clone().ok_or("no edit list yet")?;
-            (list, c.fps.ok_or("the frame rate is not known")?)
-        };
+        let (list, words, fps) = self.caption_source()?;
         let tracked: Vec<_> = words
             .tracks
             .iter()
@@ -576,6 +595,28 @@ impl Core {
             .collect();
         export::write_captions(&list, &tracked, fps.num, fps.den, out)
             .map_err(|e| format!("writing {}: {e}", out.display()))
+    }
+
+    /// The captions of the list in play as the SRT export cuts them (5d's preview over the
+    /// picture): the same cues on the same output timeline, so the preview shows what Resolve
+    /// will, cue for cue.
+    pub fn caption_cues(&self) -> Result<Vec<Cue>, String> {
+        let (list, words, fps) = self.caption_source()?;
+        let tracked = words.tracks.iter().copied().zip(words.list.iter());
+        Ok(srt::cues(&list, tracked, fps.num, fps.den))
+    }
+
+    /// What a caption file is cut from: the list in play, the words the editor holds (an `Arc`,
+    /// not a copy; each lock is held only to take its part) and the frame rate.
+    fn caption_source(&self) -> Result<(Arc<EditList>, Arc<Words>, Fps), String> {
+        self.prepare();
+        let words = lock(&self.editor)
+            .words
+            .clone()
+            .ok_or("captions need a transcript: run the pipeline on this recording")?;
+        let c = lock(&self.ctl);
+        let list = c.edit.list.clone().ok_or("no edit list yet")?;
+        Ok((list, words, c.fps.ok_or("the frame rate is not known")?))
     }
 
     /// Takes any outside change on disk, lets `f` change and save the list in play, and plays

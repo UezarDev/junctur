@@ -4,7 +4,7 @@
 //! imported a test file with `<font color>` per cue and the colours came through; the same test as
 //! WebVTT (`::cue` classes) did not. Premiere Pro is unverified; reports say its import gives every
 //! caption its default style. Only what an SRT carries into Resolve is written: text, timing,
-//! colour. Each line gets its own `<font>` tag, since a tag spanning a line break is the case
+//! colour, and bold or italic (5d). Each line gets its own `<font>` tag, since a tag spanning a line break is the case
 //! importers disagree on.
 //!
 //! One SRT holds one Resolve subtitle track, and a track shows one caption at a time: Uezar's
@@ -21,6 +21,8 @@
 
 use std::fmt::Write;
 
+use serde::Serialize;
+
 use crate::edit::{frame_ranges, frames_ceil, Captions, EditList};
 use crate::transcribe::Word;
 
@@ -34,7 +36,7 @@ const MIN_S: f64 = 0.8;
 const READABLE_S: f64 = 0.5;
 
 /// One speaker's lines in a cue.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Part {
     /// Speaker id, 0 for none.
     pub speaker: u32,
@@ -42,8 +44,8 @@ pub struct Part {
 }
 
 /// A caption: one part per speaker talking in it, in the order they started, so more than one only
-/// where people talk at once.
-#[derive(Debug, Clone, PartialEq)]
+/// where people talk at once. Serialized for the app's preview over the picture (5d).
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Cue {
     /// Output seconds.
     pub start: f64,
@@ -439,7 +441,19 @@ fn stamp(s: f64) -> String {
 /// `<font color>` of its part's speaker; a word nobody was heard saying is left white. A cue's parts
 /// follow one another line by line, so a change of speaker is a line break: no blank line between
 /// them, which would end the cue.
+///
+/// Bold and italic (5d) wrap every line outside its colour, `<b><i><font …>line</font></i></b>`:
+/// the order Resolve's own SRT export writes (`<b>` around the whole text), each line closed on its
+/// own like the colour. Resolve's import applies both (5d's research); nothing else is written,
+/// since the rest of what Resolve styles is its subtitle Track Style, which an SRT cannot set.
 pub fn write(cues: &[Cue], edit: &EditList) -> String {
+    let c = &edit.captions;
+    let (open, close) = match (c.bold, c.italic) {
+        (true, true) => ("<b><i>", "</i></b>"),
+        (true, false) => ("<b>", "</b>"),
+        (false, true) => ("<i>", "</i>"),
+        (false, false) => ("", ""),
+    };
     let mut out = String::new();
     for (n, c) in cues.iter().enumerate() {
         let _ = write!(
@@ -454,10 +468,10 @@ pub fn write(cues: &[Cue], edit: &EditList) -> String {
             for line in &part.lines {
                 match color {
                     Some(col) => {
-                        let _ = write!(out, "<font color=\"{col}\">{line}</font>\r\n");
+                        let _ = write!(out, "{open}<font color=\"{col}\">{line}</font>{close}\r\n");
                     }
                     None => {
-                        let _ = write!(out, "{line}\r\n");
+                        let _ = write!(out, "{open}{line}{close}\r\n");
                     }
                 }
             }
@@ -840,5 +854,44 @@ mod tests {
         assert!(!text.contains("<font"), "no speaker, no colour");
         assert!(cues(&e, [], 30, 1).is_empty());
         assert_eq!(stamp(3723.4567), "01:02:03,457");
+    }
+
+    #[test]
+    fn bold_and_italic_wrap_each_line_outside_its_colour() {
+        let w = [word(1.0, 1.4, "hola"), word(21.0, 21.4, "sí")];
+        let styled = |bold, italic| {
+            let e = edit(
+                &[(0.0, 40.0)],
+                Captions {
+                    bold,
+                    italic,
+                    ..Default::default()
+                },
+            );
+            write(&cues(&e, w.iter().map(|w| (0, w)), 30, 1), &e)
+        };
+        let both = styled(true, true);
+        assert!(
+            both.contains("<b><i><font color=\"#F2B33D\">hola</font></i></b>\r\n"),
+            "{both}"
+        );
+        assert!(both.contains("<b><i><font color=\"#5FB3F2\">sí</font></i></b>\r\n"));
+        assert!(styled(true, false).contains("<b><font color=\"#F2B33D\">hola</font></b>\r\n"));
+        assert!(styled(false, true).contains("<i><font color=\"#F2B33D\">hola</font></i>\r\n"));
+        let plain = styled(false, false);
+        assert!(!plain.contains("<b>") && !plain.contains("<i>"));
+        assert!(plain.contains("\r\n<font color=\"#F2B33D\">hola</font>\r\n"));
+        // A word nobody was heard saying keeps the style without a colour.
+        let mut e = edit(
+            &[(0.0, 100.0)],
+            Captions {
+                italic: true,
+                ..Default::default()
+            },
+        );
+        e.speakers = Speakers::default();
+        let text = write(&cues(&e, w.iter().map(|w| (0, w)), 30, 1), &e);
+        assert!(text.contains("\r\n<i>hola</i>\r\n"), "{text}");
+        assert!(!text.contains("<font"));
     }
 }

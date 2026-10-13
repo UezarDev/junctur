@@ -57,7 +57,7 @@ junctur status <file> [--project <dir>]
 junctur cut <file> [--project <dir>] [cut flags]
 junctur export <file> [--fcpxml <out.fcpxml>] [--srt <out.srt>] [--project <dir>]
 junctur render <file> --out <out.mp4> [--project <dir>] [--full] [--force] [--jobs <n>]
-junctur voices [<file> --add <name> --at <start>-<end>[,...]] [--forget <name>]
+junctur voices [<file> --add <name> --at <start>-<end>[,...] | <file> --rehear [--cpu]] [--forget <name>]
 cut flags: [--pad-before <s>] [--pad-after <s>] [--merge-gap <s>] [--crossfade <ms>]
 ```
 
@@ -81,6 +81,12 @@ file (or the file `JUNCTUR_VOICES` names); `junctur voices` lists them, `--forge
 Enrolling relabels from what `analyze` kept (`windows.f32` in the project), without reading the
 recording again; `analyze` and `cut` relabel with the current voices. A rename of a speaker nobody
 enrolled follows that speaker through a relabel (matched by when they talk, not by number).
+
+Any length works, even one word: a short pick makes a rough voice (Junctur says so), but the seconds
+picked are pinned to that person in that recording, kept in its `speakers.json`, and every later labelling
+gives those seconds to them and nobody else. `junctur voices <file> --rehear` (the app's "Analyse speakers
+again") reads the recording's speakers again from the audio with the voice windows cut where the pins
+begin and end, reusing every other stage; it takes about as long as the speakers stage did.
 
 `export --srt <out.srt>` writes the captions: the transcript's kept words on the edited timeline (the
 same frames as the render and the FCPXML), each cue as `<font color>` in its speaker's colour, cut by the

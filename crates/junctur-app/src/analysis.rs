@@ -218,6 +218,14 @@ impl Analysis {
         })
     }
 
+    /// Runs `f` behind the gate runs take: after the run in progress, if any, and with none
+    /// starting until it returns. For work that loads the models outside a run (5c: a recording's
+    /// speakers heard again).
+    pub fn exclusive<T>(&self, f: impl FnOnce() -> T) -> T {
+        let _turn = lock(&self.gate);
+        f()
+    }
+
     fn run(&self, p: &Project, notify: &Notify) {
         let _turn = lock(&self.gate);
         let k = p.file.clone();

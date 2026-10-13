@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use junctur_core::edit::Captions;
+use junctur_core::export::srt::Cue;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -293,7 +294,7 @@ pub async fn recolor_speaker(app: State<'_, App>, id: u32, color: String) -> Res
     app.editable()?.recolor_speaker(id, &color)
 }
 
-/// Sets the caption settings: on/off and how cues are cut.
+/// Sets the caption settings: export and preview switches, bold and italic, how cues are cut.
 #[tauri::command]
 pub async fn set_captions(app: State<'_, App>, captions: Captions) -> Result<(), String> {
     app.editable()?.set_captions(captions)
@@ -318,6 +319,13 @@ pub async fn export_captions(app: State<'_, App>, path: String) -> Result<Export
     })
 }
 
+/// The captions as the export cuts them, for the preview over the picture (5d): output seconds,
+/// each cue's parts a speaker's lines.
+#[tauri::command]
+pub async fn caption_cues(app: State<'_, App>) -> Result<Vec<Cue>, String> {
+    app.core()?.caption_cues()
+}
+
 /// The voices Junctur remembers (5b).
 #[tauri::command]
 pub async fn voices() -> Result<Vec<VoiceView>, String> {
@@ -334,6 +342,20 @@ pub async fn enroll_voice(
     name: String,
 ) -> Result<String, String> {
     app.editable()?.enroll_voice(first, last, &name)
+}
+
+/// Hears the open recording's speakers again from the audio, cut at the seconds pinned to people
+/// (5c, "Analyse speakers again"), and puts them into the list in play. Takes about as long as the
+/// speakers stage, so it runs on a blocking thread, not the async runtime's workers. Refused while
+/// the open recording is being analysed (2d: that run writes its speakers too), and run behind the
+/// analysis gate, so it never loads the models beside a run (one at a time on the GPU).
+#[tauri::command]
+pub async fn reanalyze_speakers(app: State<'_, App>) -> Result<(), String> {
+    let core = app.editable()?;
+    let analysis = app.analysis.clone();
+    tauri::async_runtime::spawn_blocking(move || analysis.exclusive(|| core.reanalyze_speakers()))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Forgets voice `name`, relabelling the open recording.

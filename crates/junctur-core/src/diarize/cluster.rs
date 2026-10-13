@@ -270,6 +270,21 @@ pub fn label(
     centroid: f32,
     min_share: f64,
 ) -> Labels {
+    label_fixed(embeddings, voices, &[], threshold, centroid, min_share)
+}
+
+/// [`label`], with some windows' voice already known (5c): `fixed[i]` is the voice window `i` is
+/// whatever it sounds like (the user pinned those seconds to that person), and it is left out of
+/// matching and clustering, so a pinned window neither joins a cluster nor pulls one toward it.
+/// Windows past the end of `fixed`, or `None` there, are labelled as [`label`] does.
+pub fn label_fixed(
+    embeddings: &[Vec<f32>],
+    voices: &[Vec<f32>],
+    fixed: &[Option<usize>],
+    threshold: f32,
+    centroid: f32,
+    min_share: f64,
+) -> Labels {
     #[derive(Clone, Copy, PartialEq)]
     enum Who {
         Voice(usize),
@@ -283,6 +298,15 @@ pub fn label(
     let mut who: Vec<Option<Who>> = Vec::with_capacity(n);
     let mut rest: Vec<(usize, &Vec<f32>)> = Vec::new();
     for (i, e) in embeddings.iter().enumerate() {
+        if let Some(v) = fixed
+            .get(i)
+            .copied()
+            .flatten()
+            .filter(|&v| v < voices.len())
+        {
+            who.push(Some(Who::Voice(v)));
+            continue;
+        }
         match close_voice(e, threshold) {
             Some(v) => who.push(Some(Who::Voice(v))),
             None => {
@@ -482,6 +506,25 @@ mod tests {
         assert!(l.windows[..20].iter().all(|&x| x == 2), "{:?}", l.windows);
         assert!(l.windows[20..40].iter().all(|&x| x == 1));
         assert!(l.windows[40..].iter().all(|&x| x == 0));
+    }
+
+    #[test]
+    fn a_fixed_window_is_its_voice_whatever_it_sounds_like() {
+        // Twenty windows of Ana; the user pinned the last five to Bea (5c).
+        let e = voice(&axis(0), 20, 0.3);
+        let prints = vec![unit(&axis(0)), unit(&axis(1))];
+        let mut fixed = vec![None; 15];
+        fixed.extend([Some(1); 5]);
+        let l = label_fixed(&e, &prints, &fixed, VOICE_MATCH, CENTROID_MATCH, 0.03);
+        assert_eq!(l.voices, vec![Some(0), Some(1)]);
+        assert!(l.windows[..15].iter().all(|&x| x == 0), "{:?}", l.windows);
+        assert!(l.windows[15..].iter().all(|&x| x == 1), "{:?}", l.windows);
+        // Nothing fixed, or a voice that is not there: as `label`.
+        let plain = label(&e, &prints, VOICE_MATCH, CENTROID_MATCH, 0.03);
+        assert_eq!(
+            label_fixed(&e, &prints, &[Some(7)], VOICE_MATCH, CENTROID_MATCH, 0.03),
+            plain
+        );
     }
 
     #[test]

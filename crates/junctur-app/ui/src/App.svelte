@@ -13,6 +13,7 @@
   import StartWindow from "./lib/StartWindow.svelte";
   import TranscriptPanel from "./lib/TranscriptPanel.svelte";
   import CaptionsPanel from "./lib/CaptionsPanel.svelte";
+  import CaptionsOverlay from "./lib/CaptionsOverlay.svelte";
   import Lanes from "./lib/Lanes.svelte";
   import Strips from "./lib/Strips.svelte";
   import Avatars from "./lib/Avatars.svelte";
@@ -442,6 +443,7 @@
         <Avatars {speakers} {talking} {mixer} size="big" />
       </div>
     {/if}
+    <CaptionsOverlay {player} {edit} picture={L.picture} />
     {#if overlay && speakers.length}
       <div class="overlay" style:left="{L.picture.x + 14}px" style:top="{L.picture.y + 14}px">
         <Avatars {speakers} {talking} {mixer} size="pill" />
