@@ -5,7 +5,8 @@
   // (transcript.ts, one pass over the words); a resize or a fold toggle only repacks them into rows.
   // Where the speaker changes a name row comes first; click the name to rename the speaker (saved
   // to edit.junctur at once). Double-click a word to fix its spelling (5h): saved to edit.junctur at
-  // once, shown here, in the caption preview and the SRT, and added to the word list Whisper is told.
+  // once, shown here, in the caption preview and the SRT, and added to the word list Whisper is told
+  // (the header says so for a moment, 5r).
   import { onMount } from "svelte";
   import { SvelteSet } from "svelte/reactivity";
   import * as api from "./api";
@@ -175,8 +176,13 @@
   let fixing = $state<number | null>(null);
   let fixDraft = $state("");
   function startFix(e: MouseEvent) {
-    const i = wordUnder(e.target);
-    if (i < 0 || !words) return;
+    // Not `e.target` (5r): `down` captures the pointer on the scroller, and Chromium (WebView2) then
+    // sends the clicks and the double-click to the scroller, so the target never was a word and the
+    // field never opened. The element under the pointer, as `move` finds it. Only a kept word: a cut
+    // word in an open fold has no field, and `fixing` set without one would hold the follow for good.
+    const el = document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>("[data-i]");
+    if (!el || el.classList.contains("cutword") || !words) return;
+    const i = Number(el.dataset.i);
     fixing = i;
     fixDraft = words.text[i];
   }
@@ -196,7 +202,21 @@
     fixing = null;
     if (!save || i == null || !words || fixDraft.trim() === words.text[i]) return;
     const text = fixDraft;
-    call(() => api.fixWord(i, text));
+    call(async () => {
+      const added = await api.fixWord(i, text);
+      if (added) tellLearned(added);
+    });
+  }
+
+  // A fix whose spelling joined the word list (5h's `settings::learn`) says so for a moment in the
+  // header (5r): before, nothing showed the list had changed until Settings was opened.
+  const LEARNED_MS = 4000;
+  let learned = $state<string | null>(null);
+  let learnedTimer = 0;
+  function tellLearned(entry: string) {
+    learned = entry;
+    clearTimeout(learnedTimer);
+    learnedTimer = window.setTimeout(() => (learned = null), LEARNED_MS);
   }
 
   const first = $derived(Math.max(0, Math.floor(top / ROW) - OVERSCAN));
@@ -256,6 +276,10 @@
     const i = wordUnder(e.target);
     if (i < 0 || e.button !== 0) return;
     e.preventDefault();
+    // The press seeks to the word on release (`up`), and the follow would then scroll a word in the
+    // first row or the last three away from under the pointer before a double-click's second press
+    // (5r). The word pressed is on screen already.
+    pausedUntil = performance.now() + FOLLOW_PAUSE_MS;
     if (e.shiftKey && chosen) {
       // The anchor only counts while it is an end of the current selection (the timeline may
       // have replaced it).
@@ -313,6 +337,7 @@
     ro.observe(scroller);
     return () => {
       clearTimeout(timer);
+      clearTimeout(learnedTimer);
       ro.disconnect();
     };
   });
@@ -321,7 +346,9 @@
 <section class="panel">
   <header>
     <span>Transcript</span>
-    {#if words}
+    {#if learned}
+      <span class="muted learned" role="status">"{learned}" added to the word list</span>
+    {:else if words}
       <span class="muted">{words.text.length.toLocaleString()} words</span>
     {/if}
   </header>
@@ -466,6 +493,13 @@
   .muted {
     color: var(--muted);
     font-weight: 400;
+  }
+  .learned {
+    min-width: 0;
+    margin-left: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .scroll {
     position: relative;
