@@ -268,8 +268,7 @@ pub fn transcribe(
     };
     if left > 0 {
         // A pause that came first holds here, before the model takes the card.
-        between();
-        let mut remaining = left;
+        let mut stops = Stops::new(left, &mut *between);
         let model;
         (choice, model) = choose(pref, opts.device);
         if let Some(note) = &choice.note {
@@ -299,10 +298,7 @@ pub fn transcribe(
             }
             done.push(seg);
             progress.at(done.len());
-            remaining -= 1;
-            if remaining > 0 {
-                between();
-            }
+            stops.chunk_done();
             Ok(())
         };
         let run = Run {
@@ -527,6 +523,28 @@ impl Run<'_> {
     }
 }
 
+/// Where a run calls [`Reports::between`]: once before Whisper loads, then after each chunk while
+/// any remain, never after the last (a pause there would only hold the finishing back).
+struct Stops<'a> {
+    left: usize,
+    between: &'a mut dyn FnMut(),
+}
+
+impl<'a> Stops<'a> {
+    /// `left` chunks to do, at least one; the first stop is now.
+    fn new(left: usize, between: &'a mut dyn FnMut()) -> Self {
+        between();
+        Self { left, between }
+    }
+
+    fn chunk_done(&mut self) {
+        self.left = self.left.saturating_sub(1);
+        if self.left > 0 {
+            (self.between)();
+        }
+    }
+}
+
 /// "transcribing n/total chunks (p%)" through `log`, every 5% and at the end.
 struct Progress<'a> {
     total: usize,
@@ -700,6 +718,18 @@ mod tests {
             model: model.into(),
             device: Device::Cuda,
         }
+    }
+
+    #[test]
+    fn a_run_stops_before_whisper_and_between_chunks_never_after_the_last() {
+        let mut calls = 0;
+        let mut between = || calls += 1;
+        let mut stops = Stops::new(3, &mut between);
+        stops.chunk_done();
+        stops.chunk_done();
+        stops.chunk_done();
+        // Before the first chunk, after the first and after the second.
+        assert_eq!(calls, 3);
     }
 
     #[test]

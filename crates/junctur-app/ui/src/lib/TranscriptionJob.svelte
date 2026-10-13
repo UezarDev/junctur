@@ -70,7 +70,8 @@
   {#if waiting.length > 0}
     <p class="label">Waiting</p>
     <ol class="queue">
-      {#each waiting as w (w.file)}
+      <!-- Keyed by place: a recording should be on the lane once, but a duplicate must not break the list. -->
+      {#each waiting as w, i (i)}
         <li title={w.file}>{w.file === open ? "This recording" : base(w.file)}</li>
       {/each}
     </ol>

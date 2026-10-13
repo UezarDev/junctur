@@ -80,8 +80,11 @@ pub fn notifier(handle: AppHandle) -> Notify {
             let _ = handle.emit(analysis::EVENT, p);
             return;
         }
-        if let Some(app) = handle.try_state::<App>() {
-            let _ = handle.emit(analysis::LANE_EVENT, app.analysis.transcription());
+        if let Some(lane) = handle
+            .try_state::<App>()
+            .and_then(|a| a.analysis.lane_moved())
+        {
+            let _ = handle.emit(analysis::LANE_EVENT, lane);
         }
         let core = handle.try_state::<App>().and_then(|a| a.core().ok());
         if change == Change::Transcribed {
@@ -259,10 +262,13 @@ pub async fn pause_transcription(
     app: State<'_, App>,
     paused: bool,
 ) -> Result<Transcription, String> {
-    app.analysis.pause(paused);
-    let now = app.analysis.transcription();
-    let _ = handle.emit(analysis::LANE_EVENT, now.clone());
-    Ok(now)
+    let sent = std::cell::RefCell::new(None);
+    app.analysis.pause(paused, &|t| {
+        let _ = handle.emit(analysis::LANE_EVENT, t);
+        *sent.borrow_mut() = Some(t.clone());
+    });
+    sent.into_inner()
+        .ok_or_else(|| "the transcription lane was not read".to_string())
 }
 
 /// Analyses `path` again with the settings now. Without `replace`, an edit list holding the user's

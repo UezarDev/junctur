@@ -109,6 +109,15 @@ pub struct Transcription {
     pub jobs: Vec<Progress>,
 }
 
+/// What of the lane the page needs a new [`Transcription`] for: its members, in turn, with their
+/// phases, and the pause.
+type Shape = (bool, bool, Vec<(String, Phase)>);
+
+fn shape(t: &Transcription) -> Shape {
+    let jobs = t.jobs.iter().map(|p| (p.file.clone(), p.phase)).collect();
+    (t.paused, t.stopped, jobs)
+}
+
 /// What a request to analyse again did.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -150,6 +159,8 @@ pub struct Analysis {
     /// snapshot sent last would move a bar back (79 % after 100 %). Not `runs` itself: the app's
     /// handler asks the analysis about runs ([`Analysis::busy`]).
     order: Arc<Mutex<()>>,
+    /// The lane's shape as last sent to the page ([`Analysis::lane_moved`]).
+    lane_sent: Arc<Mutex<Option<Shape>>>,
     /// The cache the projects live in; `None` is the default one (the CLI's).
     cache_dir: Option<PathBuf>,
     /// The user's options a run starts from ([`user_options`]); tests pass their own, so they
@@ -167,6 +178,7 @@ impl Default for Analysis {
             first: Default::default(),
             transcription: Default::default(),
             order: Default::default(),
+            lane_sent: Default::default(),
             cache_dir: None,
             user: user_options,
             halves: pipeline_halves,
@@ -258,8 +270,15 @@ impl Analysis {
 
     /// A run that could not start (its project could not be opened), recorded so the page shows
     /// the error where it shows progress, not as a failed open.
+    /// A run already waiting or running is returned as it is: a failed open beside it (a project
+    /// folder briefly unreadable) must not mark it failed while its thread goes on, or the
+    /// recording could be started again into a second place on the lane (2k repair).
     pub fn failed(&self, file: &Path, error: String) -> Progress {
         let k = key(file);
+        let mut runs = lock(&self.runs);
+        if let Some(r) = runs.get(&k).filter(|r| r.phase.busy()) {
+            return r.clone();
+        }
         let r = Progress {
             file: k.display().to_string(),
             phase: Phase::Failed,
@@ -270,7 +289,7 @@ impl Analysis {
             listed: false,
             transcribed: None,
         };
-        lock(&self.runs).insert(k, r.clone());
+        runs.insert(k, r.clone());
         r
     }
 
@@ -298,6 +317,11 @@ impl Analysis {
     }
 
     fn start_with(&self, file: &Path, notify: Notify, keep_list: bool) -> Result<Progress, String> {
+        // Before opening the project: a run going on is the answer even when the folder cannot be
+        // opened just now (2k repair; the check under the lock below closes the race).
+        if let Some(r) = self.progress(file).filter(|r| r.phase.busy()) {
+            return Ok(r);
+        }
         let p = Project::open(file, self.cache_dir.clone(), None).map_err(|e| e.to_string())?;
         let k = p.file.clone();
         let first = {
@@ -364,8 +388,31 @@ impl Analysis {
     /// Pauses or resumes the transcription lane (2k): the transcribing recording stops after the
     /// chunk it is on, the ones waiting keep waiting. Nothing on the lane: nothing to pause. Whether
     /// anything changed.
-    pub fn pause(&self, paused: bool) -> bool {
-        self.transcription.pause(paused)
+    ///
+    /// `send` gets the lane as it is now, under the same lock every run's notification is taken
+    /// and sent under, so a pause's snapshot never lands after a newer one (2k repair).
+    pub fn pause(&self, paused: bool, send: &dyn Fn(&Transcription)) -> bool {
+        let _order = lock(&self.order);
+        let changed = self.transcription.pause(paused);
+        let now = self.transcription();
+        *lock(&self.lane_sent) = Some(shape(&now));
+        send(&now);
+        changed
+    }
+
+    /// The lane, when its shape (who is on it, their phases, the pause) moved since it was last
+    /// sent; for the app's notifier, which is called under `order`. Each job's progress reaches the
+    /// page through its own `analysis` events, so a log line or a piece landing is not a reason to
+    /// send the lane again.
+    pub fn lane_moved(&self) -> Option<Transcription> {
+        let now = self.transcription();
+        let mut last = lock(&self.lane_sent);
+        let s = shape(&now);
+        if last.as_ref() == Some(&s) {
+            return None;
+        }
+        *last = Some(s);
+        Some(now)
     }
 
     /// Who is on the transcription lane, in turn, with each one's progress.
@@ -696,7 +743,11 @@ mod tests {
         let mut a = Analysis::with_cache(d.join("cache"));
         a.halves = counted_halves;
         let notify: Notify = Arc::new(|_: &Progress, _| {});
-        assert!(!a.pause(true), "nothing transcribing: nothing to pause");
+        let quiet = |_: &Transcription| {};
+        assert!(
+            !a.pause(true, &quiet),
+            "nothing transcribing: nothing to pause"
+        );
         a.start(&one, notify.clone()).unwrap();
         wait_for("one transcribing", || CHUNKS.load(SeqCst) > 0);
         a.start(&two, notify).unwrap();
@@ -710,7 +761,7 @@ mod tests {
         );
         assert_eq!(files(&a.transcription()), [k1.clone(), k2.clone()]);
 
-        assert!(a.pause(true));
+        assert!(a.pause(true, &quiet));
         wait_for("one stopped", || a.transcription().stopped);
         let at = CHUNKS.load(SeqCst);
         std::thread::sleep(Duration::from_millis(50));
@@ -724,7 +775,7 @@ mod tests {
         assert!(a.editable(&one));
         assert_eq!(a.progress(&two).unwrap().phase, Phase::Waiting);
 
-        assert!(a.pause(false));
+        assert!(a.pause(false, &quiet));
         wait_for("one going again", || CHUNKS.load(SeqCst) > at);
         assert!(!a.transcription().stopped);
         END.store(true, SeqCst);
@@ -732,6 +783,30 @@ mod tests {
         let t = a.transcription();
         assert!(t.jobs.is_empty() && !t.paused);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_failed_open_never_marks_a_running_recording_failed() {
+        // No such folder: opening the project would fail, and must not be needed.
+        let a = Analysis::with_cache(std::env::temp_dir().join("junctur-app-failed-unused"));
+        let k = key(Path::new("Z:/nowhere/rec.mp4"));
+        let running = Progress {
+            file: k.display().to_string(),
+            phase: Phase::Running,
+            line: None,
+            error: None,
+            project: None,
+            steps: Vec::new(),
+            listed: true,
+            transcribed: Some(300.0),
+        };
+        lock(&a.runs).insert(k.clone(), running);
+        let p = a.failed(&k, "could not open".into());
+        assert_eq!((p.phase, p.error), (Phase::Running, None));
+        // Asked to start again, the run going on is the answer, without opening anything.
+        let p = a.start(&k, Arc::new(|_: &Progress, _| {})).unwrap();
+        assert_eq!(p.phase, Phase::Running);
+        assert!(a.busy(&k));
     }
 
     #[test]

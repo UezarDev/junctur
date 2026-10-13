@@ -12,8 +12,11 @@ use std::sync::{Condvar, Mutex, MutexGuard};
 
 #[derive(Default)]
 struct State {
-    /// Every recording on the lane, the head transcribing, the rest in the order they came.
-    queue: VecDeque<PathBuf>,
+    /// Every place on the lane, the head transcribing, the rest in the order they came. Each place
+    /// has its own number: a recording queued twice by mistake must still wait its own turn, not
+    /// pass as the head because it bears the head's name.
+    queue: VecDeque<(u64, PathBuf)>,
+    next: u64,
     paused: bool,
     /// The head is held at a chunk boundary by the pause (it may still be finishing a chunk while
     /// `paused` and not `stopped`).
@@ -34,24 +37,26 @@ pub struct Lane {
     moved: Condvar,
 }
 
-/// A recording's place at the head of the lane; leaving it hands the lane to the next.
+/// A recording's place on the lane, from the moment it is queued; leaving it (a run ending, or
+/// unwinding while it waits) takes the place off and hands the lane to the next.
 pub struct Turn<'a> {
     lane: &'a Lane,
-    file: PathBuf,
+    id: u64,
 }
 
 impl Drop for Turn<'_> {
     fn drop(&mut self) {
         let mut s = self.lane.state();
-        if let Some(i) = s.queue.iter().position(|f| *f == self.file) {
-            s.queue.remove(i);
-        }
+        let head = s.queue.front().is_some_and(|e| e.0 == self.id);
+        s.queue.retain(|e| e.0 != self.id);
         // A pause is for the jobs it was given on: one left on an empty lane would start the next
         // recording paused, possibly much later and with no panel open to say so.
         if s.queue.is_empty() {
             s.paused = false;
         }
-        s.stopped = false;
+        if head {
+            s.stopped = false;
+        }
         self.lane.moved.notify_all();
     }
 }
@@ -66,36 +71,41 @@ impl Lane {
     }
 
     /// Queues `file` and returns once it is the head. `on_wait` is called once, outside the lane's
-    /// lock, when it has to wait (so it may ask the lane for its [`View`]).
+    /// lock, when it has to wait (so it may ask the lane for its [`View`]). The place is a [`Turn`]
+    /// before `on_wait` runs, so a panic there takes it off rather than leaving it at the head of
+    /// a lane nobody will ever leave.
     pub fn enter(&self, file: &Path, on_wait: impl FnOnce()) -> Turn<'_> {
         let mut s = self.state();
-        s.queue.push_back(file.to_path_buf());
-        if s.queue.front().map(PathBuf::as_path) != Some(file) {
+        let id = s.next;
+        s.next += 1;
+        s.queue.push_back((id, file.to_path_buf()));
+        let turn = Turn { lane: self, id };
+        let head = |s: &State| s.queue.front().is_some_and(|e| e.0 == id);
+        if !head(&s) {
             drop(s);
             on_wait();
             s = self.state();
-            while s.queue.front().map(PathBuf::as_path) != Some(file) {
+            while !head(&s) {
                 s = self.wait(s);
             }
         }
-        Turn {
-            lane: self,
-            file: file.to_path_buf(),
-        }
+        drop(s);
+        turn
     }
 
     /// Called by the head between chunks: returns at once unless paused, else blocks until
-    /// resumed, calling `on_stop` once (outside the lock) when it starts holding.
-    pub fn hold(&self, on_stop: impl FnOnce()) {
+    /// resumed, calling `on_stop` (outside the lock) each time it is held anew: once, unless a
+    /// resume and a pause both came before it woke, which leaves it held but not `stopped`.
+    pub fn hold(&self, mut on_stop: impl FnMut()) {
         let mut s = self.state();
-        if !s.paused {
-            return;
-        }
-        s.stopped = true;
-        drop(s);
-        on_stop();
-        s = self.state();
         while s.paused {
+            if !s.stopped {
+                s.stopped = true;
+                drop(s);
+                on_stop();
+                s = self.state();
+                continue;
+            }
             s = self.wait(s);
         }
     }
@@ -119,7 +129,7 @@ impl Lane {
         View {
             paused: s.paused,
             stopped: s.stopped,
-            queue: s.queue.iter().cloned().collect(),
+            queue: s.queue.iter().map(|e| e.1.clone()).collect(),
         }
     }
 }
@@ -215,5 +225,97 @@ mod tests {
         // The next recording is not held.
         let _turn = lane.enter(Path::new("b"), || {});
         lane.hold(|| panic!("a pause from an earlier job"));
+    }
+
+    #[test]
+    fn a_head_that_finishes_while_paused_hands_on_a_held_lane() {
+        let lane = Arc::new(Lane::default());
+        let first = lane.enter(Path::new("a"), || {});
+        let started = Arc::new(AtomicUsize::new(0));
+        let next = {
+            let (mine, started) = (lane.clone(), started.clone());
+            std::thread::spawn(move || {
+                let _turn = mine.enter(Path::new("b"), || {});
+                // Before Whisper loads: the first `between`.
+                mine.hold(|| {});
+                started.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+        wait_for("b queued", || lane.view().queue.len() == 2);
+        lane.pause(true);
+        // `a` was on its last chunk: it ends without reaching another boundary.
+        drop(first);
+        wait_for("b held", || lane.view().stopped);
+        let v = lane.view();
+        assert!(v.paused, "b is still on the lane: the pause stays");
+        assert_eq!(v.queue, [PathBuf::from("b")]);
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(started.load(Ordering::SeqCst), 0, "b held before Whisper");
+        lane.pause(false);
+        next.join().unwrap();
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn resumed_and_paused_again_before_waking_is_still_stopped() {
+        let lane = Arc::new(Lane::default());
+        let _turn = lane.enter(Path::new("a"), || {});
+        lane.pause(true);
+        let stops = Arc::new(AtomicUsize::new(0));
+        let head = {
+            let (mine, stops) = (lane.clone(), stops.clone());
+            std::thread::spawn(move || {
+                mine.hold(|| {
+                    stops.fetch_add(1, Ordering::SeqCst);
+                })
+            })
+        };
+        wait_for("stopped", || lane.view().stopped);
+        {
+            // Resume, then pause, with the head unable to take the lock in between.
+            let mut s = lane.state();
+            s.paused = false;
+            s.stopped = false;
+            lane.moved.notify_all();
+            s.paused = true;
+        }
+        wait_for("stopped again", || lane.view().stopped);
+        assert_eq!(
+            stops.load(Ordering::SeqCst),
+            2,
+            "the page is told it stopped again"
+        );
+        lane.pause(false);
+        head.join().unwrap();
+    }
+
+    #[test]
+    fn a_place_given_up_while_waiting_never_blocks_the_lane() {
+        let lane = Arc::new(Lane::default());
+        let first = lane.enter(Path::new("a"), || {});
+        let mine = lane.clone();
+        let panicked = std::thread::spawn(move || {
+            let _turn = mine.enter(Path::new("b"), || panic!("on_wait failed"));
+        })
+        .join();
+        assert!(panicked.is_err());
+        assert_eq!(lane.view().queue, [PathBuf::from("a")]);
+        drop(first);
+        // The same recording queued twice waits its own turn.
+        let one = lane.enter(Path::new("c"), || {});
+        let waited = Arc::new(AtomicUsize::new(0));
+        let again = {
+            let (mine, waited) = (lane.clone(), waited.clone());
+            std::thread::spawn(move || {
+                let _turn = mine.enter(Path::new("c"), || {
+                    waited.fetch_add(1, Ordering::SeqCst);
+                });
+            })
+        };
+        wait_for("c queued twice", || lane.view().queue.len() == 2);
+        assert_eq!(waited.load(Ordering::SeqCst), 1);
+        drop(one);
+        again.join().unwrap();
+        assert!(lane.view().queue.is_empty());
     }
 }
