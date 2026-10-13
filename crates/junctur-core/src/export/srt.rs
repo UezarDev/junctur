@@ -165,7 +165,9 @@ pub fn cues<'a>(
     num: u64,
     den: u64,
 ) -> Vec<Cue> {
-    let c: &Captions = &edit.captions;
+    // The caller resolves a list without its own settings to the user's defaults (2i); one that did
+    // not gets the built-in ones.
+    let c: &Captions = &edit.captions.unwrap_or_default();
     let tl = Timeline::new(edit, num, den);
     let label = edit.speakers.labeller();
     let mut words: Vec<(usize, &Word)> = words.into_iter().collect();
@@ -447,7 +449,8 @@ fn stamp(s: f64) -> String {
 /// own like the colour. Resolve's import applies both (5d's research); nothing else is written,
 /// since the rest of what Resolve styles is its subtitle Track Style, which an SRT cannot set.
 pub fn write(cues: &[Cue], edit: &EditList) -> String {
-    let c = &edit.captions;
+    // Resolved by the caller, as for `cues` (2i).
+    let c = edit.captions.unwrap_or_default();
     let (open, close) = match (c.bold, c.italic) {
         (true, true) => ("<b><i>", "</i></b>"),
         (true, false) => ("<b>", "</b>"),
@@ -538,7 +541,7 @@ mod tests {
                 &[None, None],
                 None,
             ),
-            captions,
+            captions: Some(captions),
             windows: vec![],
         }
     }

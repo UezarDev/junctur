@@ -12,6 +12,8 @@
  * nothing but the right and bottom margins is ever sent.
  */
 
+/** The title bar (2i, TitleBar.svelte): the editor is laid out in the window below it. */
+export const TITLE = 34;
 export const BAR = 52;
 export const RULER = 22;
 export const ROW_MIN = 22;

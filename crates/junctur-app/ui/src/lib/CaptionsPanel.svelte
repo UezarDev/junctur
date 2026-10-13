@@ -10,10 +10,14 @@
   // caption, a line each; 5b's per-speaker files left beside it are listed. The remembered voices
   // are listed with Forget, and the speakers can be analysed again from the audio (5c), the seconds
   // picked for each voice cutting the windows; that reads the recording again, so it is a button,
-  // never automatic.
+  // never automatic. The caption settings' own fields (export, preview, style, how cues are cut) are
+  // `CaptionRules`, shared with Settings (2i); a list without
+  // its own settings follows the user's defaults, and "Save as default" makes this recording's the
+  // defaults.
   import { save } from "@tauri-apps/plugin-dialog";
   import * as api from "./api";
   import { captionFace } from "./captionStyle";
+  import CaptionRules from "./CaptionRules.svelte";
 
   let {
     edit,
@@ -31,6 +35,7 @@
   const face = $derived(captionFace(captions ?? { bold: false, italic: false }));
   let exported = $state<string[] | null>(null);
   let busy = $state(false);
+  let savedDefault = $state(false);
 
   // The remembered voices, read again whenever the speakers change (an enrollment relabels them).
   let voiceList = $state<api.Voice[]>([]);
@@ -75,17 +80,15 @@
     call(() => api.setCaptions({ ...captions, ...change }));
   }
 
-  // A number field commits on change, inside its limits; anything else snaps back on the next
-  // edit state (the input shows the saved value again).
-  function number(e: Event, key: "chars" | "lines" | "seconds", min: number, max: number) {
-    const el = e.currentTarget as HTMLInputElement;
-    const v = Number(el.value);
-    if (!Number.isFinite(v) || v < min || v > max) {
-      el.value = String(captions?.[key] ?? "");
-      onError(`${key === "chars" ? "Characters per line" : key === "lines" ? "Lines" : "Seconds"} must be ${min} to ${max}`);
-      return;
+  async function saveDefault() {
+    if (!captions) return;
+    savedDefault = false;
+    try {
+      await api.saveCaptionDefaults(captions);
+      savedDefault = true;
+    } catch (e) {
+      onError(String(e));
     }
-    setCaptions({ [key]: key === "seconds" ? v : Math.round(v) });
   }
 
   function rename(id: number, e: Event) {
@@ -138,22 +141,7 @@
     {#if !usable || !captions}
       <p class="note">Open a recording with an edit list to set up its captions.</p>
     {:else}
-      <label class="check" title="On: rendering also writes the captions (.srt) beside the video">
-        <input
-          type="checkbox"
-          checked={captions.on}
-          onchange={(e) => setCaptions({ on: (e.currentTarget as HTMLInputElement).checked })}
-        />
-        Export captions
-      </label>
-      <label class="check" title="Shows the captions over the video as it plays, as the export cuts them">
-        <input
-          type="checkbox"
-          checked={captions.preview}
-          onchange={(e) => setCaptions({ preview: (e.currentTarget as HTMLInputElement).checked })}
-        />
-        Preview captions
-      </label>
+      <CaptionRules value={captions} part="switches" onChange={(c) => setCaptions(c)} {onError} />
 
       <h3>Speakers</h3>
       {#if speakers.length === 0}
@@ -180,22 +168,7 @@
       {/each}
 
       <h3>Style</h3>
-      <label class="check">
-        <input
-          type="checkbox"
-          checked={captions.bold}
-          onchange={(e) => setCaptions({ bold: (e.currentTarget as HTMLInputElement).checked })}
-        />
-        Bold
-      </label>
-      <label class="check">
-        <input
-          type="checkbox"
-          checked={captions.italic}
-          onchange={(e) => setCaptions({ italic: (e.currentTarget as HTMLInputElement).checked })}
-        />
-        Italic
-      </label>
+      <CaptionRules value={captions} part="style" onChange={(c) => setCaptions(c)} {onError} />
       <p class="note">
         Colour, bold and italic are all an SRT brings into Resolve. Font, size, outline, shadow, background and
         position are the subtitle track's style in Resolve (select the track, Inspector &gt; Track): set them there
@@ -205,25 +178,16 @@
       </p>
 
       <h3>How captions are cut</h3>
-      <label class="field">
-        <span>Characters per line</span>
-        <input type="number" min="10" max="80" value={captions.chars} onchange={(e) => number(e, "chars", 10, 80)} />
-      </label>
-      <label class="field">
-        <span>Lines per speaker</span>
-        <input type="number" min="1" max="3" value={captions.lines} onchange={(e) => number(e, "lines", 1, 3)} />
-      </label>
-      <label class="field">
-        <span>Longest caption (s)</span>
-        <input
-          type="number"
-          min="1"
-          max="15"
-          step="0.5"
-          value={captions.seconds}
-          onchange={(e) => number(e, "seconds", 1, 15)}
-        />
-      </label>
+      <CaptionRules value={captions} part="cut" onChange={(c) => setCaptions(c)} {onError} />
+      <div class="defaults">
+        <span class="note">
+          {edit?.captionsOwn ? "Set for this recording." : "Following your defaults (Settings)."}
+        </span>
+        <button onclick={saveDefault} title="New recordings, and ones not set by hand, start from these">
+          Save as default
+        </button>
+      </div>
+      {#if savedDefault}<p class="done">Saved as the default for every recording.</p>{/if}
 
       <button class="export" onclick={exportSrt} disabled={busy || !source}>
         {busy ? "Writing…" : "Export captions (.srt)…"}
@@ -285,12 +249,6 @@
     font-weight: 600;
     border-bottom: 1px solid var(--line);
   }
-  .check {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    margin: 8px 0 0;
-  }
   .body {
     flex: 1;
     overflow-y: auto;
@@ -336,14 +294,12 @@
       0 0 2px #000,
       0 0 2px #000;
   }
-  .field {
+  .defaults {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin: 6px 0;
-  }
-  .field input {
-    width: 72px;
+    gap: 8px;
+    margin-top: 8px;
   }
   .export {
     margin-top: 16px;

@@ -3,7 +3,8 @@
   // side panel on the right (Transcript, Captions, Properties); in portrait, mixer strips and large
   // avatars beside the picture. Where everything goes comes from layout.ts; this places it, tells
   // mpv the margins, and holds what several parts share (the selection, the lanes' window, who is
-  // talking).
+  // talking). Above it all, the title bar (2i): its menus, the keys and test mode's `menu=<id>` all
+  // come to `onMenu`; Settings opens over the editor or the start window.
   import { onMount, untrack } from "svelte";
   import { ask, open } from "@tauri-apps/plugin-dialog";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -18,7 +19,10 @@
   import Strips from "./lib/Strips.svelte";
   import Avatars from "./lib/Avatars.svelte";
   import ActionBar from "./lib/ActionBar.svelte";
-  import { layout } from "./lib/layout";
+  import TitleBar from "./lib/TitleBar.svelte";
+  import SettingsDialog from "./lib/SettingsDialog.svelte";
+  import { layout, TITLE } from "./lib/layout";
+  import type { MenuId } from "./lib/menus";
   import { Talk, same } from "./lib/talking";
   import * as sel from "./lib/selection";
   import { words as toWords, type Words } from "./lib/transcript";
@@ -63,6 +67,7 @@
   let overlay = $state(readOverlay());
   let windowWidth = $state(window.innerWidth);
   let windowHeight = $state(window.innerHeight);
+  let settingsOpen = $state(false);
   const PANEL = 400;
   const loaded = $derived(!!player?.path);
   const panelWidth = $derived(loaded && panelOpen ? Math.min(PANEL, windowWidth * 0.45) : 0);
@@ -76,15 +81,19 @@
   const L = $derived(
     layout({
       width: windowWidth,
-      height: windowHeight,
+      height: Math.max(0, windowHeight - TITLE),
       panel: panelWidth,
       aspect,
       tracks: trackCount,
       speakers: speakerCount,
     }),
   );
+  // The layout's shares are of the window below the title bar; mpv's are of the whole window, the
+  // bar being its top margin (the surface fills the window, under the opaque bar).
+  const below = $derived(windowHeight > 0 ? Math.max(0, windowHeight - TITLE) / windowHeight : 1);
   const marginRight = $derived(loaded ? Math.round(L.margins.right * 1000) / 1000 : 0);
-  const marginBottom = $derived(loaded ? Math.round(L.margins.bottom * 1000) / 1000 : 0);
+  const marginBottom = $derived(loaded ? Math.round(L.margins.bottom * below * 1000) / 1000 : 0);
+  const marginTop = $derived(Math.round((1 - below) * 1000) / 1000);
 
   function readOverlay(): boolean {
     try {
@@ -100,11 +109,9 @@
     } catch {
       // A preference only: it is simply not kept.
     }
-    void api.setMenuCheck("talking", on).catch(() => {});
   }
   function togglePanel() {
     panelOpen = !panelOpen;
-    void api.setMenuCheck("panel", panelOpen).catch(() => {});
   }
 
   // The side panel, play bar and lanes are opaque; mpv keeps the picture out from under them. Sent
@@ -115,12 +122,13 @@
   $effect(() => {
     const r = marginRight;
     const b = marginBottom;
+    const t = marginTop;
     clearTimeout(marginTimer);
     marginTimer = window.setTimeout(() => {
-      const key = `${r} ${b}`;
+      const key = `${r} ${b} ${t}`;
       if (key === sent) return;
       sent = key;
-      api.setVideoMargins(r, b).catch(() => (sent = ""));
+      api.setVideoMargins(r, b, t).catch(() => (sent = ""));
     }, 100);
   });
 
@@ -307,6 +315,37 @@
     }
   }
 
+  // Back to the start window (2i). The player stops and forgets the recording; what the page held
+  // for it goes too. Edits were saved as they were made; an analysis of it goes on in the background.
+  async function closeRecording() {
+    if (!player?.path) return;
+    try {
+      await api.closeFile();
+    } catch (e) {
+      failure = String(e);
+      return;
+    }
+    opened = null;
+    analysis = null;
+    words = null;
+    selection = null;
+    waves = null;
+    wavesVersion++;
+    failure = null;
+  }
+
+  // A model change surfaces as 2d's out-of-date notice for the open recording; nothing re-runs.
+  function settingsSaved() {
+    const o = opened;
+    if (!o) return;
+    api.outdated(o.file).then(
+      (outdated) => {
+        if (opened?.file === o.file) opened = { ...opened, outdated };
+      },
+      (e) => (failure = String(e)),
+    );
+  }
+
   async function pick() {
     try {
       const path = await open({ multiple: false, filters: [{ name: "Video", extensions: VIDEO }] });
@@ -325,8 +364,15 @@
   }
 
   function onKey(e: KeyboardEvent) {
-    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+    // The dialog has the keys while it is open (Escape closes it).
+    if (settingsOpen) return;
     const ctrl = e.ctrlKey || e.metaKey;
+    // The title bar's shortcuts (2i), even from a field: a native menu's accelerators were.
+    if (ctrl && !e.shiftKey && (e.code === "KeyO" || e.code === "KeyW" || e.code === "Comma")) {
+      e.preventDefault();
+      return onMenu(e.code === "KeyO" ? "open" : e.code === "KeyW" ? "close" : "settings");
+    }
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
     if (edit?.editable && player?.path) {
       if (ctrl && (e.code === "KeyY" || (e.code === "KeyZ" && e.shiftKey))) {
         e.preventDefault();
@@ -358,12 +404,13 @@
     }
   }
 
-  function onMenu(id: string) {
+  // Every menu item, from the title bar, the keys or test mode (which sends any string).
+  function onMenu(id: MenuId | string) {
     if (id === "open") void pick();
+    else if (id === "close") void closeRecording();
+    else if (id === "settings") settingsOpen = true;
     else if (id === "panel") {
-      // The menu flipped its own check mark.
-      if (player?.path) panelOpen = !panelOpen;
-      else void api.setMenuCheck("panel", panelOpen).catch(() => {});
+      if (player?.path) togglePanel();
     } else if (id === "talking") setOverlay(!overlay);
     else if ((id === "transcript" || id === "captions" || id === "properties") && player?.path) {
       tab = id;
@@ -377,7 +424,7 @@
     const w = Math.max(1, L.lanes.w - L.head - 1);
     const t = span ? (span.start + span.end) / 2 : (player?.position ?? view.start);
     const x = left + Math.min(1, Math.max(0, (t - view.start) / view.len)) * w;
-    return { x, min: left + 4, max: L.lanes.x + L.lanes.w - 4, bottom: windowHeight - (L.lanes.y + L.lanes.h) + 8 };
+    return { x, min: left + 4, max: L.lanes.x + L.lanes.w - 4, bottom: windowHeight - TITLE - (L.lanes.y + L.lanes.h) + 8 };
   });
 
   onMount(() => {
@@ -395,7 +442,6 @@
         starting = false;
       },
     );
-    void api.setMenuCheck("talking", overlay).catch(() => {});
     const unlisten = [
       api.onPlayerState((s) => (player = s)),
       api.onEditState((s) => (edit = s)),
@@ -426,6 +472,8 @@
   }}
 />
 
+<div class="frame">
+<TitleBar menu={{ loaded, panel: panelOpen, talking: overlay }} {onMenu} />
 <main class:dragging>
   {#if !player?.path}
     {#if !starting}
@@ -550,12 +598,23 @@
       {/if}
     </div>
   {/if}
+
+  {#if settingsOpen}
+    <SettingsDialog onClose={() => (settingsOpen = false)} onSaved={settingsSaved} />
+  {/if}
 </main>
+</div>
 
 <style>
+  .frame {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+  }
   main {
     position: relative;
-    height: 100%;
+    flex: 1;
+    min-height: 0;
     box-sizing: border-box;
     outline: 2px dashed transparent;
     outline-offset: -10px;

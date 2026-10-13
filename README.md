@@ -169,11 +169,16 @@ Downloaded on first use into `<cache>/models/`, checked against pinned SHA-256 d
 | `large-v3-q5_0` | large-v3 quantised to 5 bits: large-v3's decoder in about 2.2 GB of VRAM, a little more than turbo |
 
 To change the default, create `junctur/config.json` in the OS config folder (`%APPDATA%` on Windows,
-`~/.config` elsewhere), or point `JUNCTUR_CONFIG` at a file:
+`~/.config` elsewhere), or point `JUNCTUR_CONFIG` at a file; the desktop app's Settings (the gear in its
+title bar) writes the same file:
 
 ```json
-{ "whisper_model": "large-v3" }
+{ "whisper_model": "large-v3", "captions": { "on": true, "chars": 32 } }
 ```
+
+`captions` holds the caption defaults: what a recording whose edit list has no `captions` line of its own
+cuts its captions with (`on`, `chars` per line, `lines` per speaker, `seconds` at most), in the app and in
+`render` and `export --srt`. A key left out keeps its built-in value.
 
 `--model` on the command line wins over the config file. A config file that does not parse, names an
 unknown model or key, or is named by `JUNCTUR_CONFIG` but missing, is an error rather than a silent

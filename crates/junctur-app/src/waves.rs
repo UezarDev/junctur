@@ -110,6 +110,13 @@ impl Store {
         }
     }
 
+    /// No recording is open any more (2i): a read still going stops, and nothing is served.
+    pub fn close(&self) {
+        if let Some(old) = lock(&self.current).take() {
+            old.stop.store(true, Ordering::Relaxed);
+        }
+    }
+
     pub fn state(&self) -> Option<WavesState> {
         lock(&self.current).as_ref().map(|s| lock(&s.state).clone())
     }

@@ -13,6 +13,8 @@
 
 use serde::{Deserialize, Serialize};
 
+// `default`: a settings file or a command missing a field (one a later round adds) takes the built-in
+// value instead of failing (2i).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Captions {

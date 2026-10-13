@@ -67,8 +67,10 @@ export interface EditState {
   speakers: Speaker[];
   /** Changes when the words' speaker labels would (turns changed on disk), not on a rename. */
   speakersKey: string;
-  /** Caption settings (the edit list's `captions` line). */
+  /** Caption settings: the edit list's `captions` line, else the user's defaults (2i). */
   captions: Captions;
+  /** The list has its own caption settings; without, it follows the defaults. */
+  captionsOwn: boolean;
 }
 
 export interface Speaker {
@@ -133,6 +135,29 @@ export interface Cue {
   start: number;
   end: number;
   parts: { speaker: number; lines: string[] }[];
+}
+
+/** A Whisper model the Settings dialog offers (src/settings.rs). */
+export interface ModelChoice {
+  key: string;
+  label: string;
+  note: string;
+}
+
+/** What the Settings dialog edits (2i), kept in junctur/config.json. */
+export interface Settings {
+  whisperModel: string;
+  /** The caption settings a recording without its own starts from. */
+  captions: Captions;
+}
+
+export interface SettingsView {
+  settings: Settings;
+  models: ModelChoice[];
+  /** The config file; null with no config folder. */
+  path: string | null;
+  /** Why the file could not be read (saving replaces it). */
+  error: string | null;
 }
 
 /** A voice Junctur remembers (5b), used to name speakers in every recording. */
@@ -280,9 +305,10 @@ export const forgetVoice = (name: string) => invoke<void>("forget_voice", { name
 export const reanalyzeSpeakers = () => invoke<void>("reanalyze_speakers");
 export const undo = () => invoke<void>("undo");
 export const redo = () => invoke<void>("redo");
-/** The shares of the window (0..1) on the right and at the bottom to keep free of video. */
-export const setVideoMargins = (right: number, bottom: number) =>
-  invoke<void>("set_video_margins", { right, bottom });
+/** The shares of the window (0..1) on the right, at the bottom and at the top (the title bar) to
+ * keep free of video. */
+export const setVideoMargins = (right: number, bottom: number, top: number) =>
+  invoke<void>("set_video_margins", { right, bottom, top });
 export const setSolo = (track: number, on: boolean) => invoke<void>("set_solo", { track, on });
 export const turns = () => invoke<Turns>("turns");
 export const wavesState = () => invoke<WavesState | null>("waves_state");
@@ -300,8 +326,18 @@ export const recentInfo = (path: string) => invoke<RecordingInfo>("recent_info",
 export const thumbnail = (path: string) => invoke<ArrayBuffer>("thumbnail", { path });
 /** Opens the open recording's project folder in the file manager. */
 export const reveal = () => invoke<void>("reveal");
-export const setMenuCheck = (id: "panel" | "talking", checked: boolean) =>
-  invoke<void>("set_menu_check", { id, checked });
+/** Closes the open recording: back to the start window (2i). */
+export const closeFile = () => invoke<void>("close_file");
+export const settings = () => invoke<SettingsView>("settings");
+/** Writes the settings to junctur/config.json; never analyses anything. */
+export const saveSettings = (settings: Settings) => invoke<SettingsView>("save_settings", { settings });
+/** The Captions panel's "Save as default". */
+export const saveCaptionDefaults = (captions: Captions) =>
+  invoke<SettingsView>("save_caption_defaults", { captions });
+/** Why `path`'s analysis is out of date with the settings now (2d's notice). */
+export const outdated = (path: string) => invoke<string[]>("outdated", { path });
+/** Windows' snap layouts for the window (the pointer resting on the title bar's maximise button). */
+export const snapLayouts = () => invoke<void>("snap_layouts");
 export const uiLog = (message: string) => invoke<void>("ui_log", { message });
 
 export const onPlayerState = (f: (s: PlayerState) => void): Promise<UnlistenFn> =>
@@ -323,6 +359,6 @@ export const onLevels = (f: (levels: (number | null)[]) => void): Promise<Unlist
 export const onWaves = (f: (s: WavesState) => void): Promise<UnlistenFn> =>
   listen<WavesState>("waves", (e) => f(e.payload));
 
-/** A menu item chosen (src/menu.rs): `open`, `panel`, `talking`. */
+/** A menu item chosen by test mode's `menu=<id>` (src/testmode.rs); ids as in menus.ts. */
 export const onMenu = (f: (id: string) => void): Promise<UnlistenFn> =>
   listen<string>("menu", (e) => f(e.payload));

@@ -591,7 +591,8 @@ fn draft(
     let parsed = old.as_deref().and_then(|t| edit::parse(t).ok());
     let previous = parsed.as_ref().map(|e| e.speakers.clone());
     // Caption settings are the user's, like the names: a re-cut keeps them.
-    let captions = parsed.map(|e| e.captions).unwrap_or_default();
+    // None stays None: a list that followed the user's defaults still does (2i).
+    let captions = parsed.and_then(|e| e.captions);
     let speakers = speakers_for(speakers, previous.as_ref());
     let make = |settings: &CutSettings| EditList {
         source: p.file.clone(),

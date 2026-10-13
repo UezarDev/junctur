@@ -22,7 +22,10 @@
 //! the play bar numbers them); each step's report and the final one add the mutes (`mixer`) and
 //! the levels read then (`levels`: each track's meter and what is heard, in dBFS); `solo=<n>` /
 //! `unsolo=<n>` (2g) solo or unsolo one, and `menu=<id>` chooses a menu item as a click on it does
-//! (`menu=talking` shows the overlay of who is talking). The final report adds how far the waveforms are (`waves`);
+//! (`menu=talking` shows the overlay of who is talking; 2i: the title bar's menus, so also
+//! `menu=close`, back to the start window, and `menu=settings`, the Settings dialog). The final
+//! report adds how far the waveforms are (`waves`) and the settings the dialog shows (`settings`;
+//! set `JUNCTUR_CONFIG` to a scratch file before anything saves them);
 //! the picture's shape is in the `state` (`width`, `height`, `aspect`). Each step's
 //! report adds the edit state it left, and the final report re-reads `edit.junctur` from disk
 //! (`disk`: does it parse, and is it the list in play), counts the loads asked of mpv (a save must
@@ -46,6 +49,9 @@ use crate::trace::Trace;
 
 pub const ENV: &str = "JUNCTUR_TEST_OFFSCREEN";
 pub const STEPS_ENV: &str = "JUNCTUR_TEST_STEPS";
+/// The event a `menu=<id>` step is sent to the page as, as the title bar's own items go to
+/// App.svelte's `onMenu` (2i; 2g's native menu sent the same).
+const MENU_EVENT: &str = "menu";
 
 /// Where the window goes: well outside any monitor layout.
 const POSITION: (i32, i32) = (-12000, -12000);
@@ -217,7 +223,7 @@ fn analysis(app: &AppHandle) -> Option<crate::analysis::Progress> {
 fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
     if let Action::Menu(id) = a {
         use tauri::Emitter;
-        return app.emit(crate::menu::EVENT, id).map_err(|e| e.to_string());
+        return app.emit(MENU_EVENT, id).map_err(|e| e.to_string());
     }
     if let Action::Reanalyse = a {
         let file = with_player(app, |p| p.file())?.ok_or("no file is open")?;
@@ -408,6 +414,8 @@ pub fn arm(app: AppHandle, seconds: f64, trace: Option<Arc<Trace>>) {
                     .map(|f| crate::analysis::outdated(std::path::Path::new(&f))),
                 "mixer": mixer(&app),
                 "waves": app.try_state::<App>().and_then(|a| a.waves.state()),
+                "settings": crate::settings::read(),
+                "margins": with_player(&app, |p| p.video_margins()).ok(),
                 "ui": lock(&UI_LOG).clone(),
             }),
             Err(e) => json!({ "verdict": "error", "error": e }),

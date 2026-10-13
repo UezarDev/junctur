@@ -17,6 +17,15 @@ fn project(a: &Args) -> Result<Project, String> {
     Project::open(&a.file()?, a.path("--cache-dir"), a.path("--project")).map_err(|e| e.to_string())
 }
 
+/// The project's edit list with its caption settings resolved (2i): a list without its own takes
+/// the config file's defaults, as the app shows them, so a render and an export cut the cues the
+/// app would.
+fn edit_list(p: &Project) -> Result<EditList, String> {
+    let mut e = p.edit().map_err(|e| e.to_string())?;
+    e.captions = Some(config::captions(e.captions, config::load).map_err(|e| e.to_string())?);
+    Ok(e)
+}
+
 fn cut_settings(a: &Args) -> Result<CutSettings, String> {
     let mut s = CutSettings::default();
     if let Some(v) = a.num("--pad-before")? {
@@ -149,7 +158,8 @@ pub fn export(a: Args) -> Result<(), String> {
         println!("{} ({} clips)", out.display(), e.keep.len());
     }
     if let Some(out) = srt {
-        write_captions(&p, &e, &out)?;
+        // Only the captions need the config file, so a broken one never blocks an FCPXML.
+        write_captions(&p, &edit_list(&p)?, &out)?;
     }
     Ok(())
 }
@@ -177,10 +187,10 @@ pub fn render(a: Args) -> Result<(), String> {
     a.reject_unknown(&known(&["--out", "--full", "--force", "--jobs"]))?;
     let out = a.path("--out").ok_or("render needs --out <out.mp4>")?;
     let p = project(&a)?;
-    let e = p.edit().map_err(|e| e.to_string())?;
+    let e = edit_list(&p)?;
     // With captions on, what the caption file needs is checked before an encode that can take an
     // hour, not after it.
-    let captions = if e.captions.on {
+    let captions = if e.captions.is_some_and(|c| c.on) {
         let srt = out.with_extension("srt");
         junctur_core::output::refuse_source(&e.source, &srt).map_err(|e| e.to_string())?;
         let t = transcribe::load(&p.dir)

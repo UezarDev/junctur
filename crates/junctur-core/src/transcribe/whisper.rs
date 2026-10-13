@@ -20,8 +20,8 @@ use crate::{Error, Result};
 
 /// Which model to load. `Auto` (the default) means large-v3-turbo, on the GPU when it fits in the free
 /// VRAM, else on CPU; the others are what the user asked for, by `--model` or the config file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(try_from = "String")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "&'static str")]
 pub enum ModelPref {
     #[default]
     Auto,
@@ -55,6 +55,15 @@ impl ModelPref {
         }
     }
 
+    /// The name the config file is written with (2i): the first of [`Self::NAMES`] for it, so an
+    /// alias read in comes back out as the canonical name.
+    pub fn key(self) -> &'static str {
+        Self::NAMES
+            .iter()
+            .find(|(_, m)| *m == self)
+            .map_or("auto", |(n, _)| n)
+    }
+
     /// The model's name as [`Choice::model`] and the transcript record it (`large-v3-turbo`, ...).
     pub fn name(self) -> String {
         model_name(self.model())
@@ -66,6 +75,12 @@ fn model_name(m: &Model) -> String {
         .trim_start_matches("ggml-")
         .trim_end_matches(".bin")
         .into()
+}
+
+impl From<ModelPref> for &'static str {
+    fn from(m: ModelPref) -> Self {
+        m.key()
+    }
 }
 
 impl FromStr for ModelPref {

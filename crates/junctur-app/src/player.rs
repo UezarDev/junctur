@@ -201,6 +201,8 @@ pub struct Core {
     mixer: Arc<Mutex<Mixer>>,
     /// Held while `mutes.json` is written, so writes land in the order of the clicks.
     saving: Mutex<()>,
+    /// The user's caption defaults (2i), for an edit list without settings of its own.
+    caption_defaults: Mutex<Captions>,
 }
 
 impl Player {
@@ -260,6 +262,7 @@ impl Player {
             editor: Mutex::new(Editor::default()),
             mixer,
             saving: Mutex::new(()),
+            caption_defaults: Mutex::new(Captions::default()),
             ctl: Mutex::new(Ctl {
                 file: None,
                 edit_path: None,
@@ -577,6 +580,38 @@ impl Core {
         })
     }
 
+    /// Closes the recording (2i: back to the start window). mpv stops and idles, and what was kept
+    /// for the recording goes: loads not begun, the edit list and its watch, the editor's history
+    /// and words, the mutes. Edits are saved as they are made, so nothing is lost. An analysis of it
+    /// is not the player's and goes on (see `analysis`).
+    pub fn close(&self) -> Result<(), String> {
+        let mut ed = lock(&self.editor);
+        ed.reset(None);
+        let mut c = lock(&self.ctl);
+        c.watch = None;
+        c.file = None;
+        c.edit_path = None;
+        c.fps = None;
+        c.edit = Edit::default();
+        c.status = EditorStatus::default();
+        c.requested = Form::Source;
+        // A load asked for but not begun must not start the recording again.
+        lock(&self.loads).waiting.clear();
+        let stopped = self.mpv.command(&["stop"]);
+        {
+            let mut s = lock(&self.state);
+            s.set_reference(None);
+            s.close();
+        }
+        *lock(&self.mixer) = Mixer::default();
+        self.emit_edit(&c);
+        drop(c);
+        drop(ed);
+        self.emit_state();
+        self.emit_mixer();
+        stopped
+    }
+
     /// Sets the edit list's caption settings and saves them.
     pub fn set_captions(&self, captions: Captions) -> Result<(), String> {
         self.change(|ed, list, _| ed.set_captions(list, captions))
@@ -607,16 +642,28 @@ impl Core {
     }
 
     /// What a caption file is cut from: the list in play, the words the editor holds (an `Arc`,
-    /// not a copy; each lock is held only to take its part) and the frame rate.
+    /// not a copy; each lock is held only to take its part) and the frame rate. A list without its
+    /// own caption settings is cut with the defaults it shows (2i), so export and preview agree
+    /// with the panel; it is copied only then.
     fn caption_source(&self) -> Result<(Arc<EditList>, Arc<Words>, Fps), String> {
         self.prepare();
         let words = lock(&self.editor)
             .words
             .clone()
             .ok_or("captions need a transcript: run the pipeline on this recording")?;
-        let c = lock(&self.ctl);
-        let list = c.edit.list.clone().ok_or("no edit list yet")?;
-        Ok((list, words, c.fps.ok_or("the frame rate is not known")?))
+        let (list, fps) = {
+            let c = lock(&self.ctl);
+            let list = c.edit.list.clone().ok_or("no edit list yet")?;
+            (list, c.fps.ok_or("the frame rate is not known")?)
+        };
+        let list = match list.captions {
+            Some(_) => list,
+            None => Arc::new(EditList {
+                captions: Some(*lock(&self.caption_defaults)),
+                ..(*list).clone()
+            }),
+        };
+        Ok((list, words, fps))
     }
 
     /// Takes any outside change on disk, lets `f` change and save the list in play, and plays
@@ -689,10 +736,10 @@ impl Core {
         Some(TranscriptView::new(&words, speakers))
     }
 
-    /// Keeps the right-hand `right` and bottom `bottom` shares of the window (0..1) free of video,
-    /// for the side panel and for the play bar and track lanes under the picture (2g); mpv centres
-    /// the picture in what is left.
-    pub fn set_video_margins(&self, right: f64, bottom: f64) -> Result<(), String> {
+    /// Keeps the right-hand `right`, bottom `bottom` and top `top` shares of the window (0..1) free
+    /// of video, for the side panel, the play bar and track lanes under the picture (2g) and the
+    /// title bar above it (2i); mpv centres the picture in what is left.
+    pub fn set_video_margins(&self, right: f64, bottom: f64, top: f64) -> Result<(), String> {
         let share = |x: f64| {
             if x.is_finite() {
                 x.clamp(0.0, 0.9)
@@ -702,10 +749,18 @@ impl Core {
         };
         self.mpv
             .set_string("video-margin-ratio-right", &format!("{:.4}", share(right)))?;
+        self.mpv
+            .set_string("video-margin-ratio-top", &format!("{:.4}", share(top)))?;
         self.mpv.set_string(
             "video-margin-ratio-bottom",
             &format!("{:.4}", share(bottom)),
         )
+    }
+
+    /// The margins mpv has now, right, bottom and top (test mode; the top one is the title bar, 2i).
+    pub fn video_margins(&self) -> [Option<String>; 3] {
+        ["right", "bottom", "top"]
+            .map(|side| self.mpv.get_string(&format!("video-margin-ratio-{side}")))
     }
 
     /// The edit list's speaker turns, for the Speakers lane (2g).
@@ -740,7 +795,14 @@ impl Core {
 
     pub fn edit_state(&self) -> EditState {
         let c = lock(&self.ctl);
-        EditState::new(&c.edit, c.skip, c.fps, &c.status)
+        let defaults = *lock(&self.caption_defaults);
+        EditState::new(&c.edit, c.skip, c.fps, &c.status, &defaults)
+    }
+
+    /// New caption defaults from Settings (2i): a list without its own settings shows them at once.
+    pub fn set_caption_defaults(&self, captions: Captions) {
+        *lock(&self.caption_defaults) = captions;
+        self.emit_edit(&lock(&self.ctl));
     }
 
     pub fn toggle_pause(&self) -> Result<(), String> {
@@ -894,9 +956,10 @@ impl Core {
     }
 
     fn emit_edit(&self, c: &Ctl) {
+        let defaults = *lock(&self.caption_defaults);
         let _ = self.app.emit(
             EDIT_EVENT,
-            EditState::new(&c.edit, c.skip, c.fps, &c.status),
+            EditState::new(&c.edit, c.skip, c.fps, &c.status, &defaults),
         );
     }
 }

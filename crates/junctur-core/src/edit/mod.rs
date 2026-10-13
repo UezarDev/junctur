@@ -89,8 +89,10 @@ pub struct EditList {
     pub keep: Vec<Range>,
     /// Who speaks when; empty when the project has no speakers stage result.
     pub speakers: Speakers,
-    /// How the caption file is cut into cues, and whether captions are on.
-    pub captions: Captions,
+    /// How the caption file is cut into cues, and whether captions are on; `None` when the list has
+    /// no `captions` line, and then it follows the user's defaults (2i, `config::captions`), which
+    /// the caller resolves before cutting cues.
+    pub captions: Option<Captions>,
     pub windows: Vec<Window>,
 }
 

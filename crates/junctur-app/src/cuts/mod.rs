@@ -172,8 +172,10 @@ pub struct EditState {
     /// Changes when the list's turns (or speaker tracks) do, so the page asks for the words'
     /// labels again after an outside change; a rename leaves it as it was.
     pub speakers_key: String,
-    /// The caption settings (defaults when there is no list).
+    /// The caption settings: the list's own, else the user's defaults (also with no list).
     pub captions: edit::Captions,
+    /// The list has caption settings of its own; without, it follows the defaults (2i).
+    pub captions_own: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -195,7 +197,15 @@ pub struct EditorStatus {
 }
 
 impl EditState {
-    pub fn new(edit: &Edit, skip: bool, fps: Option<Fps>, status: &EditorStatus) -> Self {
+    /// `defaults`: the user's caption defaults (2i), for a list without settings of its own.
+    pub fn new(
+        edit: &Edit,
+        skip: bool,
+        fps: Option<Fps>,
+        status: &EditorStatus,
+        defaults: &edit::Captions,
+    ) -> Self {
+        let own = edit.list.as_ref().and_then(|l| l.captions);
         let t = edit.timeline.as_deref();
         Self {
             skip,
@@ -227,7 +237,8 @@ impl EditState {
                 .list
                 .as_ref()
                 .map_or_else(String::new, |l| speakers_key(&l.speakers)),
-            captions: edit.list.as_ref().map(|l| l.captions).unwrap_or_default(),
+            captions: own.unwrap_or(*defaults),
+            captions_own: own.is_some(),
         }
     }
 }
@@ -297,10 +308,34 @@ mod tests {
         .unwrap();
         let e = read(&p, FPS).unwrap();
         assert_eq!(e.timeline.as_ref().unwrap().ranges, vec![(30, 60)]);
-        let s = EditState::new(&e, true, Some(FPS), &EditorStatus::default());
+        let defaults = edit::Captions {
+            on: true,
+            chars: 30,
+            ..Default::default()
+        };
+        let s = EditState::new(&e, true, Some(FPS), &EditorStatus::default(), &defaults);
         assert_eq!(s.ranges, vec![30, 60]);
+        // No `captions` line: the list follows the defaults (2i).
+        assert_eq!((s.captions, s.captions_own), (defaults, false));
         assert_eq!((s.total_frames, s.output_frames), (300, 30));
         assert_eq!(s.summary.unwrap().ranges, 1);
+
+        // Its own settings, even the built-in ones, win over the defaults.
+        let own = EditList {
+            captions: Some(edit::Captions::default()),
+            ..edit::parse(&list(vec![Range {
+                start: 1.0,
+                end: 2.0,
+            }]))
+            .unwrap()
+        };
+        std::fs::write(&p, own.to_text()).unwrap();
+        let e = read(&p, FPS).unwrap();
+        let s = EditState::new(&e, true, Some(FPS), &EditorStatus::default(), &defaults);
+        assert_eq!(
+            (s.captions, s.captions_own),
+            (edit::Captions::default(), true)
+        );
 
         std::fs::write(&p, list(vec![])).unwrap();
         let e = read(&p, FPS).unwrap();
