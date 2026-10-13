@@ -138,31 +138,32 @@ fn commit(
     Ok(labelled.map(|(_, f)| f))
 }
 
-/// The open recording's speakers labelled with `v`, not saved; `None` for one whose speakers
-/// cannot be relabelled (tracks, or heard before 5b, or before 5r: maybe on the GPU), which keeps
-/// its speakers until they are analysed again. `renamed`: a
-/// remembered person renamed (from, to), whose pinned seconds (5c) follow the new name.
+/// The open recording's speakers labelled with `v`, not saved; `None` when there is nothing to
+/// change: speakers that are tracks, or speakers heard by an older Junctur (before 5b, or before
+/// 5r: maybe on the GPU), which keep their labels until heard again. `renamed`: a remembered
+/// person renamed (from, to), whose pinned seconds (5c) follow the new name, on a recording heard
+/// by an older Junctur too, so a rename never leaves them on a name no voice has. A forgotten
+/// voice's pins are kept either way (ignored until the name is remembered again).
 fn labelled(
     file: &str,
     v: &Voices,
     renamed: Option<(&str, &str)>,
 ) -> Result<Option<(Project, Found)>, String> {
     let p = project(file)?;
-    match p.speakers() {
-        Some(f)
-            if f.heard
-                .as_ref()
-                .is_some_and(|h| h.key == pipeline::hearing_key(h.track)) =>
-        {
-            let found = match renamed {
-                Some((from, to)) => pipeline::labelled_renamed(&p, &usable(v), from, to),
-                None => pipeline::labelled(&p, &usable(v)),
-            }
-            .map_err(|e| e.to_string())?;
-            Ok(Some((p, found)))
+    let Some(f) = p.speakers() else {
+        return Ok(None);
+    };
+    let found = match renamed {
+        Some((from, to)) if f.method == pipeline::Method::Voices => {
+            pipeline::labelled_renamed(&p, &usable(v), from, to)
         }
-        _ => Ok(None),
+        None if !f.heard_by_an_older_junctur() && f.method == pipeline::Method::Voices => {
+            pipeline::labelled(&p, &usable(v))
+        }
+        _ => return Ok(None),
     }
+    .map_err(|e| e.to_string())?;
+    Ok(Some((p, found)))
 }
 
 /// Remembers `name`'s voice from source seconds `a..b` of `file` (any length, 5c), pins those

@@ -12,7 +12,7 @@ use ort::value::Tensor;
 use serde::{Deserialize, Serialize};
 
 use crate::ffmpeg::PcmReader;
-use crate::runtime::{self, Device, DevicePref};
+use crate::runtime;
 use crate::vad::{Region, RATE};
 use crate::Result;
 
@@ -58,7 +58,6 @@ pub const EMBEDDINGS_MARK: &str = "cpu";
 
 pub struct Embedder {
     session: Session,
-    pub device: Device,
     fbank: fbank::Fbank,
 }
 
@@ -67,10 +66,8 @@ impl Embedder {
     /// CPU's at only 0.1 to 0.4 cosine for the same input, whatever its options, so on the GPU every
     /// window became its own speaker. No device argument, so no caller can put it back there.
     pub fn open(model: &Path) -> Result<Self> {
-        let (session, device) = runtime::open(model, DevicePref::Cpu)?;
         Ok(Self {
-            session,
-            device,
+            session: runtime::open_on_cpu(model, None)?,
             fbank: fbank::Fbank::new(),
         })
     }
@@ -372,7 +369,8 @@ mod tests {
 
     /// 5r: the embeddings hearing makes must be CAM++'s, which the CPU gives. Through
     /// [`Embedder::open`], batched and one at a time, against a plain CPU session on the same
-    /// features. In a `cuda` build the embedder on the CUDA provider gave 0.39 here.
+    /// features. In a `cuda` build the embedder on the CUDA provider gave 0.39 here (and the
+    /// embedder can only open through [`runtime::open_on_cpu`] since).
     #[test]
     #[ignore = "downloads models"]
     fn embeddings_agree_with_the_cpu_reference() {
@@ -393,8 +391,8 @@ mod tests {
             })
             .collect();
         let refs: Vec<&[f32]> = clips.iter().map(Vec::as_slice).collect();
-        let (mut cpu, device) = runtime::open(&m, DevicePref::Cpu).unwrap();
-        assert_eq!(device, Device::Cpu);
+        let (mut cpu, device) = runtime::open(&m, runtime::DevicePref::Cpu).unwrap();
+        assert_eq!(device, runtime::Device::Cpu);
         let fb = fbank::Fbank::new();
         let reference: Vec<Vec<f32>> = refs
             .iter()
@@ -413,7 +411,6 @@ mod tests {
             })
             .collect();
         let mut emb = Embedder::open(&m).unwrap();
-        assert_eq!(emb.device, Device::Cpu);
         let cos = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
         let batched = emb.embed_batch(&refs).unwrap();
         assert_eq!(batched.len(), 3);

@@ -9,8 +9,8 @@
 //!
 //! A voiceprint is the unit mean of a person's CAM++ window embeddings. It is only comparable with
 //! embeddings of the same model made the same way, so each voice records which ([`print_model`]) and
-//! the others are dropped when the file is read (5r: Uezar, "were in testing phase so its ok to
-//! delete stuff").
+//! the others are dropped when the file is read, and so leave it at its next save (5r: Uezar, "were
+//! in testing phase so its ok to delete stuff").
 
 use std::path::{Path, PathBuf};
 
@@ -87,8 +87,9 @@ pub fn remembered_or_none(say: &mut dyn FnMut(&str)) -> Vec<Voice> {
 impl Voices {
     /// The voices at `path`; none when the file does not exist. A file that does not parse is an
     /// error, never silently empty (saving over it would lose every voice). A voice whose print this
-    /// build cannot compare with (another model, or made before 5r) is dropped, and is gone from the
-    /// file at its next save; pins naming it are ignored, like those of a forgotten voice.
+    /// build cannot compare with (another model, or made before 5r) is dropped as it is read, before
+    /// anything else is checked, and leaves the file at its next save; pins naming it are ignored,
+    /// like those of a forgotten voice.
     /// A hand-edited name or colour the edit file could not hold is an error too, naming the voice.
     pub fn load(path: &Path) -> Result<Self> {
         let bad =
@@ -99,6 +100,8 @@ impl Voices {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => return Err(e.into()),
         };
+        let model = print_model();
+        v.voices.retain(|x| x.model == model);
         for x in &v.voices {
             check_name(&x.name).map_err(|e| bad(&format!("{:?}: {e}", x.name)))?;
             if parse_color(&x.color).is_none() {
@@ -108,8 +111,6 @@ impl Voices {
                 )));
             }
         }
-        let model = print_model();
-        v.voices.retain(|x| x.model == model);
         Ok(v)
     }
 
@@ -377,6 +378,7 @@ mod tests {
         assert!(Voices::load(&path).is_err());
         // A hand-edited colour or name the edit file cannot hold.
         let mut odd = v.clone();
+        odd.voices[0].model = print_model();
         odd.voices[0].color = "red".into();
         std::fs::write(&path, serde_json::to_vec(&odd).unwrap()).unwrap();
         assert!(Voices::load(&path).unwrap_err().to_string().contains("red"));
@@ -392,7 +394,7 @@ mod tests {
     }
 
     #[test]
-    fn voices_from_before_5r_are_deleted_when_the_file_is_read() {
+    fn voices_from_before_5r_are_dropped_when_read_and_leave_the_file_at_its_next_save() {
         let d = scratch("before-5r");
         let path = d.join("voices.json");
         let mut v = Voices::default();
@@ -400,8 +402,10 @@ mod tests {
         v.enroll("Uezar", &[&e], 30.0).unwrap();
         v.enroll("Ana", &[&e], 30.0).unwrap();
         assert!(v.voices.iter().all(|x| x.model.ends_with("+cpu")));
-        // As 5b to 5q saved it: the bare model digest, its windows maybe embedded on the GPU.
+        // As 5b to 5q saved it: the bare model digest, its windows maybe embedded on the GPU. Its
+        // colour is one this build would refuse: an old voice never makes the file unreadable.
         v.voices[0].model = models::SPEAKER_EMBEDDING.sha256.into();
+        v.voices[0].color = "red".into();
         v.save(&path).unwrap();
         let read = Voices::load(&path).unwrap();
         let names: Vec<&str> = read.voices.iter().map(|x| x.name.as_str()).collect();

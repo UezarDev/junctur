@@ -52,6 +52,8 @@ pub fn run(a: Args) -> Result<(), String> {
         "--at",
         "--forget",
         "--rehear",
+        // Before 5r it put `--rehear` on the CPU; speakers always are now. Accepted for scripts.
+        "--cpu",
         "--project",
         "--cache-dir",
     ])?;

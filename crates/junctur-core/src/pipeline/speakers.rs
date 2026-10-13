@@ -230,6 +230,23 @@ pub struct Heard {
     pub embeddings: String,
 }
 
+impl Heard {
+    /// Heard by this build's hearing ([`hearing_key`]). Windows heard otherwise (5r: maybe on the
+    /// GPU, not CAM++'s numbers) are never reused, labelled with or taken as a voice sample.
+    pub fn is_current(&self) -> bool {
+        self.key == hearing_key(self.track)
+    }
+}
+
+impl Found {
+    /// Told apart by voice, but heard by an older Junctur: before 5b kept the windows, or before
+    /// 5r. Its speakers cannot be labelled again until they are heard again; its pins still can be
+    /// renamed.
+    pub fn heard_by_an_older_junctur(&self) -> bool {
+        self.method == Method::Voices && !self.heard.as_ref().is_some_and(Heard::is_current)
+    }
+}
+
 /// What hearing track `track` depends on besides the speech regions: both models (by digest) and
 /// every window and threshold that shapes the windows and the overlap stretches.
 pub fn hearing_key(track: usize) -> String {
@@ -411,7 +428,7 @@ const HEARD_BY_AN_OLDER_JUNCTUR: &str = "this recording's speakers were found by
 /// ([`hearing_key`]): windows from another one, such as 5r's GPU-made ones, are never labelled
 /// with or taken as a voice sample (a voice remembered from them would match nobody).
 fn heard_embeddings(heard: &Heard, dir: &Path) -> Option<Vec<Vec<f32>>> {
-    if heard.key != hearing_key(heard.track) {
+    if !heard.is_current() {
         return None;
     }
     let b = std::fs::read(embeddings_path(dir)).ok()?;
@@ -914,23 +931,8 @@ mod tests {
     }
 
     #[test]
-    fn windows_heard_before_5r_are_heard_again() {
-        // The key 5b to 5q wrote, for the same models and settings: it did not say where the windows
-        // were embedded, so ones made on the GPU (not CAM++'s numbers) were reused for good.
-        let before = |track: usize| {
-            let what = format!(
-                "{track}|{}|{}|{} {} {}",
-                models::SPEAKER_EMBEDDING.sha256,
-                models::SEGMENTATION.sha256,
-                1.5,
-                0.5,
-                diarize::segment::settings()
-            );
-            format!("{:016x}", fnv(what.as_bytes()))
-        };
-        for track in [0, 2] {
-            assert_ne!(hearing_key(track), before(track));
-        }
+    fn the_hearing_key_says_the_windows_were_embedded_on_the_cpu() {
+        // 5b to 5q's key did not, so windows made on the GPU (not CAM++'s numbers) were reused.
         assert!(diarize::hearing_settings().ends_with(" emb=cpu"));
     }
 
@@ -1131,8 +1133,10 @@ mod tests {
             cached(mine.clone(), &speech, &[0, 1], &d).is_some(),
             "one voice: still diarized"
         );
+        assert!(!mine.heard_by_an_older_junctur());
         let mut other = mine.clone();
         other.heard.as_mut().unwrap().key = "old".into();
+        assert!(other.heard_by_an_older_junctur());
         assert!(cached(other.clone(), &speech, &[], &d).is_none());
         // Nor are windows another hearing made (5r: maybe on the GPU) labelled or sampled from.
         let err = relabel(&other, &d, &[]).unwrap_err().to_string();

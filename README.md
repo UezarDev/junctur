@@ -67,8 +67,9 @@ in the cache unless `--project <dir>` puts it somewhere else, for example a git 
 `analyze` also tells speakers apart (`--no-speakers` skips it): one speaker per speech track when OBS
 recorded the voices on their own tracks, otherwise by voice on the mix (CAM++ embeddings of 1.5 s
 windows, and pyannote's segmentation model for where two people talk at once). Both always run on the
-CPU, as tracks and speech do, also in a CUDA build, where only Whisper uses the GPU: on ONNX Runtime's CUDA
-provider CAM++'s embeddings were wrong, and every sentence became its own speaker. They are written into
+CPU, as tracks and speech do, also in a CUDA build, where Whisper is the only part of `analyze` on the GPU
+(`junctur separate` still separates on the GPU): on ONNX Runtime's CUDA provider CAM++'s embeddings were
+wrong, and every sentence became its own speaker. They are written into
 `edit.junctur` as `speaker <id> <name>` lines and `turn <start> <end> <id>` lines; turns of two people
 overlap where both talk. Rename or recolour a speaker by editing its line (or in the app). A re-cut keeps
 the names.
@@ -80,7 +81,8 @@ labelled again: the open recording at once, any other at its next `analyze` or `
 edit list as it is). Voices nobody remembered are grouped automatically as "Speaker N". Remembering the same name again adds to the voice;
 half a minute from several places works best. The voices live in `junctur/voices.json` beside the config
 file (or the file `JUNCTUR_VOICES` names); `junctur voices` lists them, `--forget <name>` drops one. A
-voice remembered before that fix (or with another model) is deleted: remember it again.
+voice remembered before that fix (or with another model) is no longer read, and leaves the file at its next
+save: remember it again.
 Enrolling relabels from what `analyze` kept (`windows.f32` in the project), without reading the
 recording again; `analyze` and `cut` relabel with the current voices. A rename of a speaker nobody
 enrolled follows that speaker through a relabel (matched by when they talk, not by number).
