@@ -147,7 +147,19 @@ export interface Captions {
   protagonist: string;
   /** A Fusion Title's clip name in Resolve's media pool; empty for Junctur's own Text+. */
   template: string;
+  /** 5j's text options: what every caption output shows, never the transcript. */
+  case: CaptionCase;
+  /** Punctuation kept (true) or removed. */
+  punctuation: boolean;
+  /** Words or phrases masked, whole words, case aside. */
+  censor: string[];
+  censorStyle: CensorStyle;
+  /** Find and replace, whole words or phrases, case aside; an empty `to` removes them. */
+  replace: { from: string; to: string }[];
 }
+
+export type CaptionCase = "asSpoken" | "upper" | "lower" | "title";
+export type CensorStyle = "middle" | "whole";
 
 export type CaptionLayout = "stacked" | "side" | "topBottom";
 

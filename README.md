@@ -98,7 +98,12 @@ the mix), one caption holds them all, each speaker on their own line(s) in their
 the last of them stops. Each word is shown once, under its one speaker. Per-speaker files that earlier
 versions wrote beside it (`<out> (<name>).srt`) are not deleted; the export lists them. Bold, italic
 and underline (`bold=on`, `italic=on`, `underline=on` on the `captions` line) wrap every line outside
-its colour, `<b><i><u><font color>`; nothing else an SRT could say reaches Resolve. Captions are
+its colour, `<b><i><u><font color>`; nothing else an SRT could say reaches Resolve. The text options
+change what every caption output shows (the SRT, Send to Resolve, the preview), never the transcript:
+`replace="gonna>going to|um>"` finds whole words or phrases, case aside, and shows the text after `>`
+(nothing removes them), then `case=upper|lower|title`, `punctuation=off`, and `censor="word|..."`
+masks whole words or phrases from the user's own list, `f**k`, or `****` with `censor_style=whole`.
+Captions are
 optional: with `captions on`, `render` also writes the file beside the video.
 Checked in DaVinci Resolve (File > Import > Subtitle keeps the colours); Premiere Pro is unverified and
 likely shows its default caption style. SRT carries no size or position.
@@ -193,7 +198,8 @@ title bar) writes the same file:
 
 `captions` holds the caption defaults: what a recording whose edit list has no `captions` line of its own
 cuts its captions with (`on`, `chars` per line, `lines` per speaker, `words` per speaker with 0 for no
-limit, `seconds` at most), in the app and in
+limit, `seconds` at most, and the text options: `case`, `punctuation`, `censor` as a list of
+words, `censorStyle`, `replace` as a list of `{"from": .., "to": ..}`), in the app and in
 `render` and `export --srt`. A key left out keeps its built-in value.
 
 `--model` on the command line wins over the config file. A config file that does not parse, names an

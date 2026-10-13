@@ -4,14 +4,16 @@
   // places between its own sections (`switches`: export and preview, 5d; `style`: bold and italic,
   // 5d, underline, 5f; `look`: font, size, position, outline, 5g; `overlap`: layout and
   // protagonist, 5g; `resolve`: the Text+ template, 5g; `cut`: how cues are cut, 5a, and the word
-  // limit, 5i) and Settings shows together (`all`); a field added to `Captions` goes into one part
+  // limit, 5i; `text`: case, punctuation, censoring and replacements, 5j, in `CaptionText`)
+  // and Settings shows together (`all`); a field added to `Captions` goes into one part
   // and shows in both. Number fields commit on change, inside the engine's limits (core
   // edit/captions.rs); anything else snaps back to `value`. `names` (the recording's
   // speakers, in the panel) are offered as protagonists; any name can be
   // typed, so Settings' default can name a remembered voice.
   import type { CaptionLayout, Captions } from "./api";
+  import CaptionText from "./CaptionText.svelte";
 
-  type Part = "switches" | "style" | "look" | "overlap" | "resolve" | "cut" | "all";
+  type Part = "switches" | "style" | "look" | "overlap" | "resolve" | "cut" | "text" | "all";
 
   let {
     value,
@@ -207,6 +209,7 @@
     />
   </label>
 {/if}
+{#if shows("text")}<CaptionText {value} {disabled} {onChange} {onError} />{/if}
 
 <style>
   .check {

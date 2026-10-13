@@ -2,6 +2,7 @@
 //! captions (5a; overlapping speakers stacked in one caption since 5e), both for Resolve; the
 //! rendered video is the smart-render phase.
 
+pub mod caption_text;
 pub mod fcpxml;
 pub mod layout;
 pub mod srt;

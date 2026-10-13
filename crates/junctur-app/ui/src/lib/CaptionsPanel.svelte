@@ -11,7 +11,8 @@
   // caption, a line each; 5b's per-speaker files left beside it are listed. The remembered voices
   // are listed with Forget, and the speakers can be analysed again from the audio (5c), the seconds
   // picked for each voice cutting the windows; that reads the recording again, so it is a button,
-  // never automatic. The caption settings' own fields (export, preview, style, how cues are cut) are
+  // never automatic. The caption settings' own fields (export, preview, style, the text options of
+  // 5j, how cues are cut) are
   // `CaptionRules`, shared with Settings (2i); a list without
   // its own settings follows the user's defaults, and "Save as default" makes this recording's the
   // defaults.
@@ -217,6 +218,13 @@
         Where their captions go in the preview and in Resolve. The protagonist keeps the normal spot and the others
         move round them. Side by side needs short lines (about 20 characters per line) not to run into each other.
         The SRT always stacks them in one caption, first to speak on top.
+      </p>
+
+      <h3>Caption text</h3>
+      <CaptionRules value={captions} part="text" onChange={(c) => setCaptions(c)} {onError} />
+      <p class="note">
+        What the captions show, in the SRT, in Resolve and in the preview; the transcript keeps the words as
+        spoken, so clearing one brings them back. Find and replace runs first, then case, punctuation and censoring.
       </p>
 
       <h3>How captions are cut</h3>

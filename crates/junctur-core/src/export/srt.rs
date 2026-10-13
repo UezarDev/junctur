@@ -23,6 +23,7 @@ use std::fmt::Write;
 
 use serde::Serialize;
 
+use super::caption_text;
 use crate::edit::{frame_ranges, frames_ceil, Captions, EditList};
 use crate::transcribe::Word;
 
@@ -163,6 +164,9 @@ fn clean(text: &str) -> String {
 /// several stacked cues, each within them; a speaker still mid-word when one closes keeps their
 /// last line on screen in the next ([`Open::after`]).
 ///
+/// Before cutting, the kept words go through the text options ([`caption_text`], 5j): a word is
+/// shown as they make it, and a replaced phrase is one unit, one word for the word limit.
+///
 /// `c` is the caption settings to cut with, resolved by the caller: the list's own, else the
 /// user's defaults (2i, `config::captions`). Taken apart from `edit`, whose `captions` may be
 /// `None`, so a caller cannot forget the defaults and silently get the built-in ones.
@@ -178,22 +182,26 @@ pub fn cues<'a>(
     let mut words: Vec<(usize, &Word)> = words.into_iter().collect();
     words.sort_by(|a, b| a.1.start.total_cmp(&b.1.start));
 
+    // The kept words with their range, then as the text options show them (5j): a unit is one
+    // word, or a replaced phrase spanning several.
+    let kept: Vec<(usize, &Word, usize)> = words
+        .into_iter()
+        .filter_map(|(track, w)| Some((track, w, tl.range_of((w.start + w.end) / 2.0)?)))
+        .collect();
+    let texts: Vec<(usize, String)> = kept.iter().map(|&(t, w, _)| (t, clean(&w.text))).collect();
+
     let mut out: Vec<Cue> = Vec::new();
     let mut open: Option<Open> = None;
-    for (track, w) in words {
-        let text = clean(&w.text);
-        if text.is_empty() {
-            continue;
-        }
-        let Some(i) = tl.range_of((w.start + w.end) / 2.0) else {
-            continue;
-        };
+    for unit in caption_text::units(&texts, c) {
+        let (track, first, i) = kept[unit.first];
+        let (_, last, j) = kept[unit.last];
+        let text = unit.text;
         let said = Said {
             track,
-            start: tl.map(i, w.start),
-            end: tl.map(i, w.end),
+            start: tl.map(i, first.start),
+            end: tl.map(j, last.end),
             // Its speaker first, then anyone else whose overlap turn holds it (5b).
-            speakers: label.speakers_of_word(track, w.start, w.end),
+            speakers: label.speakers_of_word(track, first.start, last.end),
         };
         if open.as_mut().is_some_and(|o| o.take(&said, &text, c)) {
             continue;
@@ -691,6 +699,48 @@ mod tests {
         for p in one.windows(2) {
             assert!(p[0].end <= p[1].start + 1e-9, "{one:?}");
         }
+    }
+
+    #[test]
+    fn text_options_change_what_is_wrapped_and_a_phrase_is_one_word() {
+        use crate::edit::{Case, Replace};
+        let pair = |from: &str, to: &str| Replace {
+            from: from.into(),
+            to: to.into(),
+        };
+        let w: Vec<Word> = ["you", "know,", "gonna", "win", "in", "new", "york"]
+            .iter()
+            .enumerate()
+            .map(|(k, t)| word(k as f64 * 0.3, k as f64 * 0.3 + 0.25, t))
+            .collect();
+        let with = |c: Captions| {
+            let e = edit(&[(0.0, 40.0)], c);
+            solo(&cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1))
+        };
+        let short = Captions {
+            chars: 12,
+            lines: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            with(short.clone()),
+            vec!["you know,", "gonna win in", "new york"]
+        );
+        // The replacement is what gets wrapped: "GOING TO" no longer fits after "YOU KNOW".
+        let c = Captions {
+            case: Case::Upper,
+            punctuation: false,
+            replace: vec![pair("gonna", "going to"), pair("new york", "NYC")],
+            ..short
+        };
+        assert_eq!(with(c.clone()), vec!["YOU KNOW", "GOING TO WIN", "IN NYC"]);
+        // One word at a time: the phrase is one caption, from when its first word is said.
+        let one = {
+            let e = edit(&[(0.0, 40.0)], Captions { words: 1, ..c });
+            cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1)
+        };
+        assert_eq!(solo(&one).last().map(String::as_str), Some("NYC"));
+        assert!((one.last().unwrap().start - 1.5).abs() < 1e-9, "{one:?}");
     }
 
     #[test]
