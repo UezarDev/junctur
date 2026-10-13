@@ -121,10 +121,12 @@ Each speaker gets their own video track in their colour; sending again updates t
 Junctur installs a script into Resolve's Scripts folder; start it once per Resolve session with
 Workspace > Scripts > Junctur and leave it running (it works on the free Resolve). The bundled Text+
 template is auto-subs' `caption-bin.drb` (MIT, see `crates/junctur-core/src/resolve/LICENSE-auto-subs`);
-a Text+ title of your own in the media pool can be named instead. These settings are on the `captions`
+a Text+ title of your own can be picked instead from a list of the Fusion Titles in the open project's
+media pool, and with "Keep the template's look" Junctur sets only each caption's text, timing and
+speaker colour on it. These settings are on the `captions`
 line too (`font="…"`, `size=`, `position=`, `outline=`, `outline_width=`, `outline_color=`, `layout=`,
-`protagonist="…"`, `template="…"`, each written only when not the default) and drive the preview; the
-SRT ignores them.
+`protagonist="…"`, `template="…"`, `keep_look=on`, each written only when not the default) and drive the
+preview; the SRT ignores them.
 
 `render` writes scratch pieces in a `<out>.junctur-parts` folder beside the output and deletes them;
 `--full` re-encodes everything, `--force` replaces an existing output (never the source). The source's

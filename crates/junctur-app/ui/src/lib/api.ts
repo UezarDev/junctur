@@ -149,6 +149,8 @@ export interface Captions {
   protagonist: string;
   /** A Fusion Title's clip name in Resolve's media pool; empty for Junctur's own Text+. */
   template: string;
+  /** 5m: with a template of the user's, keep its own look; Junctur sets only text, timing and colour. */
+  keepLook: boolean;
   /** 5j's text options: what every caption output shows, never the transcript. */
   case: CaptionCase;
   /** Punctuation kept (true) or removed. */
@@ -443,6 +445,8 @@ let languages: Promise<Language[]> | null = null;
 export const translationLanguages = () => (languages ??= invoke<Language[]>("translation_languages"));
 /** Installs the Junctur script into Resolve's Scripts folder; resolves to its path. */
 export const installResolveScript = () => invoke<string>("install_resolve_script");
+/** The Fusion Titles in the open Resolve project's media pool by clip name (5m), Junctur's own left out. */
+export const resolveTemplates = () => invoke<string[]>("resolve_templates");
 export const voices = () => invoke<Voice[]>("voices");
 /** Remembers `name`'s voice from words `first..=last` and relabels the speakers; resolves to a line for the user. */
 export const enrollVoice = (first: number, last: number, name: string) =>

@@ -4,7 +4,9 @@
 -- (Workspace > Scripts > Junctur) and leave it running: when Junctur's "Send to Resolve" writes a
 -- request into its mailbox, this places or restyles the captions as Text+ clips. With the word
 -- highlight or an animation on (phase 5l) the clips are auto-subs' animated caption, a Fusion
--- macro round a Text+, driven through the macro's own helpers as auto-subs drives it.
+-- macro round a Text+, driven through the macro's own helpers as auto-subs drives it. Junctur's
+-- template picker (phase 5m) asks for the Fusion Titles in the media pool; with a template's own
+-- look kept, only the text, timing and speaker colour are set on it.
 --
 -- Resolve 21 runs scripts with no io, require or os.execute, so a request is a Lua chunk read with
 -- loadfile and the only way back is Fusion's prefs (SetPrefs + SavePrefs writes Fusion.prefs,
@@ -22,6 +24,8 @@ local TEMPLATE_NAME = "Junctur Caption"
 local ANIMATED_NAME = "Junctur Animated Caption"
 -- The animated caption's macro tool in a clip's comp: a clip with it is driven as the macro.
 local MACRO = "AutoSubs"
+-- Told to Junctur in `info`, so it can tell a script too old for what it asks (5m).
+local SCRIPT = "5m"
 
 -- Plain global lookups, not rawget(_G, ...): Resolve's script runner hands a script its own
 -- environment, which holds these.
@@ -245,10 +249,6 @@ local function restyle_macro(comp, macro, tool, look, c, missing)
     local anim = look.animation
     local on = function(b) return b and 1 or 0 end
     local settings = {
-        Font = look.font, Style = look.style, TextSize = look.size, TextPosition = { c.x, c.y },
-        FillEnabled = 1, FillColorRed = c.base[1], FillColorGreen = c.base[2],
-        FillColorBlue = c.base[3],
-        OutlineEnabled = on(look.outline),
         -- Fill: the said word's letters change colour (the macro's style 0).
         HighlightEnabled = on(look.highlight), HighlightStyle = 0,
         HighlightColorRed = c.highlight[1], HighlightColorGreen = c.highlight[2],
@@ -259,14 +259,30 @@ local function restyle_macro(comp, macro, tool, look, c, missing)
         AnimationLength = look.animationLength,
         -- The whole caption in and out, not the macro's word-by-word reveal.
         AnimationLevel = 0, AnimationMode = 2,
-        -- Junctur wraps the lines itself.
-        WrapEnabled = 0,
     }
-    if look.outline then
-        settings.OutlineThickness = look.thickness
-        settings.OutlineColorRed = look.outlineColor[1]
-        settings.OutlineColorGreen = look.outlineColor[2]
-        settings.OutlineColorBlue = look.outlineColor[3]
+    -- The text colour: the speaker's, unless the template's look is kept and the speaker has
+    -- none (5m).
+    if not (look.keep and c.colored == false) then
+        settings.FillEnabled = 1
+        settings.FillColorRed = c.base[1]
+        settings.FillColorGreen = c.base[2]
+        settings.FillColorBlue = c.base[3]
+    end
+    -- The look, unless the template's own is kept (5m).
+    if not look.keep then
+        settings.Font = look.font
+        settings.Style = look.style
+        settings.TextSize = look.size
+        settings.TextPosition = { c.x, c.y }
+        settings.OutlineEnabled = on(look.outline)
+        -- Junctur wraps the lines itself.
+        settings.WrapEnabled = 0
+        if look.outline then
+            settings.OutlineThickness = look.thickness
+            settings.OutlineColorRed = look.outlineColor[1]
+            settings.OutlineColorGreen = look.outlineColor[2]
+            settings.OutlineColorBlue = look.outlineColor[3]
+        end
     end
     local ok, e = pcall(function() make()(comp, macro, settings) end)
     if not ok then error("the animated caption's SetInputValues failed: " .. tostring(e)) end
@@ -274,13 +290,17 @@ local function restyle_macro(comp, macro, tool, look, c, missing)
         local read, got = pcall(function() return macro:GetInput(key) end)
         if not read or got == nil then missing[key] = true end
     end
-    if not set(tool, "Underline", on(look.underline)) then missing.Underline = true end
+    if not look.keep and not set(tool, "Underline", on(look.underline)) then
+        missing.Underline = true
+    end
 end
 
 -- Styles a caption's Text+; errors when the text itself does not take (nothing to show), and
 -- adds the names of other inputs the tool did not take to `missing`. A clip of the animated
 -- caption is styled through its macro; a plain Text+ asked for the highlight or an animation (a
--- user's own template) is styled as 5g did, and those two are named in `missing`.
+-- user's own template) is styled as 5g did, and those two are named in `missing`. With the
+-- template's look kept (`look.keep`, 5m) only the text and the speaker's colour are set (none
+-- when the speaker has no colour), so the template keeps its font, size, place and outline.
 local function restyle(comp, tool, look, c, missing)
     local ok, macro = pcall(function() return comp and comp:FindTool(MACRO) end)
     if ok and macro then return restyle_macro(comp, macro, tool, look, c, missing) end
@@ -289,6 +309,14 @@ local function restyle(comp, tool, look, c, missing)
     local took, text = set(tool, "StyledText", c.text)
     if not took or tostring(text) ~= c.text then
         error("the template's Text+ did not take the caption's text")
+    end
+    if look.keep then
+        if c.colored ~= false then
+            for k, key in ipairs({ "Red1", "Green1", "Blue1" }) do
+                if not set(tool, key, c.fill[k]) then missing[key] = true end
+            end
+        end
+        return
     end
     local inputs = {
         { "Font", look.font }, { "Style", look.style }, { "Size", look.size },
@@ -324,7 +352,31 @@ function handlers.info(req)
         height = timeline:GetSetting("timelineResolutionHeight"),
         template = clip:GetClipProperty("Clip Name"),
         templateFps = clip:GetClipProperty("FPS") or "",
+        script = SCRIPT,
     }
+end
+
+-- The Fusion Titles in the open project's media pool, for Junctur's template picker (5m): by clip
+-- name, each once, in the order `template` looks them up (so the one listed is the one a send
+-- uses), Junctur's own two left out. auto-subs lists them by the same clip type.
+function handlers.templates()
+    local project = resolve:GetProjectManager():GetCurrentProject()
+    if not project then return { error = "No project is open in Resolve" } end
+    local out, seen, n = {}, {}, 0
+    each_clip(project:GetMediaPool():GetRootFolder(), function(clip)
+        local ok, kind, name = pcall(function()
+            return clip:GetClipProperty("Type"), clip:GetClipProperty("Clip Name")
+        end)
+        name = ok and tostring(name or "") or ""
+        if ok and tostring(kind or ""):lower() == "fusion title" and name ~= ""
+            and name ~= TEMPLATE_NAME and name ~= ANIMATED_NAME and not seen[name] then
+            seen[name] = true
+            n = n + 1
+            out["t" .. n] = name
+        end
+    end)
+    out.count = n
+    return out
 end
 
 -- The items on video track `i` by their first frame.

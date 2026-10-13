@@ -537,6 +537,16 @@ pub async fn translation_languages() -> Vec<Language> {
     l
 }
 
+/// The Fusion Titles in the open Resolve project's media pool, for the template picker (5m),
+/// through the Junctur script running there. Off the async runtime: a script not listening takes
+/// seconds to give up on, a busy Resolve longer.
+#[tauri::command]
+pub async fn resolve_templates() -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(junctur_core::resolve::templates)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Puts the Junctur script into Resolve's Scripts folder (5g) and says where.
 #[tauri::command]
 pub async fn install_resolve_script() -> Result<String, String> {

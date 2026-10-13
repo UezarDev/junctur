@@ -104,6 +104,7 @@ local function world(opts)
         local c = { name = name, lacks = lacks, macro = macro }
         function c:GetClipProperty(k)
             if k == "Clip Name" then return self.name elseif k == "FPS" then return "24" end
+            if k == "Type" then return self.kind or "Fusion Title" end
         end
         function c:SetClipProperty(_, v) self.name = v return true end
         return c
@@ -187,7 +188,10 @@ local function world(opts)
     function project:GetMediaPool() return pool end
     local resolve = {}
     function resolve:GetProjectManager()
-        return { GetCurrentProject = function() return project end }
+        return { GetCurrentProject = function()
+            if opts.no_project then return nil end
+            return project
+        end }
     end
 
     local chunk = assert(loadfile(SCRIPT))
@@ -384,5 +388,65 @@ w = world({ no_ids = true })
 info = w.m.handlers.info({ template = "" })
 check(info.error ~= nil and w.imports == 0, "no ids, no import")
 check(#w.root.subs == 1 and #w.theirs.clips == 2, "their bin untouched without ids")
+
+-- 5m: the template picker's list. The user's titles each once (the first by the lookup's walk:
+-- sub-bins first), Junctur's own two and clips that are no title left out.
+w = world()
+w.m.handlers.info({ template = "" })
+local video = w.Clip("Interview.mp4")
+video.kind = "Video"
+local nested = w.Folder("Titles", "7")
+nested.clips = { w.Clip("Lower third"), w.Clip("My Title") }
+table.insert(w.theirs.subs, nested)
+table.insert(w.root.clips, video)
+table.insert(w.root.clips, w.Clip("Lower third"))
+local list = w.m.handlers.templates()
+local names = {}
+for k = 1, list.count do names[k] = list["t" .. k] end
+check(table.concat(names, ",") == "Lower third,My Title,Basic Template",
+    "templates: " .. table.concat(names, ","))
+check(w.m.handlers.info({ template = "" }).script == "5m", "the script says which it is")
+-- No project open: an error, not an empty list.
+check(world({ no_project = true }).m.handlers.templates().error ~= nil, "no project")
+
+-- 5m: a picked template whose look is kept: only the text and the speaker's colour are set.
+w = world()
+local styled = w.Clip("Styled")
+table.insert(w.theirs.clips, styled)
+local keep = { font = "Open Sans", style = "Bold", size = 0.03, underline = true, outline = true,
+    outlineColor = { 0, 0, 0 }, thickness = 0.04, keep = true }
+local uncoloured = clip(2, 86400, "sin color")
+uncoloured.colored = false
+r = w.m.handlers.place(request({ clip(1, 86400, "hola"), uncoloured },
+    { template = "Styled", look = keep }))
+check(r.placed == 2 and r.failed == 0 and r.unstyled == "", "kept look: " .. tostring(r.firstError))
+t = w.tracks[2].items[1].tool
+check(t.inputs.StyledText == "hola" and t.inputs.Red1 == 1 and t.inputs.Green1 == 0, "text and colour")
+for _, key in ipairs({ "Font", "Style", "Size", "Center", "CharacterOffset", "Underline",
+    "Enabled1", "Enabled2", "Thickness2", "Red2" }) do
+    check(t.inputs[key] == nil, "kept look, yet " .. key .. " set")
+end
+local u = w.tracks[3].items[1].tool
+check(u.inputs.StyledText == "sin color" and u.inputs.Red1 == nil, "no speaker colour: the template's fill")
+
+-- A copy of the animated caption picked, its look kept: the motion and the colour through the
+-- macro, not the look.
+w = world()
+table.insert(w.theirs.clips, w.Clip("My Animated", nil, true))
+local moving_kept = { font = "Open Sans", style = "Bold", size = 0.03, underline = true,
+    outline = true, outlineColor = { 0, 0, 0 }, thickness = 0.04, highlight = true,
+    animation = "fade", animationLength = 0.3, keep = true }
+r = w.m.handlers.place(request({ animated(1, 86400, "hola todos") },
+    { template = "My Animated", look = moving_kept, animated = true }))
+check(r.placed == 1 and r.failed == 0 and r.unstyled == "", "kept macro: " .. tostring(r.firstError))
+it = w.tracks[2].items[1]
+m = it.macro.inputs
+check(it.tool.timing ~= nil and it.tool.inputs.Text == "hola todos", "timing and text")
+check(m.HighlightEnabled == 1 and m.FadeEnabled == 1 and m.FillColorRed == 1, "motion and colour")
+for _, key in ipairs({ "Font", "Style", "TextSize", "TextPosition", "OutlineEnabled",
+    "OutlineThickness", "WrapEnabled" }) do
+    check(m[key] == nil, "kept look, yet the macro's " .. key .. " set")
+end
+check(it.tool.inputs.Underline == nil, "kept look, yet Underline set")
 
 print("ALL OK")

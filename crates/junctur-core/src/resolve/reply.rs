@@ -151,6 +151,22 @@ pub fn sent(a: &HashMap<String, String>, timeline: &str) -> Sent {
     }
 }
 
+/// The Fusion Titles a `templates` request found in the media pool (5m), in the script's order
+/// (`count`, then `t1..tN`). A name the template setting could not hold (a quote or a control
+/// character, refused by [`crate::edit::Captions::check`]) is left out rather than offered and then
+/// refused.
+pub fn templates(a: &HashMap<String, String>) -> Vec<String> {
+    let count: usize = a
+        .get("count")
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0);
+    (1..=count)
+        .filter_map(|k| a.get(&format!("t{k}")))
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty() && !n.contains('"') && !n.chars().any(char::is_control))
+        .collect()
+}
+
 /// Resolve's frame rate setting (`"25"`, `"29.97"`, `"23.976"`) as the rate it stands for: the
 /// NTSC rates are n×1000/1001, which "29.97" rounds; a frame off per ~9 minutes otherwise.
 pub fn rate(s: &str) -> Option<f64> {
@@ -223,5 +239,22 @@ mod tests {
         assert!(timeline(&bad).is_err());
         let e: HashMap<String, String> = [("error".to_string(), "No timeline".to_string())].into();
         assert_eq!(error(&e).as_deref(), Some("No timeline"));
+    }
+
+    #[test]
+    fn the_templates_found_are_read_in_order_and_unusable_names_dropped() {
+        let text = format!(
+            "JuncturReply = \"7:{}\"",
+            hex("count	4
+t1	Lower third
+t2	Say \"hi\"
+t3	Título grande
+t4	 ")
+        );
+        let a = answer(&text, "7").unwrap();
+        assert_eq!(templates(&a), ["Lower third", "Título grande"]);
+        let none: HashMap<String, String> = [("count".to_string(), "0".to_string())].into();
+        assert!(templates(&none).is_empty());
+        assert!(templates(&HashMap::new()).is_empty());
     }
 }

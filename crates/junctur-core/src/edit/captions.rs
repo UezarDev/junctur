@@ -63,8 +63,13 @@ pub struct Captions {
     /// names a person the same everywhere, so it works in the defaults too.
     pub protagonist: String,
     /// The Fusion Title clip in Resolve's media pool every caption is a copy of; empty for
-    /// Junctur's own Text+ (5g).
+    /// Junctur's own Text+ (5g); picked from a list of the open project's Fusion Titles (5m).
     pub template: String,
+    /// The named template keeps its own look (5m): Junctur sets only each caption's text, timing
+    /// and speaker colour (and 5l's highlight and animation on a copy of the animated caption),
+    /// so a title styled in Resolve looks as styled. Off, Junctur's look wins (5g). Ignored with
+    /// Junctur's own template, whose look is these settings.
+    pub keep_look: bool,
     /// The text options (5j, [`caption_text`]): what captions show, never the transcript.
     pub case: Case,
     /// Punctuation kept (the default) or removed.
@@ -179,6 +184,7 @@ impl Default for Captions {
             layout: Layout::Stacked,
             protagonist: String::new(),
             template: String::new(),
+            keep_look: false,
             case: Case::AsSpoken,
             punctuation: true,
             censor: Vec::new(),
@@ -297,6 +303,11 @@ impl Captions {
             ));
         }
         caption_text::check(&self.censor, &self.replace)
+    }
+
+    /// Whether the template's own look is kept (5m): only with a template of the user's named.
+    pub fn keeps_look(&self) -> bool {
+        self.keep_look && !self.template.trim().is_empty()
     }
 
     /// Whether Resolve needs the animated caption template (5l).
@@ -518,6 +529,14 @@ mod tests {
             (l.highlight_color.as_str(), l.animation, l.animation_length),
             ("#00FF00", Animation::Slide, 0.4)
         );
+        // 5l's settings load 5m's look switch off; its own value reads back, and counts only
+        // with a template named.
+        assert!(!l.keep_look && !l.keeps_look());
+        let m: Captions = serde_json::from_str(r#"{"keepLook":true}"#).unwrap();
+        assert!(m.keep_look && !m.keeps_look());
+        let m: Captions =
+            serde_json::from_str(r#"{"keepLook":true,"template":" My Title "}"#).unwrap();
+        assert!(m.keeps_look());
         assert!(serde_json::from_str::<Captions>(r#"{"animation":"spin"}"#).is_err());
     }
 

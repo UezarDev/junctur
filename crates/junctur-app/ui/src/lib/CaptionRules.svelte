@@ -4,14 +4,15 @@
   // places between its own sections (`switches`: export and preview, 5d; `style`: bold and italic,
   // 5d, underline, 5f; `look`: font, size, position, outline, 5g; `overlap`: layout and
   // protagonist, 5g; `motion`: the word highlight and the animation, 5l; `resolve`: the Text+
-  // template, 5g; `cut`: how cues are cut, 5a, and the word
+  // template, 5g, picked from the Fusion Titles in Resolve's media pool with its look kept or not,
+  // 5m; `cut`: how cues are cut, 5a, and the word
   // limit, 5i; `text`: case, punctuation, censoring and replacements, 5j, in `CaptionText`)
   // and Settings shows together (`all`); a field added to `Captions` goes into one part
   // and shows in both. Number fields commit on change, inside the engine's limits (core
   // edit/captions.rs); anything else snaps back to `value`. `names` (the recording's
   // speakers, in the panel) are offered as protagonists; any name can be
   // typed, so Settings' default can name a remembered voice.
-  import type { CaptionAnimation, CaptionLayout, Captions } from "./api";
+  import { resolveTemplates, type CaptionAnimation, type CaptionLayout, type Captions } from "./api";
   import CaptionText from "./CaptionText.svelte";
 
   type Part = "switches" | "style" | "look" | "overlap" | "motion" | "resolve" | "cut" | "text" | "all";
@@ -90,8 +91,34 @@
     onChange({ ...value, [key]: WHOLE.has(key) ? Math.round(v) : v });
   }
 
+  // The template picker (5m): the Fusion Titles in the open Resolve project's media pool, asked
+  // of the Junctur script in Resolve the first time the list is opened and again on Refresh; never
+  // on its own, since every ask waits on Resolve (seconds when the script is not running). Its
+  // failure shows under the list rather than as the app's error: opening the list with Resolve
+  // closed is ordinary. `null` until asked.
+  let titles = $state<string[] | null>(null);
+  let fetching = $state(false);
+  let fetchError = $state<string | null>(null);
+  async function fetchTitles() {
+    if (fetching) return;
+    fetching = true;
+    fetchError = null;
+    try {
+      titles = await resolveTemplates();
+    } catch (e) {
+      fetchError = String(e);
+    } finally {
+      fetching = false;
+    }
+  }
+  // The picked template is always the second entry, so the selected option stays the same element
+  // when the list arrives; marked when Resolve's list came back without it (a name typed before
+  // 5m, a default from Settings, a title in another project).
+  const others = $derived((titles ?? []).filter((t) => t !== value.template));
+  const missing = $derived(titles !== null && !!value.template && !titles.includes(value.template));
+
   /** A name field: trimmed, quotes refused (the edit list writes these in quotes). */
-  function text(e: Event, key: "font" | "protagonist" | "template", needed: boolean) {
+  function text(e: Event, key: "font" | "protagonist", needed: boolean) {
     const el = e.currentTarget as HTMLInputElement;
     const v = el.value.trim();
     if (v.includes('"') || (needed && !v)) {
@@ -216,16 +243,57 @@
   {#if value.animation !== "none"}{@render num("animationLength", 0.05, " (s)")}{/if}
 {/if}
 {#if shows("resolve")}
-  <label class="field" title="The name of a Text+ title in Resolve's media pool to copy for every caption; empty for Junctur's own">
+  <label class="field" title="The Text+ title in Resolve's media pool every caption is a copy of; Junctur's own unless you pick one">
     <span>Resolve template</span>
-    <input
-      class="name"
-      placeholder="Junctur's Text+"
-      value={value.template}
-      {disabled}
-      onchange={(e) => text(e, "template", false)}
-    />
+    <span class="pair">
+      <select
+        value={value.template}
+        {disabled}
+        onfocus={() => titles === null && fetchTitles()}
+        onchange={(e) => onChange({ ...value, template: (e.currentTarget as HTMLSelectElement).value })}
+      >
+        <option value="">Junctur's own</option>
+        {#if value.template}
+          <option value={value.template}>{value.template}{missing ? " (not found in Resolve)" : ""}</option>
+        {/if}
+        {#each others as t (t)}<option value={t}>{t}</option>{/each}
+      </select>
+      <button
+        class="small"
+        disabled={disabled || fetching}
+        title="Ask Resolve again for the Text+ titles in the open project's media pool"
+        onclick={(e) => {
+          e.preventDefault();
+          fetchTitles();
+        }}>{fetching ? "…" : "Refresh"}</button
+      >
+    </span>
   </label>
+  {#if fetchError}<p class="hint">{fetchError}</p>{/if}
+  {#if titles !== null && titles.length === 0 && !fetchError}
+    <p class="hint">
+      No Text+ titles in this Resolve project's media pool: style a Text+ on a timeline, drag it into the media pool,
+      then Refresh.
+    </p>
+  {/if}
+  <label
+    class="check"
+    title="Junctur sets only each caption's text, timing and speaker colour; the font, size, position and outline are the template's"
+  >
+    <input
+      type="checkbox"
+      checked={value.keepLook}
+      disabled={disabled || !value.template}
+      onchange={(e) => onChange({ ...value, keepLook: (e.currentTarget as HTMLInputElement).checked })}
+    />
+    Keep the template's look
+  </label>
+  {#if value.template && (value.highlight || value.animation !== "none")}
+    <p class="hint">
+      The word highlight and the animation need Junctur's own template (or a copy of its animated caption): a plain
+      Text+ of yours is placed without them.
+    </p>
+  {/if}
 {/if}
 {#if shows("cut")}
   <label class="field">
@@ -286,6 +354,11 @@
     display: flex;
     gap: 6px;
     align-items: center;
+  }
+  .hint {
+    margin: 2px 0 6px;
+    font-size: 11px;
+    opacity: 0.75;
   }
   .small {
     font-size: 11px;

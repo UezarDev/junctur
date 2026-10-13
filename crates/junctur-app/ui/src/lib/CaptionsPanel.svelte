@@ -229,7 +229,7 @@
       <p class="note">
         Resolve and the preview only; the SRT ignores them. Each caption then becomes auto-subs' animated caption, a
         heavier Fusion clip than a plain Text+: on an hour-long recording thousands of them can slow Resolve down, so
-        both are off by default. They need Junctur's own template: a Text+ title of yours named below gets neither.
+        both are off by default. They need Junctur's own template: a Text+ title of yours picked below gets neither.
       </p>
 
       <h3>People talking at once</h3>
@@ -298,8 +298,12 @@
         edited video (render or FCPXML) at the start of that timeline. Once per Resolve session, choose Workspace
         &gt; Scripts &gt; Junctur in Resolve and leave it running; Junctur installs the script when you send.
         Sending again updates the captions already there instead of adding more. The template is Junctur's
-        own Text+ unless you name a Text+ title from Resolve's media pool; your template keeps its shadow and
-        background, these settings set the rest.
+        own Text+ unless you pick a Text+ title from the open Resolve project's media pool (style a Text+ in
+        Resolve, drag it into the media pool, then open the list or Refresh); your template keeps its shadow and
+        background, these settings set the rest. With "Keep the template's look" Junctur sets only each
+        caption's text, timing and speaker colour, so the font, size, position and outline are the template's:
+        people talking at once then share its spot and overlap. Picking another template, or switching its look
+        on or off, replaces the captions on the next send.
       </p>
 
       <h3>Remembered voices</h3>

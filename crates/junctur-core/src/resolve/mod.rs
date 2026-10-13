@@ -39,6 +39,10 @@ pub fn send(cues: &[Cue], edit: &EditList, c: &Captions) -> Result<Sent, String>
             ("animated", c.animated().into()),
         ],
     )?;
+    // A script from before 5m would ignore `keep` and style the template with Junctur's look.
+    if c.keeps_look() && !info.contains_key("script") {
+        return Err(OLDER_SCRIPT.into());
+    }
     let timeline = reply::timeline(&info)?;
     let aspect = timeline.height as f64 / timeline.width.max(1) as f64;
     let placed = layout::place(cues, edit, c, aspect);
@@ -46,3 +50,23 @@ pub fn send(cues: &[Cue], edit: &EditList, c: &Captions) -> Result<Sent, String>
     let done = bridge::request("place", job.to_lua())?;
     Ok(reply::sent(&done, &timeline.name))
 }
+
+/// The Fusion Titles in the open Resolve project's media pool (5m), by clip name, for the template
+/// picker; Junctur's own two left out (the picker offers "Junctur's own" itself). Installs or
+/// refreshes the script first, as a send does.
+pub fn templates() -> Result<Vec<String>, String> {
+    install()?;
+    let found = bridge::request("templates", Vec::new()).map_err(|e| {
+        if e.contains("unknown request") {
+            OLDER_SCRIPT.to_string()
+        } else {
+            e
+        }
+    })?;
+    Ok(reply::templates(&found))
+}
+
+/// A script started before this Junctur does not know its newer requests or fields; installing
+/// the new one does not change the loop already running, but starting it again takes over
+/// (`junctur.lua`'s owner token).
+const OLDER_SCRIPT: &str = "The Junctur script running in Resolve is from an older Junctur: in      Resolve choose Workspace > Scripts > Junctur again, then try again";

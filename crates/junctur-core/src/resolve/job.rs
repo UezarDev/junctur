@@ -6,6 +6,9 @@
 //! With the word highlight or an animation on (5l) the clips are copies of auto-subs' animated
 //! caption (a Fusion macro round a Text+, in the same bundled bin), and each carries its words'
 //! character ranges and frames in the shape that macro reads (`WordTiming`).
+//!
+//! With a template of the user's picked and its look kept (5m), the look is left out: the script
+//! sets only the text, the timing and the speaker's colour.
 
 use sha2::{Digest, Sha256};
 
@@ -34,6 +37,9 @@ pub struct Clip {
     pub text: String,
     /// The fill, the speaker's colour, 0 to 1 per channel.
     pub fill: [f64; 3],
+    /// The speaker has a colour of their own (5m): without one the fill is white, which a
+    /// template whose look is kept should not get, so it keeps its own.
+    pub colored: bool,
     /// The animated caption's text and lit word colours (5l, `Captions::highlight_colors`): white
     /// and the speaker's under the highlight in the speaker's colour; both the fill without it.
     pub base: [f64; 3],
@@ -72,6 +78,9 @@ pub struct Look {
     pub highlight: bool,
     pub animation: String,
     pub animation_length: f64,
+    /// The template's own look is kept (5m, [`Captions::keeps_look`]): the script sets none of
+    /// the inputs above but the highlight and the animation.
+    pub keep: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -131,18 +140,29 @@ pub fn build(placed: &[Placed], edit: &EditList, c: &Captions, timeline: &Timeli
     // writes the highlight's keyframes when it is on, never clears them (its RemoveHighlight runs
     // from an input's change, which a script setting it may not trigger), so a clip that had it
     // is replaced rather than restyled without it.
-    let kind = match (c.highlight, animated) {
+    let mut kind = match (c.highlight, animated) {
         (true, _) => "|highlight",
         (false, true) => "|animated",
         _ => "",
-    };
+    }
+    .to_string();
+    // A clip says which template it is a copy of and whether its look was kept (5m): picking
+    // another template, or switching the look on or off, then replaces the clips. Restyled
+    // instead, the old template's clip would stay, and one restyled with the look kept would keep
+    // the font and size Junctur gave it before (with the look kept they are not set). Junctur's
+    // own template adds nothing, so its keys are 5g's and 5l's.
+    let named = template(c);
+    let keep = c.keeps_look();
+    if !named.is_empty() {
+        kind.push_str(&format!("|template={named}"));
+    }
+    if keep {
+        kind.push_str("|keep");
+    }
     let mut clips = Vec::new();
     for (t, &id) in speakers.iter().enumerate() {
-        let color = edit
-            .speakers
-            .color(id)
-            .filter(|_| id > 0)
-            .unwrap_or("#FFFFFF");
+        let own = edit.speakers.color(id).filter(|_| id > 0);
+        let color = own.unwrap_or("#FFFFFF");
         let fill = rgb(color);
         let (base, highlight) = if c.highlight {
             let (base, word) = c.highlight_colors(color);
@@ -177,6 +197,7 @@ pub fn build(placed: &[Placed], edit: &EditList, c: &Captions, timeline: &Timeli
                 length,
                 text: part.lines.join("\n"),
                 fill,
+                colored: own.is_some(),
                 base,
                 highlight,
                 x: part.x,
@@ -202,6 +223,7 @@ pub fn build(placed: &[Placed], edit: &EditList, c: &Captions, timeline: &Timeli
             highlight: c.highlight,
             animation: c.animation.word().to_string(),
             animation_length: c.animation_length,
+            keep,
         },
         clips,
     }
@@ -290,6 +312,7 @@ impl Job {
             ("highlight", self.look.highlight.into()),
             ("animation", self.look.animation.as_str().into()),
             ("animationLength", self.look.animation_length.into()),
+            ("keep", self.look.keep.into()),
             ("outline", self.look.outline.is_some().into()),
         ];
         if let Some((color, thickness)) = self.look.outline {
@@ -320,6 +343,7 @@ impl Job {
                                 ("length", Value::Int(c.length)),
                                 ("text", c.text.as_str().into()),
                                 ("fill", rgb(c.fill)),
+                                ("colored", c.colored.into()),
                                 ("base", rgb(c.base)),
                                 ("highlight", rgb(c.highlight)),
                                 ("x", c.x.into()),
@@ -661,5 +685,47 @@ mod tests {
         let j = build(&[plain], &edit(), &Captions::default(), &t);
         assert!(!j.animated && j.clips[0].key.ends_with("|86472"));
         assert_eq!(j.look.animation, "none");
+    }
+
+    #[test]
+    fn a_picked_template_and_its_kept_look_are_in_the_key() {
+        let cues = [placed(0.0, 1.0, &[(1, "a"), (0, "b")])];
+        let t = timeline(24.0);
+        // Junctur's own: 5g's key, the switch ignored, nothing kept.
+        let own = Captions {
+            keep_look: true,
+            ..Default::default()
+        };
+        let j = build(&cues, &edit(), &own, &t);
+        assert!(!j.look.keep);
+        assert_eq!(j.clips[1].key, "Junctur 1 Ana|86400|86424");
+        // A template of the user's: its name in the key, so picking another replaces the clips.
+        let mine = Captions {
+            template: " My Title ".into(),
+            ..Default::default()
+        };
+        let j = build(&cues, &edit(), &mine, &t);
+        assert!(!j.look.keep);
+        assert_eq!(
+            j.clips[1].key,
+            "Junctur 1 Ana|86400|86424|template=My Title"
+        );
+        // Its look kept: said in the key too, so switching it on or off replaces them as well.
+        let kept = Captions {
+            keep_look: true,
+            highlight: true,
+            ..mine
+        };
+        let j = build(&cues, &edit(), &kept, &t);
+        assert!(j.look.keep);
+        assert_eq!(
+            j.clips[1].key,
+            "Junctur 1 Ana|86400|86424|highlight|template=My Title|keep"
+        );
+        // Ana has a colour; words with no speaker have none, so the template keeps its own fill.
+        assert!(j.clips[1].colored && !j.clips[0].colored);
+        let text = super::super::lua::chunk(&Value::Table(j.to_lua()));
+        assert!(text.contains("[\"keep\"] = true"), "{text}");
+        assert!(text.contains("[\"colored\"] = false"), "{text}");
     }
 }

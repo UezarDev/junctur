@@ -12,7 +12,7 @@ pub const HELP: &str =
     "# captions <on|off> chars=<per line> lines=<per speaker> seconds=<longest> \
      [preview=on] [bold=on] [italic=on] [underline=on] [font=\"..\"] [size=<% of height>] \
      [position=<% from bottom>] [outline=off] [outline_width=<1-10>] [outline_color=#RRGGBB] \
-     [layout=stacked|side|topBottom] [protagonist=\"<speaker>\"] [template=\"<Resolve title>\"] \
+     [layout=stacked|side|topBottom] [protagonist=\"<speaker>\"] [template=\"<Resolve title>\"] [keep_look=on] \
      [words=<per speaker>] [case=upper|lower|title] [punctuation=off] [censor=\"word|..\"] \
      [censor_style=whole] [replace=\"from>to|..\"] [translate=<language code>] [highlight=on] \
      [highlight_color=#RRGGBB] [animation=fade|pop|slide] [animation_length=<seconds>]";
@@ -72,6 +72,8 @@ pub fn write(c: &Captions) -> String {
         c.template != d.template,
         format!("template=\"{}\"", c.template),
     );
+    // 5m's switch only when on.
+    put(c.keep_look, "keep_look=on".to_string());
     // 5j's text options likewise; entries joined by `|`, a pair's halves by `>`.
     put(c.case != d.case, format!("case={}", c.case.word()));
     put(
@@ -168,6 +170,7 @@ pub fn parse(rest: &str) -> Result<Captions, String> {
             }
             "protagonist" => c.protagonist = v.to_string(),
             "template" => c.template = v.to_string(),
+            "keep_look" => c.keep_look = flag()?,
             "case" => c.case = Case::from_word(v).ok_or("expected upper, lower or title")?,
             "punctuation" => c.punctuation = flag()?,
             "censor" => c.censor = entries(v).map(str::to_string).collect(),
@@ -380,6 +383,24 @@ mod tests {
         ] {
             assert!(parse(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn keeping_the_templates_look_is_written_only_when_on() {
+        let c = Captions {
+            on: true,
+            template: "My Title".into(),
+            keep_look: true,
+            ..Default::default()
+        };
+        let line = write(&c);
+        assert_eq!(
+            line,
+            "captions on chars=42 lines=2 seconds=6 template=\"My Title\" keep_look=on"
+        );
+        assert_eq!(parse(line.strip_prefix("captions ").unwrap()).unwrap(), c);
+        assert!(!parse("on keep_look=off").unwrap().keep_look);
+        assert!(parse("on keep_look=yes").is_err());
     }
 
     #[test]
