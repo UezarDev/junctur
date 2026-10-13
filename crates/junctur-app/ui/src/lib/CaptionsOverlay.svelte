@@ -7,7 +7,7 @@
   // Cues are on the edited (output) timeline, so the playhead's output time picks one; while the
   // whole recording plays, a cut stretch shows none, since it is not in the export.
   import * as api from "./api";
-  import { captionStyle } from "./captionStyle";
+  import { captionFace, captionStyle } from "./captionStyle";
   import type { Rect } from "./layout";
 
   let {
@@ -26,7 +26,7 @@
   // The cues, sorted and never overlapping (the export's `settle`), so a binary search finds the one
   // on screen. Asked again only when something that shapes them changes: the kept ranges, the frame
   // rate, how cues are cut, who says what (`speakersKey`: the turns, which follow a new transcript
-  // or a re-hearing). Bold, italic, colours and names are drawn here from the edit state, so
+  // or a re-hearing). Bold, italic, underline, colours and names are drawn here from the edit state, so
   // toggling them costs no new cutting of a long transcript. A reply older than a newer request is
   // dropped.
   const shape = $derived.by(() => {
@@ -73,6 +73,7 @@
 
   const colors = $derived(new Map((edit?.speakers ?? []).map((s) => [s.id, s.color])));
   const style = $derived(captions ? captionStyle(captions, picture.h) : "");
+  const decoration = $derived(captions ? captionFace(captions).decoration : "none");
 
   // One log line per caption shown, so a test-mode run can tell the preview drew (the report's `ui`).
   // Keyed by time, not the object: the cues are asked for again on every edit state.
@@ -101,7 +102,11 @@
     <div class="cue" style={style}>
       {#each cue.parts as part, i (i)}
         {#each part.lines as line, j (j)}
-          <span class="line" style:color={colors.get(part.speaker) ?? "#FFFFFF"}>{line}</span>
+          <span
+            class="line"
+            style:color={colors.get(part.speaker) ?? "#FFFFFF"}
+            style:text-decoration={decoration}>{line}</span
+          >
         {/each}
       {/each}
     </div>

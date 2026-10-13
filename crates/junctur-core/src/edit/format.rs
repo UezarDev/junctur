@@ -72,13 +72,15 @@ pub fn write(e: &EditList) -> String {
         let _ = writeln!(
             out,
             "# captions <on|off> chars=<per line> lines=<per speaker> seconds=<longest> \
-             [preview=on] [bold=on] [italic=on]"
+             [preview=on] [bold=on] [italic=on] [underline=on]"
         );
-        // 5d's switches only when on, so a list that does not use them reads in 5a's builds.
+        // 5d's switches and 5f's underline only when on, so a list that does not use them reads in
+        // 5a's builds.
         let flags: String = [
             ("preview", c.preview),
             ("bold", c.bold),
             ("italic", c.italic),
+            ("underline", c.underline),
         ]
         .iter()
         .filter(|(_, on)| *on)
@@ -247,6 +249,7 @@ pub fn parse(text: &str) -> Result<EditList, String> {
                         "preview" => c.preview = flag()?,
                         "bold" => c.bold = flag()?,
                         "italic" => c.italic = flag()?,
+                        "underline" => c.underline = flag()?,
                         _ => return Err(bad("unknown caption setting")),
                     }
                 }
@@ -450,6 +453,7 @@ mod tests {
         assert!(parse(&format!("{head}captions on chars=500\n")).is_err());
         assert!(parse(&format!("{head}captions on size=3\n")).is_err());
         assert!(parse(&format!("{head}captions on bold=yes\n")).is_err());
+        assert!(parse(&format!("{head}captions on underline=yes\n")).is_err());
     }
 
     #[test]
@@ -459,20 +463,25 @@ mod tests {
             captions: Some(Captions {
                 preview: true,
                 italic: true,
+                underline: true,
                 ..Captions::default()
             }),
             ..sample()
         };
         let text = c.to_text();
         assert!(
-            text.contains("captions off chars=42 lines=2 seconds=6 preview=on italic=on\n"),
+            text.contains(
+                "captions off chars=42 lines=2 seconds=6 preview=on italic=on underline=on\n"
+            ),
             "{text}"
         );
         assert_eq!(parse(&text).unwrap(), c);
         let head = "junctur-edit 2\nsource x.mp4\n";
         let e = parse(&format!("{head}captions on bold=on preview=off\n")).unwrap();
         let c = e.captions.unwrap();
-        assert!(c.on && c.bold && !c.preview && !c.italic);
+        assert!(c.on && c.bold && !c.preview && !c.italic && !c.underline);
+        let e = parse(&format!("{head}captions on underline=off\n")).unwrap();
+        assert!(!e.captions.unwrap().underline);
     }
 
     #[test]

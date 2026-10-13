@@ -2,7 +2,7 @@
   // The caption settings' fields (2i): moved out of the Captions panel so Settings edits the
   // defaults with the very same fields. Every field of `Captions` is here once, in three parts the
   // panel places between its own sections (`switches`: export and preview, 5d; `style`: bold and
-  // italic, 5d; `cut`: how cues are cut, 5a) and Settings shows together (`all`); a field added to
+  // italic, 5d, underline, 5f; `cut`: how cues are cut, 5a) and Settings shows together (`all`); a field added to
   // `Captions` goes into one part and shows in both. Number fields commit on change, inside the
   // engine's limits (core edit/captions.rs); anything else snaps back to `value`.
   import type { Captions } from "./api";
@@ -31,7 +31,7 @@
     seconds: { min: 1, max: 15, name: "Longest caption" },
   } as const;
 
-  type Flag = "on" | "preview" | "bold" | "italic";
+  type Flag = "on" | "preview" | "bold" | "italic" | "underline";
   const SWITCHES: { key: Flag; label: string; title: string }[] = [
     { key: "on", label: "Export captions", title: "On: rendering also writes the captions (.srt) beside the video" },
     { key: "preview", label: "Preview captions", title: "Shows the captions over the video as it plays, as the export cuts them" },
@@ -39,6 +39,7 @@
   const STYLE: { key: Flag; label: string; title: string }[] = [
     { key: "bold", label: "Bold", title: "Every caption bold in the SRT" },
     { key: "italic", label: "Italic", title: "Every caption italic in the SRT" },
+    { key: "underline", label: "Underline", title: "Every caption underlined in the SRT" },
   ];
 
   function flag(e: Event, key: Flag) {

@@ -1,10 +1,10 @@
 <script lang="ts">
   // The caption styling panel (5a, 5d): exporting captions with a render, previewing them over the
   // picture (two switches since 5d), each speaker's colour and name with a sample of how it reads,
-  // bold and italic, how cues are cut, and exporting the SRT. Everything is saved to edit.junctur
+  // bold, italic and underline (5f), how cues are cut, and exporting the SRT. Everything is saved to edit.junctur
   // at once (the `captions` and `speaker` lines), so it is readable and survives a re-cut. Only
-  // what an SRT carries into DaVinci Resolve is offered: text, timing, colour, bold and italic
-  // (5d's research). Size, font, outline, shadow, background and position are Resolve's subtitle
+  // what an SRT carries into DaVinci Resolve is offered: text, timing, colour, bold, italic and
+  // underline (5d's research, 5f). Size, font, outline, shadow, background and position are Resolve's subtitle
   // Track Style, which no import sets; the note says so rather than offering settings Resolve drops. Export writes one file
   // (5e): a Resolve subtitle track shows one caption at a time, so people talking at once share one
   // caption, a line each; 5b's per-speaker files left beside it are listed. The remembered voices
@@ -32,7 +32,7 @@
   const captions = $derived(edit?.captions ?? null);
   const speakers = $derived(edit?.speakers ?? []);
   const usable = $derived(!!edit?.editable && !!captions);
-  const face = $derived(captionFace(captions ?? { bold: false, italic: false }));
+  const face = $derived(captionFace(captions ?? { bold: false, italic: false, underline: false }));
   let exported = $state<string[] | null>(null);
   let busy = $state(false);
   let savedDefault = $state(false);
@@ -162,6 +162,7 @@
           style:color={s.color}
           style:font-weight={face.weight}
           style:font-style={face.style}
+          style:text-decoration={face.decoration}
         >
           {s.name}: ¿qué tal? Hola a todos
         </div>
@@ -170,9 +171,9 @@
       <h3>Style</h3>
       <CaptionRules value={captions} part="style" onChange={(c) => setCaptions(c)} {onError} />
       <p class="note">
-        Colour, bold and italic are all an SRT brings into Resolve. Font, size, outline, shadow, background and
+        Colour, bold, italic and underline are all an SRT brings into Resolve. Font, size, outline, shadow, background and
         position are the subtitle track's style in Resolve (select the track, Inspector &gt; Track): set them there
-        once for every caption. Resolve has been reported to give bold or italic captions their own style rather
+        once for every caption. Resolve has been reported to give bold or italic (perhaps underlined) captions their own style rather
         than the track's: if a Track Style change then misses them, turn these off. The preview shows Resolve's
         default look.
       </p>
@@ -199,7 +200,7 @@
         Cues follow the edited timeline, like the render and the FCPXML. When people talk at once, one caption
         holds them all, each speaker on their own line in their colour; the line limit applies to each speaker.
         In DaVinci Resolve import the file (File &gt; Import &gt; Subtitle) onto one subtitle track at the start
-        of the timeline; the colours, bold and italic come through. An SRT carries no size or position: set
+        of the timeline; the colours, bold, italic and underline come through. An SRT carries no size or position: set
         those in Resolve. Premiere Pro is untested and likely shows its default style.
       </p>
 

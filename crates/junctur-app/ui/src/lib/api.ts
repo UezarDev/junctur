@@ -127,6 +127,8 @@ export interface Captions {
   /** Every caption bold / italic in the SRT (5d: Resolve's import applies both). */
   bold: boolean;
   italic: boolean;
+  /** Every caption underlined (5f: Uezar's import showed Resolve underlines in the speaker's colour). */
+  underline: boolean;
 }
 
 /** A caption as the SRT export cuts it (junctur-core export/srt.rs), output seconds; one part per
