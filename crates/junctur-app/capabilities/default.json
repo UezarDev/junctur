@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "What the main window's page may call: Tauri's core events and the open and save dialogs.",
+  "description": "What the main window's page may call: Tauri's core events, the open and save dialogs, and the yes/no question before a re-analysis replaces edits.",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open", "dialog:allow-save"]
+  "permissions": ["core:default", "dialog:allow-open", "dialog:allow-save", "dialog:allow-ask"]
 }

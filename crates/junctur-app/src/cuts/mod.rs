@@ -181,6 +181,9 @@ pub struct SpeakerView {
     pub id: u32,
     pub name: String,
     pub color: String,
+    /// Their audio track (0-based) when speakers were told apart by track: the lanes colour it
+    /// and the avatars take its level (2g).
+    pub track: Option<usize>,
 }
 
 /// The editor's side of the edit state: what undo and redo can do, and its last notice.
@@ -216,6 +219,7 @@ impl EditState {
                         id: n.id,
                         name: n.name.clone(),
                         color: n.color.clone(),
+                        track: n.track,
                     })
                     .collect()
             }),

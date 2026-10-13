@@ -2,15 +2,13 @@
 //! recording (`--project <dir>` to keep it somewhere git can track it).
 
 use junctur_core::edit::{CutSettings, EditList};
-use junctur_core::export;
-use junctur_core::pipeline::{self, PipelineOptions, Project, StageState, STAGES};
+use junctur_core::pipeline::{self, Project, StageState, STAGES};
 use junctur_core::render::{self, RenderOptions};
 use junctur_core::runtime::DevicePref;
-use junctur_core::transcribe::{self, ModelPref};
+use junctur_core::transcribe;
+use junctur_core::{config, export, voices};
 
 use crate::args::Args;
-use crate::config::{self, Config};
-use crate::voices;
 
 const PROJECT_FLAGS: &[&str] = &["--project", "--cache-dir"];
 const CUT_FLAGS: &[&str] = &["--pad-before", "--pad-after", "--merge-gap", "--crossfade"];
@@ -40,19 +38,6 @@ fn known(extra: &[&'static str]) -> Vec<&'static str> {
     PROJECT_FLAGS.iter().chain(extra).copied().collect()
 }
 
-/// `--model`, else the config file's `whisper_model`, else `auto` (large-v3-turbo on the GPU or CPU).
-/// The config file is read only when `--model` is absent, so a broken one cannot block an explicit
-/// choice.
-fn model(
-    flag: Option<&str>,
-    cfg: impl FnOnce() -> Result<Config, String>,
-) -> Result<ModelPref, String> {
-    match flag {
-        Some(m) => m.parse().map_err(|e| format!("--model: {e}")),
-        None => Ok(cfg()?.whisper_model.unwrap_or_default()),
-    }
-}
-
 pub fn analyze(a: Args) -> Result<(), String> {
     let mut k = known(&[
         "--cpu",
@@ -64,33 +49,23 @@ pub fn analyze(a: Args) -> Result<(), String> {
     k.extend(CUT_FLAGS);
     a.reject_unknown(&k)?;
     let p = project(&a)?;
-    let no_transcript = a.has("--no-transcript");
-    // Without a transcript no model is loaded, so the config file is not read either.
-    let model = if no_transcript {
-        ModelPref::Auto
-    } else {
-        let flag = a.path("--model").map(|m| m.to_string_lossy().into_owned());
-        model(flag.as_deref(), config::load)?
-    };
-    let opts = PipelineOptions {
-        device: if a.has("--cpu") {
-            DevicePref::Cpu
-        } else {
-            DevicePref::Auto
-        },
-        model,
-        cut: cut_settings(&a)?,
-        force: a.has("--force"),
-        no_transcript,
-        no_speakers: a.has("--no-speakers"),
-        // Read only when speakers are told apart; a broken voices file is said and skipped.
-        voices: if a.has("--no-speakers") {
-            Vec::new()
-        } else {
-            voices::usable()
-        },
-        ..Default::default()
-    };
+    // The model (`--model`, else the config file's `whisper_model`, else `auto`), as the app's
+    // analysis takes it too; then this command's own flags.
+    let model = a.path("--model").map(|m| m.to_string_lossy().into_owned());
+    let no_speakers = a.has("--no-speakers");
+    let mut opts = config::analysis_options(model.as_deref(), a.has("--no-transcript"), true)
+        .map_err(|e| e.to_string())?;
+    // The voices are read here rather than by `analysis_options`: read only when speakers are told
+    // apart, and a broken voices file is said and skipped instead of stopping the analysis.
+    opts.no_speakers = no_speakers;
+    if !no_speakers {
+        opts.voices = voices::remembered_or_none(&mut |m| eprintln!("junctur: {m}"));
+    }
+    if a.has("--cpu") {
+        opts.device = DevicePref::Cpu;
+    }
+    opts.cut = cut_settings(&a)?;
+    opts.force = a.has("--force");
     let out = pipeline::run(&p, &opts, &mut |line| eprintln!("junctur: {line}"))
         .map_err(|e| e.to_string())?;
     if let Some(t) = &out.transcript {
@@ -151,7 +126,8 @@ pub fn cut(a: Args) -> Result<(), String> {
     // The voices may have changed since `analyze`: label the speakers again first (cheap). A
     // project heard before 5b cannot be; its speakers stay as they were.
     if p.speakers().is_some() {
-        if let Err(e) = pipeline::relabel(&p, &voices::usable()) {
+        let voices = voices::remembered_or_none(&mut |m| eprintln!("junctur: {m}"));
+        if let Err(e) = pipeline::relabel(&p, &voices) {
             eprintln!("junctur: speakers not relabelled: {e}");
         }
     }
@@ -267,28 +243,4 @@ fn print_edit(p: &Project, e: &EditList) {
         );
     }
     println!("  {}", p.edit_path().display());
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn model_flag_beats_config_beats_auto() {
-        let cfg = |m: Option<ModelPref>| move || Ok(Config { whisper_model: m });
-        let broken = || Err("bad config".to_string());
-        assert_eq!(
-            model(Some("turbo"), cfg(Some(ModelPref::LargeV3))),
-            Ok(ModelPref::LargeV3Turbo)
-        );
-        // An explicit choice never reads the config, so a broken one cannot block it.
-        assert_eq!(model(Some("best"), broken), Ok(ModelPref::LargeV3));
-        assert_eq!(
-            model(None, cfg(Some(ModelPref::LargeV3Q5))),
-            Ok(ModelPref::LargeV3Q5)
-        );
-        assert_eq!(model(None, cfg(None)), Ok(ModelPref::Auto));
-        assert!(model(None, broken).is_err());
-        assert!(model(Some("large-v4"), cfg(None)).is_err());
-    }
 }

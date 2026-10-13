@@ -3,7 +3,8 @@
   // seek, shift-drag to select a stretch to cut or keep (drawn over the bar, as is a transcript
   // selection). The ranges are painted onto a canvas only when the edit list or the size changes (each
   // pixel column shaded by how much of it is kept, see coverage.ts), and the playhead is a separate
-  // element moved by CSS, so a position update never repaints thousands of ranges.
+  // element moved by CSS, so a position update never repaints thousands of ranges. Since 2g it is the
+  // overview: it outlines the window the track lanes show (`view`).
   import { onMount } from "svelte";
   import * as api from "./api";
   import { coverage } from "./coverage";
@@ -14,12 +15,15 @@
     player,
     edit,
     span,
+    view = null,
     onSelect,
     onError,
   }: {
     player: api.PlayerState | null;
     edit: api.EditState | null;
     span: { start: number; end: number } | null;
+    /** The stretch the track lanes show, outlined (source seconds). */
+    view?: { start: number; end: number } | null;
     onSelect: (s: Selection | null) => void;
     onError: (message: string) => void;
   } = $props();
@@ -210,6 +214,13 @@
       style:width="{(Math.max(0, span.end - span.start) / duration) * 100}%"
     ></div>
   {/if}
+  {#if view && duration && view.end - view.start < duration * 0.999}
+    <div
+      class="view"
+      style:left="{(Math.max(0, view.start) / duration) * 100}%"
+      style:width="{(Math.max(0, Math.min(duration, view.end) - Math.max(0, view.start)) / duration) * 100}%"
+    ></div>
+  {/if}
   {#if loaded && duration}
     <div class="head" style:left="{fraction * 100}%"></div>
   {/if}
@@ -248,6 +259,16 @@
     border-radius: 2px;
     background: rgba(120, 170, 255, 0.35);
     border: 1px solid rgba(120, 170, 255, 0.8);
+    box-sizing: border-box;
+    pointer-events: none;
+  }
+  .view {
+    position: absolute;
+    top: 2px;
+    height: 18px;
+    min-width: 4px;
+    border: 1.5px solid var(--accent);
+    border-radius: 3px;
     box-sizing: border-box;
     pointer-events: none;
   }

@@ -101,8 +101,39 @@ const VERSION: u32 = 2;
 /// hours of Whisper because the default moved is `--force`'s job); an explicit model must match, so
 /// `--model large-v3` is never silently ignored. The languages must match either way.
 fn reusable(t: &Transcript, opts: &TranscribeOptions) -> bool {
-    t.languages == opts.languages.allowed
-        && (opts.model == ModelPref::Auto || t.choice.model == opts.model.name())
+    answers(&t.choice.model, &t.languages, opts)
+}
+
+/// [`reusable`] on what a transcript records: the model that made it and its languages.
+pub fn answers(model: &str, languages: &[String], opts: &TranscribeOptions) -> bool {
+    languages == opts.languages.allowed.as_slice()
+        && (opts.model == ModelPref::Auto || model == opts.model.name())
+}
+
+/// What a project's finished transcript was made with: its model and languages; `None` when there
+/// is none, `Some(Err)` when there is one that cannot be read (a run would make it again). Reads
+/// the file without building its segments (a 30 h transcript is tens of MB), for asking whether it
+/// is out of date (2d).
+pub fn made_with(project: &Path) -> Option<std::result::Result<(String, Vec<String>), String>> {
+    #[derive(Deserialize)]
+    struct Made {
+        choice: MadeChoice,
+        languages: Vec<String>,
+    }
+    #[derive(Deserialize)]
+    struct MadeChoice {
+        model: String,
+    }
+    let bytes = match std::fs::read(path(project)) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => return Some(Err(e.to_string())),
+    };
+    Some(
+        serde_json::from_slice::<Made>(&bytes)
+            .map(|m| (m.choice.model, m.languages))
+            .map_err(|e| e.to_string()),
+    )
 }
 
 /// Where a project keeps the transcript.

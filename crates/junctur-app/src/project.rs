@@ -1,10 +1,12 @@
 //! A recording's Junctur project as the app shows it: the same folder `junctur status` reads
 //! (`pipeline::Project::open` with the default cache), with each stage's state and whether the
-//! transcript and edit list exist. Running the stages from the app comes later.
+//! transcript and edit list exist. The app runs the stages itself in `analysis` (2d).
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use junctur_core::pipeline::{Project, StageState, STAGES};
+use junctur_core::ffmpeg;
+use junctur_core::pipeline::{self, Project, StageState, STAGES};
 use junctur_core::transcribe;
 use serde::Serialize;
 
@@ -74,6 +76,89 @@ pub fn status(file: &Path, cache_dir: Option<PathBuf>) -> Result<ProjectStatus, 
     })
 }
 
+/// A recent recording's line on the start window (2g's S): how long it is and where its analysis
+/// stands. Asked per row after the list is drawn, so the list never waits on its projects.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingInfo {
+    pub duration: Option<f64>,
+    /// The edit list's kept ranges, when it has one that parses.
+    pub ranges: Option<usize>,
+    /// Stages done, of [`STAGES`].
+    pub stages_done: usize,
+    pub stages: usize,
+}
+
+/// [`RecordingInfo`] of `file`: its length from the edit list, else the track analysis's cache,
+/// else ffprobe (only for a recording never analysed this far).
+pub fn info(file: &Path, cache_dir: Option<PathBuf>) -> Result<RecordingInfo, String> {
+    let s = status(file, cache_dir.clone())?;
+    let done = s
+        .stages
+        .iter()
+        .filter(|st| st.state == StageState::Done)
+        .count();
+    let duration = match &s.edit {
+        Some(e) => Some(e.duration),
+        None => Project::open(file, cache_dir, None)
+            .ok()
+            .and_then(|p| pipeline::cached_tracks(&p))
+            .map(|r| r.duration)
+            .or_else(|| ffmpeg::probe(file).ok().map(|p| p.duration)),
+    };
+    Ok(RecordingInfo {
+        duration: duration.filter(|d| *d > 0.0),
+        ranges: s.edit.as_ref().map(|e| e.ranges),
+        stages_done: done,
+        stages: s.stages.len(),
+    })
+}
+
+/// The project folder's still of `file` (`thumb.jpg`, 320 px wide): made once by ffmpeg from 10% in
+/// (at most a minute, so a 30 h recording does not seek half an hour), then read from there.
+pub fn thumbnail(file: &Path, cache_dir: Option<PathBuf>) -> Result<Vec<u8>, String> {
+    let p = Project::open(file, cache_dir, None).map_err(|e| e.to_string())?;
+    let path = p.dir.join(THUMBNAIL);
+    if let Ok(b) = std::fs::read(&path) {
+        return Ok(b);
+    }
+    let at = ffmpeg::probe(file).map_or(0.0, |x| (x.duration * 0.1).min(60.0));
+    // Written beside it and renamed, so a half-written still is never taken for the real one; a
+    // name of its own per call, as two asks for one recording may run at once.
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let tmp = p.dir.join(format!("thumb.{}.{n}.jpg", std::process::id()));
+    let args: Vec<String> = [
+        "-v",
+        "error",
+        "-nostdin",
+        "-y",
+        "-ss",
+        &format!("{at:.3}"),
+        "-i",
+        &file.to_string_lossy(),
+        "-frames:v",
+        "1",
+        "-vf",
+        "scale=320:-2",
+        "-q:v",
+        "5",
+        &tmp.to_string_lossy(),
+    ]
+    .map(String::from)
+    .to_vec();
+    let made = ffmpeg::ffmpeg(&args)
+        .map_err(|e| e.to_string())
+        .and_then(|()| std::fs::rename(&tmp, &path).map_err(|e| e.to_string()));
+    if let Err(e) = made {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    std::fs::read(&path).map_err(|e| e.to_string())
+}
+
+const THUMBNAIL: &str = "thumb.jpg";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,6 +222,44 @@ mod tests {
         let s = status(&file, Some(d.join("cache"))).unwrap();
         assert_eq!(s.edit, None);
         assert!(s.edit_error.is_some());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_recordings_info_and_still() {
+        let d = scratch("info");
+        let file = d.join("rec.mkv");
+        let ok = std::process::Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=d=3:s=640x360:r=25",
+            ])
+            .args(["-f", "lavfi", "-i", "sine=d=3", "-shortest"])
+            .arg(&file)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let cache = Some(d.join("cache"));
+        let i = info(&file, cache.clone()).unwrap();
+        assert_eq!((i.ranges, i.stages_done, i.stages), (None, 0, STAGES.len()));
+        assert!(
+            (i.duration.unwrap() - 3.0).abs() < 0.1,
+            "from ffprobe: {i:?}"
+        );
+        let jpg = thumbnail(&file, cache.clone()).unwrap();
+        assert_eq!(&jpg[..2], &[0xFF, 0xD8], "a JPEG");
+        let dir = PathBuf::from(status(&file, cache.clone()).unwrap().dir);
+        assert!(dir.join(THUMBNAIL).is_file());
+        // Made once: what is there is what comes back.
+        std::fs::write(dir.join(THUMBNAIL), b"kept").unwrap();
+        assert_eq!(thumbnail(&file, cache.clone()).unwrap(), b"kept");
+        assert!(thumbnail(&d.join("nope.mkv"), cache).is_err());
         let _ = std::fs::remove_dir_all(&d);
     }
 

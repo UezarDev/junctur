@@ -15,14 +15,13 @@
 //! junctur voices [<file> --add <name> --at <start>-<end>[,...]] [--forget <name>]
 //! ```
 //!
-//! `--model` defaults to the config file's `whisper_model` ([`config`]), else `auto`. Speakers are
+//! `--model` defaults to the config file's `whisper_model` (`junctur_core::config`), else `auto`. Speakers are
 //! labelled with the remembered voices ([`voices`]), `junctur/voices.json` beside the config file.
 //!
 //! Arguments are parsed by hand: a few commands with a handful of flags do not justify a parser dependency.
 
 mod args;
 mod commands;
-mod config;
 mod project;
 mod voices;
 
@@ -45,6 +44,8 @@ const USAGE: &str = "usage:
 cut flags: [--pad-before <s>] [--pad-after <s>] [--merge-gap <s>] [--crossfade <ms>]";
 
 fn main() -> ExitCode {
+    // 2f: settings and voices a Claude-launched run saved in a hidden copy of the config folder.
+    junctur_core::config::adopt_hidden(&junctur_core::config::FILES);
     match run(std::env::args().skip(1).collect()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

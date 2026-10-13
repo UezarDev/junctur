@@ -13,7 +13,16 @@
 //! `rename=<id>:<name>` (5a: a speaker's name; no `;` in it), `color=<id>:#RRGGBB`,
 //! `captions=on|off` and `srt=<path>` (write the captions there), `enroll=<first>-<last>:<name>`
 //! (5b: remember a voice from transcript words) and `forget=<name>`. Set `JUNCTUR_VOICES` to a
-//! scratch file for these, or they change the user's own voices. Each step's
+//! scratch file for these, or they change the user's own voices. `reanalyse` (2d) analyses the open
+//! recording again, replacing user edits (a recording without an edit list is analysed as it
+//! opens); the report's `analysis` is the open recording's analysis progress and `outdated` what
+//! the project panel would offer a re-analysis for. Set `JUNCTUR_RECENT` and `JUNCTUR_CACHE_DIR` to
+//! scratch places too. `mute=<n>` / `unmute=<n>` (2e) mute or unmute audio track n (from 1, as
+//! the play bar numbers them); each step's report and the final one add the mutes (`mixer`) and
+//! the levels read then (`levels`: each track's meter and what is heard, in dBFS); `solo=<n>` /
+//! `unsolo=<n>` (2g) solo or unsolo one, and `menu=<id>` chooses a menu item as a click on it does
+//! (`menu=talking` shows the overlay of who is talking). The final report adds how far the waveforms are (`waves`);
+//! the picture's shape is in the `state` (`width`, `height`, `aspect`). Each step's
 //! report adds the edit state it left, and the final report re-reads `edit.junctur` from disk
 //! (`disk`: does it parse, and is it the list in play), counts the loads asked of mpv (a save must
 //! not come back as a second reload) and lists the frontend's log lines (`ui`).
@@ -77,6 +86,13 @@ enum Action {
     Srt(String),
     Enroll(usize, usize, String),
     Forget(String),
+    Reanalyse,
+    /// Audio track (0-based) and whether to mute it.
+    Mute(usize, bool),
+    /// Audio track (0-based) and whether to solo it (2g).
+    Solo(usize, bool),
+    /// A menu item chosen (2g), by id.
+    Menu(String),
 }
 
 /// The frontend's log lines (`ui_log`), kept for the report.
@@ -144,9 +160,19 @@ fn parse_steps(s: &str) -> Result<Vec<(f64, Action)>, String> {
                 Action::Enroll(a as usize, b as usize, name.to_string())
             }
             Some(("forget", name)) if !name.is_empty() => Action::Forget(name.to_string()),
+            Some((kind @ ("mute" | "unmute"), v)) => {
+                let n: usize = v.trim().parse().map_err(|_| bad())?;
+                Action::Mute(n.checked_sub(1).ok_or_else(bad)?, kind == "mute")
+            }
+            Some((kind @ ("solo" | "unsolo"), v)) => {
+                let n: usize = v.trim().parse().map_err(|_| bad())?;
+                Action::Solo(n.checked_sub(1).ok_or_else(bad)?, kind == "solo")
+            }
+            Some(("menu", id)) if !id.is_empty() => Action::Menu(id.to_string()),
             None if action == "pause" => Action::Pause,
             None if action == "undo" => Action::Edit(Step::Undo),
             None if action == "redo" => Action::Edit(Step::Redo),
+            None if action == "reanalyse" => Action::Reanalyse,
             _ => return Err(bad()),
         };
         steps.push((at, action));
@@ -173,7 +199,32 @@ fn with_player<T>(app: &AppHandle, f: impl FnOnce(&Player) -> T) -> Result<T, St
     Ok(f(p))
 }
 
+/// The open recording's analysis progress.
+fn analysis(app: &AppHandle) -> Option<crate::analysis::Progress> {
+    let file = with_player(app, |p| p.file()).ok()??;
+    app.try_state::<App>()?
+        .analysis
+        .progress(std::path::Path::new(&file))
+}
+
 fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
+    if let Action::Menu(id) = a {
+        use tauri::Emitter;
+        return app.emit(crate::menu::EVENT, id).map_err(|e| e.to_string());
+    }
+    if let Action::Reanalyse = a {
+        let file = with_player(app, |p| p.file())?.ok_or("no file is open")?;
+        let state = app.try_state::<App>().ok_or("app not set up")?;
+        let notify = crate::commands::notifier(app.clone());
+        let r = state
+            .analysis
+            .reanalyse(std::path::Path::new(&file), true, notify)?;
+        eprintln!(
+            "junctur-app test: reanalyse started: {}",
+            r.progress.is_some()
+        );
+        return Ok(());
+    }
     with_player(app, |p| match a {
         Action::Seek(s) => p.seek(*s, true).map(|_| ()),
         Action::KeySeek(s) => p.seek(*s, false).map(|_| ()),
@@ -193,11 +244,23 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
             .enroll_voice(*first, *last, name)
             .map(|line| eprintln!("junctur-app test: {line}")),
         Action::Forget(name) => p.forget_voice(name),
+        Action::Mute(track, muted) => p.set_muted(*track, *muted),
+        Action::Solo(track, on) => p.set_solo(*track, *on),
+        Action::Reanalyse | Action::Menu(_) => unreachable!("run above"),
     })?
 }
 
 fn snapshot(app: &AppHandle) -> Result<(PlayerState, u64), String> {
     with_player(app, |p| (p.state(), p.frames()))
+}
+
+/// The mutes and the levels now (2e).
+fn mixer(app: &AppHandle) -> Value {
+    with_player(app, |p| {
+        let (meters, heard) = p.levels();
+        json!({ "mixer": p.mixer(), "levels": { "meters": meters, "heard": heard } })
+    })
+    .unwrap_or(Value::Null)
 }
 
 /// A step that ran, waiting for the state it led to.
@@ -231,6 +294,7 @@ impl Ran<'_> {
             "ms": self.ms,
             "after": after,
             "edit": edit,
+            "mixer": mixer(app),
         })
     }
 }
@@ -328,6 +392,11 @@ pub fn arm(app: AppHandle, seconds: f64, trace: Option<Arc<Trace>>) {
                 "skips": trace.map(|t| t.report()),
                 "loads": with_player(&app, |p| p.loads()).ok(),
                 "disk": with_player(&app, disk_check).ok(),
+                "analysis": analysis(&app),
+                "outdated": with_player(&app, |p| p.file()).ok().flatten()
+                    .map(|f| crate::analysis::outdated(std::path::Path::new(&f))),
+                "mixer": mixer(&app),
+                "waves": app.try_state::<App>().and_then(|a| a.waves.state()),
                 "ui": lock(&UI_LOG).clone(),
             }),
             Err(e) => json!({ "verdict": "error", "error": e }),
@@ -374,6 +443,8 @@ mod tests {
                 (8.0, Action::KeySeek(1.0)),
             ]
         );
+        let s = parse_steps("9:reanalyse").unwrap();
+        assert_eq!(s, vec![(9.0, Action::Reanalyse)]);
         let s = parse_steps("1:cutw=3-5;2:keepf=30-60;3:undo;4:redo").unwrap();
         assert_eq!(
             s.iter().map(|x| x.1.clone()).collect::<Vec<_>>(),
@@ -411,6 +482,21 @@ mod tests {
                 (2.0, Action::Forget("Ana María".into())),
             ]
         );
+        assert_eq!(
+            parse_steps("1:mute=2;2:unmute=1").unwrap(),
+            vec![(1.0, Action::Mute(1, true)), (2.0, Action::Mute(0, false))]
+        );
+        assert!(parse_steps("1:mute=0").is_err(), "tracks count from 1");
+        assert_eq!(
+            parse_steps("1:solo=2;2:unsolo=2").unwrap(),
+            vec![(1.0, Action::Solo(1, true)), (2.0, Action::Solo(1, false))]
+        );
+        assert!(parse_steps("1:solo=0").is_err());
+        assert_eq!(
+            parse_steps("3:menu=talking").unwrap(),
+            vec![(3.0, Action::Menu("talking".into()))]
+        );
+        assert!(parse_steps("1:mute=x").is_err());
         assert!(parse_steps("1:enroll=10:Ana").is_err());
         assert!(parse_steps("1:forget=").is_err());
         assert!(parse_steps("5:captions=maybe").is_err());

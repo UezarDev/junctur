@@ -109,15 +109,29 @@ pub struct TrackReport {
     pub from_cache: bool,
 }
 
-pub fn analyze(file: &Path, opts: &AnalyzeOptions) -> Result<TrackReport> {
+fn entry(file: &Path, opts: &AnalyzeOptions) -> Result<PathBuf> {
     let dir = opts.cache_dir.clone().unwrap_or_else(cache::default_dir);
-    let entry = cache::entry_path(&dir, &cache::key(file, &opts.settings_key())?);
+    Ok(cache::entry_path(
+        &dir,
+        &cache::key(file, &opts.settings_key())?,
+    ))
+}
+
+/// The report an earlier [`analyze`] with `opts`' settings left in the cache, without analysing:
+/// `None` when there is none, or it does not parse. For a caller that only wants the roles if they
+/// are known (the app's player, 2e), where `analyze` would decode the whole file.
+pub fn cached(file: &Path, opts: &AnalyzeOptions) -> Option<TrackReport> {
+    let bytes = std::fs::read(entry(file, opts).ok()?).ok()?;
+    let mut report = serde_json::from_slice::<TrackReport>(&bytes).ok()?;
+    report.from_cache = true;
+    Some(report)
+}
+
+pub fn analyze(file: &Path, opts: &AnalyzeOptions) -> Result<TrackReport> {
+    let entry = entry(file, opts)?;
     if opts.use_cache {
-        if let Ok(bytes) = std::fs::read(&entry) {
-            if let Ok(mut report) = serde_json::from_slice::<TrackReport>(&bytes) {
-                report.from_cache = true;
-                return Ok(report);
-            }
+        if let Some(report) = cached(file, opts) {
+            return Ok(report);
         }
     }
 
@@ -135,7 +149,7 @@ pub fn analyze(file: &Path, opts: &AnalyzeOptions) -> Result<TrackReport> {
         }
     }
     let samples = window::align(per_track, starts.len());
-    let dir_for_models = dir.clone();
+    let dir_for_models = opts.cache_dir.clone().unwrap_or_else(cache::default_dir);
     let (logical, speech_error) = if opts.speech {
         match models::ensure(&models::SILERO_VAD, &dir_for_models).and_then(|m| Vad::open(&m)) {
             Ok(mut vad) => {
@@ -176,4 +190,48 @@ pub fn analyze(file: &Path, opts: &AnalyzeOptions) -> Result<TrackReport> {
         let _ = std::fs::write(&entry, serde_json::to_vec_pretty(&report)?);
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_reads_only_what_analyze_left() {
+        let d = std::env::temp_dir().join(format!("junctur-tracks-cached-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join("rec.mp4");
+        std::fs::write(&file, b"not a video").unwrap();
+        let opts = AnalyzeOptions {
+            cache_dir: Some(d.join("cache")),
+            ..Default::default()
+        };
+        assert!(cached(&file, &opts).is_none(), "nothing cached yet");
+        let report = TrackReport {
+            file: file.clone(),
+            duration: 10.0,
+            windows: vec![0.0],
+            window_seconds: 10.0,
+            tracks: vec![],
+            logical: vec![],
+            speech_error: None,
+            from_cache: false,
+        };
+        let path = entry(&file, &opts).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&report).unwrap()).unwrap();
+        let got = cached(&file, &opts).unwrap();
+        assert!(got.from_cache);
+        assert_eq!(got.duration, 10.0);
+        // Other settings are another entry.
+        let other = AnalyzeOptions {
+            windows: 3,
+            ..opts.clone()
+        };
+        assert!(cached(&file, &other).is_none());
+        std::fs::write(&path, b"{ broken").unwrap();
+        assert!(cached(&file, &opts).is_none());
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
