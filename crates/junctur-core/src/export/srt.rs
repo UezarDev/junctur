@@ -47,6 +47,19 @@ pub struct Part {
     /// Speaker id, 0 for none.
     pub speaker: u32,
     pub lines: Vec<String>,
+    /// What the lines say, unit by unit in order, with when each was said (5l: the word highlight
+    /// in Resolve and the preview). The SRT does not use them.
+    #[serde(skip)]
+    pub words: Vec<Spoken>,
+}
+
+/// A unit of a caption (a word, or a phrase 5j's find and replace made one) and when it was said,
+/// in output seconds: the words' own times, translated words spread over their sentence (5k).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Spoken {
+    pub text: String,
+    pub start: f64,
+    pub end: f64,
 }
 
 /// A caption: one part per speaker talking in it, in the order they started, so more than one only
@@ -315,12 +328,22 @@ impl Said {
     fn others(&self) -> &[u32] {
         self.speakers.get(1..).unwrap_or(&[])
     }
+
+    fn spoken(&self, text: &str) -> Spoken {
+        Spoken {
+            text: text.to_string(),
+            start: self.start,
+            end: self.end,
+        }
+    }
 }
 
 /// A speaker's part of the open cue; its lines are wrapped as words arrive, so a word costs O(1).
 struct OpenPart {
     speaker: u32,
     lines: Vec<String>,
+    /// The units on the lines with their times (5l).
+    spoken: Vec<Spoken>,
     /// Units taken (5i's word limit), one per word or replaced phrase (5j), whatever spaces its
     /// text holds; `last_words` of them on the last line.
     words: u32,
@@ -336,6 +359,7 @@ impl OpenPart {
     fn new(w: &Said, text: String) -> Self {
         let mut p = Self {
             speaker: w.speaker(),
+            spoken: vec![w.spoken(&text)],
             lines: vec![text],
             words: 1,
             last_words: 1,
@@ -388,6 +412,9 @@ impl Open {
                 parts.push(OpenPart {
                     speaker: p.speaker,
                     lines: p.lines.last().cloned().into_iter().collect(),
+                    // The last line's units go with it.
+                    spoken: p.spoken[p.spoken.len().saturating_sub(p.last_words as usize)..]
+                        .to_vec(),
                     words: p.last_words,
                     last_words: p.last_words,
                     track: p.track,
@@ -436,6 +463,7 @@ impl Open {
                 }
                 let had = p.lines.len();
                 p.lines = wrap_onto(std::mem::take(&mut p.lines), text, chars);
+                p.spoken.push(w.spoken(text));
                 p.words += 1;
                 p.last_words = if p.lines.len() > had {
                     1
@@ -467,6 +495,7 @@ impl Open {
                 .map(|p| Part {
                     speaker: p.speaker,
                     lines: p.lines,
+                    words: p.spoken,
                 })
                 .collect(),
         }
@@ -544,7 +573,10 @@ fn settle(cues: &mut Vec<Cue>, longest: f64, floor: f64, total: f64) {
 fn join(parts: &mut Vec<Part>, more: Vec<Part>) {
     for part in more {
         match parts.iter_mut().find(|p| p.speaker == part.speaker) {
-            Some(p) => p.lines.extend(part.lines),
+            Some(p) => {
+                p.lines.extend(part.lines);
+                p.words.extend(part.words);
+            }
             None => parts.push(part),
         }
     }
@@ -762,6 +794,42 @@ mod tests {
                      <font color=\"#F2B33D\">hola amigos</font>\r\n\r\n2\r\n00:00:02,200 --> ";
         assert!(text.starts_with(first), "{text}");
         assert!(text.contains("<font color=\"#5FB3F2\">qué tal</font>"));
+    }
+
+    /// Each unit of a part with its output times, to the millisecond.
+    fn said(p: &Part) -> Vec<(String, f64, f64)> {
+        let ms = |t: f64| (t * 1000.0).round() / 1000.0;
+        p.words
+            .iter()
+            .map(|w| (w.text.clone(), ms(w.start), ms(w.end)))
+            .collect()
+    }
+
+    #[test]
+    fn each_unit_keeps_when_it_was_said_on_the_edited_timeline() {
+        use crate::edit::Replace;
+        // Kept 10-12 and 30-33 at 30 fps: output 0-2 then 2-5 (5l's word highlight reads these).
+        let c = Captions {
+            replace: vec![Replace {
+                from: "qué tal".into(),
+                to: "¿qué tal?".into(),
+            }],
+            ..Default::default()
+        };
+        let e = edit(&[(10.0, 12.0), (30.0, 33.0)], c);
+        let w = [
+            word(10.5, 11.0, "hola"),
+            word(11.2, 11.6, "amigos"),
+            word(30.2, 30.6, "qué"),
+            word(30.7, 31.0, "tal"),
+        ];
+        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1, None);
+        assert_eq!(
+            said(&c[0].parts[0]),
+            [("hola".into(), 0.5, 1.0), ("amigos".into(), 1.2, 1.6)]
+        );
+        // A replaced phrase is one unit, from its first word's start to its last word's end.
+        assert_eq!(said(&c[1].parts[0]), [("¿qué tal?".into(), 2.2, 3.0)]);
     }
 
     #[test]
@@ -1259,6 +1327,17 @@ mod tests {
         // Speaker 2 is on screen without a gap from "sí" until "claro" ends.
         assert!((c[0].end - c[1].start).abs() < 1e-9, "{c:?}");
         assert!(c[1].end >= 1.7 - 1e-9, "{c:?}");
+        // The carried line keeps its word's time (5l), and every part's units are its lines' words.
+        assert_eq!(
+            said(&c[1].parts[1]),
+            [("sí".into(), 0.5, 1.3), ("claro".into(), 1.4, 1.7)]
+        );
+        for cue in &c {
+            for p in &cue.parts {
+                let units: Vec<&str> = p.words.iter().map(|w| w.text.as_str()).collect();
+                assert_eq!(units.join(" "), p.lines.join(" "), "{cue:?}");
+            }
+        }
     }
 
     #[test]

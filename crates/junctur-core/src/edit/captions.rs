@@ -6,7 +6,8 @@
 //! those fields drive that and the preview and the SRT ignores them, as it does the overlap layout
 //! and the protagonist (5g). The text options (5j: case, punctuation, censoring, find and replace)
 //! and the translation (5k) change the words every output shows, the SRT included, never the
-//! transcript.
+//! transcript. The word highlight and the animation (5l) are Resolve's and the preview's only, like
+//! the look.
 //!
 //! Also the two switches (5d): export (`on`: a render writes the caption file) and the preview over
 //! the picture in the editor, which are separate so captions can be watched without being written.
@@ -77,6 +78,51 @@ pub struct Captions {
     /// [`crate::translate::LANGUAGES`]; empty (the default) for the language spoken. The text
     /// options above apply to the translated words.
     pub translate: String,
+    /// The word being said lit up, word by word, in Resolve and the preview (5l).
+    pub highlight: bool,
+    /// Its colour, `#RRGGBB`; empty (the default) for the speaker's own colour, the caption then
+    /// white so the lit word shows.
+    pub highlight_color: String,
+    /// How a caption comes in and goes out, in Resolve and the preview (5l).
+    pub animation: Animation,
+    /// How long the animation takes, in seconds.
+    pub animation_length: f64,
+}
+
+/// A caption's in and out animation (5l): auto-subs' animated caption's three, one at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Animation {
+    #[default]
+    None,
+    Fade,
+    /// Grows in from smaller, fading.
+    Pop,
+    /// Rises in from lower, fading.
+    Slide,
+}
+
+impl Animation {
+    /// The word on the edit list's `captions` line, the same as in the config file.
+    pub fn word(self) -> &'static str {
+        match self {
+            Animation::None => "none",
+            Animation::Fade => "fade",
+            Animation::Pop => "pop",
+            Animation::Slide => "slide",
+        }
+    }
+
+    pub fn from_word(w: &str) -> Option<Self> {
+        [
+            Animation::None,
+            Animation::Fade,
+            Animation::Pop,
+            Animation::Slide,
+        ]
+        .into_iter()
+        .find(|a| a.word() == w)
+    }
 }
 
 /// Where the captions of people talking at once go (5g, Uezar: "stacked (up down) or sideways
@@ -139,6 +185,11 @@ impl Default for Captions {
             censor_style: CensorStyle::Middle,
             replace: Vec::new(),
             translate: String::new(),
+            highlight: false,
+            highlight_color: String::new(),
+            animation: Animation::None,
+            // auto-subs' animated caption's own default.
+            animation_length: 0.2,
         }
     }
 }
@@ -152,6 +203,8 @@ pub const SECONDS: std::ops::RangeInclusive<f64> = 1.0..=15.0;
 pub const SIZE: std::ops::RangeInclusive<f64> = 2.0..=15.0;
 pub const POSITION: std::ops::RangeInclusive<f64> = 0.0..=45.0;
 pub const OUTLINE_WIDTH: std::ops::RangeInclusive<u32> = 1..=10;
+/// Seconds: shorter is a jump, longer eats into a short caption's time on screen.
+pub const ANIMATION_LENGTH: std::ops::RangeInclusive<f64> = 0.05..=1.0;
 
 impl Captions {
     /// Why these settings cannot make sensible cues, if they cannot.
@@ -211,6 +264,19 @@ impl Captions {
                 self.outline_color
             ));
         }
+        if !self.highlight_color.is_empty() && parse_color(&self.highlight_color).is_none() {
+            return Err(format!(
+                "{:?} is not a colour like #FFD400",
+                self.highlight_color
+            ));
+        }
+        if !ANIMATION_LENGTH.contains(&self.animation_length) {
+            return Err(format!(
+                "an animation takes {} to {} s",
+                ANIMATION_LENGTH.start(),
+                ANIMATION_LENGTH.end()
+            ));
+        }
         if self.font.trim().is_empty() {
             return Err("a font is needed".into());
         }
@@ -233,6 +299,24 @@ impl Captions {
         caption_text::check(&self.censor, &self.replace)
     }
 
+    /// Whether Resolve needs the animated caption template (5l).
+    pub fn animated(&self) -> bool {
+        self.highlight || self.animation != Animation::None
+    }
+
+    /// A speaker's caption colours under the highlight (5l): the text's and the lit word's. With
+    /// the highlight colour left to the speaker's, the text is white and the word the speaker's;
+    /// a chosen colour lights the word over the speaker's colour. White on white would show
+    /// nothing, so a speaker with no colour of their own gets yellow.
+    pub fn highlight_colors(&self, speaker: &str) -> (String, String) {
+        let speaker = parse_color(speaker).unwrap_or_else(|| WHITE.into());
+        match parse_color(&self.highlight_color) {
+            Some(word) => (speaker, word),
+            None if speaker == WHITE => (WHITE.into(), UNCOLOURED_HIGHLIGHT.into()),
+            None => (WHITE.into(), speaker),
+        }
+    }
+
     /// The id of the speaker in `names` the protagonist names, if any (case and spaces aside).
     pub fn protagonist_in(&self, names: &[super::SpeakerName]) -> Option<u32> {
         let want = self.protagonist.trim().to_lowercase();
@@ -245,6 +329,10 @@ impl Captions {
             .map(|n| n.id)
     }
 }
+
+const WHITE: &str = "#FFFFFF";
+/// The lit word of a speaker with no colour (or a white one).
+const UNCOLOURED_HIGHLIGHT: &str = "#FFD400";
 
 /// `#RRGGBB`, upper case, or `None` for anything else.
 pub fn parse_color(s: &str) -> Option<String> {
@@ -418,5 +506,51 @@ mod tests {
         assert!(k.check().is_ok());
         let bad: Captions = serde_json::from_str(r#"{"translate":"klingon"}"#).unwrap();
         assert!(bad.check().is_err());
+        // 5k's settings load 5l's highlight and animation off; its own fields read back.
+        assert!(!k.highlight && !k.animated());
+        assert_eq!((k.animation, k.animation_length), (Animation::None, 0.2));
+        let l: Captions = serde_json::from_str(
+            r##"{"highlight":true,"highlightColor":"#00FF00","animation":"slide","animationLength":0.4}"##,
+        )
+        .unwrap();
+        assert!(l.highlight && l.animated() && l.check().is_ok());
+        assert_eq!(
+            (l.highlight_color.as_str(), l.animation, l.animation_length),
+            ("#00FF00", Animation::Slide, 0.4)
+        );
+        assert!(serde_json::from_str::<Captions>(r#"{"animation":"spin"}"#).is_err());
+    }
+
+    #[test]
+    fn the_highlight_colours_follow_the_speaker_unless_one_is_picked() {
+        let mut c = Captions::default();
+        // The speaker's colour lights the word; the text is white.
+        assert_eq!(
+            c.highlight_colors("#f2b33d"),
+            ("#FFFFFF".into(), "#F2B33D".into())
+        );
+        // No colour (or white): a yellow word, not white on white.
+        assert_eq!(c.highlight_colors(""), ("#FFFFFF".into(), "#FFD400".into()));
+        assert_eq!(c.highlight_colors("#FFFFFF").1, "#FFD400");
+        // A picked colour lights the word over the speaker's colour.
+        c.highlight_color = "#00ff00".into();
+        assert_eq!(
+            c.highlight_colors("#F2B33D"),
+            ("#F2B33D".into(), "#00FF00".into())
+        );
+        let bad = |c: Captions| c.check().is_err();
+        assert!(bad(Captions {
+            highlight_color: "green".into(),
+            ..Default::default()
+        }));
+        assert!(bad(Captions {
+            animation_length: 2.0,
+            ..Default::default()
+        }));
+        assert!(Captions {
+            animation: Animation::Fade,
+            ..Default::default()
+        }
+        .animated());
     }
 }

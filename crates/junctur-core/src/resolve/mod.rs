@@ -3,7 +3,8 @@
 //! Resolve (Workspace > Scripts > Junctur) stays running and places what Junctur asks, one Text+
 //! per speaker per caption on that speaker's own video track, styled by the caption settings, and
 //! tagged so sending again restyles them in place. Unlike an SRT this reaches font, size, position
-//! and outline, and shows people talking at once where the layout puts them. The SRT export stays.
+//! and outline, and shows people talking at once where the layout puts them, and (5l) can light
+//! each word as it is said and animate captions in and out. The SRT export stays.
 //!
 //! A module of its own rather than in `export`: it talks to a running program, and everything it
 //! computes (frames, tracks, Text+ inputs) is in [`job`] so the script inside Resolve stays a thin
@@ -30,7 +31,14 @@ pub fn send(cues: &[Cue], edit: &EditList, c: &Captions) -> Result<Sent, String>
         return Err("no captions to send: the transcript has no kept words yet".into());
     }
     install()?;
-    let info = bridge::request("info", vec![("template", job::template(c).into())])?;
+    // The animated caption (5l) when the highlight or an animation is on and no template is named.
+    let info = bridge::request(
+        "info",
+        vec![
+            ("template", job::template(c).into()),
+            ("animated", c.animated().into()),
+        ],
+    )?;
     let timeline = reply::timeline(&info)?;
     let aspect = timeline.height as f64 / timeline.width.max(1) as f64;
     let placed = layout::place(cues, edit, c, aspect);

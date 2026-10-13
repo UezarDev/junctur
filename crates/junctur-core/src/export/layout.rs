@@ -3,13 +3,16 @@
 //! gets. The SRT does not use it: a subtitle track has one position for every caption (5d), so it
 //! keeps 5e's one block, first speaker first.
 //!
+//! With the word highlight on (5l) each block also says where each unit of it sits on its lines and
+//! when it was said, so the preview and the Resolve send light the same word at the same time.
+//!
 //! Positions are the centre of each speaker's block as fractions of the picture, x across from
 //! the left and y up from the bottom (Fusion's `Center`). Heights are in picture heights: a block
 //! is `lines × size × LINE` tall, the size being the font's em.
 
 use serde::Serialize;
 
-use super::srt::Cue;
+use super::srt::{Cue, Spoken};
 use crate::edit::{Captions, EditList, Layout};
 
 /// Line height over the em, the usual default of a text renderer (Fusion's and a browser's).
@@ -28,6 +31,22 @@ pub struct PlacedPart {
     /// Centre of the block, fractions of the picture: x from the left, y from the bottom.
     pub x: f64,
     pub y: f64,
+    /// Where each unit sits on `lines` and when it was said (5l), only with the highlight on.
+    pub words: Vec<WordSpan>,
+}
+
+/// A unit's characters on one placed line: `from..to` in Unicode scalar values (a unit wrapped over
+/// two lines has a span on each, with the same `word` and times).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WordSpan {
+    /// Which unit of the part, in order.
+    pub word: usize,
+    pub line: usize,
+    pub from: usize,
+    pub to: usize,
+    /// Output seconds.
+    pub start: f64,
+    pub end: f64,
 }
 
 /// A caption with each speaker's block placed; parts in the cue's order (who started first).
@@ -161,10 +180,65 @@ fn place_one(cue: &Cue, protagonist: Option<u32>, c: &Captions, aspect: f64) -> 
                 speaker: p.speaker,
                 x: inside(x, sizes[i].0),
                 y: inside(y, sizes[i].1),
+                words: if c.highlight {
+                    spans(&lines, &p.words)
+                } else {
+                    Vec::new()
+                },
                 lines,
             })
             .collect(),
     }
+}
+
+/// Where `words` sit on `lines`: their whitespace-separated pieces walked through the lines' own, so
+/// a re-wrap (side by side) is followed. Nothing when they do not line up, which they always
+/// should: no highlight rather than the wrong word lit.
+fn spans(lines: &[String], words: &[Spoken]) -> Vec<WordSpan> {
+    // Every piece of the lines, as (line, from, to, text).
+    let mut pieces = Vec::new();
+    for (k, line) in lines.iter().enumerate() {
+        let chars: Vec<char> = line.chars().collect();
+        let mut from = None;
+        for i in 0..=chars.len() {
+            let blank = chars.get(i).is_none_or(|c| c.is_whitespace());
+            match (blank, from) {
+                (false, None) => from = Some(i),
+                (true, Some(f)) => {
+                    pieces.push((k, f, i, chars[f..i].iter().collect::<String>()));
+                    from = None;
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out: Vec<WordSpan> = Vec::new();
+    let mut next = pieces.into_iter();
+    for (n, w) in words.iter().enumerate() {
+        for text in w.text.split_whitespace() {
+            let Some((line, from, to, piece)) = next.next() else {
+                return Vec::new();
+            };
+            if piece != text {
+                return Vec::new();
+            }
+            match out.last_mut() {
+                Some(s) if s.word == n && s.line == line => s.to = to,
+                _ => out.push(WordSpan {
+                    word: n,
+                    line,
+                    from,
+                    to,
+                    start: w.start,
+                    end: w.end,
+                }),
+            }
+        }
+    }
+    if next.next().is_some() {
+        return Vec::new();
+    }
+    out
 }
 
 /// `lines`' words wrapped again, greedily, at `chars` characters a line; lines already that
@@ -205,6 +279,7 @@ mod tests {
                 .map(|&(speaker, lines)| Part {
                     speaker,
                     lines: vec!["x".into(); lines],
+                    words: Vec::new(),
                 })
                 .collect(),
         }
@@ -332,6 +407,7 @@ mod tests {
                 .map(|speaker| Part {
                     speaker,
                     lines: vec![long.into()],
+                    words: Vec::new(),
                 })
                 .to_vec(),
         };
@@ -382,10 +458,12 @@ mod tests {
                 Part {
                     speaker: 1,
                     lines: vec!["extraordinariamente".into()],
+                    words: Vec::new(),
                 },
                 Part {
                     speaker: 2,
                     lines: vec!["x".into()],
+                    words: Vec::new(),
                 },
             ],
         };
@@ -396,5 +474,79 @@ mod tests {
         let p = &place(&[wide], &edit(), &c, 9.0 / 16.0)[0].parts[0];
         let w = 19.0 * 0.15 * (9.0 / 16.0) * GLYPH;
         assert!((p.x - (1.0 - w / 2.0)).abs() < 1e-9, "{}", p.x);
+    }
+    #[test]
+    fn the_highlight_finds_each_unit_on_the_placed_lines() {
+        let said = |text: &str, start: f64| Spoken {
+            text: text.into(),
+            start,
+            end: start + 0.4,
+        };
+        // A replaced phrase is one unit; "¿qué tal?" sits on one line, "a todos" on two after a
+        // re-wrap.
+        let lines = vec!["hola ¿qué tal? a".to_string(), "todos".to_string()];
+        let words = [
+            said("hola", 1.0),
+            said("¿qué tal?", 1.5),
+            said("a todos", 2.0),
+        ];
+        let got: Vec<_> = spans(&lines, &words)
+            .iter()
+            .map(|s| (s.word, s.line, s.from, s.to, s.start))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (0, 0, 0, 4, 1.0),
+                (1, 0, 5, 14, 1.5),
+                (2, 0, 15, 16, 2.0),
+                (2, 1, 0, 5, 2.0)
+            ]
+        );
+        // Units that do not match the lines give nothing rather than the wrong word lit.
+        assert!(spans(&lines, &words[..2]).is_empty());
+        assert!(spans(&lines, &[said("adiós", 0.0)]).is_empty());
+        // Only with the highlight on; side by side, the spans follow the re-wrapped lines.
+        let long = [
+            "una", "frase", "bastante", "larga", "que", "llena", "la", "línea",
+        ];
+        let cue = Cue {
+            start: 1.0,
+            end: 5.0,
+            parts: [1, 2]
+                .map(|speaker| Part {
+                    speaker,
+                    lines: vec![long.join(" ")],
+                    words: long
+                        .iter()
+                        .enumerate()
+                        .map(|(k, w)| said(w, 1.0 + k as f64 * 0.5))
+                        .collect(),
+                })
+                .to_vec(),
+        };
+        let off = place(
+            std::slice::from_ref(&cue),
+            &edit(),
+            &settings(Layout::Side, ""),
+            9.0 / 16.0,
+        );
+        assert!(off[0].parts[0].words.is_empty());
+        let on = Captions {
+            highlight: true,
+            ..settings(Layout::Side, "")
+        };
+        let p = &place(&[cue], &edit(), &on, 9.0 / 16.0)[0].parts[0];
+        assert!(p.lines.len() > 1, "{:?}", p.lines);
+        assert_eq!(p.words.len(), long.len());
+        for s in &p.words {
+            let shown: String = p.lines[s.line]
+                .chars()
+                .skip(s.from)
+                .take(s.to - s.from)
+                .collect();
+            assert_eq!(shown, long[s.word]);
+            assert_eq!(s.start, 1.0 + s.word as f64 * 0.5);
+        }
     }
 }

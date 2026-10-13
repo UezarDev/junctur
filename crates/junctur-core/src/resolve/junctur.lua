@@ -2,7 +2,9 @@
 --
 -- Junctur installs this into Resolve's Scripts folder. Run it once per Resolve session
 -- (Workspace > Scripts > Junctur) and leave it running: when Junctur's "Send to Resolve" writes a
--- request into its mailbox, this places or restyles the captions as Text+ clips.
+-- request into its mailbox, this places or restyles the captions as Text+ clips. With the word
+-- highlight or an animation on (phase 5l) the clips are auto-subs' animated caption, a Fusion
+-- macro round a Text+, driven through the macro's own helpers as auto-subs drives it.
 --
 -- Resolve 21 runs scripts with no io, require or os.execute, so a request is a Lua chunk read with
 -- loadfile and the only way back is Fusion's prefs (SetPrefs + SavePrefs writes Fusion.prefs,
@@ -13,9 +15,13 @@
 local REQUEST = __JUNCTUR_REQUEST__
 local TEMPLATE_BIN = __JUNCTUR_TEMPLATE_BIN__
 local PREFS = "Global.JuncturBridge."
--- The root media pool bin Junctur keeps its own Text+ template in.
+-- The root media pool bin Junctur keeps its own Text+ templates in: the plain one and the animated
+-- caption (5l).
 local BIN = "Junctur"
 local TEMPLATE_NAME = "Junctur Caption"
+local ANIMATED_NAME = "Junctur Animated Caption"
+-- The animated caption's macro tool in a clip's comp: a clip with it is driven as the macro.
+local MACRO = "AutoSubs"
 
 -- Plain global lookups, not rawget(_G, ...): Resolve's script runner hands a script its own
 -- environment, which holds these.
@@ -93,13 +99,27 @@ local function folder_ids(root)
     return ids
 end
 
--- The user's Fusion Title when one is named; else the first clip of the Junctur bin; else the
--- bundled bin imported, its plain Text+ kept in a Junctur bin and the rest of the import deleted.
+-- The Junctur bin's template of a kind: the animated caption by its name; the plain one by its
+-- name, else the first clip there that is not the animated one (a Text+ of the user's dropped
+-- into the bin, as 5g says to do).
+local function own(bin, animated)
+    local first
+    for _, clip in ipairs(list(bin:GetClipList())) do
+        local n = clip:GetClipProperty("Clip Name")
+        if n == (animated and ANIMATED_NAME or TEMPLATE_NAME) then return clip end
+        if not animated and n ~= ANIMATED_NAME then first = first or clip end
+    end
+    return first
+end
+
+-- The user's Fusion Title when one is named; else the Junctur bin's template of the kind asked
+-- for (`animated`: the word highlight or an animation, 5l); else the bundled bin imported, its
+-- templates the Junctur bin lacks kept there and the rest of the import deleted.
 -- The import's folder is touched only when it is known for sure: exactly one folder new by id
 -- after the import, named as the bundled bin is ("AutoSubs", or a name Resolve made from it).
 -- Anything less and nothing is moved or deleted, so an auto-subs bin of the user's (which holds
 -- a "Basic Template" too) is never what is cleaned up.
-local function template(pool, name)
+local function template(pool, name, animated)
     local root = pool:GetRootFolder()
     if name ~= "" then
         local found
@@ -114,8 +134,8 @@ local function template(pool, name)
             .. "title into the media pool and give it that name, or leave the template empty"
     end
     local bin = sub_named(root, BIN)
-    local own = bin and list(bin:GetClipList())[1]
-    if own then return own end
+    local found = bin and own(bin, animated)
+    if found then return found end
     local unsure = "Resolve did not say which media pool bin the import made, so Junctur left it "
         .. "alone: drag its Text+ (\"Basic Template\") into a bin named \"Junctur\" yourself, or name "
         .. "a Text+ title of yours as the template"
@@ -136,21 +156,42 @@ local function template(pool, name)
     end
     if count == 0 then return nil, "Could not import Junctur's caption template into the media pool" end
     if count > 1 or new:GetName():sub(1, 8) ~= "AutoSubs" then return nil, unsure end
-    local basic
+    -- The import's plain Text+ and its animated caption (named with a date, "AutoSubs Caption …").
+    local basic, anim
     for _, clip in ipairs(list(new:GetClipList())) do
-        if clip:GetClipProperty("Clip Name") == "Basic Template" then basic = clip end
+        local n = tostring(clip:GetClipProperty("Clip Name") or "")
+        if n == "Basic Template" then
+            basic = clip
+        elseif n:sub(1, 16) == "AutoSubs Caption" then
+            anim = clip
+        end
     end
-    if not basic then return nil, "Junctur's caption template bin had no Text+ in it" end
+    local want = basic
+    if animated then want = anim end
+    if not want then
+        return nil, "Junctur's caption template bin had no "
+            .. (animated and "animated caption" or "Text+") .. " in it"
+    end
+    -- Each kind the Junctur bin lacks is kept, so a bin from before 5l gains the animated one.
+    local keep, names = {}, {}
+    if basic and not (bin and own(bin, false)) then
+        keep[#keep + 1], names[#names + 1] = basic, TEMPLATE_NAME
+    end
+    if anim and not (bin and own(bin, true)) then
+        keep[#keep + 1], names[#names + 1] = anim, ANIMATED_NAME
+    end
     bin = bin or pool:AddSubFolder(root, BIN)
     if was then pcall(function() pool:SetCurrentFolder(was) end) end
-    if not bin or not pool:MoveClips({ basic }, bin) then
+    if not bin or not pool:MoveClips(keep, bin) then
         return nil, "Could not move Junctur's caption template into a \"Junctur\" bin"
     end
-    pcall(function() basic:SetClipProperty("Clip Name", TEMPLATE_NAME) end)
+    for k, clip in ipairs(keep) do
+        pcall(function() clip:SetClipProperty("Clip Name", names[k]) end)
+    end
     local rest = list(new:GetClipList())
     if #rest > 0 then pool:DeleteClips(rest) end
     pool:DeleteFolders({ new })
-    return basic
+    return want
 end
 
 -- Resolve's id for the timeline, else its name: `place` checks it is the one `info` saw.
@@ -160,14 +201,16 @@ local function timeline_id(timeline)
     return "name:" .. tostring(timeline:GetName())
 end
 
+-- A clip's Text+ (the tags go on it) and its comp.
 local function textplus(item)
-    local ok, tool = pcall(function()
+    local ok, tool, comp = pcall(function()
         local n = item:GetFusionCompCount()
         if not n or n < 1 then return nil end
         local comp = item:GetFusionCompByIndex(1)
-        return comp and (comp:FindTool("Template") or comp:FindToolByID("TextPlus"))
+        return comp and (comp:FindTool("Template") or comp:FindToolByID("TextPlus")), comp
     end)
-    return ok and tool or nil
+    if not ok or not tool then return nil end
+    return tool, comp
 end
 
 -- Sets an input and reads it back: nil back means the tool has no such input (a user's own
@@ -178,9 +221,71 @@ local function set(tool, key, value)
     return ok and got ~= nil, got
 end
 
+-- Styles an animated caption (5l) as auto-subs does: the word timing set on the macro before the
+-- Text+'s Text (setting the Text turns it into the highlight's keyframes, by the macro's own
+-- ExecuteOnChange), the macro's CharacterLevelStyling given the text too, then every published
+-- input through the macro's own SetInputValues helper, which also runs its highlight and
+-- animation helpers. Each input is read back off the macro; one not taken goes into `missing`.
+local function restyle_macro(comp, macro, tool, look, c, missing)
+    pcall(function() macro:SetData("WordTiming", c.words) end)
+    local took, text = set(tool, "Text", c.text)
+    if not took or tostring(text) ~= c.text then
+        error("the animated caption's Text+ did not take the caption's text")
+    end
+    pcall(function()
+        local cls = comp:FindTool("CharacterLevelStyling1")
+        if cls then cls:SetInput("Text", c.text) end
+    end)
+    local helper = macro:GetData("SetInputValues")
+    local make = type(helper) == "string" and loadstring(helper)
+    if not make then
+        error("the animated caption has lost its SetInputValues helper: delete it from the "
+            .. "Junctur bin and send again")
+    end
+    local anim = look.animation
+    local on = function(b) return b and 1 or 0 end
+    local settings = {
+        Font = look.font, Style = look.style, TextSize = look.size, TextPosition = { c.x, c.y },
+        FillEnabled = 1, FillColorRed = c.base[1], FillColorGreen = c.base[2],
+        FillColorBlue = c.base[3],
+        OutlineEnabled = on(look.outline),
+        -- Fill: the said word's letters change colour (the macro's style 0).
+        HighlightEnabled = on(look.highlight), HighlightStyle = 0,
+        HighlightColorRed = c.highlight[1], HighlightColorGreen = c.highlight[2],
+        HighlightColorBlue = c.highlight[3],
+        -- Pop and slide fade as well, by the macro's own rule.
+        FadeEnabled = on(anim == "fade"), PopInEnabled = on(anim == "pop"),
+        SlideUpEnabled = on(anim == "slide"),
+        AnimationLength = look.animationLength,
+        -- The whole caption in and out, not the macro's word-by-word reveal.
+        AnimationLevel = 0, AnimationMode = 2,
+        -- Junctur wraps the lines itself.
+        WrapEnabled = 0,
+    }
+    if look.outline then
+        settings.OutlineThickness = look.thickness
+        settings.OutlineColorRed = look.outlineColor[1]
+        settings.OutlineColorGreen = look.outlineColor[2]
+        settings.OutlineColorBlue = look.outlineColor[3]
+    end
+    local ok, e = pcall(function() make()(comp, macro, settings) end)
+    if not ok then error("the animated caption's SetInputValues failed: " .. tostring(e)) end
+    for key in pairs(settings) do
+        local read, got = pcall(function() return macro:GetInput(key) end)
+        if not read or got == nil then missing[key] = true end
+    end
+    if not set(tool, "Underline", on(look.underline)) then missing.Underline = true end
+end
+
 -- Styles a caption's Text+; errors when the text itself does not take (nothing to show), and
--- adds the names of other inputs the tool did not take to `missing`.
-local function restyle(tool, look, c, missing)
+-- adds the names of other inputs the tool did not take to `missing`. A clip of the animated
+-- caption is styled through its macro; a plain Text+ asked for the highlight or an animation (a
+-- user's own template) is styled as 5g did, and those two are named in `missing`.
+local function restyle(comp, tool, look, c, missing)
+    local ok, macro = pcall(function() return comp and comp:FindTool(MACRO) end)
+    if ok and macro then return restyle_macro(comp, macro, tool, look, c, missing) end
+    if look.highlight then missing["word highlight"] = true end
+    if look.animation and look.animation ~= "none" then missing.animation = true end
     local took, text = set(tool, "StyledText", c.text)
     if not took or tostring(text) ~= c.text then
         error("the template's Text+ did not take the caption's text")
@@ -207,7 +312,7 @@ local handlers = {}
 function handlers.info(req)
     local project, timeline = current()
     if not project then return { error = timeline } end
-    local clip, err = template(project:GetMediaPool(), req.template or "")
+    local clip, err = template(project:GetMediaPool(), req.template or "", req.animated == true)
     if not clip then return { error = err } end
     return {
         name = timeline:GetName(),
@@ -239,7 +344,7 @@ function handlers.place(req)
         return { error = "The open timeline in Resolve changed while sending: send again" }
     end
     local pool = project:GetMediaPool()
-    local clip, err = template(pool, req.template or "")
+    local clip, err = template(pool, req.template or "", req.animated == true)
     if not clip then return { error = err } end
 
     -- Each speaker's track, by name, added when missing.
@@ -266,11 +371,11 @@ function handlers.place(req)
     local sent, stale = {}, {}
     for i = 1, count do
         for _, item in ipairs(list(timeline:GetItemListInTrack("video", i))) do
-            local tool = textplus(item)
+            local tool, comp = textplus(item)
             if tool and tool:GetData("JuncturRecording") == req.recording then
                 local key = tool:GetData("JuncturKey")
                 if key and not sent[key] then
-                    sent[key] = { item = item, tool = tool }
+                    sent[key] = { item = item, tool = tool, comp = comp }
                 else
                     stale[#stale + 1] = item
                 end
@@ -289,7 +394,7 @@ function handlers.place(req)
         local old = sent[c.key]
         if old then
             kept[c.key] = true
-            local ok, e = pcall(restyle, old.tool, req.look, c, missing)
+            local ok, e = pcall(restyle, old.comp, old.tool, req.look, c, missing)
             if ok then restyled = restyled + 1 else fail(e) end
         else
             todo[#todo + 1] = c
@@ -366,12 +471,12 @@ function handlers.place(req)
                 error("Resolve did not place the caption at frame " .. c.start
                     .. " (is another clip in the way?)")
             end
-            local tool = textplus(item)
+            local tool, comp = textplus(item)
             if not tool then error("the template has no Text+ in it") end
             -- Tagged first: a clip whose styling fails is still found and replaced next time.
             tool:SetData("JuncturRecording", req.recording)
             tool:SetData("JuncturKey", c.key)
-            restyle(tool, req.look, c, missing)
+            restyle(comp, tool, req.look, c, missing)
         end)
         if ok then placed = placed + 1 else fail(e) end
     end

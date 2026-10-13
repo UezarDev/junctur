@@ -94,12 +94,19 @@
     try {
       const r = await api.sendToResolve();
       const n = (k: number, what: string) => `${k.toLocaleString()} ${what}`;
+      // 5l's two are not inputs a template lacks but a kind of template it is not.
+      const MOTION = ["word highlight", "animation"];
+      const motion = r.unstyled.filter((u) => MOTION.includes(u));
+      const inputs = r.unstyled.filter((u) => !MOTION.includes(u));
       sentLines = [
         `On "${r.timeline}": ${n(r.placed, "placed")}, ${n(r.restyled, "updated")}, ${n(r.removed, "removed")}.`,
         ...(r.failed > 0 ? [`${n(r.failed, "not placed")}: ${r.firstError ?? "no reason given"}`] : []),
         ...(r.failed === 0 && r.firstError ? [r.firstError] : []),
-        ...(r.unstyled.length > 0
-          ? [`The template has no ${r.unstyled.join(", ")}: those keep the template's own look.`]
+        ...(inputs.length > 0
+          ? [`The template has no ${inputs.join(", ")}: those keep the template's own look.`]
+          : []),
+        ...(motion.length > 0
+          ? [`No ${motion.join(" or ")}: your template is a plain Text+; only Junctur's own animated caption has them.`]
           : []),
       ];
     } catch (e) {
@@ -215,6 +222,14 @@
         into Resolve: there the font, size, outline and position are the subtitle track's style (select the track,
         Inspector &gt; Track). Resolve has been reported to give bold or italic (perhaps underlined) SRT captions
         their own style rather than the track's: if a Track Style change then misses them, turn these off.
+      </p>
+
+      <h3>Highlight and animation</h3>
+      <CaptionRules value={captions} part="motion" onChange={(c) => setCaptions(c)} {onError} />
+      <p class="note">
+        Resolve and the preview only; the SRT ignores them. Each caption then becomes auto-subs' animated caption, a
+        heavier Fusion clip than a plain Text+: on an hour-long recording thousands of them can slow Resolve down, so
+        both are off by default. They need Junctur's own template: a Text+ title of yours named below gets neither.
       </p>
 
       <h3>People talking at once</h3>

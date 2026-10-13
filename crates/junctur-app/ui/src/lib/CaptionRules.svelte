@@ -3,17 +3,18 @@
   // defaults with the very same fields. Every field of `Captions` is here once, in parts the panel
   // places between its own sections (`switches`: export and preview, 5d; `style`: bold and italic,
   // 5d, underline, 5f; `look`: font, size, position, outline, 5g; `overlap`: layout and
-  // protagonist, 5g; `resolve`: the Text+ template, 5g; `cut`: how cues are cut, 5a, and the word
+  // protagonist, 5g; `motion`: the word highlight and the animation, 5l; `resolve`: the Text+
+  // template, 5g; `cut`: how cues are cut, 5a, and the word
   // limit, 5i; `text`: case, punctuation, censoring and replacements, 5j, in `CaptionText`)
   // and Settings shows together (`all`); a field added to `Captions` goes into one part
   // and shows in both. Number fields commit on change, inside the engine's limits (core
   // edit/captions.rs); anything else snaps back to `value`. `names` (the recording's
   // speakers, in the panel) are offered as protagonists; any name can be
   // typed, so Settings' default can name a remembered voice.
-  import type { CaptionLayout, Captions } from "./api";
+  import type { CaptionAnimation, CaptionLayout, Captions } from "./api";
   import CaptionText from "./CaptionText.svelte";
 
-  type Part = "switches" | "style" | "look" | "overlap" | "resolve" | "cut" | "text" | "all";
+  type Part = "switches" | "style" | "look" | "overlap" | "motion" | "resolve" | "cut" | "text" | "all";
 
   let {
     value,
@@ -44,6 +45,7 @@
     size: { min: 2, max: 15, name: "Size" },
     position: { min: 0, max: 45, name: "Height from the bottom" },
     outlineWidth: { min: 1, max: 10, name: "Outline thickness" },
+    animationLength: { min: 0.05, max: 1, name: "Animation length" },
   } as const;
 
   const WHOLE = new Set(["chars", "lines", "words", "outlineWidth"]);
@@ -54,7 +56,14 @@
     { key: "topBottom", label: "One at the bottom, one at the top" },
   ];
 
-  type Flag = "on" | "preview" | "bold" | "italic" | "underline" | "outline";
+  const ANIMATIONS: { key: CaptionAnimation; label: string }[] = [
+    { key: "none", label: "None" },
+    { key: "fade", label: "Fade" },
+    { key: "pop", label: "Pop in" },
+    { key: "slide", label: "Slide up" },
+  ];
+
+  type Flag = "on" | "preview" | "bold" | "italic" | "underline" | "outline" | "highlight";
   const SWITCHES: { key: Flag; label: string; title: string }[] = [
     { key: "on", label: "Export captions", title: "On: rendering also writes the captions (.srt) beside the video" },
     { key: "preview", label: "Preview captions", title: "Shows the captions over the video as it plays, as the export cuts them" },
@@ -103,7 +112,7 @@
   {/each}
 {/snippet}
 
-{#snippet num(key: "size" | "position" | "outlineWidth", step: number, unit: string)}
+{#snippet num(key: "size" | "position" | "outlineWidth" | "animationLength", step: number, unit: string)}
   <label class="field">
     <span>{LIMITS[key].name}{unit}</span>
     <input
@@ -167,6 +176,44 @@
     />
     <datalist id={listId}>{#each names as n (n)}<option value={n}></option>{/each}</datalist>
   </label>
+{/if}
+{#if shows("motion")}
+  <label class="check" title="In Resolve and the preview, the word being said lights up, word by word">
+    <input type="checkbox" checked={value.highlight} {disabled} onchange={(e) => flag(e, "highlight")} />
+    Highlight the word being said
+  </label>
+  {#if value.highlight}
+    <label class="field" title="Empty: the speaker's own colour lights the word and the caption is white">
+      <span>Highlight colour{value.highlightColor ? "" : ": the speaker's"}</span>
+      <span class="pair">
+        <input
+          type="color"
+          value={value.highlightColor || "#FFD400"}
+          {disabled}
+          onchange={(e) =>
+            onChange({ ...value, highlightColor: (e.currentTarget as HTMLInputElement).value.toUpperCase() })}
+        />
+        <button
+          class="small"
+          disabled={disabled || !value.highlightColor}
+          title="Light the word in each speaker's own colour"
+          onclick={() => onChange({ ...value, highlightColor: "" })}>Speaker's</button
+        >
+      </span>
+    </label>
+  {/if}
+  <label class="field" title="How each caption comes in and goes out, in Resolve and the preview">
+    <span>Animation</span>
+    <select
+      value={value.animation}
+      {disabled}
+      onchange={(e) =>
+        onChange({ ...value, animation: (e.currentTarget as HTMLSelectElement).value as CaptionAnimation })}
+    >
+      {#each ANIMATIONS as a (a.key)}<option value={a.key}>{a.label}</option>{/each}
+    </select>
+  </label>
+  {#if value.animation !== "none"}{@render num("animationLength", 0.05, " (s)")}{/if}
 {/if}
 {#if shows("resolve")}
   <label class="field" title="The name of a Text+ title in Resolve's media pool to copy for every caption; empty for Junctur's own">
@@ -234,6 +281,15 @@
   .field select {
     width: 150px;
     min-width: 0;
+  }
+  .pair {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .small {
+    font-size: 11px;
+    padding: 2px 6px;
   }
   .field input[type="color"] {
     width: 40px;

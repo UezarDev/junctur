@@ -5,11 +5,13 @@
   // cue for cue: people talking at once in one caption a speaker per block (5e), each line in its
   // speaker's colour. Each block sits where the engine places it (5g, `export/layout.rs`: stacked,
   // side by side or top and bottom, the protagonist kept in place), which is where the Resolve send
-  // puts that speaker's Text+, in the font, size and outline it gets.
+  // puts that speaker's Text+, in the font, size and outline it gets. With 5l's highlight the word
+  // being said is lit as the animated caption lights it in Resolve (from when it is said until the
+  // next one is), and with an animation each caption comes in and goes out as it does there.
   // Cues are on the edited (output) timeline, so the playhead's output time picks one; while the
   // whole recording plays, a cut stretch shows none, since it is not in the export.
   import * as api from "./api";
-  import { captionFace, captionStyle } from "./captionStyle";
+  import { animationProgress, animationStyle, captionFace, captionStyle, highlightColors } from "./captionStyle";
   import type { Rect } from "./layout";
 
   let {
@@ -54,7 +56,8 @@
     if (!on || !edit || !captions) return null;
     const fps = edit.fps ? `${edit.fps.num}/${edit.fps.den}` : "";
     const aspect = picture.w > 0 ? (picture.h / picture.w).toFixed(3) : "";
-    const place = `${captions.size}|${captions.position}|${captions.layout}|${captions.protagonist}|${aspect}`;
+    // The highlight too: the engine only finds the words on the lines with it on (5l).
+    const place = `${captions.size}|${captions.position}|${captions.layout}|${captions.protagonist}|${aspect}|${captions.highlight}`;
     // JSON for the lists: entries may hold any separator a plain join would use.
     const text = JSON.stringify([
       captions.case,
@@ -105,6 +108,38 @@
   });
 
   const colors = $derived(new Map((edit?.speakers ?? []).map((s) => [s.id, s.color])));
+
+  type Part = api.Cue["parts"][number];
+
+  /** The unit lit at output second `t`: the last one said by then, held until the next (5l). */
+  function lit(part: Part, t: number): number | null {
+    let w: number | null = null;
+    for (const s of part.words) if (s.start <= t) w = s.word;
+    return w;
+  }
+
+  /** A line cut into runs, each lit or not, by the lit unit's spans on it. */
+  function runs(part: Part, j: number, word: number | null): { text: string; on: boolean }[] {
+    const line = part.lines[j];
+    const spans = word == null ? [] : part.words.filter((s) => s.word === word && s.line === j);
+    if (spans.length === 0) return [{ text: line, on: false }];
+    const chars = Array.from(line);
+    const out: { text: string; on: boolean }[] = [];
+    let at = 0;
+    for (const s of spans) {
+      if (s.from > at) out.push({ text: chars.slice(at, s.from).join(""), on: false });
+      out.push({ text: chars.slice(s.from, s.to).join(""), on: true });
+      at = s.to;
+    }
+    if (at < chars.length) out.push({ text: chars.slice(at).join(""), on: false });
+    return out;
+  }
+
+  const highlighting = $derived(!!captions?.highlight);
+  const motion = $derived.by(() => {
+    if (!captions || !cue || player?.output == null) return animationStyle({ animation: "none" }, 1);
+    return animationStyle(captions, animationProgress(captions, cue.start, cue.end, player.output));
+  });
   const style = $derived(captions ? captionStyle(captions, picture.h) : "");
   const decoration = $derived(captions ? captionFace(captions).decoration : "none");
 
@@ -133,12 +168,22 @@
     aria-live="off"
   >
     {#each cue.parts as part, i (i)}
-      <div class="part" style={style} style:left="{part.x * 100}%" style:top="{(1 - part.y) * 100}%">
+      {@const own = colors.get(part.speaker) ?? "#FFFFFF"}
+      {@const [base, word] = highlighting && captions ? highlightColors(captions, own) : [own, own]}
+      {@const on = highlighting ? lit(part, player?.output ?? 0) : null}
+      <div
+        class="part"
+        style={style}
+        style:left="{part.x * 100}%"
+        style:top="{(1 - part.y) * 100}%"
+        style:opacity={motion.opacity}
+        style:transform={motion.transform}
+      >
         {#each part.lines as line, j (j)}
-          <span
-            class="line"
-            style:color={colors.get(part.speaker) ?? "#FFFFFF"}
-            style:text-decoration={decoration}>{line}</span
+          <span class="line" style:color={base} style:text-decoration={decoration}
+            >{#if highlighting}{#each runs(part, j, on) as r, k (k)}{#if r.on}<span style:color={word}
+                    >{r.text}</span
+                  >{:else}{r.text}{/if}{/each}{:else}{line}{/if}</span
           >
         {/each}
       </div>

@@ -160,7 +160,17 @@ export interface Captions {
   replace: { from: string; to: string }[];
   /** The language captions are shown in (5k), a code of `translationLanguages`; empty for as spoken. */
   translate: string;
+  /** 5l, Resolve and the preview only: the word being said lit up, word by word. */
+  highlight: boolean;
+  /** `#RRGGBB`; empty for the speaker's own colour (the caption then white). */
+  highlightColor: string;
+  /** How a caption comes in and goes out. */
+  animation: CaptionAnimation;
+  /** Seconds, 0.05 to 1. */
+  animationLength: number;
 }
+
+export type CaptionAnimation = "none" | "fade" | "pop" | "slide";
 
 export type CaptionCase = "asSpoken" | "upper" | "lower" | "title";
 export type CensorStyle = "middle" | "whole";
@@ -174,7 +184,19 @@ export type CaptionLayout = "stacked" | "side" | "topBottom";
 export interface Cue {
   start: number;
   end: number;
-  parts: { speaker: number; lines: string[]; x: number; y: number }[];
+  parts: { speaker: number; lines: string[]; x: number; y: number; words: WordSpan[] }[];
+}
+
+/** Where a unit of a caption sits on its lines and when it was said (5l, export/layout.rs), only
+ * with the highlight on: `from..to` in characters (code points) of line `line`; a unit wrapped over
+ * two lines has a span on each with the same `word`. */
+export interface WordSpan {
+  word: number;
+  line: number;
+  from: number;
+  to: number;
+  start: number;
+  end: number;
 }
 
 /** What a send to Resolve did (junctur-core resolve/reply.rs). */

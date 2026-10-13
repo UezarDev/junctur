@@ -2,13 +2,17 @@
 //! out: one Text+ clip per speaker per caption, on that speaker's own video track, at integer
 //! timeline frames, with every Text+ input it sets already computed, and the tag that lets the next
 //! send find it again.
+//!
+//! With the word highlight or an animation on (5l) the clips are copies of auto-subs' animated
+//! caption (a Fusion macro round a Text+, in the same bundled bin), and each carries its words'
+//! character ranges and frames in the shape that macro reads (`WordTiming`).
 
 use sha2::{Digest, Sha256};
 
 use super::lua::Value;
 use super::reply::Timeline;
 use crate::edit::{parse_color, Captions, EditList};
-use crate::export::layout::Placed;
+use crate::export::layout::{Placed, WordSpan};
 
 /// Text+ outline thickness per step of `outline_width`: the bundled template's is 0.05, so the
 /// default 2 steps is close to it.
@@ -30,9 +34,27 @@ pub struct Clip {
     pub text: String,
     /// The fill, the speaker's colour, 0 to 1 per channel.
     pub fill: [f64; 3],
+    /// The animated caption's text and lit word colours (5l, `Captions::highlight_colors`): white
+    /// and the speaker's under the highlight in the speaker's colour; both the fill without it.
+    pub base: [f64; 3],
+    pub highlight: [f64; 3],
     /// `Center`: fractions of the frame, y up from the bottom.
     pub x: f64,
     pub y: f64,
+    /// When each unit of `text` is said (5l), with the highlight on.
+    pub words: Vec<WordTiming>,
+}
+
+/// One entry of the animated caption's `WordTiming` (5l): `from..=to` are 0-based character
+/// indices into the clip's text, a word after the first starting just after the one before (its
+/// space or line break included), as the macro's own `UpdateTextContent` counts them; `start` and
+/// `end` are frames from the clip's start, in the template's frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WordTiming {
+    pub from: usize,
+    pub to: usize,
+    pub start: i64,
+    pub end: i64,
 }
 
 /// The Text+ inputs every clip shares.
@@ -45,6 +67,11 @@ pub struct Look {
     pub size: f64,
     pub outline: Option<([f64; 3], f64)>,
     pub underline: bool,
+    /// The word highlight and the animation (5l): `animation` is its word on the captions line
+    /// (`none`, `fade`, `pop`, `slide`), its length in seconds.
+    pub highlight: bool,
+    pub animation: String,
+    pub animation_length: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -57,6 +84,8 @@ pub struct Job {
     pub timeline: String,
     /// Track names, one per speaker; the script finds each by name or adds it.
     pub tracks: Vec<String>,
+    /// The clips are the animated caption (5l): the highlight or an animation is on.
+    pub animated: bool,
     pub look: Look,
     pub clips: Vec<Clip>,
 }
@@ -93,13 +122,34 @@ pub fn build(placed: &[Placed], edit: &EditList, c: &Captions, timeline: &Timeli
     speakers.dedup();
     let tracks: Vec<String> = speakers.iter().map(|&id| track_name(edit, id)).collect();
     let frame = |s: f64| timeline.start + (s * timeline.fps).round() as i64;
+    // Timeline frames from a clip's start to the template's own.
+    let in_template = |frames: i64| frames as f64 / timeline.fps * timeline.template_fps;
+    let animated = c.animated();
+    // A send with the other kind of clip is a different caption: the key says which, so turning
+    // the highlight or an animation on or off replaces every clip instead of restyling a plain
+    // Text+ as the macro (or back). The highlight is a kind of its own: the macro's helper only
+    // writes the highlight's keyframes when it is on, never clears them (its RemoveHighlight runs
+    // from an input's change, which a script setting it may not trigger), so a clip that had it
+    // is replaced rather than restyled without it.
+    let kind = match (c.highlight, animated) {
+        (true, _) => "|highlight",
+        (false, true) => "|animated",
+        _ => "",
+    };
     let mut clips = Vec::new();
     for (t, &id) in speakers.iter().enumerate() {
-        let fill = rgb(edit
+        let color = edit
             .speakers
             .color(id)
             .filter(|_| id > 0)
-            .unwrap_or("#FFFFFF"));
+            .unwrap_or("#FFFFFF");
+        let fill = rgb(color);
+        let (base, highlight) = if c.highlight {
+            let (base, word) = c.highlight_colors(color);
+            (rgb(&base), rgb(&word))
+        } else {
+            (fill, fill)
+        };
         // Each track's clips in time order, never overlapping: a clip that rounds to nothing gets one
         // frame, and one that would start inside the previous clip starts at its end instead (shifted,
         // not dropped; only a clip past the timeline's end is left out).
@@ -117,18 +167,21 @@ pub fn build(placed: &[Placed], edit: &EditList, c: &Captions, timeline: &Timeli
                 continue;
             }
             last_end = end;
+            let length = in_template(end - start).round().max(1.0) as i64;
+            let at = |s: f64| in_template(frame(s) - start).floor() as i64;
             clips.push(Clip {
                 track: t + 1,
-                key: format!("{}|{start}|{end}", tracks[t]),
+                key: format!("{}|{start}|{end}{kind}", tracks[t]),
                 start,
                 end,
-                length: (((end - start) as f64 / timeline.fps) * timeline.template_fps)
-                    .round()
-                    .max(1.0) as i64,
+                length,
                 text: part.lines.join("\n"),
                 fill,
+                base,
+                highlight,
                 x: part.x,
                 y: part.y,
+                words: word_timing(&part.lines, &part.words, length, at),
             });
         }
     }
@@ -137,6 +190,7 @@ pub fn build(placed: &[Placed], edit: &EditList, c: &Captions, timeline: &Timeli
         template: template(c).to_string(),
         timeline: timeline.id.clone(),
         tracks,
+        animated,
         look: Look {
             font: c.font.trim().to_string(),
             style: style(c.bold, c.italic).to_string(),
@@ -145,9 +199,56 @@ pub fn build(placed: &[Placed], edit: &EditList, c: &Captions, timeline: &Timeli
                 .outline
                 .then(|| (rgb(&c.outline_color), c.outline_width as f64 * THICKNESS)),
             underline: c.underline,
+            highlight: c.highlight,
+            animation: c.animation.word().to_string(),
+            animation_length: c.animation_length,
         },
         clips,
     }
+}
+
+/// The animated caption's `WordTiming` for a clip whose text is `lines` joined by line breaks:
+/// `spans` (layout's, on those lines) merged per unit into character ranges that follow one
+/// another, and their seconds made clip frames by `at`, held inside the clip's `length` frames
+/// and never going back (the macro lights them in order).
+fn word_timing(
+    lines: &[String],
+    spans: &[WordSpan],
+    length: i64,
+    at: impl Fn(f64) -> i64,
+) -> Vec<WordTiming> {
+    // Where each line starts in the joined text: its characters and a line break before the next.
+    let mut offset = Vec::with_capacity(lines.len());
+    let mut total = 0;
+    for l in lines {
+        offset.push(total);
+        total += l.chars().count() + 1;
+    }
+    let mut out: Vec<WordTiming> = Vec::new();
+    let mut word = None;
+    for s in spans {
+        let Some(&line) = offset.get(s.line) else {
+            continue;
+        };
+        let end = line + s.to;
+        if word == Some(s.word) {
+            if let Some(w) = out.last_mut() {
+                w.to = end.saturating_sub(1).max(w.from);
+            }
+            continue;
+        }
+        word = Some(s.word);
+        let from = out.last().map_or(0, |w| w.to + 1);
+        let prev = out.last().map_or(0, |w| w.start);
+        let start = at(s.start).clamp(0, (length - 1).max(0)).max(prev);
+        out.push(WordTiming {
+            from,
+            to: end.saturating_sub(1).max(from),
+            start,
+            end: at(s.end).clamp(start + 1, length.max(start + 1)),
+        });
+    }
+    out
 }
 
 /// Text+ `Size` for the caption size (a share of the picture height): Fusion sizes text against the
@@ -186,6 +287,9 @@ impl Job {
             ("style", self.look.style.as_str().into()),
             ("size", self.look.size.into()),
             ("underline", self.look.underline.into()),
+            ("highlight", self.look.highlight.into()),
+            ("animation", self.look.animation.as_str().into()),
+            ("animationLength", self.look.animation_length.into()),
             ("outline", self.look.outline.is_some().into()),
         ];
         if let Some((color, thickness)) = self.look.outline {
@@ -200,6 +304,7 @@ impl Job {
                 "tracks",
                 Value::List(self.tracks.iter().map(|t| t.as_str().into()).collect()),
             ),
+            ("animated", self.animated.into()),
             ("look", Value::Table(look)),
             (
                 "clips",
@@ -215,8 +320,27 @@ impl Job {
                                 ("length", Value::Int(c.length)),
                                 ("text", c.text.as_str().into()),
                                 ("fill", rgb(c.fill)),
+                                ("base", rgb(c.base)),
+                                ("highlight", rgb(c.highlight)),
                                 ("x", c.x.into()),
                                 ("y", c.y.into()),
+                                // The macro's own field names, so the script hands it on as is.
+                                (
+                                    "words",
+                                    Value::List(
+                                        c.words
+                                            .iter()
+                                            .map(|w| {
+                                                Value::Table(vec![
+                                                    ("startIndex", Value::Int(w.from as i64)),
+                                                    ("endIndex", Value::Int(w.to as i64)),
+                                                    ("startFrame", Value::Int(w.start)),
+                                                    ("endFrame", Value::Int(w.end)),
+                                                ])
+                                            })
+                                            .collect(),
+                                    ),
+                                ),
                             ])
                         })
                         .collect(),
@@ -280,6 +404,7 @@ mod tests {
                     lines: text.split('/').map(String::from).collect(),
                     x: 0.5,
                     y: 0.1 + i as f64 * 0.1,
+                    words: Vec::new(),
                 })
                 .collect(),
         }
@@ -436,5 +561,105 @@ mod tests {
             text.contains("[\"outline\"] = true, [\"outlineColor\"] = {0.000000"),
             "{text}"
         );
+    }
+    #[test]
+    fn the_highlight_gives_each_clip_its_words_in_the_macros_shape() {
+        use crate::edit::Animation;
+        use crate::export::layout::WordSpan;
+        let span = |word: usize, line: usize, from: usize, to: usize, start: f64| WordSpan {
+            word,
+            line,
+            from,
+            to,
+            start,
+            end: start + 0.5,
+        };
+        // "hola a" / "todos" at 1 s: "a todos" is one unit wrapped over both lines.
+        let mut cue = placed(1.0, 3.0, &[(1, "hola a/todos")]);
+        cue.parts[0].words = vec![
+            span(0, 0, 0, 4, 1.0),
+            span(1, 0, 5, 6, 1.5),
+            span(1, 1, 0, 5, 1.5),
+        ];
+        let c = Captions {
+            highlight: true,
+            animation: Animation::Pop,
+            animation_length: 0.3,
+            ..Default::default()
+        };
+        let t = Timeline {
+            template_fps: 48.0,
+            ..timeline(24.0)
+        };
+        let j = build(&[cue.clone()], &edit(), &c, &t);
+        assert!(j.animated);
+        let clip = &j.clips[0];
+        // Ana's colour lights the word; the text is white. The key says the clip is animated.
+        assert_eq!(clip.base, [1.0, 1.0, 1.0]);
+        assert_eq!(clip.highlight, [1.0, 0.0, 0.0]);
+        // A plain Text+ (a user's own template) keeps the speaker's colour.
+        assert_eq!(clip.fill, [1.0, 0.0, 0.0]);
+        assert!(clip.key.ends_with("|86424|86472|highlight"), "{}", clip.key);
+        // 2 s of a 48 fps template; "a todos" runs from the space after "hola" through the line
+        // break to the end, and starts 0.5 s (24 template frames) in.
+        assert_eq!(clip.length, 96);
+        assert_eq!(
+            clip.words,
+            [
+                WordTiming {
+                    from: 0,
+                    to: 3,
+                    start: 0,
+                    end: 24
+                },
+                WordTiming {
+                    from: 4,
+                    to: 11,
+                    start: 24,
+                    end: 48
+                },
+            ]
+        );
+        assert_eq!(clip.text.chars().count(), 12);
+        assert_eq!(
+            (
+                j.look.highlight,
+                j.look.animation.as_str(),
+                j.look.animation_length
+            ),
+            (true, "pop", 0.3)
+        );
+        let text = super::super::lua::chunk(&Value::Table(j.to_lua()));
+        assert!(text.contains("[\"animated\"] = true"), "{text}");
+        assert!(
+            text.contains("{[\"startIndex\"] = 4, [\"endIndex\"] = 11, [\"startFrame\"] = 24, [\"endFrame\"] = 48}"),
+            "{text}"
+        );
+        // A word said before the clip (a cue pushed later) starts at its first frame; one past its
+        // end is held inside it; frames never go back.
+        let mut late = cue.clone();
+        late.parts[0].words = vec![span(0, 0, 0, 4, 0.2), span(1, 0, 5, 6, 9.0)];
+        let w = &build(&[late], &edit(), &c, &t).clips[0].words;
+        assert_eq!((w[0].start, w[1].start, w[1].end), (0, 95, 96));
+        // An animation alone makes the clips animated, with no word timing and the speaker's
+        // colour; neither, and the key is 5g's.
+        let anim = Captions {
+            animation: Animation::Fade,
+            ..Default::default()
+        };
+        let mut plain = cue.clone();
+        plain.parts[0].words.clear();
+        let j = build(&[plain.clone()], &edit(), &anim, &t);
+        assert!(j.animated && j.clips[0].words.is_empty());
+        assert_eq!(j.clips[0].base, [1.0, 0.0, 0.0]);
+        // Its own kind of key: a clip that had the highlight is replaced, not restyled without it.
+        assert!(
+            j.clips[0].key.ends_with("|86472|animated"),
+            "{}",
+            j.clips[0].key
+        );
+        let j = build(&[plain], &edit(), &Captions::default(), &t);
+        assert!(!j.animated && j.clips[0].key.ends_with("|86472"));
+        assert_eq!(j.look.animation, "none");
     }
 }

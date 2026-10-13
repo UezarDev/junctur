@@ -36,13 +36,36 @@ local function world(opts)
         function t:SetData(k, v) self.data[k] = v end
         return t
     end
+    -- The animated caption's macro (5l): its helper records the settings it is handed, and the
+    -- Text+ records what word timing the macro held when its Text was set.
+    local HELPER = [[
+        return function(comp, tool, settings)
+            for k, v in pairs(settings) do tool:SetInput(k, v) end
+            tool.applied = (tool.applied or 0) + 1
+        end
+    ]]
     local function Item(info)
         local tool = Tool(info.mediaPoolItem.lacks)
         local comp = {}
-        function comp:FindTool(n) if n == "Template" then return tool end end
+        local macro, cls
+        if info.mediaPoolItem.macro then
+            macro = Tool()
+            cls = Tool()
+            if not opts.no_helper then macro.data.SetInputValues = HELPER end
+            local set = tool.SetInput
+            function tool:SetInput(k, v)
+                if k == "Text" then self.timing = macro.data.WordTiming end
+                set(self, k, v)
+            end
+        end
+        function comp:FindTool(n)
+            if n == "Template" then return tool end
+            if n == "AutoSubs" then return macro end
+            if n == "CharacterLevelStyling1" then return cls end
+        end
         function comp:FindToolByID() return tool end
-        local it = { tool = tool, start = info.recordFrame, length = info.endFrame,
-            template = info.mediaPoolItem }
+        local it = { tool = tool, macro = macro, cls = cls, start = info.recordFrame,
+            length = info.endFrame, template = info.mediaPoolItem }
         function it:GetFusionCompCount() return 1 end
         function it:GetFusionCompByIndex() return comp end
         function it:GetStart() return self.start end
@@ -77,8 +100,8 @@ local function world(opts)
     function timeline:GetStartFrame() return 86400 end
     function timeline:GetEndFrame() return 90000 end
 
-    local function Clip(name, lacks)
-        local c = { name = name, lacks = lacks }
+    local function Clip(name, lacks, macro)
+        local c = { name = name, lacks = lacks, macro = macro }
         function c:GetClipProperty(k)
             if k == "Clip Name" then return self.name elseif k == "FPS" then return "24" end
         end
@@ -111,7 +134,8 @@ local function world(opts)
     function pool:ImportFolderFromFile()
         w.imports = w.imports + 1
         local f = Folder("AutoSubs", "2")
-        f.clips = { Clip("Basic Template"), Clip("AutoSubs Caption 2026-09-16") }
+        f.clips = { Clip("Basic Template"), Clip("AutoSubs Caption 2026-09-16", nil, true),
+            Clip("Other") }
         table.insert(self.current.subs, f)
         return true
     end
@@ -170,6 +194,7 @@ local function world(opts)
     setfenv(chunk, setmetatable({ JUNCTUR_TEST = true, fusion = fusion, resolve = resolve },
         { __index = _G }))
     w.m = chunk()
+    w.Folder, w.Clip = Folder, Clip
     return w
 end
 
@@ -196,9 +221,13 @@ check(info.error == nil, tostring(info.error))
 check(info.template == "Junctur Caption" and info.fps == "24" and info.start == 86400, "info")
 check(info.id == "T-1", "timeline id")
 check(#w.root.subs == 2 and w.root.subs[1] == w.theirs and #w.theirs.clips == 2, "their bin untouched")
-check(w.root.subs[2].name == "Junctur" and #w.root.subs[2].clips == 1, "Junctur bin")
+check(w.root.subs[2].name == "Junctur" and #w.root.subs[2].clips == 2, "Junctur bin")
+check(w.root.subs[2].clips[1].name == "Junctur Caption", "plain template renamed")
+check(w.root.subs[2].clips[2].name == "Junctur Animated Caption", "animated template kept (5l)")
 w.m.handlers.info({ template = "" })
 check(w.imports == 1, "imported once")
+info = w.m.handlers.info({ template = "", animated = true })
+check(info.template == "Junctur Animated Caption" and w.imports == 1, "animated template, no import")
 check(w.m.handlers.info({ template = "Nope" }).error ~= nil, "a missing template is an error")
 check(w.m.handlers.info({ template = "My Title" }).template == "My Title", "the user's own template")
 
@@ -283,6 +312,72 @@ w = world({ no_delete = true })
 w.m.handlers.place(request({ clip(1, 86400, "a") }))
 r = w.m.handlers.place(request({ clip(1, 86500, "b") }))
 check(r.removed == 0 and r.firstError:find("delete") ~= nil, "failed delete: " .. tostring(r.firstError))
+
+-- 5l: the word highlight and the animation through auto-subs' macro.
+local function animated(track, start, text, extra)
+    local c = clip(track, start, text)
+    c.key = c.key .. "|highlight"
+    c.base, c.highlight = { 1, 1, 1 }, { 1, 0, 0 }
+    c.words = { { startIndex = 0, endIndex = 3, startFrame = 0, endFrame = 12 },
+        { startIndex = 4, endIndex = 9, startFrame = 12, endFrame = 24 } }
+    for k, v in pairs(extra or {}) do c[k] = v end
+    return c
+end
+local moving = { font = "Open Sans", style = "Bold", size = 0.03, underline = true,
+    outline = true, outlineColor = { 0, 0, 0 }, thickness = 0.04, highlight = true,
+    animation = "pop", animationLength = 0.3 }
+
+-- A Junctur bin from before 5l, the plain template only: the animated one is imported into it
+-- and the plain one is not doubled.
+w = world()
+local bin = w.Folder("Junctur", "9")
+bin.clips = { w.Clip("Junctur Caption") }
+table.insert(w.root.subs, bin)
+info = w.m.handlers.info({ template = "", animated = true })
+check(info.error == nil and info.template == "Junctur Animated Caption", "animated: " .. tostring(info.error))
+check(w.imports == 1 and #bin.clips == 2 and bin.clips[1].name == "Junctur Caption", "bin gains the animated one")
+check(#w.root.subs == 2, "the import's folder deleted")
+
+r = w.m.handlers.place(request({ animated(1, 86400, "hola todos") }, { look = moving, animated = true }))
+check(r.placed == 1 and r.failed == 0, "animated send: " .. tostring(r.firstError))
+check(r.unstyled == "", "every macro input taken: " .. tostring(r.unstyled))
+local it = w.tracks[2].items[1]
+check(it.template.name == "Junctur Animated Caption" and it.macro ~= nil, "placed from the macro")
+check(it.tool.timing ~= nil and it.tool.timing[2].startIndex == 4, "word timing set before the text")
+check(it.tool.inputs.Text == "hola todos" and it.cls.inputs.Text == "hola todos", "text and styling text")
+local m = it.macro.inputs
+check(it.macro.applied == 1, "the macro's own helper ran")
+check(m.HighlightEnabled == 1 and m.HighlightStyle == 0 and m.HighlightColorRed == 1
+    and m.HighlightColorGreen == 0, "highlight")
+check(m.FillColorGreen == 1 and m.TextSize == 0.03 and m.TextPosition[2] == 0.1, "fill and place")
+check(m.PopInEnabled == 1 and m.FadeEnabled == 0 and m.SlideUpEnabled == 0, "pop in")
+check(m.AnimationLength == 0.3 and m.AnimationLevel == 0 and m.AnimationMode == 2, "in and out")
+check(m.OutlineThickness == 0.04 and m.WrapEnabled == 0, "outline, no wrap")
+check(it.tool.inputs.Underline == 1, "underline on the Text+")
+check(it.tool.data.JuncturKey == "Junctur 1 Ana|86400|86424|highlight", "tagged")
+
+-- Sent again: restyled in place through the macro.
+moving.animation = "fade"
+r = w.m.handlers.place(request({ animated(1, 86400, "hola amigos") }, { look = moving, animated = true }))
+check(r.restyled == 1 and r.placed == 0 and w.tracks[2].items[1] == it, "animated restyle")
+check(it.macro.applied == 2 and m.FadeEnabled == 1 and m.PopInEnabled == 0, "fade")
+check(it.tool.inputs.Text == "hola amigos", "new text")
+
+-- Turned off: the key differs, so the macro clip is replaced by a plain Text+.
+r = w.m.handlers.place(request({ clip(1, 86400, "hola amigos") }))
+check(r.removed == 1 and r.placed == 1, "back to plain")
+check(w.tracks[2].items[1].template.name == "Junctur Caption", "plain again")
+
+-- A plain Text+ of the user's asked to highlight and animate: placed as 5g, and said so.
+r = w.m.handlers.place(request({ animated(1, 87000, "x") },
+    { template = "My Title", recording = "own2", look = moving, animated = true }))
+check(r.placed == 1 and r.unstyled == "Underline, animation, word highlight",
+    "own template: " .. tostring(r.unstyled))
+
+-- A macro that lost its helper: that caption fails, said so.
+w = world({ no_helper = true })
+r = w.m.handlers.place(request({ animated(1, 86400, "a") }, { look = moving, animated = true }))
+check(r.failed == 1 and r.firstError:find("SetInputValues") ~= nil, "no helper: " .. tostring(r.firstError))
 
 -- Folders without ids: the import is not trusted, nothing moved or deleted.
 w = world({ no_ids = true })
