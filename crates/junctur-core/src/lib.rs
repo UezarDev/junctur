@@ -12,11 +12,13 @@
 //! naming the people the user enrolled once ([`voices`]) and finding where two talk at once.
 
 pub mod cache;
+pub mod config;
 pub mod diarize;
 pub mod edit;
 pub mod error;
 pub mod export;
 pub mod ffmpeg;
+pub mod hidden;
 pub mod models;
 pub mod output;
 pub mod pipeline;
@@ -28,6 +30,7 @@ pub mod tracks;
 pub mod transcribe;
 pub mod vad;
 pub mod voices;
+pub mod waves;
 
 pub use error::{Error, Result};
 pub use separate::{separate, SeparateOptions, Stems};

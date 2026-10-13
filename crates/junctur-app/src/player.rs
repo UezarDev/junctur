@@ -11,7 +11,11 @@
 //!
 //! Edits (`editor`) reach playback the way a changed file does, through [`Core::take`], but
 //! directly: the app never waits for its own save to come back through the watch. Locks are taken
-//! in the order editor, ctl, state.
+//! in the order editor, ctl, state, mixer (state and mixer are never held together).
+//!
+//! Every audio track plays at once, each with a meter and a mute (2e, `mixer`): each load carries
+//! the mixer's filter graphs, a mute is sent to the playing graph in place, and the event thread
+//! reads the meters while playing.
 
 use std::collections::VecDeque;
 use std::ops::Deref;
@@ -23,11 +27,13 @@ use std::time::{Duration, Instant};
 use junctur_core::edit::{Captions, EditList, Speakers};
 use junctur_core::export::{self, CaptionFiles};
 use junctur_core::pipeline::{self, Found};
+use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 use crate::cuts::{self, edl, watch, Edit, EditState, EditorStatus, Form, Fps, Load};
 use crate::editor::{Edited, Editor, Op, Step, TranscriptView, Words};
 use crate::lock::lock;
+use crate::mixer::{self, Mixer, MixerState};
 use crate::mpv::{self, Event, Events, Mpv};
 use crate::state::{Change, PlayerState, OBSERVED};
 use crate::trace::Trace;
@@ -35,6 +41,17 @@ use crate::voices;
 
 pub const STATE_EVENT: &str = "player-state";
 pub const EDIT_EVENT: &str = "edit-state";
+pub const MIXER_EVENT: &str = "mixer-state";
+pub const LEVELS_EVENT: &str = "levels";
+
+/// How often the meters are read while playing: smooth enough for a meter, and one small property
+/// read each time.
+const LEVELS_EVERY: Duration = Duration::from_millis(50);
+
+/// A meter reading that has not moved for this long is old: astats only measures audio as mpv
+/// filters it, so a stalled player leaves its last reading behind. mpv filters in bursts as its
+/// buffer drains, so a few reads in a row can match while all is well.
+const LEVELS_STALE: Duration = Duration::from_millis(300);
 
 /// Position updates arrive every frame; the frontend needs a few a second.
 const POSITION_EVERY: Duration = Duration::from_millis(100);
@@ -179,6 +196,10 @@ pub struct Core {
     /// Also serialises edits: one is applied, saved and handed to playback before the next.
     editor: Mutex<Editor>,
     ctl: Mutex<Ctl>,
+    /// Shared with the event thread, which resends the mutes when playback restarts.
+    mixer: Arc<Mutex<Mixer>>,
+    /// Held while `mutes.json` is written, so writes land in the order of the clicks.
+    saving: Mutex<()>,
 }
 
 impl Player {
@@ -214,11 +235,14 @@ impl Player {
         }
         let state = Arc::new(Mutex::new(PlayerState::default()));
         let loads = Arc::new(Mutex::new(Loads::default()));
+        let mixer = Arc::new(Mutex::new(Mixer::default()));
         let events = {
             let mut reader = mpv.events().ok_or("mpv's event reader is already taken")?;
             let shared = Shared {
                 state: state.clone(),
                 loads: loads.clone(),
+                mixer: mixer.clone(),
+                mpv: mpv.clone(),
                 app: app.clone(),
                 trace,
             };
@@ -233,6 +257,8 @@ impl Player {
             state,
             loads,
             editor: Mutex::new(Editor::default()),
+            mixer,
+            saving: Mutex::new(()),
             ctl: Mutex::new(Ctl {
                 file: None,
                 edit_path: None,
@@ -270,12 +296,21 @@ impl Player {
     /// project's edit list, keeps something) and watches the edit list. `edit_path` is `None`
     /// when the project could not be opened.
     pub fn open(&self, path: &str, edit_path: Option<PathBuf>) -> Result<(), String> {
-        // Stamp, then read (both outside the lock: the read may start ffprobe).
+        // Stamp, then read (both outside the lock: the read may start ffprobe). The mixer's track
+        // count may take a second ffprobe, run alongside rather than after.
         let baseline = edit_path.as_deref().map(watch::stamp);
-        let (fps, read) = match &edit_path {
-            Some(p) => cuts::fetch(path, p, None),
-            None => (None, None),
-        };
+        let dir = edit_path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf);
+        let ((fps, read), mixer) = std::thread::scope(|s| {
+            let m = s.spawn(|| Mixer::open(path, dir));
+            let read = match &edit_path {
+                Some(p) => cuts::fetch(path, p, None),
+                None => (None, None),
+            };
+            (read, m.join().unwrap_or_default())
+        });
         let mut ed = lock(&self.editor);
         ed.reset(edit_path.clone());
         let mut c = lock(&self.ctl);
@@ -293,9 +328,11 @@ impl Player {
             })
         });
         lock(&self.state).set_reference(c.edit.timeline.clone());
+        *lock(&self.mixer) = mixer;
         let form = c.wanted();
         let loaded = self.load(&mut c, form, None, false);
         self.emit_edit(&c);
+        self.emit_mixer();
         loaded
     }
 
@@ -387,8 +424,13 @@ impl Core {
         if new_list.is_some() && new_list != c.edit.list.as_deref() {
             eprintln!("junctur-app: edit.junctur changed on disk, taken ({by})");
             ed.changed_elsewhere();
+            // A first list (the app's own analysis just wrote it, 2d) had no history to clear.
+            let notice =
+                c.edit.list.is_some().then(|| {
+                    "edit.junctur changed on disk: took it, undo history cleared".to_string()
+                });
             c.status = EditorStatus {
-                notice: Some("edit.junctur changed on disk: took it, undo history cleared".into()),
+                notice,
                 ..EditorStatus::default()
             };
         }
@@ -504,9 +546,25 @@ impl Core {
         }
     }
 
-    /// The open recording's path.
-    fn file(&self) -> Option<String> {
+    /// The open recording's path, as it was opened.
+    pub fn file(&self) -> Option<String> {
         lock(&self.ctl).file.clone()
+    }
+
+    /// An analysis of `file` (absolute) ended (2d). If it is the open recording, the words and
+    /// envelope read so far are dropped (a re-analysis may have replaced them) and the edit list on
+    /// disk is taken now rather than at the watch's next poll.
+    pub fn analysed(&self, file: &Path) {
+        let open = self.file();
+        if open.and_then(|f| std::path::absolute(f).ok()).as_deref() != Some(file) {
+            return;
+        }
+        {
+            let mut ed = lock(&self.editor);
+            ed.words = None;
+            ed.envelope = None;
+        }
+        self.reload_edit();
     }
 
     /// Puts newly labelled speakers into the list in play (names of speakers nobody enrolled are
@@ -618,15 +676,29 @@ impl Core {
         Some(TranscriptView::new(&words, speakers))
     }
 
-    /// Keeps the right-hand `share` of the window (0..1) free of video, for a panel there.
-    pub fn set_video_margin(&self, share: f64) -> Result<(), String> {
-        let share = if share.is_finite() {
-            share.clamp(0.0, 0.8)
-        } else {
-            0.0
+    /// Keeps the right-hand `right` and bottom `bottom` shares of the window (0..1) free of video,
+    /// for the side panel and for the play bar and track lanes under the picture (2g); mpv centres
+    /// the picture in what is left.
+    pub fn set_video_margins(&self, right: f64, bottom: f64) -> Result<(), String> {
+        let share = |x: f64| {
+            if x.is_finite() {
+                x.clamp(0.0, 0.9)
+            } else {
+                0.0
+            }
         };
         self.mpv
-            .set_string("video-margin-ratio-right", &format!("{share:.4}"))
+            .set_string("video-margin-ratio-right", &format!("{:.4}", share(right)))?;
+        self.mpv.set_string(
+            "video-margin-ratio-bottom",
+            &format!("{:.4}", share(bottom)),
+        )
+    }
+
+    /// The edit list's speaker turns, for the Speakers lane (2g).
+    pub fn turns(&self) -> TurnsView {
+        let list = lock(&self.ctl).edit.list.clone();
+        list.map_or_else(TurnsView::default, |l| TurnsView::new(&l.speakers))
     }
 
     /// The edit list's path and the list in play (test mode compares them).
@@ -681,8 +753,80 @@ impl Core {
         Ok(lands)
     }
 
-    pub fn set_audio_track(&self, id: i64) -> Result<(), String> {
-        self.mpv.set_string("aid", &id.to_string())
+    pub fn mixer(&self) -> MixerState {
+        lock(&self.mixer).state()
+    }
+
+    /// Mutes or unmutes audio track `track` (0-based) at once, in the graph playing, and remembers
+    /// it for the recording. Playback only: the edit list and renders never see it. The mute is
+    /// applied (and shown) even when it cannot be remembered; the error then says so.
+    pub fn set_muted(&self, track: usize, muted: bool) -> Result<(), String> {
+        {
+            let mut m = lock(&self.mixer);
+            m.set_muted(track, muted)?;
+            // Under the lock, so two quick clicks reach mpv in order.
+            send_weights(&self.mpv, &m);
+        }
+        self.emit_mixer();
+        // Written outside the mixer's lock (the event thread takes it on every restart and meter
+        // tick); the mutes are read under `saving`, so the last write holds the last click.
+        let _turn = lock(&self.saving);
+        let memory = lock(&self.mixer).memory();
+        match memory {
+            Some(m) => m
+                .write()
+                .map_err(|e| format!("muted in the preview, but not {e}")),
+            None => Ok(()),
+        }
+    }
+
+    /// Solos or unsolos audio track `track` (0-based) at once (2g). Playback only and not remembered.
+    pub fn set_solo(&self, track: usize, on: bool) -> Result<(), String> {
+        {
+            let mut m = lock(&self.mixer);
+            m.set_solo(track, on)?;
+            send_weights(&self.mpv, &m);
+        }
+        self.emit_mixer();
+        Ok(())
+    }
+
+    /// The analysis of `file` (absolute) has its `tracks` stage done (2d): the mixer takes the
+    /// roles it left, on a first analysis or a re-analysis that changed them, moving only the
+    /// mutes the user never set, and tells the page when anything changed.
+    pub fn tracks_known(&self, file: &Path) {
+        let project = {
+            let m = lock(&self.mixer);
+            if !m.is_for(file) {
+                return;
+            }
+            m.project().cloned()
+        };
+        // Read outside the lock.
+        let Some(report) = project.as_ref().and_then(pipeline::cached_tracks) else {
+            return;
+        };
+        {
+            let mut m = lock(&self.mixer);
+            // Another recording may have opened meanwhile.
+            if !m.is_for(file) || !m.learn(&report) {
+                return;
+            }
+            send_weights(&self.mpv, &m);
+        }
+        eprintln!("junctur-app: track roles taken for the mutes");
+        self.emit_mixer();
+    }
+
+    /// The meters (each track's peak) and what is heard after the mutes, in dBFS, read now.
+    pub fn levels(&self) -> (Vec<Option<f32>>, Option<f32>) {
+        let n = lock(&self.mixer).len();
+        let meter = meter(&self.mpv);
+        let heard = self.mpv.get_string(&format!("af-metadata/{}", mixer::MIX));
+        (
+            meter.map_or_else(|| vec![None; n], |j| mixer::levels(&j, n)),
+            heard.and_then(|j| mixer::heard(&j)),
+        )
     }
 
     /// Loads `form` where playback is (or is about to be, after a seek or load still landing),
@@ -708,9 +852,14 @@ impl Core {
         };
         self.mpv
             .set_string("pause", if paused { "yes" } else { "no" })?;
-        // The playlist index (-1: none) comes before per-file options since mpv 0.38.
-        let start = format!("start={start:.6}");
-        let args = ["loadfile", url.as_str(), "replace", "-1", start.as_str()];
+        // The playlist index (-1: none) comes before per-file options since mpv 0.38. The mixer's
+        // graphs go with each load, with the mutes as they are now.
+        let mut options = format!("start={start:.6}");
+        if let Some(m) = lock(&self.mixer).load_options() {
+            options.push(',');
+            options.push_str(&m);
+        }
+        let args = ["loadfile", url.as_str(), "replace", "-1", options.as_str()];
         lock(&self.loads).push(file, form.clone());
         if let Err(e) = self.mpv.command(&args) {
             lock(&self.loads).unpush();
@@ -726,6 +875,11 @@ impl Core {
         let _ = self.app.emit(STATE_EVENT, snapshot);
     }
 
+    fn emit_mixer(&self) {
+        let state = lock(&self.mixer).state();
+        let _ = self.app.emit(MIXER_EVENT, state);
+    }
+
     fn emit_edit(&self, c: &Ctl) {
         let _ = self.app.emit(
             EDIT_EVENT,
@@ -734,10 +888,111 @@ impl Core {
     }
 }
 
+/// Who talks when, as three arrays (source seconds, speaker ids from 1), sorted by start: a 30 h
+/// recording has thousands of turns, sent once per change of `speakersKey`.
+#[derive(Debug, Default, Serialize, PartialEq)]
+pub struct TurnsView {
+    pub start: Vec<f64>,
+    pub end: Vec<f64>,
+    pub speaker: Vec<u32>,
+}
+
+impl TurnsView {
+    pub fn new(s: &Speakers) -> Self {
+        let mut v = Self::default();
+        for t in &s.turns {
+            v.start.push(t.start);
+            v.end.push(t.end);
+            v.speaker.push(t.speaker);
+        }
+        v
+    }
+}
+
+/// Sends `m`'s mutes to the graph playing. It fails when there is none (no file, no audio, or a
+/// load whose chain is not up yet); the next `playback-restart` sends them again.
+fn send_weights(mpv: &Mpv, m: &Mixer) {
+    if m.len() > 0 {
+        let w = m.weights();
+        let _ = mpv.command(&["af-command", mixer::MIX, "weights", &w, mixer::MIX_FILTER]);
+    }
+}
+
+/// The meter reading, as mpv's JSON (see `mixer::levels`); `None` without an audio chain.
+fn meter(mpv: &Mpv) -> Option<String> {
+    mpv.get_string(&format!("af-metadata/{}", mixer::METER))
+}
+
+#[derive(Clone, serde::Serialize)]
+struct Levels {
+    /// Each track's peak in dBFS (`None`: nothing live, shown as silence).
+    levels: Vec<Option<f32>>,
+}
+
+/// The meters the event thread sends: every [`LEVELS_EVERY`] while playing, on a tick of their own
+/// (not on mpv's position events), and silence once when playback pauses or stalls, so the page
+/// never keeps a last reading up.
+struct Meters {
+    sent: Instant,
+    /// The last reading and when it last moved.
+    last: Option<String>,
+    moved: Instant,
+    /// Silence was sent last.
+    silent: bool,
+}
+
+impl Meters {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            sent: now - LEVELS_EVERY,
+            last: None,
+            moved: now,
+            silent: true,
+        }
+    }
+
+    /// How long until the meters are due, when they need the event thread at all: while
+    /// `playing`, and once more after it stops, for the silence.
+    fn due_in(&self, playing: bool) -> Option<Duration> {
+        (playing || !self.silent).then(|| LEVELS_EVERY.saturating_sub(self.sent.elapsed()))
+    }
+
+    /// What to send for `reading` at `now` (`playing`, `n` tracks): the levels, silence (all
+    /// `None`) once when nothing live is left to show, or nothing.
+    fn take(
+        &mut self,
+        reading: Option<String>,
+        playing: bool,
+        n: usize,
+        now: Instant,
+    ) -> Option<Vec<Option<f32>>> {
+        self.sent = now;
+        if reading != self.last {
+            self.last = reading;
+            self.moved = now;
+        }
+        let live = playing && n > 0 && now.duration_since(self.moved) < LEVELS_STALE;
+        match (&self.last, live) {
+            (Some(json), true) => {
+                self.silent = false;
+                Some(mixer::levels(json, n))
+            }
+            _ if !self.silent => {
+                self.silent = true;
+                Some(vec![None; n])
+            }
+            _ => None,
+        }
+    }
+}
+
 /// What the event thread shares with the player.
 struct Shared {
     state: Arc<Mutex<PlayerState>>,
     loads: Arc<Mutex<Loads>>,
+    mixer: Arc<Mutex<Mixer>>,
+    mpv: Arc<Mpv>,
     app: AppHandle,
     trace: Option<Arc<Trace>>,
 }
@@ -745,6 +1000,7 @@ struct Shared {
 fn event_loop(events: &mut Events, shared: &Shared) {
     let state = &shared.state;
     let mut last_sent = Instant::now() - POSITION_EVERY;
+    let mut meters = Meters::new();
     // A held-back position is sent once its interval is up, so the last one (a seek while
     // paused) is never lost.
     let mut held = false;
@@ -754,14 +1010,28 @@ fn event_loop(events: &mut Events, shared: &Shared) {
         let _ = shared.app.emit(STATE_EVENT, snapshot);
     };
     loop {
-        let timeout = if held {
-            POSITION_EVERY
-                .saturating_sub(last_sent.elapsed())
-                .as_secs_f64()
-        } else {
-            -1.0
+        let tracks = lock(&shared.mixer).len();
+        let playing = tracks > 0 && {
+            let s = lock(state);
+            s.path.is_some() && !s.paused
         };
-        let Some(event) = events.wait(timeout) else {
+        // Wake for a held-back position or the meters, whichever is due first.
+        let timeout = [
+            held.then(|| POSITION_EVERY.saturating_sub(last_sent.elapsed())),
+            meters.due_in(playing),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .map_or(-1.0, |d| d.as_secs_f64());
+        let event = events.wait(timeout);
+        if meters.due_in(playing).is_some_and(|d| d.is_zero()) {
+            let reading = if playing { meter(&shared.mpv) } else { None };
+            if let Some(levels) = meters.take(reading, playing, tracks, Instant::now()) {
+                let _ = shared.app.emit(LEVELS_EVENT, Levels { levels });
+            }
+        }
+        let Some(event) = event else {
             if held && last_sent.elapsed() >= POSITION_EVERY {
                 held = false;
                 send(&mut last_sent);
@@ -776,6 +1046,11 @@ fn event_loop(events: &mut Events, shared: &Shared) {
                 text,
             } => {
                 eprintln!("mpv [{prefix}] {level}: {text}");
+                continue;
+            }
+            Event::PlaybackRestart => {
+                // A mute changed after this load was asked for is not in its graph yet.
+                send_weights(&shared.mpv, &lock(&shared.mixer));
                 continue;
             }
             Event::StartFile { entry } => {
@@ -836,5 +1111,32 @@ mod tests {
         l.unpush();
         assert_eq!(l.push("f".into(), Form::Source), 4);
         assert!(l.started(9).is_none(), "an entry the player never loaded");
+    }
+
+    #[test]
+    fn meters_fall_silent_once_when_paused_or_stalled() {
+        let mut m = Meters::new();
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let json = |db: &str| Some(format!(r#"{{"lavfi.astats.1.Peak_level":"{db}"}}"#));
+        assert_eq!(m.due_in(false), None, "nothing to do before playing");
+        assert_eq!(m.take(json("-10"), true, 1, at(0)), Some(vec![Some(-10.0)]));
+        assert_eq!(
+            m.take(json("-12"), true, 1, at(50)),
+            Some(vec![Some(-12.0)])
+        );
+        // The same reading a few times running is still live (mpv filters in bursts)...
+        assert_eq!(
+            m.take(json("-12"), true, 1, at(200)),
+            Some(vec![Some(-12.0)])
+        );
+        // ...until it is old: a stalled player. Silence is sent once.
+        assert_eq!(m.take(json("-12"), true, 1, at(400)), Some(vec![None]));
+        assert_eq!(m.take(json("-12"), true, 1, at(450)), None);
+        assert_eq!(m.take(json("-8"), true, 1, at(500)), Some(vec![Some(-8.0)]));
+        // Paused: silence once, then no more ticks.
+        assert!(m.due_in(false).is_some(), "one more tick for the silence");
+        assert_eq!(m.take(None, false, 1, at(550)), Some(vec![None]));
+        assert_eq!(m.due_in(false), None);
     }
 }

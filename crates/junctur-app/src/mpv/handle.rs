@@ -104,6 +104,22 @@ impl Mpv {
         self.check(r, name)
     }
 
+    /// A property as text (a map or list comes as JSON); `None` when mpv has no value for it.
+    pub fn get_string(&self, name: &str) -> Option<String> {
+        let n = cstr(name).ok()?;
+        // SAFETY: live handle, NUL-terminated name; a non-null result is mpv's string, copied out
+        // and then freed with mpv_free as client.h requires.
+        unsafe {
+            let p = (self.api.get_property_string)(self.handle, n.as_ptr());
+            if p.is_null() {
+                return None;
+            }
+            let s = event::text(p);
+            (self.api.free)(p.cast());
+            Some(s)
+        }
+    }
+
     pub fn observe(&self, id: u64, name: &str, format: Format) -> Result<(), String> {
         let n = cstr(name)?;
         // SAFETY: live handle, NUL-terminated name.

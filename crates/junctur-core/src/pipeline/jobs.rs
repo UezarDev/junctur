@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::Result;
 
+/// The file in a project folder.
+pub(crate) const FILE: &str = "jobs.json";
+
 /// Stage names, in run order.
 pub const STAGES: [&str; 5] = ["tracks", "speech", "speakers", "transcribe", "edit"];
 
@@ -38,7 +41,7 @@ pub struct Jobs {
 
 impl Jobs {
     pub fn load(dir: &Path) -> Self {
-        std::fs::read(dir.join("jobs.json"))
+        std::fs::read(dir.join(FILE))
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_else(|| Jobs {
@@ -93,7 +96,8 @@ impl Jobs {
             }
             s.note = note;
         }
-        std::fs::write(dir.join("jobs.json"), serde_json::to_vec_pretty(self)?)?;
+        // Whole or not at all: a half-written file would read back as every stage pending.
+        crate::output::write_replacing(&dir.join(FILE), serde_json::to_vec_pretty(self)?)?;
         Ok(())
     }
 
@@ -106,8 +110,10 @@ impl Jobs {
         log: &mut dyn FnMut(&str),
         f: impl FnOnce(&mut dyn FnMut(&str)) -> Result<T>,
     ) -> Result<T> {
-        log(&format!("stage {name} ..."));
+        // Recorded before the line is logged, so a caller reading `jobs.json` on it sees the stage
+        // running (the app's progress, 2d).
         self.set(dir, name, StageState::Running, None, None)?;
+        log(&format!("stage {name} ..."));
         let t0 = Instant::now();
         match f(log) {
             Ok(v) => {
@@ -179,7 +185,7 @@ mod tests {
             {"name":"speech","state":"done","seconds":1.0,"note":null},
             {"name":"transcribe","state":"done","seconds":1.0,"note":null},
             {"name":"edit","state":"done","seconds":1.0,"note":null}]}"#;
-        std::fs::write(dir.join("jobs.json"), old).unwrap();
+        std::fs::write(dir.join(FILE), old).unwrap();
         let mut j = Jobs::load(&dir);
         j.set(&dir, "speakers", StageState::Done, Some(2.0), None)
             .unwrap();

@@ -16,19 +16,6 @@ pub fn path() -> Result<std::path::PathBuf, String> {
         .ok_or_else(|| "no config folder to keep voices in (set JUNCTUR_VOICES)".into())
 }
 
-/// The voices to label speakers by: none when there is no voices file. A voices file that cannot
-/// be read is said and labelling goes on without voices: speakers are an extra, and a broken
-/// file must not stop `analyze` or `cut` (the file is left as it is for the user to fix).
-pub fn usable() -> Vec<Voice> {
-    match path().and_then(|p| Voices::load(&p).map_err(|e| e.to_string())) {
-        Ok(v) => v.usable().into_iter().cloned().collect(),
-        Err(e) => {
-            eprintln!("junctur: {e}; labelling speakers without remembered voices");
-            Vec::new()
-        }
-    }
-}
-
 /// What the speakers are now (`describe`: a line on how they were found), and the edit list
 /// updated with them.
 fn print_speakers(p: &Project, found: &Found, describe: bool) -> Result<(), String> {

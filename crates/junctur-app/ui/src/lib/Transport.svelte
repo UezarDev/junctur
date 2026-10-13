@@ -1,40 +1,42 @@
 <script lang="ts">
+  // The play bar (2g): its own opaque row under the picture, between the video and the track
+  // lanes. Play, the skip toggle, the clocks, the whole recording as an overview (outlining the
+  // window the lanes show) and, at the right end, the lanes' zoom. The track controls that were
+  // here (2a's track select, 2e's strips) live on the lanes and the portrait strips; editing
+  // floats beside the selection (ActionBar).
   import * as api from "./api";
   import Timeline from "./Timeline.svelte";
   import Clocks from "./Clocks.svelte";
-  import EditBar from "./EditBar.svelte";
   import type { Selection } from "./selection";
 
   let {
     player,
     edit,
-    selection,
     span,
-    right,
+    view,
+    onZoom,
     onSelect,
-    onOpen,
     onError,
   }: {
     player: api.PlayerState | null;
     edit: api.EditState | null;
-    selection: Selection | null;
     /** The selection in source seconds, drawn on the timeline. */
     span: { start: number; end: number } | null;
-    /** Pixels on the right taken by the transcript panel. */
-    right: number;
+    /** The window the lanes show (source seconds). */
+    view: { start: number; end: number } | null;
+    /** Zoom the lanes: a factor on the window's length, or `whole` for the whole recording. */
+    onZoom: (by: number | "whole") => void;
     onSelect: (s: Selection | null) => void;
-    onOpen: () => void;
     onError: (message: string) => void;
   } = $props();
 
   const loaded = $derived(!!player?.path);
-  const selectedTrack = $derived(player?.audioTracks.find((t) => t.selected)?.id ?? "");
   // Skipping needs an edit list that keeps something; otherwise the toggle says why not.
   const canSkip = $derived(loaded && !!edit?.fps && edit.ranges.length > 0);
   const skipTitle = $derived(
     canSkip
       ? "Play only what the edit list keeps (S)"
-      : (edit?.error ?? "No edit list yet: run the pipeline on this recording"),
+      : (edit?.error ?? "No edit list yet: it comes with the analysis"),
   );
 
   async function call(f: () => Promise<void>) {
@@ -44,26 +46,21 @@
       onError(String(e));
     }
   }
-
-  function trackLabel(t: api.AudioTrack): string {
-    const parts = [t.title, t.lang, t.channels ? `${t.channels}ch` : null].filter(Boolean);
-    return `${t.id}${parts.length ? ": " + parts.join(", ") : ""}`;
-  }
 </script>
 
-<footer style:right="{right}px">
-  {#if loaded}
-    <EditBar {player} {edit} {selection} {onError} />
-  {/if}
-  <div class="row">
-  <button onclick={onOpen} disabled={!player} title="Open a recording">Open</button>
+<div class="bar">
   <button
     class="play"
     onclick={() => call(api.togglePause)}
     disabled={!loaded}
     title="Play/pause (Space)"
+    aria-label={player?.paused || !loaded ? "Play" : "Pause"}
   >
-    {player?.paused || !loaded ? "Play" : "Pause"}
+    {#if player?.paused || !loaded}
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z" /></svg>
+    {:else}
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5h3v11H4zM9 2.5h3v11H9z" /></svg>
+    {/if}
   </button>
   <button
     class="skip"
@@ -76,48 +73,48 @@
     Skip cuts
   </button>
   <Clocks {player} {edit} />
-  <Timeline {player} {edit} {span} {onSelect} {onError} />
-  <select
-    value={selectedTrack}
-    disabled={!player?.audioTracks.length}
-    title="Audio track"
-    onchange={(e) => call(() => api.setAudioTrack(Number(e.currentTarget.value)))}
-  >
-    {#if !player?.audioTracks.length}
-      <option value="">No audio</option>
-    {/if}
-    {#each player?.audioTracks ?? [] as t (t.id)}
-      <option value={t.id}>Track {trackLabel(t)}</option>
-    {/each}
-  </select>
-  </div>
-</footer>
+  <Timeline {player} {edit} {span} {view} {onSelect} {onError} />
+  <span class="zoom" role="group" aria-label="Zoom the track lanes">
+    <button disabled={!loaded} onclick={() => onZoom(2)} title="Zoom the lanes out (Ctrl+wheel on them)" aria-label="Zoom out">−</button>
+    <button disabled={!loaded} onclick={() => onZoom(0.5)} title="Zoom the lanes in (Ctrl+wheel on them)" aria-label="Zoom in">+</button>
+    <button disabled={!loaded} onclick={() => onZoom("whole")} title="Show the whole recording in the lanes">All</button>
+  </span>
+</div>
 
 <style>
-  footer {
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 12px 16px;
-    background: linear-gradient(to top, var(--panel) 60%, transparent);
-  }
-  .row {
+  .bar {
     display: flex;
     align-items: center;
     gap: 10px;
+    height: 100%;
+    padding: 0 12px;
+    box-sizing: border-box;
+    background: var(--panel-solid);
+    border-top: 1px solid var(--line);
   }
   .play {
-    min-width: 64px;
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 30px;
+    padding: 0;
+  }
+  .play svg {
+    width: 14px;
+    height: 14px;
+    fill: currentColor;
   }
   .skip.on {
     border-color: var(--accent);
     color: var(--accent);
+    background: rgba(242, 179, 61, 0.12);
   }
-  select {
-    max-width: 220px;
+  .zoom {
+    display: inline-flex;
+    gap: 2px;
+  }
+  .zoom button {
+    min-width: 28px;
+    padding: 3px 6px;
   }
 </style>

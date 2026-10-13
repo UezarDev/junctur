@@ -5,6 +5,7 @@
 //! card another app already fills would only make both fall back to CPU. `jobs.json` records what
 //! each stage did, for `junctur status`; the stage results themselves are the source of truth.
 
+mod adopt;
 mod jobs;
 mod speakers;
 mod speech;
@@ -21,7 +22,7 @@ use crate::runtime::DevicePref;
 use crate::tracks::{self, Role, TrackReport};
 use crate::transcribe::{self, Languages, ModelPref, Source, TranscribeOptions, Transcript};
 use crate::voices::{Voice, Voices};
-use crate::{cache, Error, Result};
+use crate::{cache, hidden, Error, Result};
 
 const ENVELOPE_FILE: &str = "envelope.f32";
 
@@ -43,6 +44,7 @@ pub struct Project {
 impl Project {
     pub fn open(file: &Path, cache_dir: Option<PathBuf>, dir: Option<PathBuf>) -> Result<Self> {
         let cache_dir = cache_dir.unwrap_or_else(cache::default_dir);
+        let in_cache = dir.is_none();
         let dir = match dir {
             Some(d) => d,
             None => cache_dir
@@ -50,6 +52,13 @@ impl Project {
                 .join(cache::key(file, "project1")?),
         };
         std::fs::create_dir_all(&dir)?;
+        // 2f: a run started by a packaged app (Claude desktop) may have analysed this recording into
+        // a hidden copy of the cache ([`adopt`]). Its track reports are keyed by file and settings, so
+        // a missing one is taken alone, once per process.
+        if in_cache {
+            adopt::project(&dir);
+        }
+        hidden::adopt_files_once(&cache_dir.join("tracks"), |_| true);
         Ok(Self {
             // Absolute: the edit list and the FCPXML name the source, and must work from anywhere.
             // Not `canonicalize`, whose `\\?\` form Resolve cannot open.
@@ -127,18 +136,29 @@ pub struct Outcome {
     pub edit: EditList,
 }
 
+/// The options the `tracks` stage analyses `p` with: one place for the stage and for every reader
+/// of what it cached, whose cache key depends on them.
+pub fn tracks_options(p: &Project, force: bool) -> tracks::AnalyzeOptions {
+    tracks::AnalyzeOptions {
+        cache_dir: Some(p.cache_dir.clone()),
+        use_cache: !force,
+        ..Default::default()
+    }
+}
+
+/// The track report the `tracks` stage left for `p`, without analysing: `None` before it ran.
+/// For the app's player, which only wants the roles when they are known (2e).
+pub fn cached_tracks(p: &Project) -> Option<TrackReport> {
+    tracks::cached(&p.file, &tracks_options(p, false))
+}
+
 /// Run every stage in order. `log` gets one line per event, for the CLI to print.
 pub fn run(p: &Project, opts: &PipelineOptions, log: &mut dyn FnMut(&str)) -> Result<Outcome> {
     let mut jobs = p.jobs();
     jobs.file = p.file.clone();
 
     let report = jobs.stage(&p.dir, "tracks", log, |_| {
-        let a = tracks::AnalyzeOptions {
-            cache_dir: Some(p.cache_dir.clone()),
-            use_cache: !opts.force,
-            ..Default::default()
-        };
-        tracks::analyze(&p.file, &a)
+        tracks::analyze(&p.file, &tracks_options(p, opts.force))
     })?;
     let speech = speech_stage(p, &mut jobs, &report, opts.force, log)?;
     // Speakers are an extra, not core: when they cannot be found (the model cannot be fetched
@@ -524,9 +544,9 @@ fn voice_tracks(report: &TrackReport) -> Vec<usize> {
 }
 
 /// (Re)write the edit list from cached analysis. A hand-edited list is kept as a backup before
-/// being replaced ([`back_up_hand_edit`]). Speaker names already in the list are kept by id, so a
-/// re-cut never undoes a rename; without `speakers` (skipped, or the stage failed) the list keeps
-/// the speakers it had.
+/// being replaced ([`back_up`]). Speaker names already in the list are kept by id, so a re-cut never
+/// undoes a rename; without `speakers` (skipped, or the stage failed) the list keeps the speakers it
+/// had.
 pub fn cut(
     p: &Project,
     report: &TrackReport,
@@ -535,13 +555,39 @@ pub fn cut(
     transcript: Option<&Transcript>,
     settings: &CutSettings,
 ) -> Result<EditList> {
+    let d = draft(p, report, speech, speakers, transcript, settings);
+    if let (Some(old), true) = (&d.old, d.users) {
+        back_up(&p.dir, old)?;
+    }
+    // Whole or not at all: a list cut short by a close would open as an analysed recording whose
+    // list does not parse.
+    crate::output::write_replacing(&p.edit_path(), d.list.to_text())?;
+    Ok(d.list)
+}
+
+/// A re-cut not yet written: the new list, the text on disk it replaces, and whether that text is
+/// the user's (a re-cut backs it up).
+struct Draft {
+    list: EditList,
+    old: Option<String>,
+    users: bool,
+}
+
+/// What [`cut`] would write, and whether it would back up what is there.
+fn draft(
+    p: &Project,
+    report: &TrackReport,
+    speech: &Speech,
+    speakers: Option<&Found>,
+    transcript: Option<&Transcript>,
+    settings: &CutSettings,
+) -> Draft {
     let env = speech::load_envelope(&p.envelope_path()).unwrap_or_default();
     let regions = speech.all_regions();
     let starts: Vec<f64> = transcript
         .map(|t| t.words().map(|w| w.start).collect())
         .unwrap_or_default();
-    let path = p.edit_path();
-    let old = std::fs::read_to_string(&path).ok();
+    let old = std::fs::read_to_string(p.edit_path()).ok();
     let parsed = old.as_deref().and_then(|t| edit::parse(t).ok());
     let previous = parsed.as_ref().map(|e| e.speakers.clone());
     // Caption settings are the user's, like the names: a re-cut keeps them.
@@ -556,25 +602,84 @@ pub fn cut(
         captions,
         windows: edit::windows(&regions, &starts, report.duration, settings.window),
     };
-    let e = make(settings);
-    let text = e.to_text();
-    if let Some(old) = old {
-        if old != text {
-            // A list written before speakers existed (or with `--no-speakers`) is compared as
-            // Junctur would have written it then, without them: gaining speakers is not a reason
-            // to back it up.
-            let had_speakers = previous.as_ref().is_some_and(|s| !s.is_empty());
-            back_up_hand_edit(&p.dir, &old, |s| {
+    let list = make(settings);
+    let users = old.as_deref().is_some_and(|old| {
+        // A list written before speakers existed (or with `--no-speakers`) is compared as Junctur
+        // would have written it then, without them: gaining speakers is not a reason to back it up.
+        let had_speakers = previous.as_ref().is_some_and(|s| !s.is_empty());
+        old != list.to_text()
+            && !is_generated(old, |s| {
                 let mut e = make(s);
                 if !had_speakers {
                     e.speakers = Speakers::default();
                 }
                 e.to_text()
-            })?;
-        }
+            })
+    });
+    Draft { list, old, users }
+}
+
+/// Whether the edit list on disk holds anything of the user's: a re-run of the pipeline (whose
+/// `edit` stage re-cuts) would back it up and replace it. Drafted from the cached analysis with the
+/// list's own settings; nothing is written. False without a list; true for one that does not parse
+/// or whose analysis is gone. For the app to ask before a re-analysis (2d).
+pub fn hand_edited(p: &Project) -> Result<bool> {
+    let Ok(old) = std::fs::read_to_string(p.edit_path()) else {
+        return Ok(false);
+    };
+    let Ok(list) = edit::parse(edit::unstamped(&old)) else {
+        return Ok(true);
+    };
+    let Some(speech) = p.speech() else {
+        return Ok(true);
+    };
+    let report = tracks::analyze(&p.file, &tracks_options(p, false))?;
+    let transcript = transcribe::load(&p.dir);
+    let speakers = p.speakers();
+    let d = draft(
+        p,
+        &report,
+        &speech,
+        speakers.as_ref(),
+        transcript.as_ref(),
+        &list.settings,
+    );
+    Ok(d.users)
+}
+
+/// Why a re-run with `opts` would redo more than the cut, one line each for the user (2d): no
+/// transcript yet, or one made with another model or languages than `opts` asks. Empty when the
+/// analysis answers `opts`; `Auto` takes any model, as [`run`] does, so this never offers a re-run
+/// that would redo nothing.
+pub fn outdated(p: &Project, opts: &PipelineOptions) -> Vec<String> {
+    if opts.no_transcript {
+        return Vec::new();
     }
-    std::fs::write(&path, text)?;
-    Ok(e)
+    let t = TranscribeOptions {
+        model: opts.model,
+        device: opts.device,
+        languages: opts.languages.clone(),
+        force: false,
+    };
+    match transcribe::made_with(&p.dir) {
+        None => vec!["There is no transcript yet.".to_string()],
+        Some(Err(e)) => vec![format!("The transcript could not be read ({e}).")],
+        Some(Ok((model, languages))) if !transcribe::answers(&model, &languages, &t) => {
+            vec![if languages != t.languages.allowed {
+                format!(
+                    "Transcribed in {}; the settings ask for {}.",
+                    languages.join("+"),
+                    t.languages.key()
+                )
+            } else {
+                format!(
+                    "Transcribed with {model}; the settings ask for {}.",
+                    opts.model.name()
+                )
+            }]
+        }
+        Some(Ok(_)) => Vec::new(),
+    }
 }
 
 /// The speakers a re-cut writes: found ones named as `previous` named them, or with nothing
@@ -586,23 +691,20 @@ pub fn speakers_for(found: Option<&Found>, previous: Option<&Speakers>) -> Speak
     }
 }
 
-/// Keep `old`, the edit list about to be replaced, unless Junctur wrote it: `regenerate` remakes a
-/// list from the current analysis, and a list it reproduces from its own recorded settings has
-/// nothing of the user's in it. An untouched app save is compared without its stamp: a list the
-/// app only renamed a speaker in is reproduced by the re-cut (names are carried over). Anything else (a hand edit, a list that no longer parses, one made
-/// from older analysis) goes to the first free `edit.junctur.bak`, `edit.junctur.bak2`, ...
-/// Backups are never overwritten: a single `.bak` rewritten on every re-cut lost the hand edit to
-/// the next generated list (1d).
-fn back_up_hand_edit(
-    dir: &Path,
-    old: &str,
-    regenerate: impl Fn(&CutSettings) -> String,
-) -> Result<()> {
+/// Whether `old`, the edit list about to be replaced, is Junctur's own: `regenerate` remakes a list
+/// from the current analysis, and a list it reproduces from its own recorded settings has nothing of
+/// the user's in it. An untouched app save is compared without its stamp: a list the app only
+/// renamed a speaker in is reproduced by the re-cut (names are carried over). Anything else (a hand
+/// edit, a list that no longer parses, one made from older analysis) is the user's.
+fn is_generated(old: &str, regenerate: impl Fn(&CutSettings) -> String) -> bool {
     let body = edit::unstamped(old);
-    let generated = edit::parse(body).is_ok_and(|e| regenerate(&e.settings) == body);
-    if generated {
-        return Ok(());
-    }
+    edit::parse(body).is_ok_and(|e| regenerate(&e.settings) == body)
+}
+
+/// Keeps `old` at the first free `edit.junctur.bak`, `edit.junctur.bak2`, ... Backups are never
+/// overwritten: a single `.bak` rewritten on every re-cut lost the hand edit to the next generated
+/// list (1d).
+fn back_up(dir: &Path, old: &str) -> Result<()> {
     let free = (1..)
         .map(|n| match n {
             1 => dir.join("edit.junctur.bak"),
@@ -618,11 +720,7 @@ fn back_up_hand_edit(
 pub fn recut(p: &Project, settings: &CutSettings) -> Result<EditList> {
     let missing = || Error::Edit("run `junctur analyze` on this file first".into());
     let speech = p.speech().ok_or_else(missing)?;
-    let opts = tracks::AnalyzeOptions {
-        cache_dir: Some(p.cache_dir.clone()),
-        ..Default::default()
-    };
-    let report = tracks::analyze(&p.file, &opts)?;
+    let report = tracks::analyze(&p.file, &tracks_options(p, false))?;
     let transcript = transcribe::load(&p.dir);
     let t0 = Instant::now();
     let e = cut(
@@ -663,6 +761,18 @@ mod tests {
             windows: vec![],
         }
         .to_text()
+    }
+
+    /// What [`cut`] does with the list it replaces.
+    fn back_up_hand_edit(
+        dir: &Path,
+        old: &str,
+        regenerate: impl Fn(&CutSettings) -> String,
+    ) -> Result<()> {
+        if is_generated(old, regenerate) {
+            return Ok(());
+        }
+        back_up(dir, old)
     }
 
     #[test]
@@ -799,5 +909,83 @@ mod tests {
             speakers_for(Some(&forgotten), Some(&had)).name(2),
             Some("Speaker 2")
         );
+    }
+
+    fn scratch_project(name: &str) -> (PathBuf, Project) {
+        let d = std::env::temp_dir().join(format!("junctur-2d-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join("rec.mp4");
+        std::fs::write(&file, b"not a video").unwrap();
+        let p = Project::open(&file, Some(d.join("cache")), None).unwrap();
+        (d, p)
+    }
+
+    #[test]
+    fn outdated_names_what_a_rerun_would_redo() {
+        let (d, p) = scratch_project("outdated");
+        let opts = |model| PipelineOptions {
+            model,
+            ..Default::default()
+        };
+        assert_eq!(
+            outdated(&p, &opts(ModelPref::Auto)),
+            vec!["There is no transcript yet."]
+        );
+        // Without a transcript asked for, nothing is missing.
+        let none = PipelineOptions {
+            no_transcript: true,
+            ..Default::default()
+        };
+        assert!(outdated(&p, &none).is_empty());
+        let made = |langs: &str| {
+            format!(
+                r#"{{"choice":{{"model":"large-v3-turbo","device":"cuda","note":null}},
+                "languages":{langs},"segments":[],"audio_s":0,"elapsed_s":0}}"#
+            )
+        };
+        std::fs::write(transcribe::path(&p.dir), made(r#"["es","en"]"#)).unwrap();
+        // `auto` takes whatever model made it; the same model explicitly too.
+        assert!(outdated(&p, &opts(ModelPref::Auto)).is_empty());
+        assert!(outdated(&p, &opts(ModelPref::LargeV3Turbo)).is_empty());
+        let why = outdated(&p, &opts(ModelPref::LargeV3));
+        assert_eq!(
+            why,
+            vec!["Transcribed with large-v3-turbo; the settings ask for large-v3."]
+        );
+        std::fs::write(transcribe::path(&p.dir), made(r#"["en"]"#)).unwrap();
+        let why = outdated(&p, &opts(ModelPref::Auto));
+        assert_eq!(why, vec!["Transcribed in en; the settings ask for es+en."]);
+        // Unreadable is not missing: a run would make it again, and the user hears why.
+        std::fs::write(transcribe::path(&p.dir), "{ torn").unwrap();
+        let why = outdated(&p, &opts(ModelPref::Auto));
+        assert!(
+            why[0].starts_with("The transcript could not be read"),
+            "{why:?}"
+        );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn hand_edited_without_a_list_or_its_analysis() {
+        let (d, p) = scratch_project("handedited");
+        assert!(!hand_edited(&p).unwrap(), "no list: nothing to lose");
+        std::fs::write(
+            p.edit_path(),
+            "junctur-edit 1
+keep x
+",
+        )
+        .unwrap();
+        assert!(
+            hand_edited(&p).unwrap(),
+            "a list that does not parse is the user's"
+        );
+        std::fs::write(p.edit_path(), list(CutSettings::default(), 5.0)).unwrap();
+        assert!(
+            hand_edited(&p).unwrap(),
+            "a list whose analysis is gone cannot be remade"
+        );
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }
