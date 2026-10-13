@@ -4,14 +4,17 @@
 //! reads in the builds before it, which refuse keys they do not know. Names with spaces (a font, a
 //! speaker) are written in double quotes; [`Captions::check`] refuses a quote inside one.
 
-use super::{Captions, Layout};
+use super::caption_text::{ENTRY_SEP, PAIR_SEP};
+use super::{Captions, Case, CensorStyle, Layout, Replace};
 
 /// The comment line written above it.
 pub const HELP: &str =
     "# captions <on|off> chars=<per line> lines=<per speaker> seconds=<longest> \
      [preview=on] [bold=on] [italic=on] [underline=on] [font=\"..\"] [size=<% of height>] \
      [position=<% from bottom>] [outline=off] [outline_width=<1-10>] [outline_color=#RRGGBB] \
-     [layout=stacked|side|topBottom] [protagonist=\"<speaker>\"] [template=\"<Resolve title>\"]";
+     [layout=stacked|side|topBottom] [protagonist=\"<speaker>\"] [template=\"<Resolve title>\"] \
+     [words=<per speaker>] [case=upper|lower|title] [punctuation=off] [censor=\"word|..\"] \
+     [censor_style=whole] [replace=\"from>to|..\"] [translate=<language code>]";
 
 pub fn write(c: &Captions) -> String {
     let d = Captions::default();
@@ -22,6 +25,10 @@ pub fn write(c: &Captions) -> String {
         c.lines,
         c.seconds
     );
+    // 5i's word limit only when set.
+    if c.words != 0 {
+        out.push_str(&format!(" words={}", c.words));
+    }
     // 5d's switches and 5f's underline only when on.
     for (k, on) in [
         ("preview", c.preview),
@@ -64,7 +71,40 @@ pub fn write(c: &Captions) -> String {
         c.template != d.template,
         format!("template=\"{}\"", c.template),
     );
+    // 5j's text options likewise; entries joined by `|`, a pair's halves by `>`.
+    put(c.case != d.case, format!("case={}", c.case.word()));
+    put(
+        c.punctuation != d.punctuation,
+        format!("punctuation={}", if c.punctuation { "on" } else { "off" }),
+    );
+    put(
+        !c.censor.is_empty(),
+        format!("censor=\"{}\"", c.censor.join(&ENTRY_SEP.to_string())),
+    );
+    put(
+        c.censor_style != d.censor_style,
+        format!("censor_style={}", c.censor_style.word()),
+    );
+    let pairs: Vec<String> = c
+        .replace
+        .iter()
+        .map(|r| format!("{}{PAIR_SEP}{}", r.from, r.to))
+        .collect();
+    put(
+        !pairs.is_empty(),
+        format!("replace=\"{}\"", pairs.join(&ENTRY_SEP.to_string())),
+    );
+    // 5k's translation only when set.
+    put(
+        !c.translate.is_empty(),
+        format!("translate={}", c.translate),
+    );
     out
+}
+
+/// A `|`-joined list, its empty entries dropped (so `censor=""` is none).
+fn entries(v: &str) -> impl Iterator<Item = &str> {
+    v.split(ENTRY_SEP).filter(|e| !e.trim().is_empty())
 }
 
 /// The line after `captions `.
@@ -91,6 +131,7 @@ pub fn parse(rest: &str) -> Result<Captions, String> {
         match k {
             "chars" => c.chars = whole()?,
             "lines" => c.lines = whole()?,
+            "words" => c.words = whole()?,
             "seconds" => c.seconds = number()?,
             "preview" => c.preview = flag()?,
             "bold" => c.bold = flag()?,
@@ -109,6 +150,24 @@ pub fn parse(rest: &str) -> Result<Captions, String> {
             }
             "protagonist" => c.protagonist = v.to_string(),
             "template" => c.template = v.to_string(),
+            "case" => c.case = Case::from_word(v).ok_or("expected upper, lower or title")?,
+            "punctuation" => c.punctuation = flag()?,
+            "censor" => c.censor = entries(v).map(str::to_string).collect(),
+            "censor_style" => {
+                c.censor_style = CensorStyle::from_word(v).ok_or("expected middle or whole")?;
+            }
+            "replace" => {
+                c.replace = entries(v)
+                    .map(|e| {
+                        let (from, to) = e.split_once(PAIR_SEP).ok_or("expected from>to")?;
+                        Ok(Replace {
+                            from: from.to_string(),
+                            to: to.to_string(),
+                        })
+                    })
+                    .collect::<Result<_, String>>()?;
+            }
+            "translate" => c.translate = v.to_string(),
             _ => return Err("unknown caption setting".into()),
         }
     }
@@ -190,6 +249,77 @@ mod tests {
              protagonist=\"Ana María\" template=\"My Title\""
         );
         assert_eq!(parse(line.strip_prefix("captions ").unwrap()).unwrap(), c);
+    }
+
+    #[test]
+    fn the_word_limit_is_written_only_when_set() {
+        let c = Captions {
+            on: true,
+            words: 1,
+            ..Default::default()
+        };
+        let line = write(&c);
+        assert_eq!(line, "captions on chars=42 lines=2 seconds=6 words=1");
+        assert_eq!(parse(line.strip_prefix("captions ").unwrap()).unwrap(), c);
+        assert_eq!(parse("on words=0").unwrap().words, 0);
+        for bad in ["on words=21", "on words=-1", "on words=two"] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_text_options_round_trip_and_defaults_are_not_written() {
+        let c = Captions {
+            on: true,
+            case: Case::Title,
+            punctuation: false,
+            censor: vec!["damn".into(), "what the heck".into()],
+            censor_style: CensorStyle::Whole,
+            replace: vec![
+                Replace {
+                    from: "gonna".into(),
+                    to: "going to".into(),
+                },
+                Replace {
+                    from: "um".into(),
+                    to: String::new(),
+                },
+            ],
+            ..Default::default()
+        };
+        let line = write(&c);
+        assert_eq!(
+            line,
+            "captions on chars=42 lines=2 seconds=6 case=title punctuation=off \
+             censor=\"damn|what the heck\" censor_style=whole replace=\"gonna>going to|um>\""
+        );
+        assert_eq!(parse(line.strip_prefix("captions ").unwrap()).unwrap(), c);
+        assert!(parse("on censor=\"\"").unwrap().censor.is_empty());
+        assert_eq!(parse("on case=asSpoken").unwrap().case, Case::AsSpoken);
+        for bad in [
+            "on case=shout",
+            "on punctuation=no",
+            "on censor_style=all",
+            "on replace=gonna",
+            "on replace=\">x\"",
+            "on censor=\"...\"",
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_translation_is_written_only_when_set() {
+        let c = Captions {
+            on: true,
+            translate: "fr".into(),
+            ..Default::default()
+        };
+        let line = write(&c);
+        assert_eq!(line, "captions on chars=42 lines=2 seconds=6 translate=fr");
+        assert_eq!(parse(line.strip_prefix("captions ").unwrap()).unwrap(), c);
+        assert_eq!(parse("on translate=").unwrap().translate, "");
+        assert!(parse("on translate=xx").is_err());
     }
 
     #[test]

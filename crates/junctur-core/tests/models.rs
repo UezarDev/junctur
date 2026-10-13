@@ -191,6 +191,122 @@ fn embeddings_are_unit_vectors_and_stable() {
     assert!(e.embed(&[0.0; 100]).unwrap().is_none());
 }
 
+#[test]
+#[ignore = "downloads models"]
+fn captions_translate_between_languages() {
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let mut m =
+        junctur_core::translate::model::Model::open(&cache::default_dir(), DevicePref::Cpu, &stop)
+            .unwrap();
+    let t0 = std::time::Instant::now();
+    let fr = m
+        .translate("Hola, ¿qué tal estás hoy?", "es", "fr")
+        .unwrap();
+    let en = m
+        .translate(
+            "No sé si vamos a poder terminar el directo a tiempo.",
+            "es",
+            "en",
+        )
+        .unwrap();
+    eprintln!("{fr} | {en} in {:.2} s", t0.elapsed().as_secs_f64());
+    assert!(
+        fr.to_lowercase().contains("bonjour") || fr.to_lowercase().contains("salut"),
+        "{fr}"
+    );
+    assert!(en.to_lowercase().contains("know"), "{en}");
+    // Speed on caption-length sentences, for the phase notes.
+    let lines = [
+        "Bueno, vamos a empezar con la partida de hoy.",
+        "¿Alguien sabe dónde está el último cofre?",
+        "Creo que tenemos que volver al pueblo antes de que se haga de noche.",
+        "Gracias a todos por estar aquí otra vez.",
+        "Eso fue increíble, no me lo esperaba para nada.",
+    ];
+    let t0 = std::time::Instant::now();
+    for _ in 0..4 {
+        for l in lines {
+            m.translate(l, "es", "en").unwrap();
+        }
+    }
+    let s = t0.elapsed().as_secs_f64();
+    eprintln!(
+        "20 sentences one at a time in {s:.2} s ({:.2} s each) on {:?}",
+        s / 20.0,
+        m.device
+    );
+    let batch: Vec<(&str, &str)> = lines
+        .iter()
+        .chain(&lines[..3])
+        .map(|l| (*l, "es"))
+        .collect();
+    let one: Vec<String> = batch
+        .iter()
+        .map(|(l, f)| m.translate(l, f, "en").unwrap())
+        .collect();
+    let t0 = std::time::Instant::now();
+    let mut together = Vec::new();
+    for _ in 0..4 {
+        together = m
+            .translate_batch(&batch, "en", false)
+            .unwrap()
+            .into_iter()
+            .map(Option::unwrap)
+            .collect();
+    }
+    let s = t0.elapsed().as_secs_f64();
+    eprintln!("4 batches of 8 in {s:.2} s ({:.2} s a sentence)", s / 32.0);
+    // The 8-bit weights are quantised per input, so a row's numbers shift a little with its
+    // batch-mates and a word may differ; the translation is the same sentence.
+    let same = together.iter().zip(&one).filter(|(a, b)| a == b).count();
+    assert!(
+        same >= 6 && together.iter().all(|t| !t.is_empty()),
+        "{together:?} / {one:?}"
+    );
+
+    // A run keeps its translations in the project folder, each sentence from the language its
+    // segment was heard in.
+    use junctur_core::transcribe::Segment;
+    use junctur_core::translate::{self, Sentence, Translations};
+    let d = workdir("translate");
+    let seg = |start: f64, lang: &str| Segment {
+        track: 0,
+        start,
+        end: start + 10.0,
+        lang: lang.into(),
+        model: String::new(),
+        words: Vec::new(),
+    };
+    let sentence = |start: f64, text: &str| Sentence {
+        track: 0,
+        start,
+        text: text.into(),
+    };
+    let sentences = [sentence(1.0, lines[0]), sentence(12.0, "Thanks, everyone.")];
+    let done = translate::run(
+        &d,
+        &cache::default_dir(),
+        "fr",
+        &sentences,
+        &[seg(0.0, "es"), seg(10.0, "en")],
+        &mut |_, _| {},
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!((done.translated, done.kept), (2, 0));
+    let t = Translations::load(&d);
+    assert!(
+        t.get("fr", lines[0]).is_some_and(|f| f != lines[0]),
+        "{t:?}"
+    );
+    eprintln!(
+        "{:?} {:?}",
+        t.get("fr", lines[0]),
+        t.get("fr", "Thanks, everyone.")
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// 5h: the word list reaches Whisper as prompt tokens, a long list cut to the prompt's room from
 /// the end, and a chunk decodes with it (no panic on the tokenizer's count, no failure). Turbo, on
 /// the CPU: about 1.6 GB downloaded on a first run.

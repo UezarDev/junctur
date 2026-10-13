@@ -3,14 +3,17 @@
   // defaults with the very same fields. Every field of `Captions` is here once, in parts the panel
   // places between its own sections (`switches`: export and preview, 5d; `style`: bold and italic,
   // 5d, underline, 5f; `look`: font, size, position, outline, 5g; `overlap`: layout and
-  // protagonist, 5g; `resolve`: the Text+ template, 5g; `cut`: how cues are cut, 5a) and Settings
-  // shows together (`all`); a field added to `Captions` goes into one part and shows in both. Number
-  // fields commit on change, inside the engine's limits (core edit/captions.rs); anything else snaps
-  // back to `value`. `names` (the recording's speakers, in the panel) are offered as protagonists;
-  // any name can be typed, so Settings' default can name a remembered voice.
+  // protagonist, 5g; `resolve`: the Text+ template, 5g; `cut`: how cues are cut, 5a, and the word
+  // limit, 5i; `text`: case, punctuation, censoring and replacements, 5j, in `CaptionText`)
+  // and Settings shows together (`all`); a field added to `Captions` goes into one part
+  // and shows in both. Number fields commit on change, inside the engine's limits (core
+  // edit/captions.rs); anything else snaps back to `value`. `names` (the recording's
+  // speakers, in the panel) are offered as protagonists; any name can be
+  // typed, so Settings' default can name a remembered voice.
   import type { CaptionLayout, Captions } from "./api";
+  import CaptionText from "./CaptionText.svelte";
 
-  type Part = "switches" | "style" | "look" | "overlap" | "resolve" | "cut" | "all";
+  type Part = "switches" | "style" | "look" | "overlap" | "resolve" | "cut" | "text" | "all";
 
   let {
     value,
@@ -36,13 +39,14 @@
   const LIMITS = {
     chars: { min: 10, max: 80, name: "Characters per line" },
     lines: { min: 1, max: 3, name: "Lines per speaker" },
+    words: { min: 0, max: 20, name: "Words per caption" },
     seconds: { min: 1, max: 15, name: "Longest caption" },
     size: { min: 2, max: 15, name: "Size" },
     position: { min: 0, max: 45, name: "Height from the bottom" },
     outlineWidth: { min: 1, max: 10, name: "Outline thickness" },
   } as const;
 
-  const WHOLE = new Set(["chars", "lines", "outlineWidth"]);
+  const WHOLE = new Set(["chars", "lines", "words", "outlineWidth"]);
 
   const LAYOUTS: { key: CaptionLayout; label: string }[] = [
     { key: "stacked", label: "Stacked, the later one above" },
@@ -185,6 +189,13 @@
     <span>{LIMITS.lines.name}</span>
     <input type="number" min="1" max="3" value={value.lines} {disabled} onchange={(e) => number(e, "lines")} />
   </label>
+  <label
+    class="field"
+    title="Most words a caption holds, for each speaker when people talk at once; 1 shows one word at a time, 0 has no limit"
+  >
+    <span>{LIMITS.words.name} (0: no limit)</span>
+    <input type="number" min="0" max="20" value={value.words} {disabled} onchange={(e) => number(e, "words")} />
+  </label>
   <label class="field">
     <span>{LIMITS.seconds.name} (s)</span>
     <input
@@ -198,6 +209,7 @@
     />
   </label>
 {/if}
+{#if shows("text")}<CaptionText {value} {disabled} {onChange} {onError} />{/if}
 
 <style>
   .check {

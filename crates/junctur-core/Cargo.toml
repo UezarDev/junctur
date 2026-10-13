@@ -19,3 +19,4 @@ sha2.workspace = true
 whisper-rs.workspace = true
 same-file.workspace = true
 bytemuck.workspace = true
+tokenizers.workspace = true

@@ -29,6 +29,7 @@ pub mod separate;
 pub mod signal;
 pub mod tracks;
 pub mod transcribe;
+pub mod translate;
 pub mod vad;
 pub mod voices;
 pub mod waves;

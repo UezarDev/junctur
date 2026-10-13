@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use sha2::{Digest, Sha256};
 
@@ -77,6 +78,32 @@ pub const WHISPER_LARGE_V3_Q5: Model = Model {
     license: "MIT",
 };
 
+/// M2M100 418M (MIT, Meta), the caption translation model (5k): one many-to-many model for 100
+/// languages. Xenova's ONNX export with its weights quantised to 8 bits, 288 MB of encoder and
+/// 344 MB of decoder (the decoder with and without its key/value cache merged in one file), pinned
+/// to a commit; the full-precision files are 1.1 and 1.3 GB.
+pub const TRANSLATE_ENCODER: Model = Model {
+    file: "m2m100_418m_encoder_int8.onnx",
+    url: "https://huggingface.co/Xenova/m2m100_418M/resolve/9c374f0b7aca709787cea97b047bfbbd1559d177/onnx/encoder_model_quantized.onnx",
+    sha256: "13a94e354a9140764eb81102d77d3ec6952d796e6f113c651eeb3c3443da0386",
+    license: "MIT",
+};
+
+pub const TRANSLATE_DECODER: Model = Model {
+    file: "m2m100_418m_decoder_int8.onnx",
+    url: "https://huggingface.co/Xenova/m2m100_418M/resolve/9c374f0b7aca709787cea97b047bfbbd1559d177/onnx/decoder_model_merged_quantized.onnx",
+    sha256: "007654bcabb6cea6fd3bde34ce933137b431330b3755781145d7b6906270b45a",
+    license: "MIT",
+};
+
+/// Its SentencePiece vocabulary as a Hugging Face `tokenizer.json` (8 MB), from the same commit.
+pub const TRANSLATE_TOKENIZER: Model = Model {
+    file: "m2m100_418m_tokenizer.json",
+    url: "https://huggingface.co/Xenova/m2m100_418M/resolve/9c374f0b7aca709787cea97b047bfbbd1559d177/tokenizer.json",
+    sha256: "03d9e111731c2d71f39a2c2a88499743e4c251385d07f0384b4349a23ba54363",
+    license: "MIT",
+};
+
 pub fn dir(cache_dir: &Path) -> PathBuf {
     cache_dir.join("models")
 }
@@ -84,6 +111,13 @@ pub fn dir(cache_dir: &Path) -> PathBuf {
 /// Path to `model`, downloading it first if missing. Downloads go to a `.part` file that is renamed
 /// only after the checksum matches, so an interrupted fetch never looks like a model.
 pub fn ensure(model: &Model, cache_dir: &Path) -> Result<PathBuf> {
+    ensure_or_stop(model, cache_dir, &AtomicBool::new(false))
+}
+
+/// [`ensure`], whose download ends with [`Error::Cancelled`] soon after `stop` is set: the
+/// translation model (5k) is fetched by a run the user can cancel, and its 630 MB would otherwise
+/// hold the cancel (and any run waiting on it) for minutes.
+pub fn ensure_or_stop(model: &Model, cache_dir: &Path, stop: &AtomicBool) -> Result<PathBuf> {
     let dir = dir(cache_dir);
     let path = dir.join(model.file);
     if path.is_file() {
@@ -97,17 +131,32 @@ pub fn ensure(model: &Model, cache_dir: &Path) -> Result<PathBuf> {
         );
         std::fs::remove_file(&path)?;
     }
+    if stop.load(Ordering::Relaxed) {
+        return Err(Error::Cancelled);
+    }
     std::fs::create_dir_all(&dir)?;
     let part = dir.join(format!("{}.part", model.file));
     eprintln!("junctur: downloading {} ...", model.file);
     // System curl (Windows 10+ ships it), like ffmpeg: an external program rather than a TLS stack.
-    let status = Command::new("curl")
+    let mut curl = Command::new("curl")
         .args(["-sSLf", "--retry", "2", "-o"])
         .arg(&part)
         .arg(model.url)
         .stdin(Stdio::null())
-        .status()
+        .spawn()
         .map_err(|e| Error::Download(format!("could not start curl: {e}")))?;
+    let status = loop {
+        if let Some(s) = curl.try_wait()? {
+            break s;
+        }
+        if stop.load(Ordering::Relaxed) {
+            let _ = curl.kill();
+            let _ = curl.wait();
+            let _ = std::fs::remove_file(&part);
+            return Err(Error::Cancelled);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
     if !status.success() {
         let _ = std::fs::remove_file(&part);
         return Err(Error::Download(format!("{} ({status})", model.url)));
@@ -208,6 +257,29 @@ mod tests {
         assert!(verified(&m, &path).unwrap(), "from the marker");
         std::fs::write(&path, b"abd!").unwrap();
         assert!(!verified(&m, &path).unwrap(), "changed since");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_stopped_fetch_is_cancelled_and_a_fetched_model_is_not() {
+        let d = std::env::temp_dir().join(format!("junctur-models-stop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let m = Model {
+            file: "m.onnx",
+            url: "http://127.0.0.1:9/never",
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            license: "",
+        };
+        let stop = AtomicBool::new(true);
+        assert!(matches!(
+            ensure_or_stop(&m, &d, &stop),
+            Err(Error::Cancelled)
+        ));
+        assert!(!dir(&d).join("m.onnx.part").exists());
+        // One already there is found whatever the stop says.
+        std::fs::create_dir_all(dir(&d)).unwrap();
+        std::fs::write(dir(&d).join("m.onnx"), b"abc").unwrap();
+        assert!(ensure_or_stop(&m, &d, &stop).is_ok());
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -11,7 +11,8 @@
   // caption, a line each; 5b's per-speaker files left beside it are listed. The remembered voices
   // are listed with Forget, and the speakers can be analysed again from the audio (5c), the seconds
   // picked for each voice cutting the windows; that reads the recording again, so it is a button,
-  // never automatic. The caption settings' own fields (export, preview, style, how cues are cut) are
+  // never automatic. The caption settings' own fields (export, preview, style, the text options of
+  // 5j and the translation of 5k, whose run `CaptionTranslation` shows, how cues are cut) are
   // `CaptionRules`, shared with Settings (2i); a list without
   // its own settings follows the user's defaults, and "Save as default" makes this recording's the
   // defaults.
@@ -19,6 +20,7 @@
   import * as api from "./api";
   import { captionFace, captionFont } from "./captionStyle";
   import CaptionRules from "./CaptionRules.svelte";
+  import CaptionTranslation from "./CaptionTranslation.svelte";
 
   let {
     edit,
@@ -223,6 +225,20 @@
         The SRT always stacks them in one caption, first to speak on top.
       </p>
 
+      <h3>Caption text</h3>
+      <CaptionRules value={captions} part="text" onChange={(c) => setCaptions(c)} {onError} />
+      <CaptionTranslation
+        {captions}
+        {source}
+        cuts={`${edit?.ranges.join(",") ?? ""}|${edit?.speakersKey ?? ""}|${edit?.fixesKey ?? ""}`}
+        {onError}
+      />
+      <p class="note">
+        What the captions show, in the SRT, in Resolve and in the preview; the transcript keeps the words as
+        spoken, so clearing one brings them back. A translation is made first, a sentence at a time on this
+        machine, then find and replace, case, punctuation and censoring apply to the translated words.
+      </p>
+
       <h3>How captions are cut</h3>
       <CaptionRules value={captions} part="cut" onChange={(c) => setCaptions(c)} {onError} />
       <div class="defaults">
@@ -243,7 +259,7 @@
       {/if}
       <p class="note">
         Cues follow the edited timeline, like the render and the FCPXML. When people talk at once, one caption
-        holds them all, each speaker on their own line in their colour; the line limit applies to each speaker.
+        holds them all, each speaker on their own line in their colour; the line and word limits apply to each speaker.
         In DaVinci Resolve import the file (File &gt; Import &gt; Subtitle) onto one subtitle track at the start
         of the timeline; the colours, bold, italic and underline come through. An SRT carries no size or position: set
         those in Resolve. Premiere Pro is untested and likely shows its default style.

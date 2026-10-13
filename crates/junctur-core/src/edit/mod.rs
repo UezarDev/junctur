@@ -5,6 +5,7 @@
 //! It is the one piece of state a project owns; everything else in the project folder is a cache
 //! that can be rebuilt. The source itself is never touched.
 
+mod caption_text;
 mod captions;
 mod captions_line;
 mod fixes;
@@ -20,6 +21,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+pub use caption_text::{Case, CensorStyle, Replace};
 pub use captions::{default_color, parse_color, Captions, Layout};
 pub use fixes::{check_fix, set_fix, Fix, Fixes, MAX_FIX};
 pub use format::{parse, FORMAT_VERSION};

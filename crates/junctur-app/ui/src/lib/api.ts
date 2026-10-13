@@ -125,6 +125,8 @@ export interface Captions {
   preview: boolean;
   chars: number;
   lines: number;
+  /** Most words per speaker in a caption, 0 for no limit, 1 for one word at a time (5i). */
+  words: number;
   seconds: number;
   /** Every caption bold / italic in the SRT (5d: Resolve's import applies both). */
   bold: boolean;
@@ -147,7 +149,21 @@ export interface Captions {
   protagonist: string;
   /** A Fusion Title's clip name in Resolve's media pool; empty for Junctur's own Text+. */
   template: string;
+  /** 5j's text options: what every caption output shows, never the transcript. */
+  case: CaptionCase;
+  /** Punctuation kept (true) or removed. */
+  punctuation: boolean;
+  /** Words or phrases masked, whole words, case aside. */
+  censor: string[];
+  censorStyle: CensorStyle;
+  /** Find and replace, whole words or phrases, case aside; an empty `to` removes them. */
+  replace: { from: string; to: string }[];
+  /** The language captions are shown in (5k), a code of `translationLanguages`; empty for as spoken. */
+  translate: string;
 }
+
+export type CaptionCase = "asSpoken" | "upper" | "lower" | "title";
+export type CensorStyle = "middle" | "whole";
 
 export type CaptionLayout = "stacked" | "side" | "topBottom";
 
@@ -372,6 +388,37 @@ export const exportCaptions = (path: string) => invoke<Exported>("export_caption
 export const captionCues = (aspect: number) => invoke<Cue[]>("caption_cues", { aspect });
 /** Sends the captions into DaVinci Resolve as Text+ clips through the Junctur script there (5g). */
 export const sendToResolve = () => invoke<Sent>("send_to_resolve");
+/** A caption translation run in the background (5k, src/translation.rs). */
+export interface TranslationRun {
+  /** The recording, as opened. */
+  file: string;
+  to: string;
+  done: number;
+  total: number;
+  running: boolean;
+  cancelled: boolean;
+  /** Sentences the run that ended left untranslated: no transcript language, or no usable translation. */
+  unknown: number;
+  failed: number;
+  error: string | null;
+}
+export interface TranslationStatus {
+  run: TranslationRun;
+  /** The open recording's caption sentences with no translation yet, of `sentences`. */
+  missing: number;
+  sentences: number;
+}
+export interface Language {
+  code: string;
+  name: string;
+}
+/** Translates the open recording's captions in the background, into their `translate` language. */
+export const translateCaptions = () => invoke<TranslationRun>("translate_captions");
+export const cancelTranslation = () => invoke<void>("cancel_translation");
+export const translationStatus = () => invoke<TranslationStatus>("translation_status");
+let languages: Promise<Language[]> | null = null;
+/** The languages captions can be translated into, by name; asked once. */
+export const translationLanguages = () => (languages ??= invoke<Language[]>("translation_languages"));
 /** Installs the Junctur script into Resolve's Scripts folder; resolves to its path. */
 export const installResolveScript = () => invoke<string>("install_resolve_script");
 export const voices = () => invoke<Voice[]>("voices");
@@ -429,6 +476,9 @@ export const onAnalysis = (f: (p: Progress) => void): Promise<UnlistenFn> =>
 
 export const onTranscription = (f: (t: Transcription) => void): Promise<UnlistenFn> =>
   listen<Transcription>("transcription", (e) => f(e.payload));
+
+export const onTranslation = (f: (r: TranslationRun) => void): Promise<UnlistenFn> =>
+  listen<TranslationRun>("translation", (e) => f(e.payload));
 
 export const onMixer = (f: (s: MixerState) => void): Promise<UnlistenFn> =>
   listen<MixerState>("mixer-state", (e) => f(e.payload));

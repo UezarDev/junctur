@@ -4,7 +4,9 @@
 //! underline (5d's research, `.planning/research/resolve-caption-styling.md`, and 5f). Font, size,
 //! position and outline reach Resolve only as Text+ clips sent through its scripting API (5g), so
 //! those fields drive that and the preview and the SRT ignores them, as it does the overlap layout
-//! and the protagonist (5g).
+//! and the protagonist (5g). The text options (5j: case, punctuation, censoring, find and replace)
+//! and the translation (5k) change the words every output shows, the SRT included, never the
+//! transcript.
 //!
 //! Also the two switches (5d): export (`on`: a render writes the caption file) and the preview over
 //! the picture in the editor, which are separate so captions can be watched without being written.
@@ -12,6 +14,8 @@
 //! edit list's line, or the caption defaults in `junctur/config.json`) still load.
 
 use serde::{Deserialize, Serialize};
+
+use super::caption_text::{self, Case, CensorStyle, Replace};
 
 // `default`: a settings file or a command missing a field (one a later round adds) takes the built-in
 // value instead of failing (2i); `deny_unknown_fields`: a misspelt one is an error rather than
@@ -29,6 +33,9 @@ pub struct Captions {
     pub chars: u32,
     /// Most lines in one cue, per speaker: people talking at once each get this many (5e).
     pub lines: u32,
+    /// Most words in one cue, per speaker like `lines`; 0 for no limit, 1 for one word at a time
+    /// (5i, short-form clips).
+    pub words: u32,
     /// Longest a cue stays on screen, in seconds.
     pub seconds: f64,
     /// Every caption bold (`<b>`), which Resolve's SRT import applies and its own export writes.
@@ -57,6 +64,19 @@ pub struct Captions {
     /// The Fusion Title clip in Resolve's media pool every caption is a copy of; empty for
     /// Junctur's own Text+ (5g).
     pub template: String,
+    /// The text options (5j, [`caption_text`]): what captions show, never the transcript.
+    pub case: Case,
+    /// Punctuation kept (the default) or removed.
+    pub punctuation: bool,
+    /// Words or phrases to hide, whole words, case aside.
+    pub censor: Vec<String>,
+    pub censor_style: CensorStyle,
+    /// Find and replace, applied before case and censoring.
+    pub replace: Vec<Replace>,
+    /// The language captions are shown in (5k, [`crate::translate`]), a code of
+    /// [`crate::translate::LANGUAGES`]; empty (the default) for the language spoken. The text
+    /// options above apply to the translated words.
+    pub translate: String,
 }
 
 /// Where the captions of people talking at once go (5g, Uezar: "stacked (up down) or sideways
@@ -99,6 +119,7 @@ impl Default for Captions {
             preview: false,
             chars: 42,
             lines: 2,
+            words: 0,
             seconds: 6.0,
             bold: false,
             italic: false,
@@ -112,12 +133,21 @@ impl Default for Captions {
             layout: Layout::Stacked,
             protagonist: String::new(),
             template: String::new(),
+            case: Case::AsSpoken,
+            punctuation: true,
+            censor: Vec::new(),
+            censor_style: CensorStyle::Middle,
+            replace: Vec::new(),
+            translate: String::new(),
         }
     }
 }
 
 pub const CHARS: std::ops::RangeInclusive<u32> = 10..=80;
 pub const LINES: std::ops::RangeInclusive<u32> = 1..=3;
+/// Words per speaker when limited (0 is no limit): 20 is about three full lines, past which the
+/// line limit cuts first.
+pub const WORDS: std::ops::RangeInclusive<u32> = 1..=20;
 pub const SECONDS: std::ops::RangeInclusive<f64> = 1.0..=15.0;
 pub const SIZE: std::ops::RangeInclusive<f64> = 2.0..=15.0;
 pub const POSITION: std::ops::RangeInclusive<f64> = 0.0..=45.0;
@@ -138,6 +168,13 @@ impl Captions {
                 "lines per speaker must be {} to {}",
                 LINES.start(),
                 LINES.end()
+            ));
+        }
+        if self.words != 0 && !WORDS.contains(&self.words) {
+            return Err(format!(
+                "words per caption must be {} to {}, or 0 for no limit",
+                WORDS.start(),
+                WORDS.end()
             ));
         }
         if !SECONDS.contains(&self.seconds) {
@@ -187,7 +224,13 @@ impl Captions {
                 return Err(format!("the {what} name cannot hold quotes or line breaks"));
             }
         }
-        Ok(())
+        if !self.translate.is_empty() && !crate::translate::known(&self.translate) {
+            return Err(format!(
+                "captions cannot be translated into {:?}",
+                self.translate
+            ));
+        }
+        caption_text::check(&self.censor, &self.replace)
     }
 
     /// The id of the speaker in `names` the protagonist names, if any (case and spaces aside).
@@ -241,6 +284,16 @@ mod tests {
             lines: 0,
             ..Default::default()
         }));
+        assert!(bad(Captions {
+            words: 21,
+            ..Default::default()
+        }));
+        assert!(Captions {
+            words: 1,
+            ..Default::default()
+        }
+        .check()
+        .is_ok());
         assert!(bad(Captions {
             seconds: 30.0,
             ..Default::default()
@@ -338,5 +391,32 @@ mod tests {
             ("Ana", "My Title")
         );
         assert!(serde_json::from_str::<Captions>(r#"{"layout":"diagonal"}"#).is_err());
+        // 5g's settings load 5i's word limit off; its own value reads back.
+        assert_eq!(g.words, 0);
+        let i: Captions = serde_json::from_str(r#"{"words":1}"#).unwrap();
+        assert_eq!(i.words, 1);
+        // 5i's settings load 5j's text as spoken; its own fields read back.
+        assert_eq!((i.case, i.punctuation), (Case::AsSpoken, true));
+        assert!(i.censor.is_empty() && i.replace.is_empty());
+        let j: Captions = serde_json::from_str(
+            r#"{"case":"title","punctuation":false,"censor":["damn"],"censorStyle":"whole","replace":[{"from":"gonna","to":"going to"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (j.case, j.punctuation, j.censor_style),
+            (Case::Title, false, CensorStyle::Whole)
+        );
+        assert_eq!(j.censor, ["damn"]);
+        assert_eq!(j.replace[0].to, "going to");
+        assert!(j.check().is_ok());
+        let bad: Captions = serde_json::from_str(r#"{"censor":["a|b"]}"#).unwrap();
+        assert!(bad.check().is_err());
+        // 5j's settings load 5k's captions untranslated; its own value reads back and is checked.
+        assert_eq!(j.translate, "");
+        let k: Captions = serde_json::from_str(r#"{"translate":"fr"}"#).unwrap();
+        assert_eq!(k.translate, "fr");
+        assert!(k.check().is_ok());
+        let bad: Captions = serde_json::from_str(r#"{"translate":"klingon"}"#).unwrap();
+        assert!(bad.check().is_err());
     }
 }
