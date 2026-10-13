@@ -11,7 +11,7 @@
 //! out-of-date notice.
 
 use junctur_core::config::{self, Config};
-use junctur_core::edit::Captions;
+use junctur_core::edit::{Captions, ExistingClips};
 use junctur_core::transcribe::ModelPref;
 use junctur_core::wordlist;
 use serde::{Deserialize, Serialize};
@@ -99,9 +99,15 @@ fn to_config(s: &Settings) -> Result<Config, String> {
     s.captions
         .check()
         .map_err(|e| format!("caption defaults: {e}"))?;
+    // What to do with clips in the way in Resolve (5n) is remembered per recording only: "Save as
+    // default" from a recording that remembered one starts the next asking.
+    let captions = Captions {
+        existing_clips: ExistingClips::Ask,
+        ..s.captions.clone()
+    };
     Ok(Config {
         whisper_model: (model != ModelPref::Auto).then_some(model),
-        captions: (s.captions != Captions::default()).then(|| s.captions.clone()),
+        captions: (captions != Captions::default()).then_some(captions),
         words: wordlist::normalize(&s.words),
     })
 }
@@ -217,6 +223,32 @@ mod tests {
         let c = to_config(&s).unwrap();
         assert_eq!(c.whisper_model, Some(ModelPref::LargeV3));
         assert_eq!(from_config(&c), s);
+    }
+
+    #[test]
+    fn a_recordings_remembered_choice_for_clips_in_resolve_never_becomes_a_default() {
+        // 5n: "Save as default" from a recording that remembered "new track" saves asking.
+        let s = Settings {
+            whisper_model: "auto".into(),
+            captions: Captions {
+                on: true,
+                existing_clips: ExistingClips::NewTrack,
+                ..Default::default()
+            },
+            words: vec![],
+        };
+        let saved = to_config(&s).unwrap().captions.unwrap();
+        assert!(saved.on);
+        assert_eq!(saved.existing_clips, ExistingClips::Ask);
+        // Only the choice differed from the defaults: nothing is written.
+        let only = Settings {
+            captions: Captions {
+                existing_clips: ExistingClips::Replace,
+                ..Default::default()
+            },
+            ..s
+        };
+        assert_eq!(to_config(&only).unwrap().captions, None);
     }
 
     #[test]

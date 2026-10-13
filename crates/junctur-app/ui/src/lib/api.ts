@@ -151,6 +151,9 @@ export interface Captions {
   template: string;
   /** 5m: with a template of the user's, keep its own look; Junctur sets only text, timing and colour. */
   keepLook: boolean;
+  /** 5n: what a send does with clips Junctur did not place in its captions' way; "ask" unless this
+   * recording remembered a choice. Never a default (Settings saves it as "ask"). */
+  existingClips: ExistingClips;
   /** 5j's text options: what every caption output shows, never the transcript. */
   case: CaptionCase;
   /** Punctuation kept (true) or removed. */
@@ -176,6 +179,10 @@ export type CaptionAnimation = "none" | "fade" | "pop" | "slide";
 
 export type CaptionCase = "asSpoken" | "upper" | "lower" | "title";
 export type CensorStyle = "middle" | "whole";
+
+/** 5n: clips Junctur did not place where its captions go in Resolve: ask, delete them, leave
+ * those captions out, or put the speaker's new captions on a track beside. */
+export type ExistingClips = "ask" | "replace" | "skip" | "newTrack";
 
 export type CaptionLayout = "stacked" | "side" | "topBottom";
 
@@ -211,6 +218,14 @@ export interface Sent {
   /** Text+ inputs the template did not take (a user's own title may lack some). */
   unstyled: string[];
   timeline: string;
+  /** 5n: clips Junctur did not place where new captions go; when not 0 nothing was changed in
+   * Resolve and the user is asked. `blocked`: the captions they are in the way of. */
+  inTheWay: number;
+  blocked: number;
+  /** 5n: what the choice did: clips deleted, captions left out, speakers put on a track beside. */
+  replaced: number;
+  skipped: number;
+  newTracks: number;
 }
 
 /** A Whisper model the Settings dialog offers (src/settings.rs). */
@@ -410,8 +425,10 @@ export const exportCaptions = (path: string) => invoke<Exported>("export_caption
 /** The captions as the export cuts them, for the preview over the picture (5d), placed on a
  * picture `aspect` (height over width) in shape (5g). */
 export const captionCues = (aspect: number) => invoke<Cue[]>("caption_cues", { aspect });
-/** Sends the captions into DaVinci Resolve as Text+ clips through the Junctur script there (5g). */
-export const sendToResolve = () => invoke<Sent>("send_to_resolve");
+/** Sends the captions into DaVinci Resolve as Text+ clips through the Junctur script there (5g);
+ * `existing` (5n) answers, for this send, a send that found clips Junctur did not place in the way. */
+export const sendToResolve = (existing?: ExistingClips) =>
+  invoke<Sent>("send_to_resolve", { existing: existing ?? null });
 /** A caption translation run in the background (5k, src/translation.rs). */
 export interface TranslationRun {
   /** The recording, as opened. */

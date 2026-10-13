@@ -291,6 +291,7 @@ local function world(opts)
         function it:GetFusionCompCount() return 1 end
         function it:GetFusionCompByIndex() return comp end
         function it:GetStart() return self.start end
+        function it:GetEnd() return self.start + self.length end
         return it
     end
 
@@ -446,6 +447,30 @@ local function request(clips, extra)
     for k, v in pairs(extra or {}) do r[k] = v end
     return r
 end
+-- A clip Junctur did not place (5n): a video clip or a still, with no Fusion comp.
+local function stub(start, length)
+    return { start = start, length = length,
+        GetStart = function(self) return self.start end,
+        GetEnd = function(self) return self.start + self.length end,
+        GetFusionCompCount = function() return 0 end }
+end
+-- A Text+ title on the timeline: the user's own (no tag), or with `recording`, another
+-- recording's caption.
+local function title_item(start, length, recording)
+    local tool = { data = { JuncturRecording = recording }, inputs = {} }
+    function tool:GetData(k) return self.data[k] end
+    function tool:SetData(k, v) self.data[k] = v end
+    function tool:SetInput(k, v) self.inputs[k] = v end
+    function tool:GetInput(k) return self.inputs[k] end
+    local comp = {}
+    function comp:FindTool(n) if n == "Template" then return tool end end
+    function comp:FindToolByID() return tool end
+    local it = stub(start, length)
+    it.tool = tool
+    it.GetFusionCompCount = function() return 1 end
+    it.GetFusionCompByIndex = function() return comp end
+    return it
+end
 
 -- info: the bundled bin imported once, its Text+ kept in a Junctur bin, the import's folder gone,
 -- the user's own AutoSubs bin untouched.
@@ -526,10 +551,10 @@ check(#w.tracks[2].items == 2 and #w.tracks[3].items == 1, "nothing placed twice
 check(w.appends == 1, "no retries for clips already there")
 for _, it in ipairs(w.tracks[2].items) do check(it.tool.data.JuncturKey ~= nil, "tagged") end
 
--- A clip in the way: that one fails, the rest are placed.
+-- Another recording's caption in the way: that one fails, the rest are placed. (A clip Junctur
+-- did not place is asked about instead, 5n, below.)
 w = world()
-local blocker = { start = 86430, GetStart = function(self) return self.start end,
-    GetFusionCompCount = function() return 0 end }
+local blocker = title_item(86430, 10, "zzz")
 w.m.handlers.place(request({ clip(1, 86400, "a") }))
 table.insert(w.tracks[2].items, blocker)
 r = w.m.handlers.place(request({ clip(1, 86400, "a"), clip(1, 86430, "b"), clip(1, 86460, "c") }))
@@ -692,7 +717,7 @@ local names = {}
 for k = 1, list.count do names[k] = list["t" .. k] end
 check(table.concat(names, ",") == "Lower third,My Title,Basic Template",
     "templates: " .. table.concat(names, ","))
-check(w.m.handlers.info({ template = "" }).script == "5m", "the script says which it is")
+check(w.m.handlers.info({ template = "" }).script == "5n", "the script says which it is")
 -- No project open: an error, not an empty list.
 check(world({ no_project = true }).m.handlers.templates().error ~= nil, "no project")
 
@@ -768,5 +793,103 @@ for _, key in ipairs({ "Font", "Style", "TextSize", "TextPosition", "OutlineEnab
     check(m[key] == nil, "kept look, yet the macro's " .. key .. " set")
 end
 check(it.tool.inputs.Underline == nil, "kept look, yet Underline set")
+
+-- 5n: clips Junctur did not place where new captions go on its tracks. Each world: a first send
+-- placed Ana's caption at 86400 and Bo's at 86500; then the user put on Ana's track a title of
+-- their own starting on the very frame the next caption does, a video clip over two more
+-- captions, and a clip clear of every caption. The next send keeps Ana's, drops Bo's, and adds
+-- three captions for Ana (two of them meeting the video clip) and one for Bo.
+local function crowded(opts)
+    local w = world(opts)
+    w.m.handlers.place(request({ clip(1, 86400, "a"), clip(2, 86500, "old") }))
+    w.title, w.video, w.clear = title_item(86430, 10), stub(86470, 30), stub(87000, 10)
+    for _, it in ipairs({ w.title, w.video, w.clear }) do table.insert(w.tracks[2].items, it) end
+    w.ana = w.tracks[2].items[1]
+    return w
+end
+local next_send = { clip(1, 86400, "a2"), clip(1, 86430, "b"), clip(1, 86460, "c"),
+    clip(1, 86490, "d"), clip(2, 86400, "e") }
+local function has(items, x)
+    for _, it in ipairs(items) do if it == x then return true end end
+    return false
+end
+local function untouched(w, what)
+    check(#w.tracks == 3 and #w.tracks[2].items == 4 and #w.tracks[3].items == 1, what .. ": tracks")
+    check(w.ana.tool.inputs.StyledText == "a", what .. ": Ana's caption restyled")
+    check(w.tracks[3].items[1].tool.inputs.StyledText == "old", what .. ": Bo's old caption removed")
+    check(w.title.tool.data.JuncturKey == nil and next(w.title.tool.inputs) == nil,
+        what .. ": the user's title touched")
+end
+
+-- Asked (no choice sent, or one not known): the clips and the captions they are in the way of
+-- counted, and nothing changed.
+w = crowded()
+r = w.m.handlers.place(request(next_send))
+check(r.inTheWay == 2 and r.blocked == 3 and r.placed == nil and r.error == nil,
+    "asked: " .. tostring(r.inTheWay) .. " " .. tostring(r.blocked))
+untouched(w, "asked")
+r = w.m.handlers.place(request(next_send, { existing = "merge" }))
+check(r.inTheWay == 2, "an unknown choice asks")
+untouched(w, "unknown choice")
+
+-- A clip of the user's clear of every caption is no reason to ask.
+w = crowded()
+r = w.m.handlers.place(request({ clip(1, 86400, "a"), clip(1, 86600, "far") }))
+check(r.inTheWay == nil and r.placed == 1 and r.removed == 1, "clear clip: " .. tostring(r.inTheWay))
+check(has(w.tracks[2].items, w.clear), "the clear clip kept")
+
+-- Skip: the three captions meeting the user's clips are left out, the rest done as 5g.
+w = crowded()
+r = w.m.handlers.place(request(next_send, { existing = "skip" }))
+check(r.skipped == 3 and r.placed == 1 and r.restyled == 1 and r.removed == 1 and r.failed == 0,
+    "skip: " .. tostring(r.firstError))
+check(r.replaced == 0 and r.newTracks == 0, "skip did nothing else")
+check(#w.tracks[2].items == 4 and has(w.tracks[2].items, w.video), "the user's clips stay")
+check(w.title.tool.data.JuncturKey == nil and next(w.title.tool.inputs) == nil,
+    "skip: the title is not taken for the caption starting on its frame")
+check(w.tracks[3].items[1].tool.inputs.StyledText == "e", "Bo's placed")
+
+-- Replace: only the user's clips a caption meets are deleted, then every caption placed.
+w = crowded()
+r = w.m.handlers.place(request(next_send, { existing = "replace" }))
+check(r.replaced == 2 and r.placed == 4 and r.restyled == 1 and r.failed == 0,
+    "replace: " .. tostring(r.firstError))
+check(not has(w.tracks[2].items, w.title) and not has(w.tracks[2].items, w.video), "deleted")
+check(has(w.tracks[2].items, w.clear) and #w.tracks[2].items == 5, "the clear clip kept")
+for _, it in ipairs(w.tracks[2].items) do
+    if it ~= w.clear then check(it.tool.data.JuncturRecording == "abc", "replace: placed and tagged") end
+end
+-- Resolve refusing the delete: an error, and nothing changed.
+w = crowded({ no_delete = true })
+r = w.m.handlers.place(request(next_send, { existing = "replace" }))
+check(r.error ~= nil and r.error:find("nothing was changed") ~= nil, "refused delete: " .. tostring(r.error))
+untouched(w, "refused delete")
+
+-- A new track: Ana's new captions on "Junctur 1 Ana (2)", her caption already placed restyled
+-- where it is, Bo's on his own; the user's clips untouched.
+w = crowded()
+r = w.m.handlers.place(request(next_send, { existing = "newTrack" }))
+check(r.newTracks == 1 and r.placed == 4 and r.restyled == 1 and r.removed == 1 and r.failed == 0,
+    "new track: " .. tostring(r.firstError))
+check(#w.tracks == 4 and w.tracks[4].name == "Junctur 1 Ana (2)" and #w.tracks[4].items == 3,
+    "the new track")
+check(#w.tracks[2].items == 4 and w.ana.tool.inputs.StyledText == "a2", "Ana's own track")
+check(w.title.tool.data.JuncturKey == nil and next(w.title.tool.inputs) == nil, "title untouched")
+-- Sent again, remembered: everything restyled in place, no further track.
+r = w.m.handlers.place(request(next_send, { existing = "newTrack" }))
+check(r.restyled == 5 and r.placed == 0 and r.newTracks == 0 and #w.tracks == 4, "resent")
+-- A new caption meeting a clip of the user's again goes on the same track beside.
+local more = { clip(1, 86995, "f") }
+for _, c in ipairs(next_send) do more[#more + 1] = c end
+r = w.m.handlers.place(request(more, { existing = "newTrack" }))
+check(r.placed == 1 and r.newTracks == 1 and #w.tracks == 4 and #w.tracks[4].items == 4,
+    "the same track beside: " .. tostring(r.firstError))
+
+-- A track "(2)" holding a clip of the user's where Ana's captions go: "(3)" is used.
+w = crowded()
+w.tracks[4] = { name = "Junctur 1 Ana (2)", items = { stub(86440, 60) } }
+r = w.m.handlers.place(request(next_send, { existing = "newTrack" }))
+check(r.placed == 4 and #w.tracks == 5 and w.tracks[5].name == "Junctur 1 Ana (3)", "(3)")
+check(#w.tracks[4].items == 1, "(2) left alone")
 
 print("ALL OK")

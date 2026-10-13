@@ -85,14 +85,68 @@
     call(() => api.setCaptions({ ...captions, ...change }));
   }
 
-  // Send to Resolve (5g): one at a time; the reply says what landed.
+  // Send to Resolve (5g): one at a time; the reply says what landed. A send that finds clips
+  // Junctur did not place where its captions go (5n) changes nothing and comes back with them
+  // counted: `inTheWay` holds the question until the user picks or cancels.
   let sending = $state(false);
   let sentLines = $state<string[] | null>(null);
-  async function sendResolve() {
+  let inTheWay = $state<{ clips: number; captions: number } | null>(null);
+  // New track first: the one choice that never loses anything.
+  let choice = $state<api.ExistingClips>("newTrack");
+  let remember = $state(false);
+  const CHOICES: { value: api.ExistingClips; label: string; note: string }[] = [
+    {
+      value: "newTrack",
+      label: "Put them on a new track",
+      note: "That speaker's new captions go on a track beside theirs; your clips stay as they are.",
+    },
+    {
+      value: "replace",
+      label: "Replace those clips",
+      note: "Deletes only the clips a caption overlaps, then places every caption.",
+    },
+    {
+      value: "skip",
+      label: "Skip those captions",
+      note: "Your clips stay; the captions they overlap are not placed.",
+    },
+  ];
+  const CHOSEN: Record<api.ExistingClips, string> = {
+    ask: "ask",
+    newTrack: "put Junctur's captions on a new track",
+    replace: "replace them",
+    skip: "skip the captions they overlap",
+  };
+  // A question about one recording's send is not answered for the next one opened.
+  $effect(() => {
+    void source;
+    inTheWay = null;
+  });
+  // The choice made in the question, remembered for this recording first when asked to.
+  async function answer() {
+    const picked = choice;
+    if (remember && captions) {
+      try {
+        await api.setCaptions({ ...captions, existingClips: picked });
+      } catch (e) {
+        onError(String(e));
+        return;
+      }
+    }
+    await sendResolve(picked);
+  }
+  async function sendResolve(existing?: api.ExistingClips) {
     sending = true;
     sentLines = null;
+    inTheWay = null;
     try {
-      const r = await api.sendToResolve();
+      const r = await api.sendToResolve(existing);
+      if (r.inTheWay > 0) {
+        choice = "newTrack";
+        remember = false;
+        inTheWay = { clips: r.inTheWay, captions: r.blocked };
+        return;
+      }
       const n = (k: number, what: string) => `${k.toLocaleString()} ${what}`;
       // 5l's two are not inputs a template lacks but a kind of template it is not.
       const MOTION = ["word highlight", "animation"];
@@ -100,6 +154,11 @@
       const inputs = r.unstyled.filter((u) => !MOTION.includes(u));
       sentLines = [
         `On "${r.timeline}": ${n(r.placed, "placed")}, ${n(r.restyled, "updated")}, ${n(r.removed, "removed")}.`,
+        ...(r.replaced > 0 ? [`${n(r.replaced, r.replaced === 1 ? "clip of yours replaced" : "clips of yours replaced")}.`] : []),
+        ...(r.skipped > 0 ? [`${n(r.skipped, "skipped")}, where your clips are.`] : []),
+        ...(r.newTracks > 0
+          ? [`${n(r.newTracks, r.newTracks === 1 ? "speaker's" : "speakers'")} new captions on a track beside theirs ("… (2)").`]
+          : []),
         ...(r.failed > 0 ? [`${n(r.failed, "not placed")}: ${r.firstError ?? "no reason given"}`] : []),
         ...(r.failed === 0 && r.firstError ? [r.firstError] : []),
         ...(inputs.length > 0
@@ -282,9 +341,42 @@
 
       <h3>Send to Resolve</h3>
       <CaptionRules value={captions} part="resolve" onChange={(c) => setCaptions(c)} {onError} />
-      <button class="export" onclick={sendResolve} disabled={sending || !source}>
+      <button class="export" onclick={() => sendResolve()} disabled={sending || !source}>
         {sending ? "Sending…" : "Send to Resolve"}
       </button>
+      {#if inTheWay}
+        <div class="ask" role="group" aria-label="Clips already on Junctur's tracks">
+          <p>
+            {inTheWay.clips.toLocaleString()}
+            {inTheWay.clips === 1 ? "clip" : "clips"} Junctur did not place
+            {inTheWay.clips === 1 ? "is" : "are"} where {inTheWay.captions.toLocaleString()}
+            {inTheWay.captions === 1 ? "caption goes" : "captions go"}, on Junctur's tracks. Nothing was changed
+            in Resolve.
+          </p>
+          {#each CHOICES as c (c.value)}
+            <label class="choice">
+              <input type="radio" name="existing-clips" value={c.value} bind:group={choice} />
+              <span>{c.label}<span class="note"> {c.note}</span></span>
+            </label>
+          {/each}
+          <label class="choice">
+            <input type="checkbox" bind:checked={remember} />
+            <span>Remember for this recording</span>
+          </label>
+          <div class="defaults">
+            <button onclick={() => (inTheWay = null)} disabled={sending}>Cancel</button>
+            <button onclick={answer} disabled={sending || !source}>Send</button>
+          </div>
+        </div>
+      {/if}
+      {#if captions.existingClips !== "ask"}
+        <div class="defaults">
+          <span class="note">
+            Clips Junctur did not place in the way: {CHOSEN[captions.existingClips]} (remembered for this recording).
+          </span>
+          <button onclick={() => setCaptions({ existingClips: "ask" })}>Ask again</button>
+        </div>
+      {/if}
       {#if sentLines}
         {#each sentLines as line (line)}<p class="done">{line}</p>{/each}
       {/if}
@@ -303,7 +395,9 @@
         background, these settings set the rest. With "Keep the template's look" Junctur sets only each
         caption's text, timing and speaker colour, so the font, size, position and outline are the template's:
         people talking at once then share its spot and overlap. Picking another template, or switching its look
-        on or off, replaces the captions on the next send.
+        on or off, replaces the captions on the next send. When clips Junctur did not place (yours, or captions
+        whose tags Resolve lost) are where new captions go on its tracks, Junctur changes nothing and asks:
+        put the captions on a new track, replace only the clips they overlap, or skip those captions.
       </p>
 
       <h3>Remembered voices</h3>
@@ -418,5 +512,23 @@
     color: var(--good);
     font-size: 12px;
     word-break: break-all;
+  }
+  /* 5n: the question when clips Junctur did not place are in its captions' way. */
+  .ask {
+    margin-top: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .ask p {
+    margin: 0 0 6px;
+  }
+  .choice {
+    display: flex;
+    gap: 6px;
+    align-items: flex-start;
+    margin-top: 4px;
   }
 </style>

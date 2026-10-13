@@ -25,7 +25,9 @@ use crate::export::srt::Cue;
 
 /// Installs (or refreshes) the script, asks Resolve for the open timeline and the template, then
 /// places `cues` on it, laid out for that timeline's shape (side-by-side lines are wrapped to its
-/// width).
+/// width). Clips Junctur did not place in the new captions' way are dealt with as
+/// `c.existing_clips` says (5n): asking changes nothing and comes back with
+/// [`Sent::in_the_way`] counted, for the app to ask the user and send again with their choice.
 pub fn send(cues: &[Cue], edit: &EditList, c: &Captions) -> Result<Sent, String> {
     if cues.is_empty() {
         return Err("no captions to send: the transcript has no kept words yet".into());
@@ -39,8 +41,10 @@ pub fn send(cues: &[Cue], edit: &EditList, c: &Captions) -> Result<Sent, String>
             ("animated", c.animated().into()),
         ],
     )?;
-    // A script from before 5m would ignore `keep` and style the template with Junctur's look.
-    if c.keeps_look() && !info.contains_key("script") {
+    // A script from before 5n would ignore `existing` and place over clips the user put on
+    // Junctur's tracks without asking (and one before 5m would ignore `keep` too), so every send
+    // needs this round's script.
+    if !reply::script_is_current(&info) {
         return Err(OLDER_SCRIPT.into());
     }
     let timeline = reply::timeline(&info)?;

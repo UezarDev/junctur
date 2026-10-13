@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use junctur_core::edit::{Captions, EditList, Speakers};
+use junctur_core::edit::{Captions, EditList, ExistingClips, Speakers};
 use junctur_core::export::layout::{self, Placed};
 use junctur_core::export::srt;
 use junctur_core::export::{self, CaptionFiles};
@@ -723,8 +723,17 @@ impl Core {
     /// for the Resolve timeline's shape, to the Junctur script running there. Blocks until Resolve
     /// answers (minutes for a long recording), so the command runs it off the async runtime.
     /// Refused, like the export, while translated captions are not all translated (5k).
-    pub fn send_to_resolve(&self) -> Result<junctur_core::resolve::Sent, String> {
-        let (list, captions, words, fps) = self.caption_source()?;
+    /// `existing`: what to do this once with clips Junctur did not place in the captions' way
+    /// (5n), the user's answer when the send before asked; else the recording's remembered
+    /// choice, or asking.
+    pub fn send_to_resolve(
+        &self,
+        existing: Option<ExistingClips>,
+    ) -> Result<junctur_core::resolve::Sent, String> {
+        let (list, mut captions, words, fps) = self.caption_source()?;
+        if let Some(e) = existing {
+            captions.existing_clips = e;
+        }
         captions.check()?;
         let tracked: Vec<_> = words
             .tracks

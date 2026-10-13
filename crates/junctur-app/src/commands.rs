@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use junctur_core::edit::Captions;
+use junctur_core::edit::{Captions, ExistingClips};
 use junctur_core::export::layout::Placed;
 use junctur_core::resolve::Sent;
 use serde::Serialize;
@@ -469,11 +469,15 @@ pub async fn caption_cues(app: State<'_, App>, aspect: f64) -> Result<Vec<Placed
 
 /// Sends the captions into DaVinci Resolve as Text+ clips (5g), through the Junctur script running
 /// there; installs or refreshes that script first. Off the async runtime: Resolve can take minutes
-/// over a long recording.
+/// over a long recording. `existing` (5n): the user's answer to a send that found clips Junctur
+/// did not place in the captions' way, for this send only.
 #[tauri::command]
-pub async fn send_to_resolve(app: State<'_, App>) -> Result<Sent, String> {
+pub async fn send_to_resolve(
+    app: State<'_, App>,
+    existing: Option<ExistingClips>,
+) -> Result<Sent, String> {
     let core = app.core()?;
-    tauri::async_runtime::spawn_blocking(move || core.send_to_resolve())
+    tauri::async_runtime::spawn_blocking(move || core.send_to_resolve(existing))
         .await
         .map_err(|e| e.to_string())?
 }

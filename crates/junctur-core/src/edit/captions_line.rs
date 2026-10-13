@@ -5,7 +5,7 @@
 //! speaker) are written in double quotes; [`Captions::check`] refuses a quote inside one.
 
 use super::caption_text::{ENTRY_SEP, PAIR_SEP};
-use super::{Animation, Captions, Case, CensorStyle, Layout, Replace};
+use super::{Animation, Captions, Case, CensorStyle, ExistingClips, Layout, Replace};
 
 /// The comment line written above it.
 pub const HELP: &str =
@@ -13,6 +13,7 @@ pub const HELP: &str =
      [preview=on] [bold=on] [italic=on] [underline=on] [font=\"..\"] [size=<% of height>] \
      [position=<% from bottom>] [outline=off] [outline_width=<1-10>] [outline_color=#RRGGBB] \
      [layout=stacked|side|topBottom] [protagonist=\"<speaker>\"] [template=\"<Resolve title>\"] [keep_look=on] \
+     [existing_clips=replace|skip|newTrack] \
      [words=<per speaker>] [case=upper|lower|title] [punctuation=off] [censor=\"word|..\"] \
      [censor_style=whole] [replace=\"from>to|..\"] [translate=<language code>] [highlight=on] \
      [highlight_color=#RRGGBB] [animation=fade|pop|slide] [animation_length=<seconds>]";
@@ -74,6 +75,11 @@ pub fn write(c: &Captions) -> String {
     );
     // 5m's switch only when on.
     put(c.keep_look, "keep_look=on".to_string());
+    // 5n's remembered choice only when there is one.
+    put(
+        c.existing_clips != d.existing_clips,
+        format!("existing_clips={}", c.existing_clips.word()),
+    );
     // 5j's text options likewise; entries joined by `|`, a pair's halves by `>`.
     put(c.case != d.case, format!("case={}", c.case.word()));
     put(
@@ -171,6 +177,10 @@ pub fn parse(rest: &str) -> Result<Captions, String> {
             "protagonist" => c.protagonist = v.to_string(),
             "template" => c.template = v.to_string(),
             "keep_look" => c.keep_look = flag()?,
+            "existing_clips" => {
+                c.existing_clips =
+                    ExistingClips::from_word(v).ok_or("expected ask, replace, skip or newTrack")?;
+            }
             "case" => c.case = Case::from_word(v).ok_or("expected upper, lower or title")?,
             "punctuation" => c.punctuation = flag()?,
             "censor" => c.censor = entries(v).map(str::to_string).collect(),
@@ -401,6 +411,38 @@ mod tests {
         assert_eq!(parse(line.strip_prefix("captions ").unwrap()).unwrap(), c);
         assert!(!parse("on keep_look=off").unwrap().keep_look);
         assert!(parse("on keep_look=yes").is_err());
+    }
+
+    #[test]
+    fn a_remembered_choice_for_clips_in_the_way_is_written_only_when_there_is_one() {
+        // 5n: asking (the default) is not written, so a list that never chose reads in 5m.
+        let ask = Captions {
+            on: true,
+            ..Default::default()
+        };
+        assert!(!write(&ask).contains("existing_clips"));
+        for (choice, word) in [
+            (ExistingClips::Replace, "replace"),
+            (ExistingClips::Skip, "skip"),
+            (ExistingClips::NewTrack, "newTrack"),
+        ] {
+            let c = Captions {
+                existing_clips: choice,
+                ..ask.clone()
+            };
+            let line = write(&c);
+            assert_eq!(
+                line,
+                format!("captions on chars=42 lines=2 seconds=6 existing_clips={word}")
+            );
+            assert_eq!(parse(line.strip_prefix("captions ").unwrap()).unwrap(), c);
+        }
+        assert_eq!(
+            parse("on existing_clips=ask").unwrap().existing_clips,
+            ExistingClips::Ask
+        );
+        assert!(parse("on existing_clips=overwrite").is_err());
+        assert!(parse("on existing_clips=new_track").is_err());
     }
 
     #[test]

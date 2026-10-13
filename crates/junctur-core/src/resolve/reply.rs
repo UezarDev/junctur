@@ -99,6 +99,16 @@ pub struct Sent {
     pub unstyled: Vec<String>,
     /// The timeline they went on.
     pub timeline: String,
+    /// Clips Junctur did not place that sit where new captions go on its tracks (5n), found by a
+    /// send asking first: when not zero, nothing was changed in Resolve and the user is asked to
+    /// replace, skip or use a new track. `blocked` is how many captions they are in the way of.
+    pub in_the_way: usize,
+    pub blocked: usize,
+    /// What the choice did (5n): those clips deleted, the captions left out, the tracks added
+    /// beside a speaker's for its new captions.
+    pub replaced: usize,
+    pub skipped: usize,
+    pub new_tracks: usize,
 }
 
 /// The script's own error, if it answered with one.
@@ -148,8 +158,25 @@ pub fn sent(a: &HashMap<String, String>, timeline: &str) -> Sent {
             })
             .unwrap_or_default(),
         timeline: timeline.to_string(),
+        in_the_way: n("inTheWay"),
+        blocked: n("blocked"),
+        replaced: n("replaced"),
+        skipped: n("skipped"),
+        new_tracks: n("newTracks"),
     }
 }
+
+/// Whether the script answering `info` is this round's or newer (5n): it says which it is
+/// (`script`, 5m on), compared by length then text so "5n" < "5aa". One from before it would ignore
+/// what a send asks of it now (asking before placing over the user's clips).
+pub fn script_is_current(info: &HashMap<String, String>) -> bool {
+    let version = |v: &str| (v.len(), v.to_string());
+    info.get("script")
+        .is_some_and(|v| version(v.trim()) >= version(SCRIPT))
+}
+
+/// The script version this Junctur needs (`junctur.lua`'s `SCRIPT`).
+pub const SCRIPT: &str = "5n";
 
 /// The Fusion Titles a `templates` request found in the media pool (5m), in the script's order
 /// (`count`, then `t1..tN`), each trimmed by the rule the script and the send use
@@ -209,6 +236,11 @@ mod tests {
         assert_eq!((s.placed, s.removed, s.failed), (3, 1, 0));
         assert_eq!(s.first_error, None);
         assert_eq!(s.unstyled, ["Underline", "Thickness2"]);
+        // A send before 5n's fields, or one that found nothing in the way: all zero.
+        assert_eq!(
+            (s.in_the_way, s.blocked, s.replaced, s.skipped, s.new_tracks),
+            (0, 0, 0, 0, 0)
+        );
         // Another request's answer, or one cut off mid-write, is not this one's.
         assert!(answer(&text, "1").is_none());
         assert!(answer("JuncturReply = \"2:7061f\"", "2").is_none());
@@ -240,6 +272,36 @@ mod tests {
         assert!(timeline(&bad).is_err());
         let e: HashMap<String, String> = [("error".to_string(), "No timeline".to_string())].into();
         assert_eq!(error(&e).as_deref(), Some("No timeline"));
+    }
+
+    #[test]
+    fn clips_in_the_way_and_what_was_done_with_them_are_read() {
+        let text = format!(
+            "JuncturReply = \"3:{}\"",
+            hex("inTheWay\t2\nblocked\t3\nplaced\t0")
+        );
+        let s = sent(&answer(&text, "3").unwrap(), "Main");
+        assert_eq!((s.in_the_way, s.blocked, s.placed), (2, 3, 0));
+        let text = format!(
+            "JuncturReply = \"4:{}\"",
+            hex("placed\t5\nreplaced\t1\nskipped\t2\nnewTracks\t1")
+        );
+        let s = sent(&answer(&text, "4").unwrap(), "Main");
+        assert_eq!((s.replaced, s.skipped, s.new_tracks), (1, 2, 1));
+    }
+
+    #[test]
+    fn only_a_script_of_this_round_or_newer_is_current() {
+        let info = |v: Option<&str>| -> HashMap<String, String> {
+            v.map(|v| [("script".to_string(), v.to_string())].into())
+                .unwrap_or_default()
+        };
+        assert!(!script_is_current(&info(None)));
+        assert!(!script_is_current(&info(Some("5m"))));
+        assert!(script_is_current(&info(Some("5n"))));
+        assert!(script_is_current(&info(Some("5o"))));
+        assert!(script_is_current(&info(Some("5aa"))));
+        assert!(!script_is_current(&info(Some(""))));
     }
 
     #[test]

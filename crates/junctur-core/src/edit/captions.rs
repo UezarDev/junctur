@@ -70,6 +70,11 @@ pub struct Captions {
     /// so a title styled in Resolve looks as styled. Off, Junctur's look wins (5g). Ignored with
     /// Junctur's own template, whose look is these settings.
     pub keep_look: bool,
+    /// What a send to Resolve does with clips Junctur did not place that are in its captions' way
+    /// on its tracks (5n): ask (the default), or the choice remembered for this recording. Kept on
+    /// the recording's own `captions` line; never a default (`to_config` in the app stores it as
+    /// `ask`), so one recording's choice does not reach the next.
+    pub existing_clips: ExistingClips,
     /// The text options (5j, [`caption_text`]): what captions show, never the transcript.
     pub case: Case,
     /// Punctuation kept (the default) or removed.
@@ -127,6 +132,45 @@ impl Animation {
         ]
         .into_iter()
         .find(|a| a.word() == w)
+    }
+}
+
+/// What a send to Resolve does with clips Junctur did not place (no tag of its own) that sit where
+/// its new captions go on the tracks it places on (5n, after auto-subs' replace / skip / new track).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExistingClips {
+    /// Change nothing and ask the user, with the count found.
+    #[default]
+    Ask,
+    /// Delete those clips (only the ones a caption overlaps), then place.
+    Replace,
+    /// Leave them; the captions they overlap are not placed.
+    Skip,
+    /// Place that speaker's new captions on a track of their own beside it (`<track> (2)`).
+    NewTrack,
+}
+
+impl ExistingClips {
+    /// The word on the edit list's `captions` line, in the config file and in the request.
+    pub fn word(self) -> &'static str {
+        match self {
+            ExistingClips::Ask => "ask",
+            ExistingClips::Replace => "replace",
+            ExistingClips::Skip => "skip",
+            ExistingClips::NewTrack => "newTrack",
+        }
+    }
+
+    pub fn from_word(w: &str) -> Option<Self> {
+        [
+            ExistingClips::Ask,
+            ExistingClips::Replace,
+            ExistingClips::Skip,
+            ExistingClips::NewTrack,
+        ]
+        .into_iter()
+        .find(|e| e.word() == w)
     }
 }
 
@@ -193,6 +237,7 @@ impl Default for Captions {
             protagonist: String::new(),
             template: String::new(),
             keep_look: false,
+            existing_clips: ExistingClips::Ask,
             case: Case::AsSpoken,
             punctuation: true,
             censor: Vec::new(),
@@ -557,6 +602,11 @@ mod tests {
             serde_json::from_str(r#"{"keepLook":true,"template":" My Title "}"#).unwrap();
         assert!(m.keeps_look());
         assert!(serde_json::from_str::<Captions>(r#"{"animation":"spin"}"#).is_err());
+        // 5m's settings load 5n's choice as asking; its own value reads back.
+        assert_eq!(m.existing_clips, ExistingClips::Ask);
+        let n: Captions = serde_json::from_str(r#"{"existingClips":"newTrack"}"#).unwrap();
+        assert_eq!(n.existing_clips, ExistingClips::NewTrack);
+        assert!(serde_json::from_str::<Captions>(r#"{"existingClips":"merge"}"#).is_err());
     }
 
     #[test]

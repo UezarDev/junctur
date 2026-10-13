@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 use super::lua::Value;
 use super::reply::Timeline;
-use crate::edit::{parse_color, title_name, Captions, EditList};
+use crate::edit::{parse_color, title_name, Captions, EditList, ExistingClips};
 use crate::export::layout::{Placed, WordSpan};
 
 /// Text+ outline thickness per step of `outline_width`: the bundled template's is 0.05, so the
@@ -96,6 +96,10 @@ pub struct Job {
     pub tracks: Vec<String>,
     /// The clips are the animated caption (5l): the highlight or an animation is on.
     pub animated: bool,
+    /// What the script does with clips Junctur did not place that are in the way of new
+    /// captions on these tracks (5n): ask (change nothing, count them), replace, skip, or a
+    /// new track.
+    pub existing: ExistingClips,
     pub look: Look,
     pub clips: Vec<Clip>,
 }
@@ -214,6 +218,7 @@ pub fn build(placed: &[Placed], edit: &EditList, c: &Captions, timeline: &Timeli
         timeline: timeline.id.clone(),
         tracks,
         animated,
+        existing: c.existing_clips,
         look: Look {
             font: c.font.trim().to_string(),
             style: style(c.bold, c.italic).to_string(),
@@ -331,6 +336,7 @@ impl Job {
                 Value::List(self.tracks.iter().map(|t| t.as_str().into()).collect()),
             ),
             ("animated", self.animated.into()),
+            ("existing", self.existing.word().into()),
             ("look", Value::Table(look)),
             (
                 "clips",
@@ -584,6 +590,21 @@ mod tests {
         );
         assert!(text.contains("[\"text\"] = \"say \\\"hi\\\"\""), "{text}");
         assert!(text.contains("[\"timeline\"] = \"T-1\""), "{text}");
+        // 5n: asking unless the recording remembered a choice.
+        assert!(text.contains("[\"existing\"] = \"ask\""), "{text}");
+        let new_track = Captions {
+            existing_clips: ExistingClips::NewTrack,
+            ..Default::default()
+        };
+        let j = build(
+            &[placed(0.0, 1.0, &[(1, "x")])],
+            &edit(),
+            &new_track,
+            &timeline(24.0),
+        );
+        assert_eq!(j.existing, ExistingClips::NewTrack);
+        let text = super::super::lua::chunk(&Value::Table(j.to_lua()));
+        assert!(text.contains("[\"existing\"] = \"newTrack\""), "{text}");
         assert!(
             text.contains("[\"outline\"] = true, [\"outlineColor\"] = {0.000000"),
             "{text}"

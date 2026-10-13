@@ -6,7 +6,9 @@
 -- highlight or an animation on (phase 5l) the clips are auto-subs' animated caption, a Fusion
 -- macro round a Text+, driven through the macro's own helpers as auto-subs drives it. Junctur's
 -- template picker (phase 5m) asks for the Fusion Titles in the media pool; with a template's own
--- look kept, only the text, timing and speaker colour are set on it.
+-- look kept, only the text, timing and speaker colour are set on it. Clips Junctur did not place
+-- that sit where new captions go (phase 5n) are asked about before anything changes, then
+-- replaced, skipped round, or left with the captions put on a track beside.
 --
 -- Resolve 21 runs scripts with no io, require or os.execute, so a request is a Lua chunk read with
 -- loadfile and the only way back is Fusion's prefs (SetPrefs + SavePrefs writes Fusion.prefs,
@@ -24,8 +26,9 @@ local TEMPLATE_NAME = "Junctur Caption"
 local ANIMATED_NAME = "Junctur Animated Caption"
 -- The animated caption's macro tool in a clip's comp: a clip with it is driven as the macro.
 local MACRO = "AutoSubs"
--- Told to Junctur in `info`, so it can tell a script too old for what it asks (5m).
-local SCRIPT = "5m"
+-- Told to Junctur in `info`, so it can tell a script too old for what it asks (5m; 5n asks before
+-- placing over clips it did not place, which a 5m script would not).
+local SCRIPT = "5n"
 
 -- Plain global lookups, not rawget(_G, ...): Resolve's script runner hands a script its own
 -- environment, which holds these.
@@ -466,6 +469,38 @@ local function by_start(timeline, i)
     return out
 end
 
+-- An item's first frame and the frame after its last; one whose end cannot be read is taken as
+-- one frame long. Nil for one whose start cannot be read (it cannot be placed against).
+local function span(item)
+    local ok, s = pcall(function() return item:GetStart() end)
+    if not ok or type(s) ~= "number" then return nil end
+    local got, e = pcall(function() return item:GetEnd() end)
+    if not got or type(e) ~= "number" or e <= s then e = s + 1 end
+    return s, e
+end
+
+-- The items on video track `i` that are not `recording`'s, with their frames (5n). With no
+-- recording, those with no Junctur tag at all: the clips Junctur did not place (a video clip, a
+-- still, the user's own title, or a caption whose tags were lost).
+local function others(timeline, i, recording)
+    local out = {}
+    for _, item in ipairs(list(timeline:GetItemListInTrack("video", i))) do
+        local tool = textplus(item)
+        local ok, tag = pcall(function() return tool and tool:GetData("JuncturRecording") end)
+        if not ok then tag = nil end
+        if (recording == nil and tag == nil) or (recording ~= nil and tag ~= recording) then
+            local s, e = span(item)
+            if s then out[#out + 1] = { item = item, s = s, e = e } end
+        end
+    end
+    return out
+end
+
+-- Whether an item's frames (from `others`) meet a caption's, both ends exclusive.
+local function overlaps(o, c)
+    return o.s < c["end"] and c.start < o.e
+end
+
 function handlers.place(req)
     local project, timeline = current()
     if not project then return { error = timeline } end
@@ -477,25 +512,10 @@ function handlers.place(req)
     if not clip then return { error = err } end
     per_send = { helpers = {} }
 
-    -- Each speaker's track, by name, added when missing.
+    -- The video tracks by name. Each speaker's is added further on, once nothing stops the send.
     local index = {}
     local count = timeline:GetTrackCount("video")
     for i = 1, count do index[timeline:GetTrackName("video", i)] = i end
-    local track = {}
-    for k, name in ipairs(req.tracks) do
-        if not index[name] then
-            local ok, added = pcall(function() return timeline:AddTrack("video") end)
-            local now = timeline:GetTrackCount("video")
-            -- Without a new track, naming the top one would rename one of the user's.
-            if not ok or not added or now ~= count + 1 then
-                return { error = "Resolve did not add a video track for " .. name }
-            end
-            count = now
-            timeline:SetTrackName("video", count, name)
-            index[name] = count
-        end
-        track[k] = index[name]
-    end
 
     -- Clips an earlier send placed for this recording, by their tag.
     local sent, stale = {}, {}
@@ -512,6 +532,113 @@ function handlers.place(req)
             end
         end
     end
+    -- The captions no clip of an earlier send stands for: the ones to place.
+    local todo, kept = {}, {}
+    for _, c in ipairs(req.clips) do
+        if sent[c.key] then kept[c.key] = true else todo[#todo + 1] = c end
+    end
+
+    -- 5n: clips Junctur did not place where those captions go, on the tracks they go on. Found
+    -- before anything is changed, so asking leaves Resolve as it was.
+    local mode = req.existing
+    if mode ~= "replace" and mode ~= "skip" and mode ~= "newTrack" then mode = "ask" end
+    local untagged, hits, blocked, nblocked = {}, {}, {}, 0
+    for k, c in ipairs(todo) do
+        local i = index[req.tracks[c.track]]
+        if i then
+            untagged[i] = untagged[i] or others(timeline, i, nil)
+            for _, o in ipairs(untagged[i]) do
+                if overlaps(o, c) then
+                    if not o.hit then
+                        o.hit = true
+                        hits[#hits + 1] = o
+                    end
+                    if not blocked[k] then
+                        blocked[k] = true
+                        nblocked = nblocked + 1
+                    end
+                end
+            end
+        end
+    end
+    if #hits > 0 and mode == "ask" then
+        return { inTheWay = #hits, blocked = nblocked }
+    end
+    local replaced, skipped, beside = 0, 0, 0
+    local names = {}
+    for k, name in ipairs(req.tracks) do names[k] = name end
+    if #hits > 0 and mode == "replace" then
+        -- Only the clips a caption overlaps, and first: when Resolve refuses, nothing has changed.
+        local items = {}
+        for k, o in ipairs(hits) do items[k] = o.item end
+        local ok, done = pcall(function() return timeline:DeleteClips(items, false) end)
+        if not (ok and done) then
+            return { error = "Resolve did not delete the " .. #items .. " clips in the captions' "
+                .. "way, so nothing was changed: unlock their track, or choose another way" }
+        end
+        replaced = #items
+    elseif #hits > 0 and mode == "skip" then
+        local rest = {}
+        for k, c in ipairs(todo) do
+            if blocked[k] then skipped = skipped + 1 else rest[#rest + 1] = c end
+        end
+        todo = rest
+    elseif #hits > 0 then
+        -- A new track: a speaker with a caption in the way has all its new captions placed on
+        -- "<its track> (2)", or the first of (3) to (9) where none of them meets a clip not of
+        -- this recording. Found by name again on the next send, so a remembered choice does not
+        -- add a track every time; its captions already placed stay where they are.
+        local moving = {}
+        for k, c in ipairs(todo) do
+            if blocked[k] then moving[c.track] = true end
+        end
+        for t in pairs(moving) do
+            local free
+            for n = 2, 9 do
+                local name = req.tracks[t] .. " (" .. n .. ")"
+                local i = index[name]
+                if not i then
+                    free = name
+                    break
+                end
+                local theirs, clear = others(timeline, i, req.recording), true
+                for _, c in ipairs(todo) do
+                    if c.track == t then
+                        for _, o in ipairs(theirs) do
+                            if overlaps(o, c) then clear = false end
+                        end
+                    end
+                end
+                if clear then
+                    free = name
+                    break
+                end
+            end
+            if not free then
+                return { error = "Tracks \"" .. req.tracks[t] .. " (2)\" to (9) all have clips "
+                    .. "where its captions go, so nothing was changed: choose Replace or Skip" }
+            end
+            names[t] = free
+            beside = beside + 1
+        end
+    end
+
+    -- Each speaker's track, by name, added when missing.
+    local track = {}
+    for k, name in ipairs(names) do
+        if not index[name] then
+            local ok, added = pcall(function() return timeline:AddTrack("video") end)
+            local now = timeline:GetTrackCount("video")
+            -- Without a new track, naming the top one would rename one of the user's.
+            if not ok or not added or now ~= count + 1 then
+                return { error = "Resolve did not add a video track for " .. name }
+            end
+            count = now
+            timeline:SetTrackName("video", count, name)
+            index[name] = count
+        end
+        track[k] = index[name]
+    end
 
     local placed, restyled, removed, failed, first = 0, 0, 0, 0, nil
     local missing = {}
@@ -519,15 +646,11 @@ function handlers.place(req)
         failed = failed + 1
         first = first or tostring(e)
     end
-    local todo, kept = {}, {}
     for _, c in ipairs(req.clips) do
         local old = sent[c.key]
         if old then
-            kept[c.key] = true
             local ok, e = pcall(restyle, old.comp, old.tool, req.look, c, missing)
             if ok then restyled = restyled + 1 else fail(e) end
-        else
-            todo[#todo + 1] = c
         end
     end
     for key, old in pairs(sent) do
@@ -571,7 +694,9 @@ function handlers.place(req)
             tracks[i] = tracks[i] or by_start(timeline, i)
             local item = tracks[i][c.start]
             local tool = item and textplus(item)
-            -- Not a clip an earlier send left there (or another recording's).
+            -- Not a clip an earlier send left there (or another recording's). An untagged clip of
+            -- the user's cannot be there either (5n): one a new caption meets was asked about,
+            -- deleted, skipped round or moved away from before the append.
             if tool and not tool:GetData("JuncturRecording") then out[k] = item end
         end
         return out
@@ -610,16 +735,19 @@ function handlers.place(req)
         end)
         if ok then placed = placed + 1 else fail(e) end
     end
-    local names = {}
-    for key in pairs(missing) do names[#names + 1] = key end
-    table.sort(names)
+    local unstyled = {}
+    for key in pairs(missing) do unstyled[#unstyled + 1] = key end
+    table.sort(unstyled)
     return {
         placed = placed,
         restyled = restyled,
         removed = removed,
         failed = failed,
         firstError = first or "",
-        unstyled = table.concat(names, ", "),
+        unstyled = table.concat(unstyled, ", "),
+        replaced = replaced,
+        skipped = skipped,
+        newTracks = beside,
     }
 end
 
