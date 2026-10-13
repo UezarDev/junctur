@@ -207,7 +207,13 @@ pub struct Core {
     saving: Mutex<()>,
     /// The user's caption defaults (2i), for an edit list without settings of its own.
     caption_defaults: Mutex<Captions>,
+    /// The open recording's translations (5k) as last read, and the file's size and time then:
+    /// read again only when the background run has written it since.
+    translations: Mutex<Option<(PathBuf, Stamp, Arc<Translations>)>>,
 }
+
+/// A file's size and modification time, to tell it was written since.
+type Stamp = Option<(u64, std::time::SystemTime)>;
 
 impl Player {
     /// Starts mpv with `extra` options after the defaults and embeds its video in `window`. Call
@@ -267,6 +273,7 @@ impl Player {
             mixer,
             saving: Mutex::new(()),
             caption_defaults: Mutex::new(Captions::default()),
+            translations: Mutex::new(None),
             ctl: Mutex::new(Ctl {
                 file: None,
                 edit_path: None,
@@ -689,7 +696,7 @@ impl Core {
         let (list, captions, words, fps) = self.caption_source()?;
         let tracked = words.tracks.iter().copied().zip(words.list.iter());
         let tr = self.translations();
-        let cues = srt::cues(&list, &captions, tracked, fps.num, fps.den, Some(&tr));
+        let cues = srt::cues(&list, &captions, tracked, fps.num, fps.den, Some(&*tr));
         Ok(layout::place(&cues, &list, &captions))
     }
 
@@ -715,17 +722,31 @@ impl Core {
             tracked.iter().copied(),
             fps.num,
             fps.den,
-            Some(&tr),
+            Some(&*tr),
         );
         let placed = layout::place(&cues, &list, &captions);
         junctur_core::resolve::send(&placed, &list, &captions)
     }
 
-    /// The open recording's translations (5k), read from its project folder each time: the
-    /// background run writes them as it goes.
-    fn translations(&self) -> Translations {
-        let dir = lock(&self.editor).project_dir().map(PathBuf::from);
-        dir.map_or_else(Translations::default, |d| Translations::load(&d))
+    /// The open recording's translations (5k), from its project folder: the background run writes
+    /// them as it goes, so the file is read again when its size or time moved, and otherwise
+    /// kept, as the preview asks for them on every change of the captions.
+    fn translations(&self) -> Arc<Translations> {
+        let Some(dir) = lock(&self.editor).project_dir().map(PathBuf::from) else {
+            return Arc::default();
+        };
+        let stamp: Stamp = std::fs::metadata(junctur_core::translate::path(&dir))
+            .ok()
+            .and_then(|m| Some((m.len(), m.modified().ok()?)));
+        let mut held = lock(&self.translations);
+        if let Some((d, s, t)) = &*held {
+            if *d == dir && *s == stamp && stamp.is_some() {
+                return t.clone();
+            }
+        }
+        let t = Arc::new(Translations::load(&dir));
+        *held = Some((dir, stamp, t.clone()));
+        t
     }
 
     /// What translating the captions of the list in play needs (5k): its sentences as said, the
@@ -743,10 +764,13 @@ impl Core {
         let file = self.file().ok_or("no recording open")?;
         let tracked = words.tracks.iter().copied().zip(words.list.iter());
         let sentences = srt::sentences(&list, tracked, fps.num, fps.den);
+        // Never none in place of the transcript: a piece read mid-write would make every
+        // sentence's language unknown.
         let segments = transcribe::load(&project)
             .map(|t| t.segments)
             .or_else(|| transcribe::so_far(&project))
-            .unwrap_or_default();
+            .filter(|s| !s.is_empty())
+            .ok_or("the transcript could not be read just now; try again")?;
         Ok(translation::Job {
             file,
             to: captions.translate,

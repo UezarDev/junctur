@@ -841,7 +841,7 @@ mod tests {
         assert_eq!(texts, ["Hola, ¿qué tal?", "Muy bien."]);
         assert_eq!((s[1].track, s[1].start), (0, 10.5));
         let mut t = Translations::default();
-        t.insert("en", "Hola, ¿qué tal?", "Hi, how are you doing?");
+        t.insert("es", "en", "Hola, ¿qué tal?", "Hi, how are you doing?");
         assert_eq!(missing(&c, &s, &t), 1);
         assert_eq!(missing(&Captions::default(), &s, &t), 0, "not translated");
         // A sentence not translated yet is shown as said.
@@ -852,7 +852,7 @@ mod tests {
             (got[0].end - 1.2).abs() < 1e-9,
             "the first ends with its sentence"
         );
-        t.insert("en", "Muy bien.", "Very good.");
+        t.insert("es", "en", "Muy bien.", "Very good.");
         assert_eq!(missing(&c, &s, &t), 0);
         // Not asked for (no setting, or no translations given): the words as said.
         let plain = solo(&cues(&e, &Captions::default(), words(), 30, 1, Some(&t)));
@@ -1051,7 +1051,7 @@ mod tests {
         let e = edit(&[(0.0, 40.0)], c.clone());
         let mut t = Translations::default();
         let many = "a b c d e f g h i j k l m n o p";
-        t.insert("en", "Sí bien.", many);
+        t.insert("es", "en", "Sí bien.", many);
         let got = cues(&e, &c, w.iter().map(|w| (0, w)), 30, 1, Some(&t));
         assert_eq!(solo(&got), many.split(' ').collect::<Vec<_>>());
         for p in got.windows(2) {

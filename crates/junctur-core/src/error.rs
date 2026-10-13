@@ -20,6 +20,8 @@ pub enum Error {
     Download(String),
     /// ONNX Runtime refused to load or run a model.
     Model(String),
+    /// The user stopped it (a model download for a cancelled translation, 5k).
+    Cancelled,
     /// An edit list that cannot be read, or a stage asked for before its inputs exist.
     Edit(String),
     /// The renderer cannot produce the requested output (e.g. it would overwrite the source).
@@ -44,6 +46,7 @@ impl fmt::Display for Error {
             Error::Probe(msg) => write!(f, "unexpected ffprobe output: {msg}"),
             Error::Download(msg) => write!(f, "model download failed: {msg}"),
             Error::Model(msg) => write!(f, "model error: {msg}"),
+            Error::Cancelled => write!(f, "cancelled"),
             Error::Edit(msg) => write!(f, "{msg}"),
             Error::Render(msg) => write!(f, "render: {msg}"),
             Error::Output(msg) => write!(f, "{msg}"),

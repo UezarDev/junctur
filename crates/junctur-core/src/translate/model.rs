@@ -8,6 +8,7 @@
 //! key/value cache merged in (`use_cache_branch`), so each step feeds only the newest token.
 
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 
 use ort::session::{Session, SessionInputValue};
 use ort::value::{DynValue, Tensor};
@@ -24,8 +25,9 @@ const PAD: i64 = 1;
 const LAYERS: usize = 12;
 const HEADS: usize = 16;
 const HEAD_DIM: usize = 64;
-/// Source tokens past this are dropped: a caption sentence is a few dozen (sentences are cut at
-/// [`crate::export::sentences`]'s word limit), and the model was trained on at most 1024.
+/// Most source tokens in one row: a caption sentence is a few dozen (sentences are cut at a word
+/// limit, [`crate::export::srt::sentences`]), and the model was trained on at most 1024. A longer
+/// one is cut into pieces ([`cut`]), never truncated.
 const MAX_SOURCE: usize = 250;
 
 pub struct Model {
@@ -36,11 +38,12 @@ pub struct Model {
 }
 
 impl Model {
-    /// Fetches the model on first use (632 MB) into `cache_dir` and opens it.
-    pub fn open(cache_dir: &Path, pref: DevicePref) -> Result<Self> {
-        let tok = models::ensure(&models::TRANSLATE_TOKENIZER, cache_dir)?;
-        let enc = models::ensure(&models::TRANSLATE_ENCODER, cache_dir)?;
-        let dec = models::ensure(&models::TRANSLATE_DECODER, cache_dir)?;
+    /// Fetches the model on first use (632 MB) into `cache_dir` and opens it. `stop` set ends a
+    /// download under way with [`Error::Cancelled`].
+    pub fn open(cache_dir: &Path, pref: DevicePref, stop: &AtomicBool) -> Result<Self> {
+        let tok = models::ensure_or_stop(&models::TRANSLATE_TOKENIZER, cache_dir, stop)?;
+        let enc = models::ensure_or_stop(&models::TRANSLATE_ENCODER, cache_dir, stop)?;
+        let dec = models::ensure_or_stop(&models::TRANSLATE_DECODER, cache_dir, stop)?;
         let tokenizer = tokenizer(&std::fs::read_to_string(tok)?)?;
         let (encoder, device) = runtime::open(&enc, pref)?;
         let (decoder, _) = runtime::open(&dec, pref)?;
@@ -59,36 +62,88 @@ impl Model {
             .ok_or_else(|| Error::Model(format!("the translation model has no language {code:?}")))
     }
 
-    /// `text`, said in `from`, in `to` (the model's language codes).
+    /// `text`, said in `from`, in `to` (the model's language codes); an error when the model gives
+    /// nothing usable ([`Model::translate_batch`]).
     pub fn translate(&mut self, text: &str, from: &str, to: &str) -> Result<String> {
-        Ok(self.translate_batch(&[(text, from)], to)?.remove(0))
+        self.translate_batch(&[(text, from)], to, false)?
+            .remove(0)
+            .ok_or_else(|| Error::Model(format!("no translation of {text:?}")))
     }
 
     /// Each `(text, said in)` of `batch` in `to`, in order. A batch is decoded together, a row
     /// each: a step reads the weights once for every row, which is most of what a step costs on a
     /// CPU, so a batch of several takes little longer than one sentence (measured in 5k). Rows may
-    /// be in different languages, each behind its own language's token.
-    pub fn translate_batch(&mut self, batch: &[(&str, &str)], to: &str) -> Result<Vec<String>> {
-        if batch.is_empty() {
-            return Ok(Vec::new());
-        }
-        let rows = batch.len();
-        let mut sources: Vec<Vec<i64>> = Vec::with_capacity(rows);
-        for (text, from) in batch {
+    /// be in different languages, each behind its own language's token. A row longer than
+    /// [`MAX_SOURCE`] tokens is cut between words into pieces that are translated as rows of
+    /// their own and joined again.
+    ///
+    /// `None` for a row the model gave nothing usable for: an empty translation, or one still
+    /// going at the length cap, which is the greedy decoder looping. `guard` forbids the decoder
+    /// to repeat any three tokens in a row, which ends such a loop, for a second try.
+    pub fn translate_batch(
+        &mut self,
+        batch: &[(&str, &str)],
+        to: &str,
+        guard: bool,
+    ) -> Result<Vec<Option<String>>> {
+        // Every piece's ids, and the row each belongs to.
+        let mut pieces: Vec<(usize, Vec<i64>)> = Vec::new();
+        for (row, (text, from)) in batch.iter().enumerate() {
             let enc = self
                 .tokenizer
                 .encode(*text, false)
                 .map_err(|e| Error::Model(format!("translation tokenizer: {e}")))?;
-            let mut ids = vec![self.language(from)? as i64];
-            ids.extend(enc.get_ids().iter().take(MAX_SOURCE).map(|&i| i as i64));
-            ids.push(EOS as i64);
-            sources.push(ids);
+            let lang = self.language(from)? as i64;
+            for (a, b) in cut(enc.get_tokens(), MAX_SOURCE) {
+                let mut ids = vec![lang];
+                ids.extend(enc.get_ids()[a..b].iter().map(|&i| i as i64));
+                ids.push(EOS as i64);
+                pieces.push((row, ids));
+            }
+        }
+        let sources: Vec<Vec<i64>> = pieces.iter().map(|(_, ids)| ids.clone()).collect();
+        let target = self.language(to)? as i64;
+        let decoded = self.decode(&sources, target, guard)?;
+        let mut out: Vec<Option<Vec<String>>> = vec![Some(Vec::new()); batch.len()];
+        for ((row, _), tokens) in pieces.iter().zip(decoded) {
+            let text = match tokens {
+                Some(t) => Some(
+                    self.tokenizer
+                        .decode(&t, true)
+                        .map_err(|e| Error::Model(format!("translation tokenizer: {e}")))?
+                        .trim()
+                        .to_string(),
+                ),
+                None => None,
+            };
+            match (&mut out[*row], text) {
+                (Some(parts), Some(t)) if !t.is_empty() => parts.push(t),
+                (slot, _) => *slot = None,
+            }
+        }
+        Ok(out
+            .into_iter()
+            .map(|p| p.map(|p| p.join(" ")).filter(|t| !t.is_empty()))
+            .collect())
+    }
+
+    /// Greedy decoding of each source (language token, ids, `</s>`) into `target`: its tokens, or
+    /// `None` when it reached the length cap without ending.
+    fn decode(
+        &mut self,
+        sources: &[Vec<i64>],
+        target: i64,
+        guard: bool,
+    ) -> Result<Vec<Option<Vec<u32>>>> {
+        let rows = sources.len();
+        if rows == 0 {
+            return Ok(Vec::new());
         }
         // Shorter rows padded at the end, masked out of the attention.
         let n = sources.iter().map(Vec::len).max().unwrap_or(0);
         let mut ids = Vec::with_capacity(rows * n);
         let mut mask = Vec::with_capacity(rows * n);
-        for s in &sources {
+        for s in sources {
             ids.extend(
                 s.iter()
                     .copied()
@@ -108,7 +163,6 @@ impl Model {
 
         // A translation runs about as long as its source; past twice that it is looping.
         let longest = 2 * n + 10;
-        let target = self.language(to)? as i64;
         let mut tokens: Vec<Vec<u32>> = vec![Vec::new(); rows];
         let mut finished = vec![false; rows];
         let mut next: Vec<i64> = (0..rows).flat_map(|_| [EOS as i64, target]).collect();
@@ -146,7 +200,12 @@ impl Model {
             // rows start together, and the decoder has no padding mask of its own.
             for (r, done) in finished.iter_mut().enumerate() {
                 let at = (r * k + k - 1) * vocab;
-                let best = argmax(&logits[at..at + vocab]) as u32;
+                let banned = if guard {
+                    repeats(&tokens[r])
+                } else {
+                    Vec::new()
+                };
+                let best = argmax(&logits[at..at + vocab], &banned) as u32;
                 if !*done {
                     if best == EOS {
                         *done = true;
@@ -170,16 +229,49 @@ impl Model {
                 break;
             }
         }
-        tokens
-            .iter()
-            .map(|t| {
-                self.tokenizer
-                    .decode(t, true)
-                    .map(|s| s.trim().to_string())
-                    .map_err(|e| Error::Model(format!("translation tokenizer: {e}")))
-            })
-            .collect()
+        Ok(tokens
+            .into_iter()
+            .zip(finished)
+            .map(|(t, done)| done.then_some(t))
+            .collect())
     }
+}
+
+/// SentencePiece's mark of a token that starts a word.
+const WORD: char = '\u{2581}';
+
+/// `tokens` cut into runs of at most `most`, each cut made before a token that starts a word
+/// where the run has one, so no word is split; a single word longer than `most` tokens is cut
+/// where it must be.
+fn cut(tokens: &[String], most: usize) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut a = 0;
+    while a < tokens.len() {
+        let mut b = (a + most).min(tokens.len());
+        if b < tokens.len() {
+            if let Some(w) = (a + 1..=b).rev().find(|&i| tokens[i].starts_with(WORD)) {
+                b = w;
+            }
+        }
+        out.push((a, b));
+        a = b;
+    }
+    if out.is_empty() {
+        out.push((0, 0));
+    }
+    out
+}
+
+/// The tokens that would repeat three tokens already written (no repeated trigram).
+fn repeats(tokens: &[u32]) -> Vec<usize> {
+    let Some(last) = tokens.len().checked_sub(2).map(|i| &tokens[i..]) else {
+        return Vec::new();
+    };
+    tokens
+        .windows(3)
+        .filter(|w| w[..2] == *last)
+        .map(|w| w[2] as usize)
+        .collect()
 }
 
 /// The tokenizer from its `tokenizer.json`. The export lists merges whose pieces or result are not
@@ -225,9 +317,42 @@ fn cache_names(prefix: &str) -> Vec<String> {
         .collect()
 }
 
-fn argmax(v: &[f32]) -> usize {
+fn argmax(v: &[f32], banned: &[usize]) -> usize {
     v.iter()
         .enumerate()
+        .filter(|(i, _)| !banned.contains(i))
         .max_by(|a, b| a.1.total_cmp(b.1))
         .map_or(0, |(i, _)| i)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pieces(t: &[&str]) -> Vec<String> {
+        t.iter()
+            .map(|s| s.replace('_', &WORD.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_long_source_is_cut_between_words() {
+        let t = pieces(&["_a", "b", "_c", "d", "e", "_f", "_g"]);
+        assert_eq!(cut(&t, 4), [(0, 2), (2, 6), (6, 7)]);
+        // A word longer than the limit is cut where it must be.
+        assert_eq!(
+            cut(&pieces(&["_a", "b", "c", "d", "e"]), 2),
+            [(0, 2), (2, 4), (4, 5)]
+        );
+        assert_eq!(cut(&t, 250), [(0, 7)]);
+        assert_eq!(cut(&[], 250), [(0, 0)]);
+    }
+
+    #[test]
+    fn the_guard_forbids_a_token_that_repeats_three() {
+        assert_eq!(repeats(&[5, 6, 7, 5, 6]), [7]);
+        assert!(repeats(&[5, 6]).is_empty() && repeats(&[]).is_empty());
+        assert_eq!(argmax(&[0.1, 0.9, 0.5], &[1]), 2);
+        assert_eq!(argmax(&[0.1, 0.9, 0.5], &[]), 1);
+    }
 }

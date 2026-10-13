@@ -387,6 +387,9 @@ export interface TranslationRun {
   total: number;
   running: boolean;
   cancelled: boolean;
+  /** Sentences the run that ended left untranslated: no transcript language, or no usable translation. */
+  unknown: number;
+  failed: number;
   error: string | null;
 }
 export interface TranslationStatus {

@@ -194,8 +194,10 @@ fn embeddings_are_unit_vectors_and_stable() {
 #[test]
 #[ignore = "downloads models"]
 fn captions_translate_between_languages() {
-    let mut m = junctur_core::translate::model::Model::open(&cache::default_dir(), DevicePref::Cpu)
-        .unwrap();
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let mut m =
+        junctur_core::translate::model::Model::open(&cache::default_dir(), DevicePref::Cpu, &stop)
+            .unwrap();
     let t0 = std::time::Instant::now();
     let fr = m
         .translate("Hola, ¿qué tal estás hoy?", "es", "fr")
@@ -245,7 +247,12 @@ fn captions_translate_between_languages() {
     let t0 = std::time::Instant::now();
     let mut together = Vec::new();
     for _ in 0..4 {
-        together = m.translate_batch(&batch, "en").unwrap();
+        together = m
+            .translate_batch(&batch, "en", false)
+            .unwrap()
+            .into_iter()
+            .map(Option::unwrap)
+            .collect();
     }
     let s = t0.elapsed().as_secs_f64();
     eprintln!("4 batches of 8 in {s:.2} s ({:.2} s a sentence)", s / 32.0);

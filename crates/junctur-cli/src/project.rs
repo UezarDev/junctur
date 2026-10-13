@@ -186,15 +186,29 @@ fn translations(
     t: &transcribe::Transcript,
 ) -> Result<junctur_core::translate::Translations, String> {
     let mut last = None;
-    export::translate_captions(e, c, t, &p.dir, &p.cache_dir, &mut |done, todo| {
-        // A line per tenth, not per sentence.
-        let tenth = (done * 10).checked_div(todo);
-        if todo > 0 && tenth != last {
-            last = tenth;
-            eprintln!("junctur: translating captions: {done} of {todo} sentences");
-        }
-    })
-    .map_err(|e| e.to_string())
+    let (tr, done) =
+        export::translate_captions(e, c, t, &p.dir, &p.cache_dir, &mut |done, todo| {
+            // A line per tenth, not per sentence.
+            let tenth = (done * 10).checked_div(todo);
+            if todo > 0 && tenth != last {
+                last = tenth;
+                eprintln!("junctur: translating captions: {done} of {todo} sentences");
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    if done.unknown > 0 {
+        eprintln!(
+            "junctur: {} caption sentences have no transcript language to translate from",
+            done.unknown
+        );
+    }
+    if done.failed > 0 {
+        eprintln!(
+            "junctur: the model gave no usable translation of {} caption sentences",
+            done.failed
+        );
+    }
+    Ok(tr)
 }
 
 fn print_captions(out: &std::path::Path, files: &export::CaptionFiles) {

@@ -93,10 +93,15 @@ pub(super) fn apply<'a>(
         let words: Vec<String> = lookup(&text(&shown, s))
             .map(|t| clean(t).split_whitespace().map(str::to_string).collect())
             .unwrap_or_default();
-        if words.is_empty() {
+        // Words left empty by the cleaning take no place, as in the sentence's text.
+        let spoken: Vec<&Shown> = s
+            .iter()
+            .map(|&i| &shown[i])
+            .filter(|w| !w.text.is_empty())
+            .collect();
+        if words.is_empty() || spoken.is_empty() {
             out.extend(s.iter().map(|&i| shown[i].clone()));
         } else {
-            let spoken: Vec<&Shown> = s.iter().map(|&i| &shown[i]).collect();
             out.extend(spread(&spoken, words));
         }
     }
@@ -116,16 +121,27 @@ fn spread(spoken: &[&Shown], words: Vec<String>) -> Vec<Shown> {
         total += len(&w.text) + 1.0;
     }
     let total = total - 1.0;
-    // The point `p` characters in: inside a word, a share of its time; in the space after it,
-    // its end. `ending` takes the word before a point exactly at a word's start, so a translated
-    // word ending there ends with that word rather than at the next one's start.
+    // The point `p` characters in: inside a word, a share of its time; in the space after it, a
+    // share of the pause to the next word, so a translation longer than its sentence does not
+    // bunch its extra words at one instant where a pause leaves room (5p met them there). A pause
+    // across a cut has no time on the edited timeline: the word's end. `ending` takes the word
+    // before a point exactly at a word's start, so a translated word ending there ends with that
+    // word or in the pause after it.
     let point = |p: f64, ending: bool| -> (usize, f64) {
         let k = at
             .iter()
             .rposition(|&a| if ending { a < p } else { a <= p })
             .unwrap_or(0);
         let w = spoken[k];
-        let share = ((p - at[k]) / len(&w.text)).clamp(0.0, 1.0);
+        let into = p - at[k];
+        let l = len(&w.text);
+        if into > l {
+            if let Some(n) = spoken.get(k + 1).filter(|n| n.start.0 == w.end.0) {
+                let share = (into - l).min(1.0);
+                return (w.end.0, w.end.1 + share * (n.start.1 - w.end.1).max(0.0));
+            }
+        }
+        let share = (into / l).clamp(0.0, 1.0);
         // A spoken word lies in one kept range (it is kept by its middle).
         (w.start.0, w.start.1 + share * (w.end.1 - w.start.1))
     };
@@ -265,6 +281,38 @@ mod tests {
             }
         }
         assert_eq!((got[0].start.0, got[3].end.0), (0, 1));
+    }
+
+    #[test]
+    fn extra_words_spread_over_a_pause_and_empty_words_take_no_place() {
+        // "aa" 0..1, a pause, "bb" 3..4; an empty word between takes no place. Twelve
+        // translated words: some fall in the space between, and spread over the pause rather
+        // than all starting at 1.0.
+        let spoken = vec![
+            w(0, 0.0, 1.0, "aa"),
+            w(0, 1.0, 1.0, ""),
+            w(0, 3.0, 4.0, "bb"),
+        ];
+        let s = vec![vec![0, 1, 2]];
+        let many = "a b c d e f g h i j k l";
+        let got = apply(spoken, &s, |_| Some(many), |t| t.to_string());
+        assert_eq!(got.len(), 12);
+        let in_pause: Vec<f64> = got
+            .iter()
+            .map(|w| w.start.1)
+            .filter(|&t| t > 1.0 && t < 3.0)
+            .collect();
+        assert!(!in_pause.is_empty(), "{got:?}");
+        for p in got.windows(2) {
+            assert!(
+                p[0].start.1 <= p[1].start.1 && p[0].start.1 <= p[0].end.1,
+                "{got:?}"
+            );
+        }
+        // Touching words leave no pause: the word's end, as before.
+        let touching = vec![w(0, 0.0, 1.0, "aa"), w(0, 1.0, 2.0, "bb")];
+        let got = apply(touching, &[vec![0, 1]], |_| Some(many), |t| t.to_string());
+        assert!(got.iter().all(|w| (0.0..=2.0).contains(&w.start.1)));
     }
 
     #[test]

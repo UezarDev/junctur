@@ -21,12 +21,12 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-pub use cache::Translations;
+pub use cache::{path, Translations};
 pub use languages::{from_whisper, known, LANGUAGES};
 
 use crate::runtime::DevicePref;
 use crate::transcribe::Segment;
-use crate::Result;
+use crate::{Error, Result};
 
 /// A caption sentence: the kept words of one speaker on one track, as captions show them
 /// untranslated.
@@ -45,6 +45,10 @@ pub struct Done {
     pub translated: usize,
     /// Sentences kept as said: already in the target language, or in one the model lacks.
     pub kept: usize,
+    /// Sentences whose language could not be told: not kept, tried again by a later run.
+    pub unknown: usize,
+    /// Sentences the model gave nothing usable for, twice: not kept, tried again by a later run.
+    pub failed: usize,
     /// Stopped before the end; what was done is saved.
     pub cancelled: bool,
 }
@@ -57,11 +61,17 @@ const SAVE_EVERY: Duration = Duration::from_secs(3);
 /// take 0.29 s a sentence against 1.21 s one by one.
 const BATCH: usize = 8;
 
-/// Translates into `to` every sentence of `sentences` the project's translations lack, saving them
-/// in `project` as it goes. `segments` (the transcript's) say which language each was said in.
-/// `progress` hears `(done, to do)` as sentences are done; `stop` set ends it after the batch in
-/// hand. The model is opened only when a sentence needs it. What was done is saved even when the
-/// model fails part way.
+/// Translates into `to` every sentence of `sentences` the project's translations lack (or hold
+/// from another language than it is heard in now), saving them in `project` as it goes.
+/// `segments` (the transcript's) say which language each was said in. `progress` hears `(done, to
+/// do)` as sentences are done; `stop` set ends it after the batch in hand, or a model download
+/// under way. The model is opened only when a sentence needs it. What was done is saved even when
+/// the model fails part way.
+///
+/// Only what is known is kept: a sentence whose language cannot be told (no segment on its track)
+/// and one the model gives nothing usable for, even on a second try, are left untranslated and
+/// counted ([`Done::unknown`], [`Done::failed`]), so a later run tries them again. A translations
+/// file that is there but does not read is an error, never written over.
 pub fn run(
     project: &Path,
     cache_dir: &Path,
@@ -72,36 +82,49 @@ pub fn run(
     stop: &AtomicBool,
 ) -> Result<Done> {
     if !known(to) {
-        return Err(crate::Error::Edit(format!(
+        return Err(Error::Edit(format!(
             "captions cannot be translated into {to:?}"
         )));
     }
-    let mut cache = Translations::load(project);
-    // Each missing sentence once, with the language it was said in.
-    let mut seen = std::collections::HashSet::new();
-    let todo: Vec<(&str, Option<&str>)> = sentences
-        .iter()
-        .filter(|s| cache.get(to, &s.text).is_none() && seen.insert(s.text.as_str()))
-        .map(|s| {
-            let from = spoken(segments, s.track, s.start).and_then(from_whisper);
-            (s.text.as_str(), from.filter(|f| *f != to))
-        })
-        .collect();
-    let total = todo.len();
+    if segments.is_empty() && !sentences.is_empty() {
+        // The transcript read as nothing (a piece being written while it transcribes): every
+        // sentence's language would be unknown.
+        return Err(Error::Edit(
+            "the transcript's languages could not be read; try again".into(),
+        ));
+    }
+    let mut cache = Translations::read(project)?;
     let mut done = Done::default();
+    // Each sentence still needing it once, with the language it was said in.
+    let mut seen = std::collections::HashSet::new();
+    let mut todo: Vec<(&str, &str)> = Vec::new();
+    for s in sentences {
+        if !seen.insert(s.text.as_str()) {
+            continue;
+        }
+        match spoken(segments, s.track, s.start) {
+            None if cache.get(to, &s.text).is_none() => done.unknown += 1,
+            None => {}
+            Some(heard) if cache.needs(heard, to, &s.text) => todo.push((s.text.as_str(), heard)),
+            Some(_) => {}
+        }
+    }
+    let total = todo.len();
     progress(0, total);
     // Already in the target language, or in one the model lacks: shown as said.
-    for (text, _) in todo.iter().filter(|(_, from)| from.is_none()) {
-        cache.insert(to, text, text);
-        done.kept += 1;
+    let mut work: Vec<(&str, &str)> = Vec::new();
+    for &(text, heard) in &todo {
+        match from_whisper(heard).filter(|f| *f != to) {
+            Some(from) => work.push((text, from)),
+            None => {
+                cache.insert(heard, to, text, text);
+                done.kept += 1;
+            }
+        }
     }
     if done.kept > 0 {
         progress(done.kept, total);
     }
-    let mut work: Vec<(&str, &str)> = todo
-        .iter()
-        .filter_map(|&(text, from)| Some((text, from?)))
-        .collect();
     // Like lengths together, so a batch pads little.
     work.sort_by_key(|(text, _)| text.len());
     let result = translate(
@@ -110,10 +133,17 @@ pub fn run(
     if total > 0 {
         cache.save(project)?;
     }
-    result.map(|()| done)
+    match result {
+        Err(Error::Cancelled) => {
+            done.cancelled = true;
+            Ok(done)
+        }
+        r => r.map(|()| done),
+    }
 }
 
-/// The batches of [`run`], into `cache`.
+/// The batches of [`run`], into `cache`; each row the model failed is tried again alone, with
+/// the loop guard, after the batches.
 #[allow(clippy::too_many_arguments)]
 fn translate(
     cache: &mut Translations,
@@ -128,26 +158,44 @@ fn translate(
 ) -> Result<()> {
     let mut model: Option<model::Model> = None;
     let mut saved = Instant::now();
-    for batch in work.chunks(BATCH) {
+    let mut again: Vec<(&str, &str)> = Vec::new();
+    // Each batch and whether it is a second try.
+    let mut batches: Vec<(Vec<(&str, &str)>, bool)> =
+        work.chunks(BATCH).map(|b| (b.to_vec(), false)).collect();
+    let mut i = 0;
+    while i < batches.len() {
         if stop.load(Ordering::Relaxed) {
             done.cancelled = true;
             return Ok(());
         }
         let m = match &mut model {
             Some(m) => m,
-            None => model.insert(model::Model::open(cache_dir, DevicePref::Cpu)?),
+            None => model.insert(model::Model::open(cache_dir, DevicePref::Cpu, stop)?),
         };
-        for (&(text, _), shown) in batch.iter().zip(m.translate_batch(batch, to)?) {
-            // An empty translation is the model failing, not a sentence to hide: shown as said.
-            let shown = if shown.is_empty() { text } else { &shown };
-            cache.insert(to, text, shown);
-            done.translated += 1;
+        let (batch, guard) = &batches[i];
+        let shown = m.translate_batch(batch, to, *guard)?;
+        for (&(text, from), shown) in batch.iter().zip(shown) {
+            match shown {
+                Some(t) => {
+                    cache.insert(from, to, text, &t);
+                    done.translated += 1;
+                }
+                None if !guard => again.push((text, from)),
+                None => done.failed += 1,
+            }
         }
         if saved.elapsed() >= SAVE_EVERY {
-            cache.save(project)?;
+            // A failed save is tried again at the next and at the end; the run goes on.
+            if let Err(e) = cache.save(project) {
+                eprintln!("junctur: saving the translations: {e}");
+            }
             saved = Instant::now();
         }
-        progress(done.kept + done.translated, total);
+        progress(done.kept + done.translated + done.failed, total);
+        i += 1;
+        if i == batches.len() {
+            batches.extend(again.drain(..).map(|w| (vec![w], true)));
+        }
     }
     Ok(())
 }
@@ -223,6 +271,12 @@ mod tests {
                 start: 2.0,
                 text: "Hello there.".into(),
             },
+            // No segment on its track: its language is not known, so it is not kept.
+            Sentence {
+                track: 1,
+                start: 2.0,
+                text: "Who?".into(),
+            },
         ];
         let mut seen = Vec::new();
         // A cache dir with no model in it: opening the model would fail the run.
@@ -240,14 +294,15 @@ mod tests {
         assert_eq!(
             done,
             Done {
-                translated: 0,
                 kept: 2,
-                cancelled: false
+                unknown: 1,
+                ..Done::default()
             }
         );
         assert_eq!(seen, [(0, 2), (2, 2)]);
         let t = Translations::load(&d);
         assert_eq!(t.get("en", "Aloha."), Some("Aloha."));
+        assert_eq!(t.get("en", "Who?"), None);
         // Nothing left: a second run does nothing.
         let again = run(
             &d,
@@ -259,7 +314,24 @@ mod tests {
             &AtomicBool::new(false),
         )
         .unwrap();
-        assert_eq!(again, Done::default());
+        assert_eq!(
+            again,
+            Done {
+                unknown: 1,
+                ..Done::default()
+            }
+        );
+        // A transcript that read as nothing is an error, not every sentence kept as said.
+        assert!(run(
+            &d,
+            &none,
+            "fr",
+            &sentences,
+            &[],
+            &mut |_, _| {},
+            &AtomicBool::new(false)
+        )
+        .is_err());
         // Stopped before the first: nothing done, nothing opened.
         let stopped = run(
             &d,
@@ -272,6 +344,19 @@ mod tests {
         )
         .unwrap();
         assert!(stopped.cancelled && stopped.translated == 0);
+        // A translations file that does not read is an error, and left as it is.
+        std::fs::write(d.join(cache::FILE), "{").unwrap();
+        assert!(run(
+            &d,
+            &none,
+            "en",
+            &sentences,
+            &segments,
+            &mut |_, _| {},
+            &AtomicBool::new(false)
+        )
+        .is_err());
+        assert_eq!(std::fs::read_to_string(d.join(cache::FILE)).unwrap(), "{");
         assert!(run(
             &d,
             &none,

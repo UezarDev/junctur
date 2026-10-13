@@ -223,7 +223,12 @@
 
       <h3>Caption text</h3>
       <CaptionRules value={captions} part="text" onChange={(c) => setCaptions(c)} {onError} />
-      <CaptionTranslation {captions} {source} {onError} />
+      <CaptionTranslation
+        {captions}
+        {source}
+        cuts={`${edit?.ranges.join(",") ?? ""}|${edit?.speakersKey ?? ""}`}
+        {onError}
+      />
       <p class="note">
         What the captions show, in the SRT, in Resolve and in the preview; the transcript keeps the words as
         spoken, so clearing one brings them back. A translation is made first, a sentence at a time on this

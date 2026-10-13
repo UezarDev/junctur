@@ -9,10 +9,13 @@
   let {
     captions,
     source,
+    cuts,
     onError,
   }: {
     captions: api.Captions;
     source: string | null;
+    /** What the sentences depend on besides the language: the kept ranges and who says what. */
+    cuts: string;
     onError: (message: string) => void;
   } = $props();
 
@@ -52,12 +55,13 @@
     };
   });
 
-  // The count follows the language and the cuts (a new edit state); a language picked here, not
-  // the one the recording opened with, starts translating.
+  // The count follows the language and the cuts, not every caption setting: counting builds every
+  // sentence of the transcript. A language picked here, not the one the recording opened with,
+  // starts translating.
   let seen: { source: string | null; lang: string } | null = null;
   $effect(() => {
     const lang = to;
-    void captions;
+    void cuts;
     refresh();
     if (seen && seen.source === source && lang && lang !== seen.lang) translate();
     seen = { source, lang };
@@ -71,7 +75,11 @@
         <div style="width: {run.total ? (100 * run.done) / run.total : 0}%"></div>
       </div>
       <span class="note">
-        Translating… {run.done.toLocaleString()} of {run.total.toLocaleString()} sentences
+        {#if run.done === 0}
+          Starting… (the first translation downloads the model, about 630 MB)
+        {:else}
+          Translating… {run.done.toLocaleString()} of {run.total.toLocaleString()} sentences
+        {/if}
       </span>
       <button onclick={() => api.cancelTranslation().catch((e) => onError(String(e)))}>Cancel</button>
     {:else if left && left.missing > 0}
@@ -82,6 +90,13 @@
       <button onclick={translate} title="The first translation downloads the model (about 630 MB)">Translate</button>
     {:else if left}
       <span class="note">All {left.sentences.toLocaleString()} sentences translated.</span>
+    {/if}
+    {#if mine && run && !run.running && (run.unknown > 0 || run.failed > 0)}
+      <p class="error">
+        {#if run.unknown > 0}{run.unknown.toLocaleString()} sentences had no transcript language to translate from.{/if}
+        {#if run.failed > 0}The model gave no usable translation of {run.failed.toLocaleString()} sentences.{/if}
+        Translate tries them again.
+      </p>
     {/if}
     {#if mine && run?.error}<p class="error">{run.error}</p>{/if}
   </div>

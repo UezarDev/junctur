@@ -36,6 +36,10 @@ pub struct Run {
     pub total: usize,
     pub running: bool,
     pub cancelled: bool,
+    /// Sentences left untranslated by the run that ended: no transcript language to translate
+    /// from, or no usable translation from the model; a later run tries them again.
+    pub unknown: usize,
+    pub failed: usize,
     pub error: Option<String>,
     /// Which run this is: a run ended or replaced never writes over a later one's state.
     #[serde(skip)]
@@ -121,7 +125,9 @@ impl Translation {
                 }
                 r.running = false;
                 match result {
-                    Ok(d) => r.cancelled = d.cancelled,
+                    Ok(d) => {
+                        (r.cancelled, r.unknown, r.failed) = (d.cancelled, d.unknown, d.failed)
+                    }
                     Err(e) => r.error = Some(e.to_string()),
                 }
                 send(&r);
@@ -137,7 +143,8 @@ impl Translation {
         self.run()
     }
 
-    /// Asks the run going to stop after the sentences in hand; what it did is kept.
+    /// Asks the run going to stop after the sentences in hand, or its model download at once;
+    /// what it did is kept.
     pub fn cancel(&self) {
         lock(&self.stop).store(true, Ordering::Relaxed);
     }

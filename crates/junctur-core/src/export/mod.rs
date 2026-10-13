@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::edit::{Captions, EditList};
 use crate::transcribe::{Transcript, Word};
-use crate::translate::Translations;
+use crate::translate::{Done, Translations};
 use crate::{ffmpeg, output, Error, Result};
 
 /// Write `edit` as an FCPXML timeline to `out`, probing the source for its frame rate. Any `out`
@@ -70,7 +70,8 @@ pub fn write_srt(
 /// Makes the translations `captions` need (5k) for `edit`'s captions from `transcript`, kept in
 /// the `project` folder, the model fetched into `cache_dir` on first use; `progress` hears
 /// `(done, to do)` sentences. Nothing to do (captions not translated, or every sentence done)
-/// returns at once. Returns the project's translations, for [`write_srt`].
+/// returns at once. Returns the project's translations, for [`write_srt`], and what the run did
+/// (sentences it could not translate stay missing, and [`write_srt`] refuses them).
 pub fn translate_captions(
     edit: &EditList,
     captions: &Captions,
@@ -78,7 +79,8 @@ pub fn translate_captions(
     project: &Path,
     cache_dir: &Path,
     progress: &mut dyn FnMut(usize, usize),
-) -> Result<Translations> {
+) -> Result<(Translations, Done)> {
+    let mut done = Done::default();
     if !captions.translate.is_empty() {
         let (num, den) =
             ffmpeg::probe_video(&edit.source)?.map_or((30, 1), |v| (v.fps_num, v.fps_den));
@@ -87,7 +89,7 @@ pub fn translate_captions(
             .iter()
             .flat_map(|s| s.words.iter().map(move |w| (s.track, w)));
         let sentences = srt::sentences(edit, words, num, den);
-        crate::translate::run(
+        done = crate::translate::run(
             project,
             cache_dir,
             &captions.translate,
@@ -97,7 +99,7 @@ pub fn translate_captions(
             &std::sync::atomic::AtomicBool::new(false),
         )?;
     }
-    Ok(Translations::load(project))
+    Ok((Translations::read(project)?, done))
 }
 
 /// [`write_srt`] from words already in hand (the app holds them) at a known frame rate.
