@@ -108,15 +108,6 @@
       sending = false;
     }
   }
-  let installed = $state<string | null>(null);
-  async function installScript() {
-    installed = null;
-    try {
-      installed = await api.installResolveScript();
-    } catch (e) {
-      onError(String(e));
-    }
-  }
 
   async function saveDefault() {
     if (!captions) return;
@@ -273,10 +264,6 @@
       {#if sentLines}
         {#each sentLines as line (line)}<p class="done">{line}</p>{/each}
       {/if}
-      <button onclick={installScript} title="Puts the Junctur script into Resolve's Scripts folder; sending does this too">
-        Install script in Resolve
-      </button>
-      {#if installed}<p class="done">Installed: {installed}</p>{/if}
       <p class="note">
         Places every caption on the open Resolve timeline as a Text+ clip, each speaker on their own video track
         ("Junctur", their number and name) in their colour, styled as above, at the edited timeline's times: put the
