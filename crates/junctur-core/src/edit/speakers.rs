@@ -346,6 +346,12 @@ fn carry<'p>(
             .map(|t| (t.start, t.end))
             .collect()
     };
+    // Each previous speaker's spans once, not once per new speaker.
+    let before: Vec<Vec<(f64, f64)>> = previous
+        .names
+        .iter()
+        .map(|p| spans(&previous.turns, p.id))
+        .collect();
     let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
     for i in (0..n).filter(|&i| out[i].is_none() && !is_person(i)) {
         let a = spans(turns, i as u32 + 1);
@@ -353,7 +359,7 @@ fn carry<'p>(
             if taken[j] || !allowed(p) {
                 continue;
             }
-            let o = overlap(&a, &spans(&previous.turns, p.id));
+            let o = overlap(&a, &before[j]);
             if o > 0.0 {
                 pairs.push((o, i, j));
             }

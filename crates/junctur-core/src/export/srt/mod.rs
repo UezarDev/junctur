@@ -14,7 +14,7 @@ use serde::Serialize;
 
 use super::caption_text;
 use super::translated;
-use crate::edit::{Captions, EditList};
+use crate::edit::{Captions, EditList, Labeller};
 use crate::transcribe::Word;
 use crate::translate::Translations;
 
@@ -22,7 +22,7 @@ pub use file::write;
 pub use kept_words::{missing, sentences};
 pub(super) use open::wrap_onto;
 
-use kept_words::{clean, kept, sentence_words};
+use kept_words::{clean, kept, said, sentence_words};
 use open::{Open, Said};
 use timeline::Timeline;
 use timing::settle;
@@ -89,14 +89,53 @@ pub fn cues<'a>(
     let tl = Timeline::new(edit, num, den);
     let label = edit.speakers.labeller();
     let kept = kept(&tl, edit, words);
-    let shown = match translations.filter(|_| !c.translate.is_empty()) {
-        Some(t) => {
-            let s = sentence_words(&kept, &tl, &label);
-            translated::apply(kept, &s, |text| t.get(&c.translate, text), clean)
-        }
+    let translated = translations
+        .filter(|_| !c.translate.is_empty())
+        .map(|t| (t, sentence_words(&kept, &tl, &label)));
+    cut(&tl, &label, kept, translated, c)
+}
+
+/// [`cues`] with every translation, from one pass over the kept words; while some of the
+/// sentences ([`sentences`]) have no translation yet, `Err` of how many lack one and of how many.
+pub fn finished<'a>(
+    edit: &EditList,
+    c: &Captions,
+    words: impl IntoIterator<Item = (usize, &'a Word)>,
+    num: u64,
+    den: u64,
+    translations: &Translations,
+) -> Result<Vec<Cue>, (usize, usize)> {
+    let tl = Timeline::new(edit, num, den);
+    let label = edit.speakers.labeller();
+    let kept = kept(&tl, edit, words);
+    if c.translate.is_empty() {
+        return Ok(cut(&tl, &label, kept, None, c));
+    }
+    let s = sentence_words(&kept, &tl, &label);
+    let said = said(&kept, &s);
+    match missing(c, &said, translations) {
+        0 => Ok(cut(&tl, &label, kept, Some((translations, s)), c)),
+        n => Err((n, said.len())),
+    }
+}
+
+/// The cues of the kept words, translated with each sentence's translation when given.
+fn cut(
+    tl: &Timeline,
+    label: &Labeller,
+    kept: Vec<translated::Shown>,
+    translated: Option<(&Translations, Vec<Vec<usize>>)>,
+    c: &Captions,
+) -> Vec<Cue> {
+    let mut shown = match translated {
+        Some((t, s)) => translated::apply(kept, &s, |text| t.get(&c.translate, text), clean),
         None => kept,
     };
-    let texts: Vec<(usize, String)> = shown.iter().map(|w| (w.track, w.text.clone())).collect();
+    // Taken, not cloned: only the words' tracks and times are read past here.
+    let texts: Vec<(usize, String)> = shown
+        .iter_mut()
+        .map(|w| (w.track, std::mem::take(&mut w.text)))
+        .collect();
 
     let mut out: Vec<Cue> = Vec::new();
     let mut open: Option<Open> = None;

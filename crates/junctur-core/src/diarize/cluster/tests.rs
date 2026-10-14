@@ -1,5 +1,12 @@
 use super::*;
 
+/// `v` scaled to unit length (zero stays zero).
+fn unit(v: &[f32]) -> Vec<f32> {
+    let mut u = v.to_vec();
+    normalize(&mut u);
+    u
+}
+
 /// `n` embeddings spread around `centre`, each tilted a little along its own axis.
 fn voice(centre: &[f32], n: usize, spread: f32) -> Vec<Vec<f32>> {
     (0..n)
@@ -287,4 +294,79 @@ fn dot_matches_the_plain_sum() {
     let b: Vec<f32> = (0..515).map(|i| (i as f32 * 0.11).cos()).collect();
     let plain: f32 = a.iter().zip(&b).map(|(x, y)| x * y).sum();
     assert!((dot(&a, &b) - plain).abs() < 1e-3);
+}
+
+/// Embeddings of `n` voices with every window tilted its own way, from a fixed seed.
+fn noisy(n: usize, voices: usize, dim: usize) -> Vec<Vec<f32>> {
+    let mut x = 0x2545_f491_4f6c_dd1du64;
+    let mut next = move || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        (x >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+    };
+    let centres: Vec<Vec<f32>> = (0..voices)
+        .map(|_| (0..dim).map(|_| next()).collect())
+        .collect();
+    (0..n)
+        .map(|i| {
+            let c = &centres[i % voices];
+            c.iter().map(|v| v * 3.0 + next()).collect()
+        })
+        .collect()
+}
+
+/// Pass 1 as it was written before the scratch and the in-place centroid.
+fn allocating_pass_one(
+    embeddings: &[Vec<f32>],
+    threshold: f32,
+    cap: usize,
+) -> (Vec<Group>, Vec<usize>) {
+    let mut groups: Vec<Group> = Vec::new();
+    let mut labels = Vec::new();
+    for e in embeddings {
+        let e = unit(e);
+        let best = groups
+            .iter()
+            .enumerate()
+            .map(|(i, g)| (i, dot(&g.unit, &e)))
+            .max_by(|a, b| a.1.total_cmp(&b.1));
+        match best {
+            Some((i, s)) if s >= threshold || groups.len() >= cap => {
+                let g = &mut groups[i];
+                g.sum.iter_mut().zip(&e).for_each(|(c, x)| *c += x);
+                g.unit = unit(&g.sum);
+                g.count += 1;
+                labels.push(i);
+            }
+            _ => {
+                groups.push(Group {
+                    sum: e.clone(),
+                    unit: e,
+                    count: 1,
+                });
+                labels.push(groups.len() - 1);
+            }
+        }
+    }
+    (groups, labels)
+}
+
+/// The groups' sums and units come out of pass 1 bit for bit as [`allocating_pass_one`]'s.
+#[test]
+fn pass_one_matches_the_allocating_version_bit_for_bit() {
+    let e = noisy(600, 5, 67);
+    for (threshold, cap) in [(FIRST, MAX_GROUPS), (0.3, MAX_GROUPS), (0.95, 7)] {
+        let (a, la) = allocating_pass_one(&e, threshold, cap);
+        let slices: Vec<&[f32]> = e.iter().map(Vec::as_slice).collect();
+        let (b, lb) = first_pass(&slices, threshold, cap);
+        assert_eq!(la, lb);
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(&b) {
+            let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&x.sum), bits(&y.sum));
+            assert_eq!(bits(&x.unit), bits(&y.unit));
+            assert_eq!(x.count, y.count);
+        }
+    }
 }

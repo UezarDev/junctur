@@ -118,8 +118,9 @@ pub fn write_captions(
 }
 
 /// The cues of a finished caption output, the SRT or the send to Resolve: refused while the
-/// translation is not all made ([`untranslated`]), else [`srt::cues`] with every translation. One
-/// place for both, so a change to how a file is cut reaches the send too.
+/// translation is not all made (as [`untranslated`]), else [`srt::cues`] with every translation,
+/// the kept words gone over once ([`srt::finished`]). One place for both, so a change to how a
+/// file is cut reaches the send too.
 pub fn finished_cues(
     edit: &EditList,
     captions: &Captions,
@@ -128,15 +129,15 @@ pub fn finished_cues(
     den: u64,
     translations: &Translations,
 ) -> Result<Vec<srt::Cue>> {
-    untranslated(edit, captions, words, num, den, translations)?;
-    Ok(srt::cues(
+    srt::finished(
         edit,
         captions,
         words.iter().copied(),
         num,
         den,
-        Some(translations),
-    ))
+        translations,
+    )
+    .map_err(|(n, of)| not_translated(n, of))
 }
 
 /// Refuses captions to be translated whose translation is not all made yet: a file or a
@@ -156,11 +157,14 @@ pub fn untranslated(
     let sentences = srt::sentences(edit, words.iter().copied(), num, den);
     match srt::missing(captions, &sentences, translations) {
         0 => Ok(()),
-        n => Err(Error::Edit(format!(
-            "{n} of {} caption sentences are not translated yet: translate the captions first",
-            sentences.len()
-        ))),
+        n => Err(not_translated(n, sentences.len())),
     }
+}
+
+fn not_translated(n: usize, of: usize) -> Error {
+    Error::Edit(format!(
+        "{n} of {of} caption sentences are not translated yet: translate the captions first"
+    ))
 }
 
 /// `<stem> (…).srt` files beside `out`.

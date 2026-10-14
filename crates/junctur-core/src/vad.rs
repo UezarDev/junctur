@@ -129,8 +129,9 @@ pub fn normalize(samples: &[f32]) -> Vec<f32> {
     if rms.is_empty() {
         return Vec::new();
     }
-    rms.sort_by(f32::total_cmp);
-    let loud = rms[(rms.len() * 95 / 100).min(rms.len() - 1)];
+    // The one percentile needs only its own place in the order, not a full sort.
+    let at = (rms.len() * 95 / 100).min(rms.len() - 1);
+    let loud = *rms.select_nth_unstable_by(at, f32::total_cmp).1;
     if loud <= 0.0 {
         return samples.to_vec();
     }

@@ -64,11 +64,24 @@ impl Translations {
             version: u32,
             model: String,
         }
+        let current = |version: u32, model: &str| {
+            version == VERSION && model == models::TRANSLATE_DECODER.file
+        };
+        // Parsed whole once. Only a file that does not parse whole is read again for its stamp:
+        // another version's may have another shape, and is started afresh rather than refused.
+        let whole: std::result::Result<Self, _> = serde_json::from_str(&text);
+        if let Ok(t) = whole {
+            return Ok(if current(t.version, &t.model) {
+                t
+            } else {
+                Self::default()
+            });
+        }
         let stamp: Stamp = serde_json::from_str(&text).map_err(unread)?;
-        if stamp.version != VERSION || stamp.model != Self::default().model {
+        if !current(stamp.version, &stamp.model) {
             return Ok(Self::default());
         }
-        serde_json::from_str(&text).map_err(unread)
+        whole.map_err(unread)
     }
 
     /// [`Translations::read`] for showing them: a file that does not read shows none.

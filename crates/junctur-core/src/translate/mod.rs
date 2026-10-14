@@ -80,11 +80,12 @@ pub fn run(
     // Each sentence still needing it once, with the language it was said in.
     let mut seen = std::collections::HashSet::new();
     let mut todo: Vec<(&str, &str)> = Vec::new();
+    let languages = Spoken::new(segments);
     for s in sentences {
         if !seen.insert(s.text.as_str()) {
             continue;
         }
-        match spoken(segments, s.track, s.start) {
+        match languages.at(s.track, s.start) {
             None if cache.get(to, &s.text).is_none() => done.unknown += 1,
             None => {}
             Some(heard) if cache.needs(heard, to, &s.text) => todo.push((s.text.as_str(), heard)),
@@ -209,6 +210,76 @@ pub fn spoken(segments: &[Segment], track: usize, t: f64) -> Option<&str> {
         .filter(|s| s.track == track)
         .min_by(|a, b| distance(a, t).total_cmp(&distance(b, t)))
         .map(|s| s.lang.as_str())
+}
+
+/// [`spoken`] for many sentences: each track's segments in transcript order, answered by binary
+/// search when their starts and ends never go down (a transcript's normally do not), else by
+/// scanning that track's segments.
+pub struct Spoken<'a> {
+    tracks: std::collections::HashMap<usize, Track<'a>>,
+}
+
+struct Track<'a> {
+    segments: Vec<&'a Segment>,
+    sorted: bool,
+}
+
+impl<'a> Spoken<'a> {
+    pub fn new(segments: &'a [Segment]) -> Self {
+        let mut tracks: std::collections::HashMap<usize, Track> = Default::default();
+        for s in segments {
+            tracks
+                .entry(s.track)
+                .or_insert_with(|| Track {
+                    segments: Vec::new(),
+                    sorted: true,
+                })
+                .segments
+                .push(s);
+        }
+        for t in tracks.values_mut() {
+            t.sorted = t
+                .segments
+                .windows(2)
+                .all(|w| w[0].start <= w[1].start && w[0].end <= w[1].end)
+                && t.segments
+                    .iter()
+                    .all(|s| !s.start.is_nan() && !s.end.is_nan());
+        }
+        Self { tracks }
+    }
+
+    /// What [`spoken`] says for `track` at `t`.
+    pub fn at(&self, track: usize, t: f64) -> Option<&'a str> {
+        let tr = self.tracks.get(&track)?;
+        let seg = &tr.segments;
+        if !tr.sorted || t.is_nan() {
+            return seg
+                .iter()
+                .min_by(|a, b| distance(a, t).total_cmp(&distance(b, t)))
+                .map(|s| s.lang.as_str());
+        }
+        // Before `p` every segment starts at or before `t`, so is `max(0, t - end)` away, which
+        // never grows with the index: the least is the last one's, first reached at `q`. From
+        // `p` on the distance never shrinks, so `p` is the nearest there. Ties go to the earlier.
+        let p = seg.partition_point(|s| s.start <= t);
+        let before = p.checked_sub(1).map(|last| {
+            let d = distance(seg[last], t);
+            (seg[..p].partition_point(|s| distance(s, t) > d), d)
+        });
+        let after = seg.get(p).map(|s| (p, distance(s, t)));
+        let best = match (before, after) {
+            (Some(b), Some(a)) => {
+                if a.1 < b.1 {
+                    a
+                } else {
+                    b
+                }
+            }
+            (b, a) => b.or(a)?,
+        };
+        Some(seg[best.0].lang.as_str())
+    }
 }
 
 fn distance(s: &Segment, t: f64) -> f64 {

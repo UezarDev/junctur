@@ -143,42 +143,74 @@ pub struct Analysis {
     pub overlaps: Vec<Overlap>,
 }
 
-/// Clips of a 16 kHz mono stream starting at time 0, asked for in order of start and read once:
-/// only the stretch from the current clip's start on is buffered (at most a segmentation window).
-struct Clips<'a> {
-    reader: &'a mut PcmReader,
-    buf: Vec<f32>,
-    buf_start: usize,
+/// Where [`Clips`] reads: the decoder, or a stand-in in tests.
+trait Samples {
+    /// Up to `n` samples into `buf` (replacing its contents); fewer only at the end, empty then.
+    fn read_into(&mut self, buf: &mut Vec<f32>, n: usize) -> Result<()>;
 }
 
-impl Clips<'_> {
+impl Samples for PcmReader {
+    fn read_into(&mut self, buf: &mut Vec<f32>, n: usize) -> Result<()> {
+        PcmReader::read_into(self, buf, n)
+    }
+}
+
+/// Clips of a 16 kHz mono stream starting at time 0, asked for in order of start and read once:
+/// only the stretch from the current clip's start on is kept (at most a segmentation window).
+struct Clips<'a, R> {
+    reader: &'a mut R,
+    /// Samples from stream sample `start` on, the first `head` of them already let go: they are
+    /// moved out only once they are half the buffer, so a clip does not shift the whole window.
+    buf: Vec<f32>,
+    head: usize,
+    start: usize,
+    scratch: Vec<f32>,
+}
+
+impl<'a, R: Samples> Clips<'a, R> {
+    fn new(reader: &'a mut R) -> Self {
+        Self {
+            reader,
+            buf: Vec::new(),
+            head: 0,
+            start: 0,
+            scratch: Vec::new(),
+        }
+    }
+
     /// Samples `a..a + len`, zero-padded past the end of the stream. `a` must not go backwards.
     fn clip(&mut self, a: usize, len: usize) -> Result<Vec<f32>> {
-        // Drop what lies before this clip, then read up to its end.
-        let drop = a.saturating_sub(self.buf_start).min(self.buf.len());
-        self.buf.drain(..drop);
-        self.buf_start += drop;
-        while self.buf_start < a {
-            let skip = self
-                .reader
-                .read((a - self.buf_start).min(RATE as usize * 60))?;
-            if skip.is_empty() {
-                break;
-            }
-            self.buf_start += skip.len();
+        // Let go of what lies before this clip, then read up to its end.
+        let drop = a
+            .saturating_sub(self.start + self.head)
+            .min(self.buf.len() - self.head);
+        self.head += drop;
+        if self.head * 2 >= self.buf.len() {
+            self.buf.drain(..self.head);
+            self.start += self.head;
+            self.head = 0;
         }
-        while self.buf_start + self.buf.len() < a + len {
-            let more = self
-                .reader
-                .read(a + len - self.buf_start - self.buf.len())?;
-            if more.is_empty() {
+        // Only an empty buffer can lie wholly before `a`, and it is compacted above.
+        while self.start + self.head < a {
+            let n = (a - self.start - self.head).min(RATE as usize * 60);
+            self.reader.read_into(&mut self.scratch, n)?;
+            if self.scratch.is_empty() {
                 break;
             }
-            self.buf.extend(more);
+            self.start += self.scratch.len();
+        }
+        while self.start + self.buf.len() < a + len {
+            let n = a + len - self.start - self.buf.len();
+            self.reader.read_into(&mut self.scratch, n)?;
+            if self.scratch.is_empty() {
+                break;
+            }
+            self.buf.extend_from_slice(&self.scratch);
         }
         // Clips are sorted but may overlap the previous one, so slice from the buffer.
-        let lo = a.saturating_sub(self.buf_start).min(self.buf.len());
-        let mut clip = self.buf[lo..(lo + len).min(self.buf.len())].to_vec();
+        let kept = &self.buf[self.head..];
+        let lo = a.saturating_sub(self.start + self.head).min(kept.len());
+        let mut clip = kept[lo..(lo + len).min(kept.len())].to_vec();
         clip.resize(len, 0.0);
         Ok(clip)
     }
@@ -203,11 +235,7 @@ pub fn analyze(
     };
     let at = |t: f64| (t * RATE as f64) as usize;
     let len = at(SEGMENT_S);
-    let mut clips = Clips {
-        reader,
-        buf: Vec::new(),
-        buf_start: 0,
-    };
+    let mut clips = Clips::new(reader);
     let mut emb_clips: Vec<Vec<f32>> = Vec::new();
     let mut embeddings: Vec<Vec<f32>> = Vec::new();
     let mut seg_clips: Vec<(usize, Vec<f32>)> = Vec::new();
@@ -415,6 +443,80 @@ mod tests {
             let one = emb.embed(refs[k]).unwrap().unwrap();
             assert!(cos(b, r) > 0.999, "clip {k} batched: {}", cos(b, r));
             assert!(cos(&one, r) > 0.999, "clip {k} alone: {}", cos(&one, r));
+        }
+    }
+
+    /// A stream held in memory, read in pieces as the decoder reads.
+    struct Held(Vec<f32>, usize);
+
+    impl Samples for Held {
+        fn read_into(&mut self, buf: &mut Vec<f32>, n: usize) -> Result<()> {
+            let end = (self.1 + n).min(self.0.len());
+            buf.clear();
+            buf.extend_from_slice(&self.0[self.1..end]);
+            self.1 = end;
+            Ok(())
+        }
+    }
+
+    /// The clip reader as written before it let go of its front lazily: a drain per clip and a
+    /// new Vec per read.
+    fn draining_clip(
+        r: &mut Held,
+        buf: &mut Vec<f32>,
+        buf_start: &mut usize,
+        a: usize,
+        len: usize,
+    ) -> Vec<f32> {
+        let read = |r: &mut Held, n: usize| {
+            let mut v = Vec::new();
+            r.read_into(&mut v, n).unwrap();
+            v
+        };
+        let drop = a.saturating_sub(*buf_start).min(buf.len());
+        buf.drain(..drop);
+        *buf_start += drop;
+        while *buf_start < a {
+            let skip = read(r, (a - *buf_start).min(RATE as usize * 60));
+            if skip.is_empty() {
+                break;
+            }
+            *buf_start += skip.len();
+        }
+        while *buf_start + buf.len() < a + len {
+            let more = read(r, a + len - *buf_start - buf.len());
+            if more.is_empty() {
+                break;
+            }
+            buf.extend(more);
+        }
+        let lo = a.saturating_sub(*buf_start).min(buf.len());
+        let mut clip = buf[lo..(lo + len).min(buf.len())].to_vec();
+        clip.resize(len, 0.0);
+        clip
+    }
+
+    /// Both readers hand out the same clips.
+    #[test]
+    fn clips_match_the_draining_reader() {
+        let stream: Vec<f32> = (0..3_000_000).map(|i| i as f32).collect();
+        // Embedding and segmentation clips interleaved, overlapping, with gaps, one past the end.
+        let mut asks: Vec<(usize, usize)> = Vec::new();
+        let mut a = 0;
+        for k in 0..400 {
+            let len = if k % 3 == 0 { 160_000 } else { 24_000 };
+            asks.push((a, len));
+            a += [7_000, 24_000, 0, 1_500_000 / 400, 41_000][k % 5];
+        }
+        asks.push((2_990_000, 24_000));
+        asks.push((3_100_000, 24_000));
+        let mut held = Held(stream.clone(), 0);
+        let mut clips = Clips::new(&mut held);
+        let mut old = Held(stream, 0);
+        let (mut buf, mut start) = (Vec::new(), 0);
+        for &(a, len) in &asks {
+            let want = draining_clip(&mut old, &mut buf, &mut start, a, len);
+            assert_eq!(clips.clip(a, len).unwrap(), want, "clip at {a}");
         }
     }
 

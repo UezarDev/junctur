@@ -44,13 +44,6 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
     acc.iter().sum::<f32>() + tail
 }
 
-/// `v` scaled to unit length (zero stays zero).
-fn unit(v: &[f32]) -> Vec<f32> {
-    let mut u = v.to_vec();
-    normalize(&mut u);
-    u
-}
-
 /// Most groups pass 1 makes; past it a window that resembles no group joins the nearest one. Pass 2
 /// is O(k^3) over a k x k matrix, so k must stay bounded however long the recording.
 pub const MAX_GROUPS: usize = 400;
@@ -66,18 +59,28 @@ struct Group {
 impl Group {
     fn add(&mut self, e: &[f32], count: usize) {
         self.sum.iter_mut().zip(e).for_each(|(c, x)| *c += x);
-        self.unit = unit(&self.sum);
+        // Refilled in place: one Vec per group for the whole pass, not a new one per window.
+        self.unit.clear();
+        self.unit.extend_from_slice(&self.sum);
+        normalize(&mut self.unit);
         self.count += count;
     }
 }
 
 /// Pass 1: centroid clusters at `threshold`, never merged, at most `cap` of them. Returns the
 /// groups and each window's.
-fn first_pass(embeddings: &[Vec<f32>], threshold: f32, cap: usize) -> (Vec<Group>, Vec<usize>) {
+fn first_pass<E: AsRef<[f32]>>(
+    embeddings: &[E],
+    threshold: f32,
+    cap: usize,
+) -> (Vec<Group>, Vec<usize>) {
     let mut groups: Vec<Group> = Vec::new();
     let mut labels = Vec::with_capacity(embeddings.len());
-    for e in embeddings {
-        let e = unit(e);
+    let mut e: Vec<f32> = Vec::new();
+    for x in embeddings {
+        e.clear();
+        e.extend_from_slice(x.as_ref());
+        normalize(&mut e);
         let best = groups
             .iter()
             .enumerate()
@@ -91,7 +94,7 @@ fn first_pass(embeddings: &[Vec<f32>], threshold: f32, cap: usize) -> (Vec<Group
             _ => {
                 groups.push(Group {
                     sum: e.clone(),
-                    unit: e,
+                    unit: e.clone(),
                     count: 1,
                 });
                 labels.push(groups.len() - 1);
@@ -154,8 +157,8 @@ pub fn two_pass(embeddings: &[Vec<f32>], first: f32, merge_at: f32, min_share: f
     two_pass_capped(embeddings, first, merge_at, min_share, MAX_GROUPS)
 }
 
-fn two_pass_capped(
-    embeddings: &[Vec<f32>],
+fn two_pass_capped<E: AsRef<[f32]>>(
+    embeddings: &[E],
     first: f32,
     merge_at: f32,
     min_share: f64,
@@ -179,7 +182,7 @@ fn two_pass_capped(
     embeddings
         .iter()
         .map(|e| {
-            let g = nearest(kept.iter().map(|g| g.unit.as_slice()), e).expect("a group");
+            let g = nearest(kept.iter().map(|g| g.unit.as_slice()), e.as_ref()).expect("a group");
             *dense[g].get_or_insert_with(|| {
                 next += 1;
                 next - 1
@@ -190,8 +193,8 @@ fn two_pass_capped(
 
 /// Passes 1 and 2: the groups left after merging, each with its unit centroid and member count,
 /// and the group (an index into them) each embedding ended up in.
-fn merged(
-    embeddings: &[Vec<f32>],
+fn merged<E: AsRef<[f32]>>(
+    embeddings: &[E],
     first: f32,
     merge_at: f32,
     cap: usize,
@@ -334,9 +337,10 @@ fn cluster_rest(
     min_share: f64,
     n: usize,
 ) {
-    let rest_e: Vec<Vec<f32>> = rest.iter().map(|(_, e)| (*e).clone()).collect();
+    let rest_e: Vec<&[f32]> = rest.iter().map(|(_, e)| e.as_slice()).collect();
     if voices.is_empty() {
-        for ((i, _), c) in rest.iter().zip(two_pass(&rest_e, FIRST, MERGE, min_share)) {
+        let labels = two_pass_capped(&rest_e, FIRST, MERGE, min_share, MAX_GROUPS);
+        for ((i, _), c) in rest.iter().zip(labels) {
             who[*i] = Some(Who::Cluster(c));
         }
     } else if !rest.is_empty() {

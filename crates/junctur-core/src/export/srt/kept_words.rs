@@ -188,12 +188,18 @@ pub fn sentences<'a>(
     let tl = Timeline::new(edit, num, den);
     let label = edit.speakers.labeller();
     let kept = kept(&tl, edit, words);
-    sentence_words(&kept, &tl, &label)
+    said(&kept, &sentence_words(&kept, &tl, &label))
+}
+
+/// The sentences of `kept` (as [`sentence_words`] cuts them) with their track, start and text,
+/// the empty ones left out.
+pub(super) fn said(kept: &[Shown], sentences: &[Vec<usize>]) -> Vec<Sentence> {
+    sentences
         .iter()
         .map(|s| Sentence {
             track: kept[s[0]].track,
             start: kept[s[0]].start.1,
-            text: translated::text(&kept, s),
+            text: translated::text(kept, s),
         })
         .filter(|s| !s.text.is_empty())
         .collect()

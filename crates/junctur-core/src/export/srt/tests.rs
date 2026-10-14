@@ -464,6 +464,8 @@ fn finished_cues_refuse_untranslated_and_cut_as_the_srt_does() {
     t.insert("es", "en", "Hola.", "Hello.");
     let refused = finished_cues(&e, &c, &words, 30, 1, &t).unwrap_err();
     assert!(refused.to_string().contains("1 of 2"), "{refused}");
+    let checked = crate::export::untranslated(&e, &c, &words, 30, 1, &t).unwrap_err();
+    assert_eq!(refused.to_string(), checked.to_string());
     t.insert("es", "en", "Adiós.", "Goodbye.");
     let got = finished_cues(&e, &c, &words, 30, 1, &t).unwrap();
     assert_eq!(got, cues(&e, &c, words.iter().copied(), 30, 1, Some(&t)));

@@ -233,6 +233,7 @@ pub fn read(
     let frame = PER_HOP * tracks;
     let mut buf = Vec::with_capacity(READ_HOPS * frame);
     let mut out = Vec::with_capacity(READ_HOPS * tracks);
+    let mut peaks = vec![0f32; tracks];
     let mut hops = 0;
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -245,13 +246,13 @@ pub fn read(
         out.clear();
         // A read is whole hops of whole frames, but at the end of the stream.
         for hop in buf.chunks(frame) {
-            let mut peaks = vec![0f32; tracks];
+            peaks.fill(0.0);
             for s in hop.chunks_exact(tracks) {
                 for (p, x) in peaks.iter_mut().zip(s) {
                     *p = p.max(x.abs());
                 }
             }
-            out.extend(peaks.into_iter().map(level));
+            out.extend(peaks.iter().copied().map(level));
             hops += 1;
         }
         more(&out);

@@ -25,6 +25,52 @@ fn a_sentence_takes_its_segments_language() {
     assert_eq!(spoken(&s, 2, 5.0), None);
 }
 
+/// The index answers as the scan does: transcript-shaped tracks (touching, overlapping, gaps, zero
+/// length, equal starts), a track out of order, and times before, inside, between and after.
+#[test]
+fn the_language_index_answers_as_the_scan_does() {
+    let langs = ["en", "es", "fr", "de", "it"];
+    let mut x = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = move |n: u64| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x % n
+    };
+    let mut segments = Vec::new();
+    for track in 0..3 {
+        let (mut start, mut end) = (0.0f64, 0.0f64);
+        for k in 0..300 {
+            start += [0.0, 0.0, 0.25, 1.5, 9.0][next(5) as usize];
+            end = end.max(start + [0.0, 0.1, 2.0, 7.3][next(4) as usize]);
+            let lang = langs[(next(5) + k) as usize % 5];
+            segments.push(seg(track, start, end, lang));
+        }
+    }
+    // A track whose segments are out of order takes the scan.
+    for k in 0..50 {
+        let s = (next(1000) as f64) / 3.0;
+        segments.push(seg(3, s, s + (k % 4) as f64, langs[k % 5]));
+    }
+    let index = Spoken::new(&segments);
+    assert!((0..3).all(|t| index.tracks[&t].sorted) && !index.tracks[&3].sorted);
+    for track in 0..5 {
+        for i in 0..4000 {
+            let t = i as f64 * 0.37 - 20.0;
+            assert_eq!(
+                index.at(track, t),
+                spoken(&segments, track, t),
+                "track {track} at {t}"
+            );
+        }
+        for s in segments.iter().filter(|s| s.track == track) {
+            for t in [s.start, s.end, (s.start + s.end) / 2.0] {
+                assert_eq!(index.at(track, t), spoken(&segments, track, t));
+            }
+        }
+    }
+}
+
 #[test]
 fn sentences_already_in_the_target_language_are_kept_without_the_model() {
     let d = std::env::temp_dir().join(format!("junctur-tr-run-{}", std::process::id()));
