@@ -592,11 +592,11 @@ pub async fn caption_cues(app: State<'_, App>, aspect: f64) -> Result<Vec<Placed
 
 /// Sends the edit into DaVinci Resolve as a timeline of its own with the captions on it as Text+
 /// clips (5z, 5g), through the Junctur script running there; installs or refreshes that script
-/// first. `answer` ("new" or "replace") is the user's word on a timeline of that name already
-/// there; without it such a send changes nothing and answers `exists` for the page to ask.
+/// first. `answer` ("new", "update" or "replace") is the user's word on a timeline of that name
+/// already there; without it such a send changes nothing and answers `exists` for the page to ask.
 /// `existing` (5n): the user's answer to a send that found clips Junctur did not place in the
-/// captions' way, for this send only. Off the async runtime: Resolve can take minutes over a long
-/// recording.
+/// captions' way (an update, 5ab, on a timeline that has them), for this send only. Off the async
+/// runtime: Resolve can take minutes over a long recording.
 #[tauri::command]
 pub async fn send_to_resolve(
     app: State<'_, App>,

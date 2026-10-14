@@ -113,8 +113,10 @@ pub struct Sent {
     pub new_tracks: usize,
     /// Whether it replaced a timeline of that name (5z).
     pub replaced: bool,
+    /// Whether only the captions were updated on a timeline already there (5ab), its cut untouched.
+    pub updated: bool,
     /// What went wrong making the timeline without stopping the send: an old timeline Resolve
-    /// would not delete or a name it would not take.
+    /// would not delete or a name it would not take; on an update, a cut that no longer matches.
     pub note: Option<String>,
 }
 
@@ -183,13 +185,14 @@ pub fn sent(a: &HashMap<String, String>, timeline: &str) -> Sent {
         skipped: n("skipped"),
         new_tracks: n("newTracks"),
         replaced: false,
+        updated: false,
         note: None,
     }
 }
 
 /// Whether the script answering `check` (the first request of a send since 5z; `info` before it)
 /// is the one this Junctur needs or newer: it says which it is (`script`, 5m on), compared by
-/// length then text so "5z" < "5aa". One from before it would ignore what a send asks of it now
+/// length then text so "5z" < "5ab". One from before it would ignore what a send asks of it now
 /// (5n: asking before placing over the user's clips; 5l: the highlight and animation; 5z: a
 /// `check` answered without 5n's or 5l's handling of `place`).
 pub fn script_is_current(info: &HashMap<String, String>) -> bool {
@@ -198,9 +201,9 @@ pub fn script_is_current(info: &HashMap<String, String>) -> bool {
         .is_some_and(|v| version(v.trim()) >= version(SCRIPT))
 }
 
-/// The script version this Junctur needs (`junctur.lua`'s `SCRIPT`): "5z" since the caption
-/// rounds 5l to 5q and 5z's whole-timeline send met in one script.
-pub const SCRIPT: &str = "5z";
+/// The script version this Junctur needs (`junctur.lua`'s `SCRIPT`): "5ab" since the caption
+/// rounds 5l to 5q met 5z's whole-timeline send and 5ab's update of captions only (`open`).
+pub const SCRIPT: &str = "5ab";
 
 /// The Fusion Titles a `templates` request found in the media pool (5m), in the script's order
 /// (`count`, then `t1..tN`), each trimmed by the rule the script and the send use
@@ -330,8 +333,10 @@ mod tests {
         assert!(!script_is_current(&info(Some("5m"))));
         assert!(!script_is_current(&info(Some("5n"))));
         assert!(!script_is_current(&info(Some("5o"))));
-        assert!(script_is_current(&info(Some("5z"))));
-        assert!(script_is_current(&info(Some("5aa"))));
+        assert!(!script_is_current(&info(Some("5z"))));
+        assert!(!script_is_current(&info(Some("5aa"))));
+        assert!(script_is_current(&info(Some("5ab"))));
+        assert!(script_is_current(&info(Some("5ac"))));
         assert!(!script_is_current(&info(Some(""))));
     }
 

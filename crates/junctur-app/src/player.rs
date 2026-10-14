@@ -823,7 +823,8 @@ impl Core {
     /// recording, every audio track, cut as the list says) with its captions on it as Text+ clips
     /// (5g), laid out for that timeline's shape, through the Junctur script running there. When the
     /// project already has the timeline and `answer` does not say what to do, nothing is changed
-    /// and the outcome says so. Blocks until Resolve answers (minutes for a long recording), so the
+    /// and the outcome says so; answered Update (5ab), only the captions on that timeline are
+    /// updated. Blocks until Resolve answers (minutes for a long recording), so the
     /// command runs it off the async runtime. Refused, like the export, while translated captions
     /// are not all translated (5k); a recording with no transcript sends its timeline alone. The
     /// captions are cut as the preview and the SRT cut them (5q). `existing`: what to do this once

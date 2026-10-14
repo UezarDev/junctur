@@ -30,7 +30,7 @@ export const CAPTION_SECTIONS: { part: CaptionPart; title: string; info?: string
   {
     part: "resolve",
     title: "Send to Resolve",
-    info: "Sends the whole edit to the project open in Resolve: a new timeline named after the recording, cut as here with every audio track, and every caption on it as a Text+ clip, a video track per speaker. If the project already has that timeline, Junctur asks whether to make a new one beside it or replace it. Once per Resolve session run Workspace > Scripts > Junctur and leave it running.",
+    info: "Sends the whole edit to the project open in Resolve: a new timeline named after the recording, cut as here with every audio track, and every caption on it as a Text+ clip, a video track per speaker. If the project already has that timeline, Junctur asks whether to make a new one beside it, update only the captions on it (its cuts and your changes in Resolve left alone) or replace it. Once per Resolve session run Workspace > Scripts > Junctur and leave it running.",
   },
 ];
 

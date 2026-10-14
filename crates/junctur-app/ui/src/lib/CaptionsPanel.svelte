@@ -6,7 +6,8 @@
   // carries only text, timing, colour, bold, italic and underline into DaVinci Resolve (5d, 5f); the
   // font, size, position, outline and where people talking at once go (5g) reach it through "Send to
   // Resolve", Text+ clips placed by the Junctur script running in Resolve on the timeline the send makes
-  // of the edit (5z), and drive the preview.
+  // of the edit (5z), and drive the preview. When Resolve already has that timeline, `TimelineExists`
+  // asks what to do, Update captions only (5ab) among the choices.
   // Export writes one file
   // (5e): a Resolve subtitle track shows one caption at a time, so people talking at once share one
   // caption, a line each; 5b's per-speaker files left beside it are listed. The remembered voices
@@ -18,13 +19,15 @@
   // its own settings follows the user's defaults, and "Save as default" makes this recording's the
   // defaults. Each group is a `Section`; what used to be a paragraph under it is its (i) (2t), and
   // only status and results show as text.
-  import { message, save } from "@tauri-apps/plugin-dialog";
+  import { onDestroy, tick } from "svelte";
+  import { save } from "@tauri-apps/plugin-dialog";
   import * as api from "./api";
   import { captionFace, captionFont } from "./captionStyle";
   import CaptionRules from "./CaptionRules.svelte";
   import CaptionTranslation from "./CaptionTranslation.svelte";
   import InfoTip from "./InfoTip.svelte";
   import Section from "./Section.svelte";
+  import TimelineExists from "./TimelineExists.svelte";
   import { section } from "./captionSections";
 
   let {
@@ -94,13 +97,18 @@
 
   // Send to Resolve (5g, 5z): one at a time; the reply says what landed. The send makes the edit's
   // own timeline; when the project already has one of that name nothing is changed until the
-  // pop-up is answered, and Cancel (or closing it) sends nothing. A send that finds clips Junctur
-  // did not place where its captions go (5n) places none and comes back with them counted:
-  // `inTheWay` holds the question until the user picks or cancels. The timeline a send makes has
-  // new caption tracks, so since 5z a send does not meet such clips.
+  // pop-up is answered (Create new, Update captions only (5ab) or Replace), and Cancel (or Escape,
+  // or a press outside it) sends nothing. A panel closed under the pop-up answers it as Cancel, so
+  // the send never waits on a dialog that is gone; once the send is over, the keys go back to its
+  // button. A send that finds clips Junctur did not place where its captions go (5n) places none
+  // and comes back with them counted: `inTheWay` holds the question until the user picks or
+  // cancels. That happens on Update captions only, which places on the timeline already there (a
+  // timeline a send makes has new caption tracks); the answer is sent again with the same answer
+  // to the pop-up, so it updates that timeline rather than making another.
   let sending = $state(false);
+  let sendButton = $state<HTMLButtonElement | undefined>();
   let sentLines = $state<string[] | null>(null);
-  let inTheWay = $state<{ clips: number; captions: number } | null>(null);
+  let inTheWay = $state<{ clips: number; captions: number; answer: api.TimelineAnswer | null } | null>(null);
   // New track first: the one choice that never loses anything.
   let choice = $state<api.ExistingClips>("newTrack");
   let remember = $state(false);
@@ -138,36 +146,46 @@
     if (sending) return;
     const picked = choice;
     const keep = remember;
-    if (!(await sendResolve(picked)) || !keep) return;
+    if (!(await sendResolve(picked, inTheWay?.answer ?? null)) || !keep) return;
     const now = captions;
     if (now) await call(() => api.setCaptions({ ...now, existingClips: picked }));
   }
   // Resolves to whether the send went through (not refused, not stopped to ask). `sending` is set
   // before the first await, so a second click while one is on its way does nothing.
-  const CREATE = "Create new timeline (recommended)";
-  const REPLACE = "Replace";
-  async function sendResolve(existing?: api.ExistingClips): Promise<boolean> {
+  let asking = $state<{ name: string; answer: (a: api.TimelineAnswer | null) => void } | null>(null);
+  const ask = (name: string) =>
+    new Promise<api.TimelineAnswer | null>((answer) => {
+      asking = {
+        name,
+        answer: (a) => {
+          asking = null;
+          answer(a);
+        },
+      };
+    });
+  onDestroy(() => asking?.answer(null));
+  // `existing` (5n) and `given` (the pop-up's answer, 5z/5ab) are a re-send's: the question about
+  // clips in the way answered for the send that asked.
+  async function sendResolve(
+    existing?: api.ExistingClips,
+    given: api.TimelineAnswer | null = null,
+  ): Promise<boolean> {
     if (sending) return false;
     sending = true;
     sentLines = null;
     inTheWay = null;
+    let asked = false;
     try {
-      let r = await api.sendToResolve(null, existing);
+      let used = given;
+      let r = await api.sendToResolve(used, existing);
       if (r.kind === "exists") {
-        const pick = await message(
-          `Resolve already has a timeline called "${r.name}". Create new timeline makes "${r.name} 2" (or the next free number) beside it and leaves it as it is. Replace deletes "${r.name}" and makes it again from this edit.`,
-          {
-            title: "This timeline is already in Resolve",
-            kind: "warning",
-            buttons: { yes: CREATE, no: REPLACE, cancel: "Cancel" },
-          },
-        );
-        // The plugin answers with the label pressed; anything else (Cancel, the dialog closed) sends nothing.
-        const answer = pick === CREATE ? "new" : pick === REPLACE ? "replace" : null;
+        asked = true;
+        const answer = await ask(r.name);
         if (!answer) {
           sentLines = ["Nothing was sent."];
           return false;
         }
+        used = answer;
         r = await api.sendToResolve(answer, existing);
       }
       // An answered send never asks again; if it did, say so rather than end without a word.
@@ -178,8 +196,9 @@
       if (r.inTheWay > 0) {
         choice = "newTrack";
         remember = false;
-        inTheWay = { clips: r.inTheWay, captions: r.blocked };
-        // On Replace, the timeline made beside the old one, which is kept until captions land.
+        inTheWay = { clips: r.inTheWay, captions: r.blocked, answer: used };
+        // On Replace, the timeline made beside the old one, kept until captions land; on an update,
+        // a cut that no longer matches the edit's.
         sentLines = r.note ? [r.note] : null;
         return false;
       }
@@ -190,7 +209,9 @@
       const inputs = r.unstyled.filter((u) => !MOTION.includes(u));
       const captioned = r.placed + r.restyled + r.failed + r.skipped > 0;
       sentLines = [
-        `Timeline "${r.timeline}" made in Resolve${r.replaced ? ", replacing the old one" : ""}.`,
+        r.updated
+          ? `Captions updated on timeline "${r.timeline}" in Resolve, now the open timeline; its cuts were left as they are.`
+          : `Timeline "${r.timeline}" made in Resolve${r.replaced ? ", replacing the old one" : ""}.`,
         ...(r.note ? [r.note] : []),
         ...(captioned
           ? [`Captions: ${n(r.placed, "placed")}, ${n(r.restyled, "updated")}, ${n(r.removed, "removed")}.`]
@@ -217,6 +238,10 @@
       return false;
     } finally {
       sending = false;
+      if (asked) {
+        await tick();
+        sendButton?.focus();
+      }
     }
   }
 
@@ -271,6 +296,8 @@
     }
   }
 </script>
+
+{#if asking}<TimelineExists name={asking.name} onPick={asking.answer} />{/if}
 
 <section class="panel">
   <header>
@@ -364,7 +391,7 @@
       <Section {...head("resolve")}>
         <CaptionRules value={captions} part="resolve" onChange={(c) => setCaptions(c)} {onError} />
         <div class="buttons">
-          <button class="grow" onclick={() => sendResolve()} disabled={sending || !source}>
+          <button class="grow" bind:this={sendButton} onclick={() => sendResolve()} disabled={sending || !source}>
             {sending ? "Sending…" : "Send to Resolve"}
           </button>
         </div>

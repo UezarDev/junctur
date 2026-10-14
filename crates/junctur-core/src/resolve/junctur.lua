@@ -1,15 +1,15 @@
--- Junctur's bridge inside DaVinci Resolve (phases 5g, 5z). SPDX-License-Identifier: GPL-3.0-or-later
+-- Junctur's bridge inside DaVinci Resolve (phases 5g, 5z, 5ab). SPDX-License-Identifier: GPL-3.0-or-later
 --
 -- Junctur installs this into Resolve's Scripts folder. Run it once per Resolve session
 -- (Workspace > Scripts > Junctur) and leave it running: when Junctur's "Send to Resolve" writes a
 -- request into its mailbox, this makes the edited timeline from Junctur's FCPXML (5z) and places
--- or restyles the captions on it as Text+ clips. With the word highlight or an animation on (phase
--- 5l) the clips are auto-subs' animated caption, a Fusion macro round a Text+, driven through the
--- macro's own helpers as auto-subs drives it. Junctur's template picker (phase 5m) asks for the
--- Fusion Titles in the media pool; with a template's own look kept, only the text, timing and
--- speaker colour are set on it. Clips Junctur did not place that sit where new captions go (phase
--- 5n) are asked about before anything changes, then replaced, skipped round, or left with the
--- captions put on a track beside.
+-- or restyles the captions on it as Text+ clips, or (5ab) updates only the captions on the
+-- timeline already there. With the word highlight or an animation on (phase 5l) the clips are
+-- auto-subs' animated caption, a Fusion macro round a Text+, driven through the macro's own helpers
+-- as auto-subs drives it. Junctur's template picker (phase 5m) asks for the Fusion Titles in the
+-- media pool; with a template's own look kept, only the text, timing and speaker colour are set on
+-- it. Clips Junctur did not place that sit where new captions go (phase 5n) are asked about before
+-- anything changes, then replaced, skipped round, or left with the captions put on a track beside.
 --
 -- Resolve 21 runs scripts with no io, require or os.execute, so a request is a Lua chunk read with
 -- loadfile and the only way back is Fusion's prefs (SetPrefs + SavePrefs writes Fusion.prefs,
@@ -30,8 +30,8 @@ local MACRO = "AutoSubs"
 -- Told to Junctur in `check` (5z; `info` before), so it can tell a script too old for what it asks
 -- (5m; 5n asks before placing over clips it did not place, which a 5m script would not; 5z makes
 -- the timeline, and a 5z script from before the caption rounds met it would place without 5l's
--- highlight, 5m's kept look or 5n's question).
-local SCRIPT = "5z"
+-- highlight, 5m's kept look or 5n's question; 5ab adds `open`, the update of captions only).
+local SCRIPT = "5ab"
 
 -- Plain global lookups, not rawget(_G, ...): Resolve's script runner hands a script its own
 -- environment, which holds these.
@@ -641,6 +641,64 @@ function handlers.finish(req)
             .. tostring(made:GetName()) .. "\""
     end
     return { replaced = true, name = made:GetName(), note = note }
+end
+
+-- Where the timeline's own cut ends: the last end frame of any clip on its audio tracks and on
+-- its video tracks other than Junctur's caption tracks ("Junctur", "Junctur <id> <name>"); nil
+-- when there are none.
+local function cut_end(t)
+    local last
+    for _, kind in ipairs({ "video", "audio" }) do
+        local ok, n = pcall(function() return t:GetTrackCount(kind) end)
+        for i = 1, (ok and tonumber(n) or 0) do
+            local name = kind == "video" and tostring(t:GetTrackName(kind, i) or "") or ""
+            if name ~= "Junctur" and name:sub(1, 8) ~= "Junctur " then
+                for _, item in ipairs(list(t:GetItemListInTrack(kind, i))) do
+                    local got, e = pcall(function() return item:GetEnd() end)
+                    e = got and tonumber(e)
+                    if e and (not last or e > last) then last = e end
+                end
+            end
+        end
+    end
+    return last
+end
+
+-- 5ab, Update captions only: the one timeline called req.name made the current one, so `place`
+-- can put the captions on it (an append goes to the current timeline), and where its cut ends, so
+-- Junctur can tell a cut that no longer matches its edit. Nothing on any timeline changes.
+function handlers.open(req)
+    local project = resolve:GetProjectManager():GetCurrentProject()
+    if not project then return no_project() end
+    local found, err = timelines_named(project, req.name)
+    if not found then return { error = err } end
+    if #found == 0 then
+        return { error = "Resolve no longer has a timeline called \"" .. req.name
+            .. "\": nothing was changed. Send again to make it" }
+    end
+    if #found > 1 then
+        return { error = "Resolve has " .. #found .. " timelines called \"" .. req.name
+            .. "\", so Junctur cannot tell which to update: nothing was changed. Rename or delete "
+            .. "all but one, or choose Create new timeline" }
+    end
+    local t = found[1]
+    local clip
+    -- The animated caption (5l) when the highlight or an animation is on, as `build` looks it up.
+    clip, err = template(project:GetMediaPool(), req.template or "", req.animated == true)
+    if not clip then return { error = err .. " (nothing was changed on the timelines)" } end
+    pcall(function() project:SetCurrentTimeline(t) end)
+    local now = project:GetCurrentTimeline()
+    -- Asked to switch, Resolve may have switched somewhere else: say what is open now.
+    if not now or timeline_id(now) ~= timeline_id(t) then
+        local shown = now and ("now has \"" .. tostring(now:GetName()) .. "\" open")
+            or "now has no timeline open"
+        return { error = "Resolve did not switch to the timeline \"" .. tostring(t:GetName())
+            .. "\": it " .. shown .. ", and no clips were changed. Open \"" .. tostring(t:GetName())
+            .. "\" yourself and send again" }
+    end
+    local out = describe(t, clip)
+    out.cutEnd = cut_end(t) or ""
+    return out
 end
 
 -- The items on video track `i` by their first frame.

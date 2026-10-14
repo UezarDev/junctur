@@ -230,7 +230,10 @@ export interface Sent {
   newTracks: number;
   /** Whether it replaced one of that name. */
   replaced: boolean;
-  /** What went wrong making it without stopping the send (an old timeline not deleted). */
+  /** Whether only the captions were updated on the timeline already there (5ab). */
+  updated: boolean;
+  /** What went wrong making it without stopping the send (an old timeline not deleted), or on an
+   * update a cut that no longer matches the edit's. */
   note: string | null;
 }
 
@@ -479,9 +482,9 @@ export const exportCaptions = (path: string) => invoke<Exported>("export_caption
 /** The captions as the export cuts them, for the preview over the picture (5d), placed on a
  * picture `aspect` (height over width) in shape (5g). */
 export const captionCues = (aspect: number) => invoke<Cue[]>("caption_cues", { aspect });
-/** What to do when Resolve already has the timeline a send makes (5z): make another beside it, or
- * replace it. */
-export type TimelineAnswer = "new" | "replace";
+/** What to do when Resolve already has the timeline a send makes (5z): make another beside it,
+ * update only the captions on it (5ab), or replace it. */
+export type TimelineAnswer = "new" | "update" | "replace";
 /** What a send came to (junctur-core resolve/mod.rs): sent, or held back because Resolve already
  * has a timeline called `name` (nothing changed; send again with an answer). */
 export type SendOutcome = { kind: "exists"; name: string } | ({ kind: "sent" } & Sent);

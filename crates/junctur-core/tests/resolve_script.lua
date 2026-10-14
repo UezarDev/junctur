@@ -298,16 +298,18 @@ local function world(opts)
     -- A timeline with its own tracks; `w.tracks` stays the first one's ("Main", the one open).
     local function Timeline(name, id, frames)
         local tracks = { { name = "Video 1", items = {} } }
-        local timeline = { name = name, id = id, tracks = tracks, frames = frames }
-        function timeline:GetTrackCount() return #tracks end
-        function timeline:GetTrackName(_, i) return tracks[i].name end
+        local audio = {}
+        local timeline = { name = name, id = id, tracks = tracks, audio = audio, frames = frames }
+        local function kind(k) return k == "audio" and audio or tracks end
+        function timeline:GetTrackCount(k) return #kind(k) end
+        function timeline:GetTrackName(k, i) return kind(k)[i].name end
         function timeline:AddTrack()
             if opts.no_tracks then return false end
             tracks[#tracks + 1] = { name = "", items = {} }
             return true
         end
         function timeline:SetTrackName(_, i, n) tracks[i].name = n return true end
-        function timeline:GetItemListInTrack(_, i) return tracks[i].items end
+        function timeline:GetItemListInTrack(k, i) return kind(k)[i].items end
         function timeline:DeleteClips(list)
             if opts.no_delete then return false end
             for _, d in ipairs(list) do for _, t in ipairs(tracks) do drop(t.items, d) end end
@@ -470,7 +472,11 @@ local function world(opts)
     local project = {}
     w.project = project
     function project:GetCurrentTimeline() return w.current end
-    function project:SetCurrentTimeline(t) w.current = t return true end
+    function project:SetCurrentTimeline(t)
+        if opts.no_switch then return false end
+        w.current = t
+        return true
+    end
     function project:GetTimelineCount()
         if opts.no_count then error("no such method") end
         return #w.timelines
@@ -712,6 +718,80 @@ r = w.m.handlers.place(request({ clip(1, 0, "hola") }, { timeline = info.id }))
 check(r.placed == 1 and #w.current.tracks == 3 and #w.main.tracks == 1, "captions on the made timeline")
 check(w.current.tracks[2].items[1].start == 0, "at its frames")
 
+-- 5ab open: the one timeline of the name made current, nothing on it changed, and where its own
+-- cut ends (video and audio tracks), Junctur's caption tracks left out. Then place on it updates
+-- only the captions: restyled, removed, placed; the cut's clips and the other timelines untouched.
+w = world()
+info = w.m.handlers.build(build())
+local there = w.current
+w.m.handlers.place(request({ clip(1, 0, "hola"), clip(2, 0, "bo"), clip(2, 3000, "late") },
+    { timeline = info.id }))
+local function cut(e)
+    return { start = 0, GetStart = function(self) return self.start end,
+        GetEnd = function() return e end, GetFusionCompCount = function() return 0 end }
+end
+local video, sound = cut(2000), cut(2010)
+there.tracks[1].items = { video }
+there.audio[1] = { name = "Audio 1", items = { sound } }
+w.current = w.main
+local made_before = #w.made
+r = w.m.handlers.open({ name = " REC (junctur)", template = "" })
+check(r.error == nil and r.id == info.id and r.name == "rec (Junctur)", tostring(r.error))
+check(w.current == there, "made current")
+check(r.cutEnd == 2010 and r.fps == "24" and r.template == "Junctur Caption", "cut end " .. tostring(r.cutEnd))
+check(#w.made == made_before and names(w) == "Main, rec (Junctur)", "nothing made")
+r = w.m.handlers.place(request({ clip(1, 0, "hola otra vez"), clip(1, 48, "nuevo") }, { timeline = r.id }))
+check(r.restyled == 1 and r.removed == 2 and r.placed == 1 and r.failed == 0, "updated in place")
+check(#there.tracks == 3 and there.tracks[1].items[1] == video and #there.tracks[1].items == 1, "the cut untouched")
+check(there.audio[1].items[1] == sound and #w.main.tracks == 1, "audio and Main untouched")
+check(there.tracks[2].items[1].tool.inputs.StyledText == "hola otra vez" and #there.tracks[3].items == 0, "captions")
+
+-- 5n on 5ab's update: the timeline there holds a clip of the user's on Junctur's track where a new
+-- caption goes. Asked: nothing changed; then skip (the answer, sent again as an update) leaves that
+-- caption out and the clip where it is.
+local mine = stub(100, 30)
+table.insert(there.tracks[2].items, mine)
+local again = { clip(1, 0, "hola otra vez"), clip(1, 48, "nuevo"), clip(1, 110, "choca") }
+r = w.m.handlers.open({ name = "rec (Junctur)", template = "" })
+r = w.m.handlers.place(request(again, { timeline = r.id }))
+check(r.inTheWay == 1 and r.blocked == 1 and r.placed == nil and #there.tracks[2].items == 3,
+    "update asks: " .. tostring(r.inTheWay))
+r = w.m.handlers.open({ name = "rec (Junctur)", template = "" })
+r = w.m.handlers.place(request(again, { timeline = r.id, existing = "skip" }))
+check(r.skipped == 1 and r.restyled == 2 and r.placed == 0 and #there.tracks[2].items == 3,
+    "update skips: " .. tostring(r.skipped) .. " " .. tostring(r.firstError))
+local kept_mine = false
+for _, it in ipairs(there.tracks[2].items) do if it == mine then kept_mine = true end end
+check(kept_mine and #w.made == made_before, "the user's clip kept, nothing made")
+r = w.m.handlers.open({ name = "rec (Junctur)", template = "", animated = true })
+check(r.error == nil and r.template == "Junctur Animated Caption", "open finds the animated caption (5l)")
+
+-- open with no clips to measure answers no cut end; it refuses with nothing changed when there is
+-- no project, the timeline is gone or doubled, the template is missing, or Resolve will not open it.
+w = world()
+w.m.handlers.build(build({ captions = false }))
+w.current = w.main
+r = w.m.handlers.open({ name = "rec (Junctur)", template = "" })
+check(r.error == nil and r.cutEnd == "", "no cut end: " .. tostring(r.cutEnd))
+w.current = w.main
+r = w.m.handlers.open({ name = "gone (Junctur)", template = "" })
+check(r.error ~= nil and r.error:find("no longer has") and w.current == w.main, "gone")
+r = w.m.handlers.open({ name = "rec (Junctur)", template = "Nope" })
+check(r.error ~= nil and r.error:find("nothing was changed") and w.current == w.main, "a missing template")
+w.no_project = true
+check(w.m.handlers.open({ name = "rec (Junctur)" }).error ~= nil, "open without a project")
+w.no_project = nil
+w.m.handlers.build(build({ name = "other", captions = false }))
+w.timelines[#w.timelines].name = "REC (Junctur)"
+w.current = w.main
+r = w.m.handlers.open({ name = "rec (Junctur)", template = "" })
+check(r.error ~= nil and r.error:find("2 timelines") and w.current == w.main, "two of the name")
+w = world({ no_switch = true })
+w.m.handlers.build(build({ captions = false }))
+r = w.m.handlers.open({ name = "rec (Junctur)", template = "" })
+check(r.error ~= nil and r.error:find("did not switch") and r.error:find("now has \"Main\" open")
+    and w.current == w.main, "not opened: " .. tostring(r.error))
+
 -- 5g's place, on the timeline open.
 w = world()
 local tracks = w.tracks
@@ -941,7 +1021,7 @@ local names = {}
 for k = 1, list.count do names[k] = list["t" .. k] end
 check(table.concat(names, ",") == "Lower third,My Title,Basic Template",
     "templates: " .. table.concat(names, ","))
-check(w.m.handlers.check({}).script == "5z", "the script says which it is, in check (5z)")
+check(w.m.handlers.check({}).script == "5ab", "the script says which it is, in check (5z on)")
 -- No project open: an error, not an empty list.
 check(world({ no_project = true }).m.handlers.templates().error ~= nil, "no project")
 

@@ -123,8 +123,9 @@ The app's Captions panel can also send the whole edit straight into DaVinci Reso
 Resolve"): a new timeline in the open project, named `<recording> (Junctur)` and made from the same
 FCPXML as `junctur export --fcpxml` (the recording, every audio track, cut as the edit list says), with
 the captions on it as Fusion Text+ clips. If the project already has that timeline, Junctur asks whether
-to create a new one beside it (`<recording> (Junctur) 2`) or replace it; it never replaces one without
-asking. Text+ reaches what an SRT cannot: font, size, height, outline, and where people
+to create a new one beside it (`<recording> (Junctur) 2`), update only the captions on it (its cuts and
+anything changed in Resolve left alone; the result says when its cut no longer matches the edit's) or
+replace it; it never replaces one without asking. Text+ reaches what an SRT cannot: font, size, height, outline, and where people
 talking at once go (stacked, side by side, or one at the top; a protagonist keeps the normal spot).
 Each speaker gets their own video track in their colour.
 Junctur installs a script into Resolve's Scripts folder; start it once per Resolve session with

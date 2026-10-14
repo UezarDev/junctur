@@ -1,5 +1,6 @@
 //! The Lua script Junctur installs in Resolve (5g, 5z), run against a stand-in Resolve
 //! (`resolve_script.lua`): the timeline made from the FCPXML (5z: listed, made, linked, replaced),
+//! the one already there opened for an update of its captions only (5ab),
 //! placing, restyling in place, removing, tags, locked tracks, the template
 //! import. Needs a Lua 5.1 interpreter: `JUNCTUR_LUA`, else `luajit` or `lua` on PATH, else the
 //! `fuscript` that comes with DaVinci Resolve (it only runs the file; it does not start or touch
