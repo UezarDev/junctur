@@ -4,6 +4,12 @@
 //! each. Times go through the kept ranges on the frame grid ([`frame_ranges`]), as the renderer and
 //! the FCPXML do, so a cue lands on the same frames in the render and in Resolve.
 
+mod file;
+mod kept_words;
+mod open;
+mod timeline;
+mod timing;
+
 use serde::Serialize;
 
 use super::caption_text;
@@ -122,10 +128,5 @@ pub fn cues<'a>(
     out
 }
 
-mod file;
-mod kept_words;
-mod open;
 #[cfg(test)]
 mod tests;
-mod timeline;
-mod timing;

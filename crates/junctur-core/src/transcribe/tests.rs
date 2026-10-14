@@ -1,3 +1,4 @@
+use super::partial::{read_partial, VERSION};
 use super::*;
 
 fn header(languages: &str, model: &str) -> Header {
