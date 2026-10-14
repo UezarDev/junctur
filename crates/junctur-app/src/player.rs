@@ -476,7 +476,14 @@ impl Core {
         if new_list.is_some() && new_list != in_play {
             eprintln!("junctur-app: edit.junctur changed on disk, taken ({by})");
         }
-        if new_list.is_some() && new_list.map(|l| &l.keep) != in_play.map(|l| &l.keep) {
+        // The history holds the ranges and the retimed words (2w): an outside change to either
+        // would be undone over.
+        // Compared as the file writes them, so a list read back equals the one saved.
+        let undone = |l: &EditList| {
+            let times: Vec<_> = l.times.iter().map(edit_key).collect();
+            (l.keep.clone(), times)
+        };
+        if new_list.is_some() && new_list.map(undone) != in_play.map(undone) {
             ed.changed_elsewhere();
             // A first list (the app's own analysis just wrote it, 2d) had no history to clear.
             let notice =
@@ -523,6 +530,18 @@ impl Core {
             self.prepare();
         }
         self.change(file, |ed, list, fps| ed.edit(list, step, fps))
+    }
+
+    /// Moves a cut's edge (2w): frame edit `frames` (start, end, keep) moving edge `from`, and the
+    /// words beside it with it, as one undo step. See [`Editor::move_edge`].
+    pub fn move_edge(
+        &self,
+        file: Option<&str>,
+        frames: (u64, u64, bool),
+        from: u64,
+    ) -> Result<(), String> {
+        self.prepare();
+        self.change(file, |ed, list, fps| ed.move_edge(list, frames, from, fps))
     }
 
     /// Cuts (`keep` false) or keeps every run of transcript words in `runs` (`first..=last` each)
@@ -585,9 +604,14 @@ impl Core {
         if self.file().as_deref() != Some(file) {
             return Err(OPENED_MEANWHILE.into());
         }
+        let times = lock(&self.ctl)
+            .edit
+            .list
+            .as_ref()
+            .map_or_else(Vec::new, |l| l.times.clone());
         let stretches = runs
             .iter()
-            .map(|&(first, last)| words.stretch(first, last))
+            .map(|&(first, last)| words.stretch(first, last, &times))
             .collect::<Option<Vec<_>>>()
             .ok_or("no such words in the transcript")?;
         let (found, line) = voices::enroll(file, name, &stretches)?;
@@ -782,7 +806,12 @@ impl Core {
             .map(|l| l.speakers.clone())
             .unwrap_or_default();
         let fixed = junctur_core::edit::check_span(text)?;
-        let run = words.retyped(first, last, &fixed, &speakers)?;
+        let times = lock(&self.ctl)
+            .edit
+            .list
+            .as_ref()
+            .map_or_else(Vec::new, |l| l.times.clone());
+        let run = words.retyped(first, last, &fixed, &speakers, &times)?;
         self.change(file, |ed, list, _| ed.fix_words(list, &run, &fixed))?;
         Ok((run.heard, fixed))
     }
@@ -1079,7 +1108,8 @@ impl Core {
         let none = Speakers::default();
         let speakers = list.as_deref().map_or(&none, |l| &l.speakers);
         let fixes = list.as_deref().map_or(&[][..], |l| &l.fixes);
-        Some(TranscriptView::new(&words, speakers, fixes))
+        let times = list.as_deref().map_or(&[][..], |l| &l.times);
+        Some(TranscriptView::new(&words, speakers, fixes, times))
     }
 
     /// Keeps the right-hand `right`, bottom `bottom` and top `top` shares of the window (0..1) free
@@ -1636,6 +1666,14 @@ fn event_loop(events: &mut Events, shared: &Shared) {
             held = true;
         }
     }
+}
+
+/// A retimed word as the edit list writes it (2w repair): track, heard start, nth, new start and
+/// end, all to the millisecond, so the history's comparison with the file is not thrown by a last
+/// bit.
+fn edit_key(t: &junctur_core::edit::Retime) -> (usize, i64, usize, i64, i64) {
+    let ms = |s: f64| (s * 1000.0).round() as i64;
+    (t.track, ms(t.start), t.nth, ms(t.from), ms(t.to))
 }
 
 #[cfg(test)]

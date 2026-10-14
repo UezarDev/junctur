@@ -817,6 +817,8 @@ fn draft(
     let previous = parsed.as_ref().map(|e| e.speakers.clone());
     // Fixed words too (5h): a re-cut changes what is kept, not what a word says.
     let fixes = parsed.as_ref().map_or_else(Vec::new, |e| e.fixes.clone());
+    // And retimed words (2w): where a word is said is not what a re-cut decides.
+    let times = parsed.as_ref().map_or_else(Vec::new, |e| e.times.clone());
     // Caption settings are the user's, like the names: a re-cut keeps them.
     // None stays None: a list that followed the user's defaults still does (2i).
     let captions = parsed.and_then(|e| e.captions);
@@ -829,6 +831,7 @@ fn draft(
         speakers: speakers.clone(),
         captions: captions.clone(),
         fixes: fixes.clone(),
+        times: times.clone(),
         windows: edit::windows(&regions, starts, report.duration, settings.window),
     };
     let list = make(settings, &starts);
@@ -1087,6 +1090,7 @@ mod tests {
             speakers: Default::default(),
             captions: Default::default(),
             fixes: Vec::new(),
+            times: Vec::new(),
             windows: vec![],
         }
         .to_text()

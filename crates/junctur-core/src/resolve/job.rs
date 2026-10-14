@@ -407,6 +407,7 @@ mod tests {
             },
             captions: None,
             fixes: Vec::new(),
+            times: Vec::new(),
             windows: Vec::new(),
         }
     }

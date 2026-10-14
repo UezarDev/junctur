@@ -306,6 +306,9 @@ export interface TranscriptView {
   span: number[];
   /** Each span's text. */
   spans: string[];
+  /** 2w repair: each word's start as heard, in ms, sent only when some word is retimed (else
+   * `start` is it): words starting together (5w) are grouped by it, as fixes name them. */
+  heard?: number[];
 }
 
 export type StageState = "pending" | "running" | "done" | "failed";
@@ -459,6 +462,11 @@ export const editWords = (runs: [number, number][], keep: boolean) =>
 /** Cuts or keeps source frames `[start, end)` exactly. */
 export const editFrames = (start: number, end: number, keep: boolean) =>
   invoke<void>("edit_frames", { start, end, keep });
+/** 2w: moves a cut's edge, at frame `from` (one end of `[start, end)`), to the other end by that
+ * frame edit, and the words beside the edge with it, as one undo step. An edit that moves no edge
+ * of the list (review's clips are not always its ranges) is the frame edit alone. */
+export const moveEdge = (step: { start: number; end: number; keep: boolean }, from: number) =>
+  invoke<void>("move_edge", { start: step.start, end: step.end, keep: step.keep, from });
 /** Renames speaker `id` in the edit list (saved at once, not an undo step). */
 export const renameSpeaker = (id: number, name: string) =>
   invoke<void>("rename_speaker", { id, name });

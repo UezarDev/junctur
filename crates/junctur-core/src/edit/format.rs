@@ -32,27 +32,33 @@
 //! a list without one is still version 3. Every version reads here, a `fix` line without `+<n>` as
 //! the first word of its millisecond. A run of words fixed as one text (5x: a sentence retyped) is a
 //! `span <track> <first start>[+<n>] <last start>[+<n>] <text>` line, the words from the first to the
-//! last on that track, and makes the list version 5; without one a list is written as before.
+//! last on that track, and makes the list version 5; without one a list is written as before. A word
+//! retimed by moving a cut's edge (2w) is a `time <track> <start>[+<n>] <new start> <new end>` line,
+//! the word named by its heard start as a fix names it, and makes the list version 6; without one a
+//! list is written as before.
 
 use std::fmt::Write;
 use std::path::PathBuf;
 
 use super::captions_line;
 use super::{
-    check_fix, check_span, default_color, default_name, fixes, parse_color, CutSettings, EditList,
-    Fix, Range, SpeakerName, Speakers, Turn, Window, WordAt,
+    check_fix, check_span, default_color, default_name, fixes, parse_color, times, CutSettings,
+    EditList, Fix, Range, Retime, SpeakerName, Speakers, Turn, Window, WordAt,
 };
 
-/// The newest version this build writes (a span of words fixed as one, 5x); lists with fixed words
-/// but no span are written as 4 when one is a later word of its start millisecond (5w), else as 3
-/// (5h), lists without fixed words as 2 (with speakers or captions) or 1.
-pub const FORMAT_VERSION: u32 = 5;
+/// The newest version this build writes (a retimed word, 2w); lists without one are written as 5
+/// with a span of words fixed as one (5x), lists with fixed words but no span as 4 when one is a
+/// later word of its start millisecond (5w), else as 3 (5h), lists without fixed words as 2 (with
+/// speakers or captions) or 1.
+pub const FORMAT_VERSION: u32 = 6;
 
 pub fn write(e: &EditList) -> String {
     let s = &e.settings;
     let mut out = String::new();
-    let version = if e.fixes.iter().any(Fix::is_span) {
+    let version = if !e.times.is_empty() {
         FORMAT_VERSION
+    } else if e.fixes.iter().any(Fix::is_span) {
+        5
     } else if e.fixes.iter().any(|f| f.nth > 0) {
         4
     } else if !e.fixes.is_empty() {
@@ -140,6 +146,17 @@ pub fn write(e: &EditList) -> String {
             };
         }
     }
+    if !e.times.is_empty() {
+        let _ = writeln!(
+            out,
+            "# time <track> <start>[+<n>] <new start> <new end>: a word retimed by moving a cut's edge (start as heard)"
+        );
+        let mut times = e.times.clone();
+        times::sort(&mut times);
+        for t in &times {
+            let _ = writeln!(out, "time {}", times::line(t));
+        }
+    }
     let _ = writeln!(out, "# window <start> <score> <speech share> <words>");
     for w in &e.windows {
         let _ = writeln!(
@@ -161,14 +178,16 @@ pub fn parse(text: &str) -> Result<EditList, String> {
         l.strip_prefix("junctur-edit ")
             .and_then(|v| v.parse::<u32>().ok())
     };
-    match lines.next() {
-        Some((_, l)) if version(l).is_some_and(|v| (1..=FORMAT_VERSION).contains(&v)) => {}
+    let read_version = match lines.next() {
+        Some((_, l)) if version(l).is_some_and(|v| (1..=FORMAT_VERSION).contains(&v)) => {
+            version(l).unwrap_or(FORMAT_VERSION)
+        }
         _ => {
             return Err(format!(
                 "not a junctur-edit file this build reads (versions 1 to {FORMAT_VERSION})"
             ))
         }
-    }
+    };
     let mut e = EditList {
         source: PathBuf::new(),
         duration: 0.0,
@@ -177,6 +196,7 @@ pub fn parse(text: &str) -> Result<EditList, String> {
         speakers: Speakers::default(),
         captions: None,
         fixes: Vec::new(),
+        times: Vec::new(),
         windows: Vec::new(),
     };
     // Turn lines may come before the speaker lines they name; checked once all are read.
@@ -305,6 +325,42 @@ pub fn parse(text: &str) -> Result<EditList, String> {
                 };
                 add_fix(&mut e.fixes, fix).map_err(bad)?;
             }
+            "time" => {
+                // Written only into a version 6 list (2w repair): one under an older header is not
+                // a list Junctur wrote, and the build that wrote that version refused the line.
+                if read_version < 6 {
+                    return Err(bad("a `time` line needs a `junctur-edit 6` list"));
+                }
+                let expected = "expected `time <track> <start>[+<n>] <new start> <new end>`";
+                let parts: Vec<&str> = rest.split_whitespace().collect();
+                let [track, at, from, to] = parts[..] else {
+                    return Err(bad(expected));
+                };
+                let num = |x: &str| x.parse::<f64>().ok().filter(|x| x.is_finite());
+                let (Ok(track), Some(at), Some(from), Some(to)) =
+                    (track.parse::<usize>(), word_at(at), num(from), num(to))
+                else {
+                    return Err(bad(expected));
+                };
+                if to <= from {
+                    return Err(bad("a retimed word's end is to come after its start"));
+                }
+                let t = Retime {
+                    track,
+                    start: at.start,
+                    nth: at.nth,
+                    from: times::to_ms(from),
+                    to: times::to_ms(to),
+                };
+                if e.times.iter().any(|x| {
+                    x.track == t.track
+                        && fixes::same_millisecond(x.start, t.start)
+                        && x.nth == t.nth
+                }) {
+                    return Err(bad("a second `time` line for this word"));
+                }
+                e.times.push(t);
+            }
             "turn" => match nums()?[..] {
                 [start, end, id] if end > start && id >= 1.0 && id.fract() == 0.0 => {
                     e.speakers.turns.push(Turn {
@@ -342,6 +398,7 @@ pub fn parse(text: &str) -> Result<EditList, String> {
     }
     e.speakers.names.sort_by_key(|n| n.id);
     fixes::sort(&mut e.fixes);
+    times::sort(&mut e.times);
     e.speakers.turns.sort_by(|a, b| a.start.total_cmp(&b.start));
     // Hand edits may leave ranges out of order or overlapping; the renderer wants neither.
     e.keep.sort_by(|a, b| a.start.total_cmp(&b.start));
@@ -405,6 +462,7 @@ mod tests {
             speakers: Speakers::default(),
             captions: None,
             fixes: Vec::new(),
+            times: Vec::new(),
             windows: vec![Window {
                 start: 0.0,
                 score: 0.5,
@@ -761,6 +819,83 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(ok.fixes.len(), 4);
+    }
+
+    #[test]
+    fn a_retimed_word_is_a_time_line_and_makes_the_list_version_6() {
+        // 2w: a word's start and end moved with a cut's edge, named by its heard start.
+        let t = |track, start, nth, from, to| Retime {
+            track,
+            start,
+            nth,
+            from,
+            to,
+        };
+        let e = EditList {
+            times: vec![t(1, 54.944, 1, 54.95, 55.3), t(0, 2.5, 0, 2.5, 2.9)],
+            ..sample()
+        };
+        let text = e.to_text();
+        assert!(text.starts_with("junctur-edit 6\n"), "{text}");
+        assert!(
+            text.contains("time 0 2.500 2.500 2.900\ntime 1 54.944+1 54.950 55.300\n"),
+            "{text}"
+        );
+        let back = parse(&text).unwrap();
+        assert_eq!(back.times, [e.times[1], e.times[0]]);
+        assert_eq!(back.to_text(), text);
+        // Every older version reads as before, with no times, and is written back byte for byte.
+        let older = [
+            sample(),
+            EditList {
+                fixes: vec![Fix {
+                    track: 0,
+                    start: 2.5,
+                    nth: 1,
+                    through: Some(WordAt { start: 3.0, nth: 0 }),
+                    text: "Ana went".into(),
+                }],
+                ..sample()
+            },
+        ];
+        for old in older {
+            let text = old.to_text();
+            assert!(!text.contains("time "), "{text}");
+            let back = parse(&text).unwrap();
+            assert!(back.times.is_empty());
+            assert_eq!(back.to_text(), text);
+        }
+        // Refused: a second line for one word, an end not after its start, a missing number.
+        let head = "junctur-edit 6\nsource x.mp4\n";
+        for bad in [
+            "time 0 2.000 2.100 2.000\n",
+            "time 0 2.000 2.100\n",
+            "time 0 2.000 2.100 x\n",
+            "time x 2.000 2.100 2.300\n",
+            "time 0 2.000 2.1 2.3\ntime 0 2.0004 2.0 2.4\n",
+        ] {
+            assert!(parse(&format!("{head}{bad}")).is_err(), "{bad}");
+        }
+        let ok = parse(&format!(
+            "{head}time 0 2.000 2.1 2.3\ntime 0 2.000+1 2.3 2.4\n"
+        ))
+        .unwrap();
+        assert_eq!(ok.times.len(), 2);
+        // Two tracks' words of one millisecond keep their order through a round trip (2w repair).
+        let one_ms = EditList {
+            times: vec![t(1, 5.0001, 0, 5.0, 5.2), t(0, 5.0004, 0, 5.0, 5.3)],
+            ..sample()
+        };
+        let text = one_ms.to_text();
+        assert!(
+            text.contains("time 0 5.000 5.000 5.300\ntime 1 5.000 5.000 5.200\n"),
+            "{text}"
+        );
+        assert_eq!(parse(&text).unwrap().to_text(), text);
+        // A `time` line under an older header is refused (2w repair), and so is a version this
+        // build does not know (as a 5x build refuses this version 6).
+        assert!(parse("junctur-edit 5\nsource x.mp4\ntime 0 2.000 2.1 2.3\n").is_err());
+        assert!(parse("junctur-edit 7\nsource x.mp4\n").is_err());
     }
 
     #[test]

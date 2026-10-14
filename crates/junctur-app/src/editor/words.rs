@@ -1,14 +1,54 @@
 //! The transcript as the editor sees it: every word of every track in one list, sorted by start, so
 //! the frontend and the editor name a word by the same index. Each word keeps the track it was heard
 //! on, which is what names its speaker when speakers are tracks (5a).
+//!
+//! The words are kept as Whisper heard them, which is what names a word in a fix or a retime (5h,
+//! 2w); where a word's time places it (the page's start and end, a word edit's span, a voice's
+//! stretch) the edit list's retimed words are read through [`Times`], in the order the fixes and the
+//! captions read the words, so the page and the captions place every word the same way.
 
 use std::path::Path;
 
 use junctur_core::edit::{
-    same_millisecond, word_span, CutSettings, Envelope, Fix, Fixed, Fixes, Speakers, WordAt,
+    same_millisecond, set_time, word_span, CutSettings, Envelope, Fix, Fixed, Fixes, Retime,
+    Speakers, Times, WordAt,
 };
 use junctur_core::transcribe::{self, Word};
 use serde::Serialize;
+
+use crate::cuts::Fps;
+
+/// How far from a moved edge the word it moves may end (or start) and still be the word beside it
+/// (2w): the pads and the snap leave an edge about half a second from its word, and a range kept
+/// by hand over a long pause should not stretch its last word over the whole pause.
+const REACH: f64 = 1.0;
+
+/// Which end of a kept range an edge is (2w).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Side {
+    Start,
+    End,
+}
+
+/// Every word's start and end with the list's retimed words in place (2w), the latest end up to
+/// each word (as [`Words`] keeps it for the heard times), and the earliest start from each word on:
+/// a retimed word may start before the word heard before it (another track's), so the next word in
+/// list order is no longer the earliest to come (2w repair).
+struct Timing {
+    start: Vec<f64>,
+    end: Vec<f64>,
+    ends_by: Vec<f64>,
+    starts_from: Vec<f64>,
+}
+
+/// The latest of `ends` so far, at each.
+fn ends_by(ends: impl Iterator<Item = f64>) -> Vec<f64> {
+    ends.scan(f64::NEG_INFINITY, |m, e| {
+        *m = m.max(e);
+        Some(*m)
+    })
+    .collect()
+}
 
 #[derive(Debug, Default)]
 pub struct Words {
@@ -66,19 +106,153 @@ impl Words {
         // Stable: words of one chunk keep their order when two start together.
         words.sort_by(|a, b| a.1.start.total_cmp(&b.1.start));
         let (tracks, list): (Vec<usize>, Vec<Word>) = words.into_iter().unzip();
-        let ends_by = list
-            .iter()
-            .scan(f64::NEG_INFINITY, |m, w| {
-                *m = m.max(w.end);
-                Some(*m)
-            })
-            .collect();
+        let ends_by = ends_by(list.iter().map(|w| w.end));
         Self {
             list,
             tracks,
             ends_by,
             until: None,
         }
+    }
+
+    /// The words' times with `times` (the list's retimed words, 2w) in place; `None` when no word
+    /// is retimed and the heard times are the ones. Read in list order, the order the fixes and the
+    /// captions read the words in (a stable sort by heard start), which counts each word's `nth`.
+    fn timing(&self, times: &[Retime]) -> Option<Timing> {
+        if times.is_empty() {
+            return None;
+        }
+        let mut t = Times::new(times);
+        let (start, end): (Vec<f64>, Vec<f64>) = self
+            .list
+            .iter()
+            .zip(&self.tracks)
+            .map(|(w, &k)| t.of(k, w))
+            .unzip();
+        let ends_by = ends_by(end.iter().copied());
+        let mut starts_from = start.clone();
+        for i in (0..starts_from.len().saturating_sub(1)).rev() {
+            starts_from[i] = starts_from[i].min(starts_from[i + 1]);
+        }
+        Some(Timing {
+            start,
+            end,
+            ends_by,
+            starts_from,
+        })
+    }
+
+    /// The list's retimed words after moving `side` of the kept range of frames `a..b` to frame
+    /// `to` (2w): `times` with the words the edge moves set where it now is, so every word keeps
+    /// the side of the cut it was on. `beyond` is the far end of the cut beside that edge (the next
+    /// range's start, or the file's end; the previous range's end, or 0). Growing the range (the
+    /// edge moved out into the cut), the word the range ended (or started) with follows the edge, if
+    /// within [`REACH`] of it, and words of that cut the edge now runs into start (or end) at it and
+    /// stay cut; an edge moved across the whole cut joins the next range, the word then following
+    /// it no further than that range's start, and no word of the cut, all kept now, is trimmed (2w
+    /// repair: words of the next range were trimmed as if in the cut). Shrinking it, words on the
+    /// kept side the edge now runs into end (or start) at it and stay kept, and a word it leaves
+    /// with under a frame on the kept side is cut whole, its head (tail) clipped to the edge. A word
+    /// left with under a frame on its side takes the side it is now on; the word following a growing
+    /// edge stops at the next word on its track when the edge passed that one whole. Every new span
+    /// is at least a frame long, so its middle stays on its side. Words are read with `times` in
+    /// place, so moving an edge again moves the words from where they now are.
+    pub fn moved_edge(
+        &self,
+        times: &[Retime],
+        (a, b): (u64, u64),
+        side: Side,
+        to: u64,
+        beyond: u64,
+        fps: Fps,
+    ) -> Vec<Retime> {
+        let n = self.list.len();
+        let t = self.timing(times);
+        let s = |i: usize| t.as_ref().map_or(self.list[i].start, |t| t.start[i]);
+        let e = |i: usize| t.as_ref().map_or(self.list[i].end, |t| t.end[i]);
+        let per = fps.num as f64 / fps.den as f64;
+        let frame = fps.seconds(1);
+        // A word is where the frame at its middle is, as the page and the captions place it.
+        let mid = |i: usize| (s(i) + e(i)) / 2.0 * per;
+        let inside = |i: usize| (a as f64..b as f64).contains(&mid(i));
+        let edge = fps.seconds(to);
+        let mut moved: Vec<(usize, f64, f64)> = Vec::new();
+        match side {
+            Side::End if to > b => {
+                let joined = to >= beyond;
+                let gap = |i: usize| (b as f64..beyond as f64).contains(&mid(i));
+                for i in (0..n).filter(|&i| !joined && gap(i)) {
+                    if s(i) < edge && e(i) - frame >= edge {
+                        moved.push((i, edge, e(i)));
+                    }
+                }
+                let last = (0..n)
+                    .filter(|&i| inside(i))
+                    .max_by(|&i, &j| e(i).total_cmp(&e(j)).then(i.cmp(&j)));
+                if let Some(w) = last.filter(|&w| e(w) >= fps.seconds(b) - REACH) {
+                    let mut end = edge.min(fps.seconds(beyond));
+                    // The next word on its track, passed whole: kept now, and this one ends where
+                    // it starts.
+                    let next = (w + 1..n).find(|&j| self.tracks[j] == self.tracks[w]);
+                    if let Some(j) = next.filter(|&j| s(j) < edge && e(j) - frame < edge) {
+                        end = end.min(s(j));
+                    }
+                    moved.push((w, s(w), end.max(s(w) + frame)));
+                }
+            }
+            Side::End => {
+                for i in (0..n).filter(|&i| inside(i) && s(i) < edge && e(i) > edge) {
+                    if s(i) + frame <= edge {
+                        moved.push((i, s(i), edge));
+                    } else if e(i) - frame >= edge {
+                        moved.push((i, edge, e(i)));
+                    }
+                }
+            }
+            Side::Start if to < a => {
+                let joined = to <= beyond;
+                let gap = |i: usize| (beyond as f64..a as f64).contains(&mid(i));
+                for i in (0..n).filter(|&i| !joined && gap(i)) {
+                    if e(i) > edge && s(i) + frame <= edge {
+                        moved.push((i, s(i), edge));
+                    }
+                }
+                let first = (0..n)
+                    .filter(|&i| inside(i))
+                    .min_by(|&i, &j| s(i).total_cmp(&s(j)).then(i.cmp(&j)));
+                if let Some(w) = first.filter(|&w| s(w) <= fps.seconds(a) + REACH) {
+                    let mut start = edge.max(fps.seconds(beyond));
+                    let prev = (0..w).rev().find(|&j| self.tracks[j] == self.tracks[w]);
+                    if let Some(j) = prev.filter(|&j| e(j) > edge && s(j) + frame > edge) {
+                        start = start.max(e(j));
+                    }
+                    moved.push((w, start.min(e(w) - frame), e(w)));
+                }
+            }
+            Side::Start => {
+                for i in (0..n).filter(|&i| inside(i) && s(i) < edge && e(i) > edge) {
+                    if e(i) - frame >= edge {
+                        moved.push((i, edge, e(i)));
+                    } else if s(i) + frame <= edge {
+                        moved.push((i, s(i), edge));
+                    }
+                }
+            }
+        }
+        let mut out = times.to_vec();
+        for (i, from, to) in moved {
+            let w = &self.list[i];
+            // A span the millisecond grid leaves empty is refused: that word stays as it was.
+            let _ = set_time(
+                &mut out,
+                self.tracks[i],
+                w.start,
+                self.nth(i),
+                (w.start, w.end),
+                (from, to),
+            );
+        }
+        out
     }
 
     /// Which of the words heard on its track starting in its millisecond word `i` is, 0 for the
@@ -109,6 +283,7 @@ impl Words {
         last: usize,
         text: &str,
         speakers: &Speakers,
+        times: &[Retime],
     ) -> Result<Retyped, String> {
         let (first, last) = (first.min(last), first.max(last));
         if last >= self.list.len() {
@@ -123,10 +298,15 @@ impl Words {
         let mut who: Option<u32> = None;
         let mut two: Option<(u32, u32)> = None;
         let mut heard: Vec<&str> = Vec::new();
+        // Whose words they are by where they are now (2w repair), as the page shows them.
+        let t = self.timing(times);
         for i in (first..=last).filter(|&i| self.tracks[i] == track) {
             let w = &self.list[i];
             heard.push(w.text.trim());
-            match (who, label.of_word(track, w.start, w.end)) {
+            let (start, end) = t
+                .as_ref()
+                .map_or((w.start, w.end), |t| (t.start[i], t.end[i]));
+            match (who, label.of_word(track, start, end)) {
                 (Some(a), Some(b)) if a != b && two.is_none() => two = Some((a, b)),
                 (None, Some(b)) => who = Some(b),
                 _ => {}
@@ -156,10 +336,15 @@ impl Words {
     }
 
     /// The source seconds words `first..=last` are said in: the first one's start to the latest
-    /// end up to the last (5b: a voice is enrolled from this). `None` for an index out of range.
-    pub fn stretch(&self, first: usize, last: usize) -> Option<(f64, f64)> {
+    /// end up to the last (5b: a voice is enrolled from this), the list's retimed words (`times`,
+    /// 2w) where they now are. `None` for an index out of range.
+    pub fn stretch(&self, first: usize, last: usize, times: &[Retime]) -> Option<(f64, f64)> {
         let (first, last) = (first.min(last), first.max(last));
-        Some((self.list.get(first)?.start, *self.ends_by.get(last)?))
+        self.list.get(last)?;
+        Some(match self.timing(times) {
+            Some(t) => (t.start[first], t.ends_by[last]),
+            None => (self.list[first].start, self.ends_by[last]),
+        })
     }
 
     /// The source span that cutting (`keep` false) or keeping words `first..=last` changes, placed
@@ -167,7 +352,9 @@ impl Words {
     /// track), the run lasts until the latest end up to its last word, and speech after it starts
     /// with the next word (sorted by start, so the earliest; for the last word so far of a
     /// recording still transcribing, where the transcript stops, 2j: what follows is not known
-    /// yet, so the span never reaches past it). `None` for an index out of range.
+    /// yet, so the span never reaches past it). Words are where the list's retimed words (`times`,
+    /// 2w) put them. `None` for an index out of range.
+    #[allow(clippy::too_many_arguments)]
     pub fn span(
         &self,
         first: usize,
@@ -176,13 +363,20 @@ impl Words {
         env: &Envelope,
         s: &CutSettings,
         duration: f64,
+        times: &[Retime],
     ) -> Option<(f64, f64)> {
         let (first, last) = (first.min(last), first.max(last));
-        let start = self.list.get(first)?.start;
-        let end = *self.ends_by.get(last)?;
-        let before = first.checked_sub(1).map(|i| self.ends_by[i]);
+        self.list.get(last)?;
+        let t = self.timing(times);
+        let start_of = |i: usize| t.as_ref().map_or(self.list[i].start, |t| t.start[i]);
+        let ends_by = |i: usize| t.as_ref().map_or(self.ends_by[i], |t| t.ends_by[i]);
+        // The earliest start of the words after `i`: the next one's while the list is sorted.
+        let first_from = |i: usize| t.as_ref().map_or(self.list[i].start, |t| t.starts_from[i]);
+        let start = start_of(first);
+        let end = ends_by(last);
+        let before = first.checked_sub(1).map(ends_by);
         // A word started before the transcript stops may end after it.
-        let after = self.list.get(last + 1).map(|w| w.start);
+        let after = (last + 1 < self.list.len()).then(|| first_from(last + 1));
         let after = after.or(self.until.map(|u| u.max(end)));
         Some(word_span(
             before,
@@ -207,8 +401,8 @@ pub struct Retyped {
 }
 
 /// The words for the frontend, compact for a 30 h transcript (hundreds of thousands of words):
-/// times in whole milliseconds, each word's speaker id (0: none) from the edit list's turns, and its
-/// text as the user fixed it (5h), else as heard.
+/// times in whole milliseconds (where the user's retimed words put them, 2w), each word's speaker id
+/// (0: none) from the edit list's turns, and its text as the user fixed it (5h), else as heard.
 #[derive(Debug, Serialize)]
 pub struct TranscriptView {
     pub text: Vec<String>,
@@ -231,6 +425,11 @@ pub struct TranscriptView {
     pub span: Vec<u32>,
     /// Each span's text, in the order their first words come.
     pub spans: Vec<String>,
+    /// Each word's start as heard, in whole milliseconds, when some word is retimed (2w repair): what
+    /// names a word in a fix, so words starting together (5w) are grouped by it, not by `start`.
+    /// Empty (and not sent) when no word is retimed, `start` being the heard start.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub heard: Vec<u64>,
 }
 
 /// [`TranscriptView::sure`] of a word that is never flagged, above every percentage. The page has
@@ -245,16 +444,24 @@ fn percent(p: f32) -> u8 {
 }
 
 impl TranscriptView {
-    pub fn new(words: &Words, speakers: &Speakers, fixes: &[Fix]) -> Self {
+    pub fn new(words: &Words, speakers: &Speakers, fixes: &[Fix], times: &[Retime]) -> Self {
         let ms = |s: f64| (s.max(0.0) * 1000.0).round() as u64;
         let mut fixed = Fixes::new(fixes);
         let w = &words.list;
+        let heard = if times.is_empty() {
+            Vec::new()
+        } else {
+            w.iter().map(|w| ms(w.start)).collect()
+        };
+        let (starts, ends): (Vec<f64>, Vec<f64>) = match words.timing(times) {
+            Some(t) => (t.start, t.end),
+            None => w.iter().map(|w| (w.start, w.end)).unzip(),
+        };
         let label = speakers.labeller();
-        let (speaker, also) = w
-            .iter()
+        let (speaker, also) = (0..w.len())
             .zip(&words.tracks)
-            .map(|(w, &t)| {
-                let all = label.speakers_of_word(t, w.start, w.end);
+            .map(|(i, &t)| {
+                let all = label.speakers_of_word(t, starts[i], ends[i]);
                 (
                     all.first().copied().unwrap_or(0),
                     all.get(1).copied().unwrap_or(0),
@@ -293,14 +500,15 @@ impl TranscriptView {
         }
         Self {
             text,
-            start: w.iter().map(|w| ms(w.start)).collect(),
-            end: w.iter().map(|w| ms(w.end)).collect(),
+            start: starts.iter().map(|&s| ms(s)).collect(),
+            end: ends.iter().map(|&e| ms(e)).collect(),
             speaker,
             also,
             sure,
             track: words.tracks.iter().map(|&t| t as u32).collect(),
             span,
             spans,
+            heard,
         }
     }
 }
@@ -352,7 +560,7 @@ mod tests {
         // The last word's span stops where the transcript does.
         let s = CutSettings::default();
         let (_, b) = early
-            .span(3, 3, false, &Envelope::default(), &s, 1000.0)
+            .span(3, 3, false, &Envelope::default(), &s, 1000.0, &[])
             .unwrap();
         assert!(b <= 302.0, "{b}");
         // Track 1 reaches its next piece: the earlier words keep their indices.
@@ -390,7 +598,7 @@ mod tests {
 
     #[test]
     fn sorted_and_compact() {
-        let v = TranscriptView::new(&sample(), &Speakers::default(), &[]);
+        let v = TranscriptView::new(&sample(), &Speakers::default(), &[], &[]);
         assert_eq!(v.text, vec!["uno", "dos", "tres"]);
         assert_eq!(v.start, vec![10_000, 10_500, 12_000]);
         assert_eq!(v.end, vec![10_400, 11_000, 12_500]);
@@ -403,7 +611,7 @@ mod tests {
             through: None,
             text: "Uezar".into(),
         };
-        let v = TranscriptView::new(&sample(), &Speakers::default(), &[fix]);
+        let v = TranscriptView::new(&sample(), &Speakers::default(), &[fix], &[]);
         assert_eq!(v.text, vec!["uno", "Uezar", "tres"]);
     }
 
@@ -423,7 +631,7 @@ mod tests {
             sure(Some(0.2), 12.0, "bien"),
         ]);
         let none = Speakers::default();
-        let v = TranscriptView::new(&w, &none, &[]);
+        let v = TranscriptView::new(&w, &none, &[], &[]);
         assert_eq!(v.sure, vec![39, 100, NOT_FLAGGED, 5, 20]);
         let fix = |start: f64, text: &str| Fix {
             track: 0,
@@ -433,7 +641,7 @@ mod tests {
             text: text.into(),
         };
         // "Tsunejo" fixed, "bien" confirmed (its own text): neither is flagged any more.
-        let v = TranscriptView::new(&w, &none, &[fix(11.5, "Tsunheto"), fix(12.0, "bien")]);
+        let v = TranscriptView::new(&w, &none, &[fix(11.5, "Tsunheto"), fix(12.0, "bien")], &[]);
         assert_eq!(v.sure, vec![39, 100, NOT_FLAGGED, NOT_FLAGGED, NOT_FLAGGED]);
         assert_eq!(v.text[3..], ["Tsunheto", "bien"]);
         // 5x: a span retyped over "uno" to "viejo" vouches for every word in it; the words after it
@@ -445,7 +653,7 @@ mod tests {
             }),
             ..fix(10.0, "one old")
         };
-        let v = TranscriptView::new(&w, &none, &[span]);
+        let v = TranscriptView::new(&w, &none, &[span], &[]);
         assert_eq!(v.sure, vec![NOT_FLAGGED, NOT_FLAGGED, NOT_FLAGGED, 5, 20]);
         assert_eq!(v.span, vec![1, 1, 1, 0, 0]);
         assert_eq!(v.spans, ["one old"]);
@@ -485,7 +693,7 @@ mod tests {
             through: None,
             text: "miel".into(),
         };
-        let v = TranscriptView::new(&w, &Speakers::default(), &[fix]);
+        let v = TranscriptView::new(&w, &Speakers::default(), &[fix], &[]);
         assert_eq!(v.text, ["manada", "en", "yes", "miel", "y"]);
     }
 
@@ -511,7 +719,7 @@ mod tests {
             through: None,
             text: "él".into(),
         };
-        let v = TranscriptView::new(&w, &Speakers::default(), &[confirm]);
+        let v = TranscriptView::new(&w, &Speakers::default(), &[confirm], &[]);
         assert_eq!(v.sure, vec![NOT_FLAGGED, NOT_FLAGGED, 30, 10]);
         assert_eq!(v.text, ["en", "él", "la", "y"]);
     }
@@ -528,7 +736,7 @@ mod tests {
             (0, word(3.0, 3.4, "went")),
             (0, word(4.0, 4.4, "ok")),
         ]);
-        let r = w.retyped(4, 1, "x", &Speakers::default()).unwrap();
+        let r = w.retyped(4, 1, "x", &Speakers::default(), &[]).unwrap();
         assert_eq!(r.track, 0);
         assert_eq!(r.heard, "the wezar went");
         assert_eq!((r.first.start, r.last.start), (2.0, 3.0));
@@ -539,14 +747,14 @@ mod tests {
             through: Some(r.last),
             text: "Uezar left".into(),
         };
-        let v = TranscriptView::new(&w, &Speakers::default(), &[fix]);
+        let v = TranscriptView::new(&w, &Speakers::default(), &[fix], &[]);
         assert_eq!(v.text, ["so", "the", "wezar", "yeah", "went", "ok"]);
         assert_eq!(v.span, [0, 1, 1, 0, 1, 0]);
         assert_eq!(v.spans, ["Uezar left"]);
         assert_eq!(v.track, [0, 0, 0, 1, 0, 0]);
         // Refused: starting and ending on two tracks; two people's words.
-        assert!(w.retyped(1, 3, "x", &Speakers::default()).is_err());
-        assert!(w.retyped(0, 9, "x", &Speakers::default()).is_err());
+        assert!(w.retyped(1, 3, "x", &Speakers::default(), &[]).is_err());
+        assert!(w.retyped(0, 9, "x", &Speakers::default(), &[]).is_err());
         use junctur_core::edit::Turn;
         let turn = |start, end, speaker| Turn {
             start,
@@ -558,14 +766,14 @@ mod tests {
             &[None, None],
             None,
         );
-        let why = w.retyped(0, 2, "So Uezar", &two).unwrap_err();
+        let why = w.retyped(0, 2, "So Uezar", &two, &[]).unwrap_err();
         assert!(why.contains("two people"), "{why}");
         // Clearing is never refused for the speakers (5x repair): a span set before a respeak gave
         // its words to two people can still be taken away, by an empty text or the heard words.
-        assert!(w.retyped(0, 2, "", &two).is_ok());
-        assert!(w.retyped(0, 2, " so  the wezar", &two).is_ok());
+        assert!(w.retyped(0, 2, "", &two, &[]).is_ok());
+        assert!(w.retyped(0, 2, " so  the wezar", &two, &[]).is_ok());
         assert!(
-            w.retyped(1, 4, "x", &two).is_ok(),
+            w.retyped(1, 4, "x", &two, &[]).is_ok(),
             "one person's words, and track 1's are not counted"
         );
         // A same-start group (5w) is a run like any other.
@@ -573,7 +781,7 @@ mod tests {
             (0, word(54.944, 54.944, "en")),
             (0, word(54.944, 55.0, "él")),
         ]);
-        let r = g.retyped(0, 1, "x", &Speakers::default()).unwrap();
+        let r = g.retyped(0, 1, "x", &Speakers::default(), &[]).unwrap();
         assert_eq!((r.first.nth, r.last.nth), (0, 1));
     }
 
@@ -592,7 +800,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            TranscriptView::new(&sample(), &voices, &[]).speaker,
+            TranscriptView::new(&sample(), &voices, &[], &[]).speaker,
             vec![2, 2, 1]
         );
         // By track: the track a word was heard on decides, whatever the turns overlap.
@@ -606,7 +814,10 @@ mod tests {
             &[Some(0), Some(3)],
             None,
         );
-        assert_eq!(TranscriptView::new(&w, &tracks, &[]).speaker, vec![2, 1]);
+        assert_eq!(
+            TranscriptView::new(&w, &tracks, &[], &[]).speaker,
+            vec![2, 1]
+        );
     }
 
     #[test]
@@ -616,22 +827,22 @@ mod tests {
         let env = Envelope::default();
         // Cut "dos": from the pause after "uno" (only 0.1 s, so its far edge) to 0.25 s before
         // "tres".
-        let (a, b) = w.span(1, 1, false, &env, &s, 60.0).unwrap();
+        let (a, b) = w.span(1, 1, false, &env, &s, 60.0, &[]).unwrap();
         assert!(
             (a - 10.5).abs() < 1e-9 && (b - 11.75).abs() < 1e-9,
             "{a} {b}"
         );
-        let (a, b) = w.span(1, 1, true, &env, &s, 60.0).unwrap();
+        let (a, b) = w.span(1, 1, true, &env, &s, 60.0, &[]).unwrap();
         assert!(
             (a - 10.4).abs() < 1e-9 && (b - 11.35).abs() < 1e-9,
             "{a} {b}"
         );
         // Reversed indices are the same span; out of range is none.
         assert_eq!(
-            w.span(2, 1, false, &env, &s, 60.0),
-            w.span(1, 2, false, &env, &s, 60.0)
+            w.span(2, 1, false, &env, &s, 60.0, &[]),
+            w.span(1, 2, false, &env, &s, 60.0, &[])
         );
-        assert_eq!(w.span(0, 3, false, &env, &s, 60.0), None);
+        assert_eq!(w.span(0, 3, false, &env, &s, 60.0, &[]), None);
     }
 
     #[test]
@@ -645,12 +856,42 @@ mod tests {
             word(16.0, 16.5, "after"),
         ]);
         let s = CutSettings::default();
-        let (a, b) = w.span(2, 2, false, &Envelope::default(), &s, 60.0).unwrap();
+        let (a, b) = w
+            .span(2, 2, false, &Envelope::default(), &s, 60.0, &[])
+            .unwrap();
         assert_eq!(
             a, 12.0,
             "no pause before: the selection's own edge, said as such"
         );
         // The trailing boundary goes in the real pause after "long" ends, not inside it.
         assert!((15.0..=16.0).contains(&b), "{b}");
+    }
+
+    #[test]
+    fn retimed_words_are_sent_with_their_heard_starts_and_spans_reach_the_earliest_next() {
+        // 2w repair: track 1's word retimed to start before track 0's word heard before it.
+        let w = Words::from_tracked(vec![
+            (0, word(10.0, 10.4, "uno")),
+            (0, word(10.5, 11.0, "dos")),
+            (1, word(10.6, 11.0, "yes")),
+        ]);
+        let times = vec![Retime {
+            track: 1,
+            start: 10.6,
+            nth: 0,
+            from: 10.45,
+            to: 11.0,
+        }];
+        let v = TranscriptView::new(&w, &Speakers::default(), &[], &times);
+        assert_eq!(v.start, [10_000, 10_500, 10_450]);
+        assert_eq!(v.heard, [10_000, 10_500, 10_600]);
+        assert!(TranscriptView::new(&w, &Speakers::default(), &[], &[])
+            .heard
+            .is_empty());
+        // Cutting "uno": what follows starts at 10.45 (the retimed "yes"), not 10.5.
+        let s = CutSettings::default();
+        let env = Envelope::default();
+        let (_, b) = w.span(0, 0, false, &env, &s, 60.0, &times).unwrap();
+        assert!(b <= 10.45, "{b}");
     }
 }

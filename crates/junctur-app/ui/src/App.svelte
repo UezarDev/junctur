@@ -258,15 +258,20 @@
     }
   }
 
+  // Each refetch's number: the latest one asked for wins (2w repair: two quick edge moves each ask
+  // again, and taking only a reply onto the words the ask started from dropped the later one).
+  let relabel = 0;
   $effect(() => {
     const key = wordsKey();
     if (!words || wordsLoading || key === labelledWith) return;
     labelledWith = key;
-    const before = words;
+    const ask = ++relabel;
+    const gen = loadGen;
     api.transcript().then(
       (view) => {
-        // Only onto the same transcript (another file may have opened meanwhile).
-        if (view && words === before && view.speaker.length === before.text.length) {
+        // Only the latest ask, onto the same recording's transcript (another file may have opened
+        // meanwhile) and the same words.
+        if (view && ask === relabel && gen === loadGen && words && view.speaker.length === words.text.length) {
           // Text, speakers and the spans fixed as one text (5x) all come from the view.
           words = toWords(view);
         }

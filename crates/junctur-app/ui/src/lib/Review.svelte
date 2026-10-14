@@ -110,11 +110,13 @@
     const by = dir * (e.shiftKey ? 10 : 1);
     press(e, () =>
       step(async () => {
+        const c = list[index];
         const m = moveEdge(list, index, edge, by, await api.editState());
         if (!m) return;
         // The clips move only once the edit is made: one refused leaves review's list and the
-        // live one agreeing, so a later Keep or Remove acts on frames that are really there.
-        if (m.frames) await api.editFrames(m.frames.start, m.frames.end, m.frames.keep);
+        // live one agreeing, so a later Keep or Remove acts on frames that are really there. The
+        // words beside the edge move with it when it is an edge of the list (2w).
+        if (m.frames) await api.moveEdge(m.frames, edge === "start" ? c.start : c.end);
         list = m.list;
         await play(list[index]);
       }),
