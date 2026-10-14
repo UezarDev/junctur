@@ -32,13 +32,15 @@ fn no_speech_no_speakers() {
         seconds: 10.0,
     };
     let f = find(
-        Path::new("missing.mp4"),
-        &speech,
-        &[],
-        &[],
-        &[],
-        Path::new("."),
-        Path::new("."),
+        &Job {
+            file: Path::new("missing.mp4"),
+            speech: &speech,
+            voice: &[],
+            voices: &[],
+            pins: &[],
+            dir: Path::new("."),
+            cache_dir: Path::new("."),
+        },
         &mut |_, _| panic!("nothing to hear"),
     )
     .unwrap();
@@ -68,13 +70,15 @@ fn pins_survive_every_plan() {
             seconds: 10.0,
         };
         let f = find(
-            Path::new("missing.mp4"),
-            &speech,
-            &voice,
-            &[],
-            &pins,
-            Path::new("."),
-            Path::new("."),
+            &Job {
+                file: Path::new("missing.mp4"),
+                speech: &speech,
+                voice: &voice,
+                voices: &[],
+                pins: &pins,
+                dir: Path::new("."),
+                cache_dir: Path::new("."),
+            },
             &mut |_, _| {},
         )
         .unwrap();

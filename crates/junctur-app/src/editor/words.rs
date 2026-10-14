@@ -58,6 +58,15 @@ pub struct Words {
     until: Option<f64>,
 }
 
+/// What places a word cut ([`Words::span`]): the speech envelope it snaps to, the list's settings
+/// and length, and its retimed words.
+pub struct Placing<'a> {
+    pub env: &'a Envelope,
+    pub settings: &'a CutSettings,
+    pub duration: f64,
+    pub times: &'a [Retime],
+}
+
 impl Words {
     /// Each word with the track it was heard on, as the caption cuts read them.
     pub fn tracked(&self) -> impl Iterator<Item = (usize, &Word)> {
@@ -344,17 +353,13 @@ impl Words {
     /// by [`word_span`] between the latest end of any earlier word and the earliest start after the
     /// run (or where a transcript still in progress stops). Words are where the retimed words put
     /// them. `None` for an index out of range.
-    #[allow(clippy::too_many_arguments)]
-    pub fn span(
-        &self,
-        first: usize,
-        last: usize,
-        keep: bool,
-        env: &Envelope,
-        s: &CutSettings,
-        duration: f64,
-        times: &[Retime],
-    ) -> Option<(f64, f64)> {
+    pub fn span(&self, first: usize, last: usize, keep: bool, at: &Placing) -> Option<(f64, f64)> {
+        let Placing {
+            env,
+            settings: s,
+            duration,
+            times,
+        } = *at;
         let (first, last) = (first.min(last), first.max(last));
         self.list.get(last)?;
         let t = self.timing(times);

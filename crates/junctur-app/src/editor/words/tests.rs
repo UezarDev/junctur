@@ -43,7 +43,7 @@ fn words_so_far_only_grow_at_the_end() {
     // The last word's span stops where the transcript does.
     let s = CutSettings::default();
     let (_, b) = early
-        .span(3, 3, false, &Envelope::default(), &s, 1000.0, &[])
+        .span(3, 3, false, &placing(&Envelope::default(), &s, 1000.0, &[]))
         .unwrap();
     assert!(b <= 302.0, "{b}");
     // Track 1 reaches its next piece: the earlier words keep their indices.
@@ -309,22 +309,22 @@ fn spans_stay_in_the_pauses() {
     let env = Envelope::default();
     // Cut "dos": from the pause after "uno" (only 0.1 s, so its far edge) to 0.25 s before
     // "tres".
-    let (a, b) = w.span(1, 1, false, &env, &s, 60.0, &[]).unwrap();
+    let (a, b) = w.span(1, 1, false, &placing(&env, &s, 60.0, &[])).unwrap();
     assert!(
         (a - 10.5).abs() < 1e-9 && (b - 11.75).abs() < 1e-9,
         "{a} {b}"
     );
-    let (a, b) = w.span(1, 1, true, &env, &s, 60.0, &[]).unwrap();
+    let (a, b) = w.span(1, 1, true, &placing(&env, &s, 60.0, &[])).unwrap();
     assert!(
         (a - 10.4).abs() < 1e-9 && (b - 11.35).abs() < 1e-9,
         "{a} {b}"
     );
     // Reversed indices are the same span; out of range is none.
     assert_eq!(
-        w.span(2, 1, false, &env, &s, 60.0, &[]),
-        w.span(1, 2, false, &env, &s, 60.0, &[])
+        w.span(2, 1, false, &placing(&env, &s, 60.0, &[])),
+        w.span(1, 2, false, &placing(&env, &s, 60.0, &[]))
     );
-    assert_eq!(w.span(0, 3, false, &env, &s, 60.0, &[]), None);
+    assert_eq!(w.span(0, 3, false, &placing(&env, &s, 60.0, &[])), None);
 }
 
 #[test]
@@ -339,7 +339,7 @@ fn a_long_word_on_another_track_is_not_clipped_by_start_order() {
     ]);
     let s = CutSettings::default();
     let (a, b) = w
-        .span(2, 2, false, &Envelope::default(), &s, 60.0, &[])
+        .span(2, 2, false, &placing(&Envelope::default(), &s, 60.0, &[]))
         .unwrap();
     assert_eq!(
         a, 12.0,
@@ -373,6 +373,23 @@ fn retimed_words_are_sent_with_their_heard_starts_and_spans_reach_the_earliest_n
     // Cutting "uno": what follows starts at 10.45 (the retimed "yes"), not 10.5.
     let s = CutSettings::default();
     let env = Envelope::default();
-    let (_, b) = w.span(0, 0, false, &env, &s, 60.0, &times).unwrap();
+    let (_, b) = w
+        .span(0, 0, false, &placing(&env, &s, 60.0, &times))
+        .unwrap();
     assert!(b <= 10.45, "{b}");
+}
+
+/// The words' cut placing in these tests, as the editor gives it from a list.
+fn placing<'a>(
+    env: &'a Envelope,
+    settings: &'a CutSettings,
+    duration: f64,
+    times: &'a [Retime],
+) -> Placing<'a> {
+    Placing {
+        env,
+        settings,
+        duration,
+        times,
+    }
 }

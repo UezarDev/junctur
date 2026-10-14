@@ -109,9 +109,15 @@ pub fn run(
     }
     // Like lengths together, so a batch pads little.
     work.sort_by_key(|(text, _)| text.len());
-    let result = translate(
-        &mut cache, cache_dir, project, to, &work, &mut done, total, progress, stop,
-    );
+    let shared = Batches {
+        cache_dir,
+        project,
+        to,
+        total,
+        progress,
+        stop,
+    };
+    let result = translate(&mut cache, &work, &mut done, shared);
     if total > 0 {
         cache.save(project)?;
     }
@@ -124,20 +130,33 @@ pub fn run(
     }
 }
 
-/// The batches of [`run`], into `cache`; each row the model failed is tried again alone, with
-/// the loop guard, after the batches.
-#[allow(clippy::too_many_arguments)]
+/// What every batch of a [`run`] shares: where the model and the translations are kept, the
+/// language translated into, how many sentences the run has, and its progress and stop.
+struct Batches<'a> {
+    cache_dir: &'a Path,
+    project: &'a Path,
+    to: &'a str,
+    total: usize,
+    progress: &'a mut dyn FnMut(usize, usize),
+    stop: &'a AtomicBool,
+}
+
+/// The batches of [`run`] over `work`, into `cache`; each row the model failed is tried again
+/// alone, with the loop guard, after the batches.
 fn translate(
     cache: &mut Translations,
-    cache_dir: &Path,
-    project: &Path,
-    to: &str,
     work: &[(&str, &str)],
     done: &mut Done,
-    total: usize,
-    progress: &mut dyn FnMut(usize, usize),
-    stop: &AtomicBool,
+    shared: Batches,
 ) -> Result<()> {
+    let Batches {
+        cache_dir,
+        project,
+        to,
+        total,
+        progress,
+        stop,
+    } = shared;
     let mut model: Option<model::Model> = None;
     let mut saved = Instant::now();
     let mut again: Vec<(&str, &str)> = Vec::new();

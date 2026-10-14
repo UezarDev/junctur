@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::stages::Stage;
 use super::{
     not_analysed, speakers, speakers_stage, steps, Found, Method, PipelineOptions, Project,
 };
@@ -72,7 +73,17 @@ pub fn rehear(p: &Project, voices: &[Voice], log: &mut dyn FnMut(&str)) -> Resul
         voices: voices.to_vec(),
         ..Default::default()
     };
-    speakers_stage(p, &mut jobs, &report, &speech, &opts, log, steps::none())
+    speakers_stage(
+        Stage {
+            p,
+            jobs: &mut jobs,
+            report: &report,
+            steps: steps::none(),
+        },
+        &speech,
+        &opts,
+        log,
+    )
 }
 
 /// The project's speakers labelled again with `voices` from what the stage heard (no audio),

@@ -22,6 +22,7 @@ pub use partial::{so_far, SoFar};
 pub use whisper::{choose, Choice, ModelPref, Whisper};
 pub use words::Word;
 
+use audio::Group;
 use partial::{open_partial, resume_point, sort, Header, Resume};
 use run::{order, prompt_line, Progress, Reached, Run, Stops};
 
@@ -161,25 +162,35 @@ pub struct Reports<'a> {
     pub between: &'a mut dyn FnMut(),
 }
 
-/// Transcribe the speech regions of `sources`, piece by piece ([`PIECE`]), resuming an interrupted
-/// run and reusing a finished one that answers `opts`. `log` gets the model note and progress every
-/// 5%; `reports` how far it has got ([`Reports`]).
-#[allow(clippy::too_many_arguments)]
+/// What a transcription hears and where it keeps what it heard.
+pub struct Job<'a> {
+    /// The recording.
+    pub file: &'a Path,
+    pub sources: &'a [Source],
+    /// The recording's length in seconds.
+    pub total: f64,
+    /// The project folder: the transcript, its partial and the lock live here.
+    pub project: &'a Path,
+    /// Where the models are kept.
+    pub cache_dir: &'a Path,
+    pub opts: &'a TranscribeOptions,
+}
+
+/// Transcribe the speech regions of `job.sources`, piece by piece ([`PIECE`]), resuming an
+/// interrupted run and reusing a finished one that answers `job.opts`. `log` gets the model note
+/// and progress every 5%; `reports` how far it has got ([`Reports`]).
 pub fn transcribe(
-    file: &Path,
-    sources: &[Source],
-    total: f64,
-    project: &Path,
-    cache_dir: &Path,
-    opts: &TranscribeOptions,
+    job: &Job,
     log: &mut dyn FnMut(&str),
-    reports: Reports,
+    mut reports: Reports,
 ) -> Result<Transcript> {
-    let Reports {
-        reach,
-        transcribed,
-        between,
-    } = reports;
+    let Job {
+        sources,
+        total,
+        project,
+        opts,
+        ..
+    } = *job;
     let partial = partial_path(project);
     // One transcription of a recording at a time across processes, so the app resuming on open never
     // runs a second Whisper on a partial the CLI is writing. The OS lets go if the process dies.
@@ -195,12 +206,8 @@ pub fn transcribe(
     } else if let Some(t) = load(project).filter(|t| reusable(t, opts)) {
         return Ok(t);
     }
-    let Resume {
-        pref,
-        want,
-        started,
-        mut done,
-    } = resume_point(&partial, opts);
+    let mut resume = resume_point(&partial, opts);
+    let done = std::mem::take(&mut resume.done);
     let resumed_chunks = done.len();
 
     let work = order(sources, total);
@@ -222,67 +229,38 @@ pub fn transcribe(
         })
         .collect();
     let left = todo.iter().flatten().filter(|&&t| t).count();
-    let mut reached = Reached::new(sources, &groups, &todo);
+    let reached = Reached::new(sources, &groups, &todo);
     for (track, at) in reached.all() {
-        reach(track, at);
+        (reports.reach)(track, at);
     }
     // Where the transcript is whole on every track, and the piece that was last reported.
-    let mut whole = reached.whole();
+    let whole = reached.whole();
     if left > 0 {
-        transcribed(whole.min(total));
+        (reports.transcribed)(whole.min(total));
     }
     // Nothing left to hear: no GPU query, no model load. The choice is the one that did the work.
     let mut choice = Choice {
-        model: want.model.clone(),
-        device: started.as_ref().map_or(Device::Cpu, |h| h.device),
+        model: resume.want.model.clone(),
+        device: resume.started.as_ref().map_or(Device::Cpu, |h| h.device),
         note: None,
     };
+    let mut tally = Tally {
+        done,
+        reached,
+        whole,
+    };
     if left > 0 {
-        // A pause that came first holds here, before the model takes the card.
-        let mut stops = Stops::new(left, &mut *between);
-        let model;
-        (choice, model) = choose(pref, opts.device);
-        if let Some(note) = &choice.note {
-            log(note);
-        }
-        let header = started.clone().unwrap_or(Header {
-            device: choice.device,
-            ..want.clone()
-        });
-        let mut w = Whisper::open(&models::ensure(model, cache_dir)?, choice.device)?;
-        if let Some(line) = prompt_line(&w.set_prompt(&opts.words)) {
-            log(&line);
-        }
-        let mut out = open_partial(&partial, &header, &done)?;
-        let mut progress = Progress::new(work.len(), log);
-        progress.at(resumed_chunks);
-        let mut finished = |seg: Segment| -> Result<()> {
-            // One write for the line and its newline, so a kill tears at most this line.
-            out.write_all(format!("{}\n", serde_json::to_string(&seg)?).as_bytes())?;
-            out.flush()?;
-            if let Some(at) = reached.finish(seg.track, seg.start) {
-                reach(seg.track, at);
-                let now = reached.whole();
-                // A new piece is whole (silence may have skipped several); the very end is the
-                // finished transcript's to tell.
-                if now.is_finite() && piece(now) > piece(whole) {
-                    transcribed(now.min(total));
-                }
-                whole = now;
-            }
-            done.push(seg);
-            progress.at(done.len());
-            stops.chunk_done();
-            Ok(())
-        };
-        let run = Run {
+        let plan = Plan {
+            partial: &partial,
             groups: &groups,
             todo: &todo,
-            model: &choice.model,
-            languages: &opts.languages,
+            chunks: work.len(),
+            left,
+            resumed: resumed_chunks,
         };
-        run.chunks(file, &mut w, &mut finished)?;
+        choice = run_chunks(job, &plan, &resume, &mut tally, log, &mut reports)?;
     }
+    let mut done = tally.done;
     sort(&mut done);
     let t = Transcript {
         choice,
@@ -300,6 +278,90 @@ pub fn transcribe(
         log(&format!("could not remove {}: {e}", partial.display()));
     }
     Ok(t)
+}
+
+/// The chunks of a run with some left to hear.
+struct Plan<'a> {
+    partial: &'a Path,
+    groups: &'a [Group],
+    /// Per group, which of its chunks still need Whisper.
+    todo: &'a [Vec<bool>],
+    /// Every chunk of the run, done or not.
+    chunks: usize,
+    /// The chunks still to hear, at least one.
+    left: usize,
+    /// The chunks an interrupted run had finished.
+    resumed: usize,
+}
+
+/// What a run has so far: its finished chunks and how far each track's transcript reaches.
+struct Tally {
+    done: Vec<Segment>,
+    reached: Reached,
+    /// Where the transcript is whole on every track.
+    whole: f64,
+}
+
+/// Whisper over the chunks `plan` has left: the model chosen and loaded, the partial written afresh,
+/// then every finished chunk appended to it, added to `tally` and reported. The choice it ran with.
+fn run_chunks(
+    job: &Job,
+    plan: &Plan,
+    resume: &Resume,
+    tally: &mut Tally,
+    log: &mut dyn FnMut(&str),
+    reports: &mut Reports,
+) -> Result<Choice> {
+    let Reports {
+        reach,
+        transcribed,
+        between,
+    } = reports;
+    let total = job.total;
+    // A pause that came first holds here, before the model takes the card.
+    let mut stops = Stops::new(plan.left, &mut **between);
+    let (choice, model) = choose(resume.pref, job.opts.device);
+    if let Some(note) = &choice.note {
+        log(note);
+    }
+    let header = resume.started.clone().unwrap_or(Header {
+        device: choice.device,
+        ..resume.want.clone()
+    });
+    let mut w = Whisper::open(&models::ensure(model, job.cache_dir)?, choice.device)?;
+    if let Some(line) = prompt_line(&w.set_prompt(&job.opts.words)) {
+        log(&line);
+    }
+    let mut out = open_partial(plan.partial, &header, &tally.done)?;
+    let mut progress = Progress::new(plan.chunks, log);
+    progress.at(plan.resumed);
+    let mut finished = |seg: Segment| -> Result<()> {
+        // One write for the line and its newline, so a kill tears at most this line.
+        out.write_all(format!("{}\n", serde_json::to_string(&seg)?).as_bytes())?;
+        out.flush()?;
+        if let Some(at) = tally.reached.finish(seg.track, seg.start) {
+            reach(seg.track, at);
+            let now = tally.reached.whole();
+            // A new piece is whole (silence may have skipped several); the very end is the
+            // finished transcript's to tell.
+            if now.is_finite() && piece(now) > piece(tally.whole) {
+                transcribed(now.min(total));
+            }
+            tally.whole = now;
+        }
+        tally.done.push(seg);
+        progress.at(tally.done.len());
+        stops.chunk_done();
+        Ok(())
+    };
+    let run = Run {
+        groups: plan.groups,
+        todo: plan.todo,
+        model: &choice.model,
+        languages: &job.opts.languages,
+    };
+    run.chunks(job.file, &mut w, &mut finished)?;
+    Ok(choice)
 }
 
 /// The lock file a transcription holds in a project folder ([`Transcribing`]).

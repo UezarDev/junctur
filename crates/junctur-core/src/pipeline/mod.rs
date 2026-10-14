@@ -30,7 +30,7 @@ pub use speaker_files::{
 
 use again::{carry_fixes, hear_again, heard_again, not_again};
 use editlist::{draft, keep_or_write};
-use stages::{count_words, speakers_stage, speech_stage, transcribe_stage};
+use stages::{count_words, speakers_stage, speech_stage, transcribe_stage, Stage};
 
 use crate::edit::{self, CutSettings, EditList};
 use crate::runtime::DevicePref;
@@ -242,13 +242,28 @@ pub fn prepare(
     let report = jobs.stage(&p.dir, "tracks", log, |_| {
         tracks::analyze(&p.file, &tracks_options(p, opts.force))
     })?;
-    let speech = speech_stage(p, &mut jobs, &report, opts.force, log, steps)?;
+    let speech = speech_stage(
+        Stage {
+            p,
+            jobs: &mut jobs,
+            report: &report,
+            steps,
+        },
+        opts.force,
+        log,
+    )?;
     // Speakers are an extra, not core: when they cannot be found (the model cannot be fetched
     // offline, say), the run goes on without them and the edit list keeps the names it had.
     let speakers = if opts.no_speakers {
         None
     } else {
-        match speakers_stage(p, &mut jobs, &report, &speech, opts, log, steps) {
+        let stage = Stage {
+            p,
+            jobs: &mut jobs,
+            report: &report,
+            steps,
+        };
+        match speakers_stage(stage, &speech, opts, log) {
             Ok(f) => Some(f),
             Err(e) => {
                 log(&format!("speakers: {e}; going on without them"));
@@ -294,14 +309,16 @@ pub fn finish(
     } else {
         let again = hear_again(p, opts, log)?;
         let t = transcribe_stage(
-            p,
-            &mut jobs,
-            &report,
+            Stage {
+                p,
+                jobs: &mut jobs,
+                report: &report,
+                steps,
+            },
             &speech,
             opts,
             again,
             log,
-            steps,
             transcribed,
             between,
         );

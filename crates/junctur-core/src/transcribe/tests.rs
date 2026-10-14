@@ -380,12 +380,14 @@ fn again_drops_a_partial_and_never_reuses_the_finished_transcript() {
     std::fs::write(path(&dir), serde_json::to_vec(&old).unwrap()).unwrap();
     let run = |opts: &TranscribeOptions| {
         transcribe(
-            &dir.join("rec.mp4"),
-            &[],
-            10.0,
-            &dir,
-            &dir,
-            opts,
+            &Job {
+                file: &dir.join("rec.mp4"),
+                sources: &[],
+                total: 10.0,
+                project: &dir,
+                cache_dir: &dir,
+                opts,
+            },
             &mut |_| {},
             Reports {
                 reach: &mut |_, _| {},

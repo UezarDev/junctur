@@ -266,20 +266,36 @@ fn plan<'a>(speech: &'a Speech, voice: &[usize]) -> Plan<'a> {
     }
 }
 
-/// Who talks when in `file`, from the speech stage's regions, labelled with `voices`. `voice` names
-/// the single-voice speech tracks. Hearing by voice writes the embeddings to `dir` for [`relabel`]
-/// and cuts the windows at `pins` ([`seeded`]); `heard` is told the track and how far it has got.
-#[allow(clippy::too_many_arguments)]
-pub fn find(
-    file: &Path,
-    speech: &Speech,
-    voice: &[usize],
-    voices: &[Voice],
-    pins: &[Pin],
-    dir: &Path,
-    cache_dir: &Path,
-    heard: &mut dyn FnMut(usize, f64),
-) -> Result<Found> {
+/// What [`find`] hears and where it keeps what it heard.
+pub struct Job<'a> {
+    /// The recording.
+    pub file: &'a Path,
+    /// The speech stage's regions.
+    pub speech: &'a Speech,
+    /// The single-voice speech tracks.
+    pub voice: &'a [usize],
+    /// The remembered voices the speakers are labelled with.
+    pub voices: &'a [Voice],
+    /// The user's pins, which cut the windows ([`seeded`]).
+    pub pins: &'a [Pin],
+    /// The project folder, where hearing by voice writes the embeddings for [`relabel`].
+    pub dir: &'a Path,
+    /// Where the models are kept.
+    pub cache_dir: &'a Path,
+}
+
+/// Who talks when in `job.file`, from the speech stage's regions, labelled with the remembered
+/// voices ([`Job`]); `heard` is told the track and how far it has got.
+pub fn find(job: &Job, heard: &mut dyn FnMut(usize, f64)) -> Result<Found> {
+    let Job {
+        file,
+        speech,
+        voice,
+        voices,
+        pins,
+        dir,
+        cache_dir,
+    } = *job;
     let found = match plan(speech, voice) {
         Plan::Nothing => Found {
             method: Method::None,

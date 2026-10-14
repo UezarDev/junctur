@@ -13,7 +13,7 @@ use junctur_core::edit::{
 };
 
 use crate::cuts::Fps;
-pub use words::{Retyped, Side, TranscriptView, Words};
+pub use words::{Placing, Retyped, Side, TranscriptView, Words};
 
 /// What a word edit under a frame is refused with: [`Editor::edit_all`] tells it from the others.
 const UNDER_A_FRAME: &str = "that is shorter than a frame: select a little more";
@@ -358,10 +358,12 @@ impl Editor {
                         first,
                         last,
                         keep,
-                        &env,
-                        &list.settings,
-                        list.duration,
-                        &list.times,
+                        &Placing {
+                            env: &env,
+                            settings: &list.settings,
+                            duration: list.duration,
+                            times: &list.times,
+                        },
                     )
                     .ok_or("no such words in the transcript")?;
                 (a, b, keep, self.envelope.is_none())

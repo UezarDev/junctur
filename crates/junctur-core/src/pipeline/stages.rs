@@ -11,6 +11,15 @@ use crate::tracks::{Role, TrackReport};
 use crate::transcribe::{self, Source, TranscribeOptions, Transcript};
 use crate::Result;
 
+/// What every stage of a run is given: the project, its job record, the tracks report and where
+/// each track's progress goes.
+pub(super) struct Stage<'a> {
+    pub(super) p: &'a Project,
+    pub(super) jobs: &'a mut Jobs,
+    pub(super) report: &'a TrackReport,
+    pub(super) steps: Steps<'a>,
+}
+
 /// Puts the transcript's word counts into the score windows of the edit list on disk, changing
 /// nothing else, when rewriting it loses nothing of the user's ([`edit::amend`]); the list on disk
 /// afterwards, when it reads.
@@ -36,14 +45,13 @@ pub(super) fn count_words(
 }
 
 /// Speech regions and the cut envelope on every speech track, reused unless `force`.
-pub(super) fn speech_stage(
-    p: &Project,
-    jobs: &mut Jobs,
-    report: &TrackReport,
-    force: bool,
-    log: &mut dyn FnMut(&str),
-    steps: Steps,
-) -> Result<Speech> {
+pub(super) fn speech_stage(st: Stage, force: bool, log: &mut dyn FnMut(&str)) -> Result<Speech> {
+    let Stage {
+        p,
+        jobs,
+        report,
+        steps,
+    } = st;
     let sources = speech_tracks(report);
     if sources.is_empty() {
         log("no track carries speech: the edit list will be empty");
@@ -74,14 +82,17 @@ pub(super) fn speech_stage(
 
 /// Who talks when, reused unless `force` or the speech regions it was found from changed.
 pub(super) fn speakers_stage(
-    p: &Project,
-    jobs: &mut Jobs,
-    report: &TrackReport,
+    st: Stage,
     speech: &Speech,
     opts: &PipelineOptions,
     log: &mut dyn FnMut(&str),
-    steps: Steps,
 ) -> Result<Found> {
+    let Stage {
+        p,
+        jobs,
+        report,
+        steps,
+    } = st;
     // An unreadable file holds pins nothing else knows: kept aside under another name and
     // said, not silently replaced by a file without them.
     let previous = match p.speakers_file() {
@@ -117,13 +128,15 @@ pub(super) fn speakers_stage(
                 .map(|f| f.pins.clone())
                 .unwrap_or_default();
             let mut f = speakers::find(
-                &p.file,
-                speech,
-                &voice_tracks(report),
-                &opts.voices,
-                &pins,
-                &p.dir,
-                &p.cache_dir,
+                &speakers::Job {
+                    file: &p.file,
+                    speech,
+                    voice: &voice_tracks(report),
+                    voices: &opts.voices,
+                    pins: &pins,
+                    dir: &p.dir,
+                    cache_dir: &p.cache_dir,
+                },
                 &mut |track, at| steps(steps::step(report, "speakers", track, at)),
             )?;
             // Heard again: the voice names the old labels knew still are the voices', not
@@ -140,19 +153,21 @@ pub(super) fn speakers_stage(
 }
 
 /// Whisper over the speech regions, resumed or reused when it can be.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn transcribe_stage(
-    p: &Project,
-    jobs: &mut Jobs,
-    report: &TrackReport,
+    st: Stage,
     speech: &Speech,
     opts: &PipelineOptions,
     again: bool,
     log: &mut dyn FnMut(&str),
-    steps: Steps,
     transcribed: &mut dyn FnMut(f64),
     between: &mut dyn FnMut(),
 ) -> Result<Transcript> {
+    let Stage {
+        p,
+        jobs,
+        report,
+        steps,
+    } = st;
     let t_opts = TranscribeOptions {
         model: opts.model,
         device: opts.device,
@@ -171,12 +186,14 @@ pub(super) fn transcribe_stage(
         .collect();
     jobs.stage(&p.dir, "transcribe", log, |log| {
         transcribe::transcribe(
-            &p.file,
-            &src,
-            report.duration,
-            &p.dir,
-            &p.cache_dir,
-            &t_opts,
+            &transcribe::Job {
+                file: &p.file,
+                sources: &src,
+                total: report.duration,
+                project: &p.dir,
+                cache_dir: &p.cache_dir,
+                opts: &t_opts,
+            },
             log,
             transcribe::Reports {
                 reach: &mut |track, at| steps(steps::step(report, "transcribe", track, at)),
