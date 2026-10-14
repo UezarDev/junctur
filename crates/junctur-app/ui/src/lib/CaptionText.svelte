@@ -79,7 +79,7 @@
     pairs.map((p) => `${p.from} > ${p.to}`).join("\n");
 </script>
 
-<Field label="Translate to" info="Translated on this machine, a sentence at a time; the transcript stays as spoken.">
+<Field label="Translate to" info="Shows the captions in another language, translated on this machine a sentence at a time; Off shows them as spoken. The transcript always stays as spoken.">
   {#snippet children(id)}
     <select
       {id}
@@ -87,7 +87,7 @@
       {disabled}
       onchange={(e) => onChange({ ...value, translate: (e.currentTarget as HTMLSelectElement).value })}
     >
-      <option value="">As spoken (no translation)</option>
+      <option value="">Off (as spoken)</option>
       {#if value.translate && !languages.some((l) => l.code === value.translate)}
         <option value={value.translate}>{value.translate}</option>
       {/if}

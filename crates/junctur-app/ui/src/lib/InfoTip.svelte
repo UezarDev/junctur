@@ -6,8 +6,10 @@
   // A real button, not a hover-only mark: Tab reaches it and focus opens it, so the explanation
   // exists for the keyboard too. It opens on hover, focus and click (click only opens: a mouse click
   // comes after the hover already opened it), closes `CLOSE_MS` after the pointer leaves unless the
-  // pointer reaches the popup, and at once on blur, Escape, a scroll or a resize, since a fixed popup
-  // would stay put while its trigger moved. The popup lives in `<body>` (floating.svelte.ts).
+  // pointer reaches the popup, and at once on blur, Escape or a resize. A scroll moves it with its
+  // trigger and closes it only once the trigger is out of sight: Tab to an (i) half under a panel's
+  // edge scrolls the panel to show it, and that must not shut what focus just opened. The popup
+  // lives in `<body>` (floating.svelte.ts).
   import { place, portal, release, slot } from "./floating.svelte";
 
   let { label, text }: { label: string; text: string } = $props();
@@ -36,6 +38,14 @@
     release(id);
   }
 
+  function measure() {
+    if (!popup || !button) return;
+    pos = place(button.getBoundingClientRect(), WIDTH, popup.offsetHeight, {
+      width: window.innerWidth,
+      height: window.innerHeight,
+    });
+  }
+
   // Placed against its real height once drawn; hidden until then so it never flashes at 0,0.
   $effect(() => {
     void text;
@@ -43,21 +53,34 @@
       pos = null;
       return;
     }
-    pos = place(button.getBoundingClientRect(), WIDTH, popup.offsetHeight, {
-      width: window.innerWidth,
-      height: window.innerHeight,
-    });
+    measure();
   });
+
+  /** A scroll of the box holding the trigger (or of the page) moves the popup, or closes it once
+   * the trigger is scrolled out of that box or the window. Other boxes' scrolls leave it alone. */
+  function scrolled(e: Event) {
+    if (!button) return;
+    const box = e.target instanceof Element ? e.target : null;
+    if (box && !box.contains(button)) return;
+    const r = button.getBoundingClientRect();
+    const b = box?.getBoundingClientRect();
+    const top = Math.max(b?.top ?? 0, 0);
+    const bottom = Math.min(b?.bottom ?? window.innerHeight, window.innerHeight);
+    const left = Math.max(b?.left ?? 0, 0);
+    const right = Math.min(b?.right ?? window.innerWidth, window.innerWidth);
+    if (r.bottom > top && r.top < bottom && r.right > left && r.left < right) measure();
+    else hide();
+  }
 
   $effect(() => {
     if (!open) return;
     const close = () => hide();
     const key = (e: KeyboardEvent) => e.code === "Escape" && hide();
-    window.addEventListener("scroll", close, true);
+    window.addEventListener("scroll", scrolled, true);
     window.addEventListener("resize", close);
     window.addEventListener("keydown", key);
     return () => {
-      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("scroll", scrolled, true);
       window.removeEventListener("resize", close);
       window.removeEventListener("keydown", key);
     };

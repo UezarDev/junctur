@@ -24,6 +24,7 @@
   import CaptionTranslation from "./CaptionTranslation.svelte";
   import InfoTip from "./InfoTip.svelte";
   import Section from "./Section.svelte";
+  import { section } from "./captionSections";
 
   let {
     edit,
@@ -41,6 +42,8 @@
   const face = $derived(captionFace(captions ?? { bold: false, italic: false, underline: false }));
   const font = $derived(captions ? captionFont(captions) : "inherit");
   const names = $derived(speakers.map((s) => s.name));
+  // A shared group's heading and (i) (captionSections.ts).
+  const head = (part: Parameters<typeof section>[0]) => ({ title: section(part).title, info: section(part).info });
   let exported = $state<string[] | null>(null);
   let busy = $state(false);
   let savedDefault = $state(false);
@@ -182,7 +185,7 @@
     {#if !usable || !captions}
       <p class="status">Open a recording with an edit list to set up its captions.</p>
     {:else}
-      <Section title="Export and preview">
+      <Section {...head("switches")}>
         <CaptionRules value={captions} part="switches" onChange={(c) => setCaptions(c)} {onError} />
       </Section>
 
@@ -213,25 +216,16 @@
         {/each}
       </Section>
 
-      <Section
-        title="Style"
-        info="The preview and Send to Resolve use all of these. An SRT carries only the colour, bold, italic and underline: in Resolve the rest is the subtitle track's style (Inspector > Track). If a Track Style change misses bold or italic SRT captions, turn those off."
-      >
+      <Section {...head("style")}>
         <CaptionRules value={captions} part="style" onChange={(c) => setCaptions(c)} {onError} />
         <CaptionRules value={captions} part="look" onChange={(c) => setCaptions(c)} {onError} />
       </Section>
 
-      <Section
-        title="People talking at once"
-        info="Where their captions go in the preview and in Resolve. Side by side needs short lines (about 20 characters). The SRT always stacks them in one caption, first to speak on top."
-      >
+      <Section {...head("overlap")}>
         <CaptionRules value={captions} part="overlap" {names} onChange={(c) => setCaptions(c)} {onError} />
       </Section>
 
-      <Section
-        title="Caption text"
-        info="What the captions show in the SRT, in Resolve and in the preview; the transcript keeps the words as spoken. A translation comes first, then find and replace, case, punctuation and censoring."
-      >
+      <Section {...head("text")}>
         <CaptionRules value={captions} part="text" onChange={(c) => setCaptions(c)} {onError} />
         <CaptionTranslation
           {captions}
@@ -241,7 +235,7 @@
         />
       </Section>
 
-      <Section title="How captions are cut">
+      <Section {...head("cut")}>
         <CaptionRules value={captions} part="cut" onChange={(c) => setCaptions(c)} {onError} />
       </Section>
 
@@ -267,10 +261,7 @@
         {/if}
       </Section>
 
-      <Section
-        title="Send to Resolve"
-        info="Places every caption on the open Resolve timeline as a Text+ clip, a video track per speaker, at the edited timeline's times: put the edited video at the timeline's start. Once per Resolve session run Workspace > Scripts > Junctur and leave it running. Sending again updates the captions already there."
-      >
+      <Section {...head("resolve")}>
         <CaptionRules value={captions} part="resolve" onChange={(c) => setCaptions(c)} {onError} />
         <div class="buttons">
           <button class="grow" onclick={sendResolve} disabled={sending || !source}>

@@ -7,6 +7,7 @@
   // it: a <label> round a row that holds the (i) button would label the button (the first labelable
   // element inside it), and a click on the words would press the (i). The control's look is set
   // here (`:global`, since the snippet is the caller's markup) so every field is styled once.
+  // The text and select column is `--control-width` wide (200px), so a screen with room can widen it.
   import type { Snippet } from "svelte";
   import InfoTip from "./InfoTip.svelte";
 
@@ -92,7 +93,7 @@
   .row > :global(select),
   .row > :global(input:not([type="number"]):not([type="color"])) {
     flex: none;
-    width: 160px;
+    width: var(--control-width, 200px);
     min-width: 0;
   }
   .row > :global(input[type="number"]) {

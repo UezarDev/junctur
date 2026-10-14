@@ -11,6 +11,8 @@
   import Field from "./Field.svelte";
   import InfoTip from "./InfoTip.svelte";
   import Section from "./Section.svelte";
+  import { CAPTION_SECTIONS } from "./captionSections";
+  import { slot } from "./floating.svelte";
 
   let { onClose, onSaved }: { onClose: () => void; onSaved: (v: api.SettingsView) => void } = $props();
 
@@ -56,10 +58,11 @@
 
 <svelte:window
   onkeydown={(e) => {
-    if (e.code === "Escape") {
-      e.stopPropagation();
-      onClose();
-    }
+    if (e.code !== "Escape") return;
+    e.stopPropagation();
+    // An open (i) takes Escape first: closing the dialog would lose the draft.
+    if (slot.open) slot.open = null;
+    else onClose();
   }}
 />
 
@@ -76,10 +79,10 @@
           info={`${model ? `${model.note} ` : ""}Used by the next analysis; recordings already transcribed keep their transcript until re-analysed (Properties says when one was made with another model).`}
         >
           {#snippet children(id)}
+            <!-- A function binding: TypeScript does not carry the {#if draft} into the snippet. -->
             <select
               {id}
-              value={draft?.whisperModel}
-              onchange={(e) => draft && (draft.whisperModel = e.currentTarget.value)}
+              bind:value={() => draft?.whisperModel ?? "", (v) => draft && (draft.whisperModel = v)}
             >
               {#each view?.models ?? [] as m (m.key)}<option value={m.key}>{m.label}</option>{/each}
             </select>
@@ -96,32 +99,21 @@
         </Field>
       </Section>
 
-      <h3 class="group">
-        Caption defaults
+      <div class="group">
+        <h3>Caption defaults</h3>
         <InfoTip
           label="Caption defaults"
           text="What a recording starts from until its captions are set in its Captions tab."
         />
-      </h3>
-      <Section title="Export and preview">
-        <CaptionRules value={draft.captions} part="switches" {onChange} onError={(e) => (error = e)} />
-      </Section>
-      <Section title="Style">
-        <CaptionRules value={draft.captions} part="style" {onChange} onError={(e) => (error = e)} />
-        <CaptionRules value={draft.captions} part="look" {onChange} onError={(e) => (error = e)} />
-      </Section>
-      <Section title="People talking at once">
-        <CaptionRules value={draft.captions} part="overlap" {onChange} onError={(e) => (error = e)} />
-      </Section>
-      <Section title="Caption text">
-        <CaptionRules value={draft.captions} part="text" {onChange} onError={(e) => (error = e)} />
-      </Section>
-      <Section title="How captions are cut">
-        <CaptionRules value={draft.captions} part="cut" {onChange} onError={(e) => (error = e)} />
-      </Section>
-      <Section title="Send to Resolve">
-        <CaptionRules value={draft.captions} part="resolve" {onChange} onError={(e) => (error = e)} />
-      </Section>
+      </div>
+      {#each CAPTION_SECTIONS as s (s.part)}
+        <Section title={s.title} info={s.info}>
+          <CaptionRules value={draft.captions} part={s.part} {onChange} onError={(e) => (error = e)} />
+          {#if s.part === "style"}
+            <CaptionRules value={draft.captions} part="look" {onChange} onError={(e) => (error = e)} />
+          {/if}
+        </Section>
+      {/each}
 
       {#if view.path}<p class="status path">Saved in {view.path}</p>{/if}
     {:else if !error}
@@ -167,8 +159,15 @@
     align-items: center;
     gap: 6px;
     margin: 28px 0 0;
+  }
+  .group h3 {
+    margin: 0;
     font-size: 14px;
     font-weight: 600;
+  }
+  /* The Whisper model's labels are long ("Automatic (large-v3-turbo)"); the dialog has the room. */
+  .dialog {
+    --control-width: 240px;
   }
   .path {
     margin-top: 18px;

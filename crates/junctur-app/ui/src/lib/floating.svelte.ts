@@ -30,7 +30,9 @@ export function place(
   view: { width: number; height: number },
 ): { top: number; left: number } {
   const above = at.top - height - GAP;
-  const top = above >= MARGIN ? above : Math.min(at.bottom + GAP, view.height - height - MARGIN);
+  const below = Math.min(at.bottom + GAP, view.height - height - MARGIN);
+  // A popup taller than the room either side starts at the top margin rather than off-screen.
+  const top = above >= MARGIN ? above : Math.max(MARGIN, below);
   const centred = at.left + at.width / 2 - width / 2;
   const left = Math.max(MARGIN, Math.min(centred, view.width - width - MARGIN));
   return { top, left };
