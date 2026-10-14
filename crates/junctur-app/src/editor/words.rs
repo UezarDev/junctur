@@ -59,6 +59,11 @@ pub struct Words {
 }
 
 impl Words {
+    /// Each word with the track it was heard on, as the caption cuts read them.
+    pub fn tracked(&self) -> impl Iterator<Item = (usize, &Word)> {
+        self.tracks.iter().copied().zip(&self.list)
+    }
+
     /// The project's `transcript.json`, or `None` when there is none (or it does not read).
     pub fn load(project_dir: &Path) -> Option<Self> {
         let t = transcribe::load(project_dir)?;
