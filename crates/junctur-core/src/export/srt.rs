@@ -679,6 +679,7 @@ mod tests {
             end,
             text: text.into(),
             p: 1.0,
+            p_min: None,
         }
     }
 

@@ -102,6 +102,30 @@ pub fn set_fix(
     Ok(*fixes != before)
 }
 
+/// Marks the word heard as `heard` on `track` at `start` as checked by the user (5o): a fix line with
+/// the heard text, so every fix line means "the user vouched for this word" and the transcript panel
+/// flags none of them. Not a line kind of its own: an older build reads it as a fix that changes
+/// nothing, where a new kind would need a format version it refuses. A word with a fix already is
+/// left as it is. Whether anything changed.
+pub fn confirm_fix(
+    fixes: &mut Vec<Fix>,
+    track: usize,
+    start: f64,
+    heard: &str,
+) -> Result<bool, String> {
+    let k = key(track, start);
+    if fixes.iter().any(|f| f.key() == k) {
+        return Ok(false);
+    }
+    let text = check_fix(heard)?;
+    if text.is_empty() {
+        return Err("this word has no text to confirm".into());
+    }
+    fixes.push(Fix { track, start, text });
+    sort(fixes);
+    Ok(true)
+}
+
 /// The list's order: by start, then track.
 pub(super) fn sort(fixes: &mut [Fix]) {
     fixes.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.track.cmp(&b.track)));
@@ -146,6 +170,7 @@ mod tests {
             end: start + 0.3,
             text: text.into(),
             p: 1.0,
+            p_min: None,
         }
     }
 
@@ -176,6 +201,23 @@ mod tests {
         assert!(set_fix(&mut f, 0, 3.0, "a", "Tsun\nheto").unwrap());
         assert_eq!(f[0].text, "Tsun heto");
         assert!(set_fix(&mut f, 0, 3.0, "a", &"x".repeat(MAX_FIX + 1)).is_err());
+    }
+
+    /// 5o: a confirmed word is a fix to its own text; a fixed word stays fixed, and the heard text
+    /// typed in again (5h) takes the confirmation away like any fix.
+    #[test]
+    fn a_word_is_confirmed_as_a_fix_to_what_was_heard() {
+        let mut f = Vec::new();
+        assert!(confirm_fix(&mut f, 1, 12.34, " Uezar, ").unwrap());
+        assert_eq!(f[0].text, "Uezar,");
+        assert!(!confirm_fix(&mut f, 1, 12.34, "Uezar,").unwrap(), "once");
+        assert_eq!(Fixes::new(&f).text(1, &word(12.34, "Uezar,")), "Uezar,");
+        assert!(set_fix(&mut f, 0, 3.0, "Wezar", "Uezar").unwrap());
+        assert!(!confirm_fix(&mut f, 0, 3.0, "Wezar").unwrap());
+        assert_eq!(f[0].text, "Uezar", "the fix stands");
+        assert!(set_fix(&mut f, 1, 12.34, "Uezar,", "Uezar,").unwrap());
+        assert_eq!(f.len(), 1);
+        assert!(confirm_fix(&mut f, 0, 9.0, "  ").is_err());
     }
 
     #[test]

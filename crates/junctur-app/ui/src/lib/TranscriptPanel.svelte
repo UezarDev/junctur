@@ -6,12 +6,24 @@
   // Where the speaker changes a name row comes first; click the name to rename the speaker (saved
   // to edit.junctur at once). Double-click a word to fix its spelling (5h): saved to edit.junctur at
   // once, shown here, in the caption preview and the SRT, and added to the word list Whisper is told.
+  // Words Whisper was unsure of are underlined (5o) and stepped through from the header, where "Looks
+  // right" confirms one; a fixed or confirmed word is not flagged (the core decides, `words.sure`).
   import { onMount } from "svelte";
   import { SvelteSet } from "svelte/reactivity";
   import * as api from "./api";
   import * as sel from "./selection";
   import { toSeconds } from "./time";
-  import { pack, stamp, tokens, wordAt, type Stretch, type Token, type Words } from "./transcript";
+  import {
+    flagged,
+    pack,
+    stamp,
+    stepFrom,
+    tokens,
+    wordAt,
+    type Stretch,
+    type Token,
+    type Words,
+  } from "./transcript";
 
   let {
     words,
@@ -24,6 +36,7 @@
     player,
     edit,
     selection,
+    flagBelow = 0,
     onSelect,
     onError,
   }: {
@@ -42,6 +55,8 @@
     player: api.PlayerState | null;
     edit: api.EditState | null;
     selection: sel.Selection | null;
+    /** Kept words Whisper was less sure of than this many percent are flagged (5o); 0 for none. */
+    flagBelow?: number;
     onSelect: (s: sel.Selection | null) => void;
     onError: (message: string) => void;
   } = $props();
@@ -211,6 +226,40 @@
   const current = $derived(words && player?.position != null ? wordAt(words, player.position * 1000) : -1);
   const chosen = $derived(selection?.kind === "words" ? selection : null);
 
+  // Flagged words (5o): per edit or threshold, the kept ones to check, in order.
+  const toCheck = $derived(toks && words ? flagged(toks, words.sure, flagBelow) : []);
+  const doubt = (i: number) => flagBelow > 0 && words != null && words.sure[i] < flagBelow;
+  // The one word selected, when it is flagged: what "Looks right" confirms.
+  const checking = $derived(chosen && chosen.first === chosen.last && doubt(chosen.first) ? chosen.first : -1);
+
+  // Next or previous flagged word from the selection, else from the word under the playhead: it is
+  // selected, played from and scrolled to (even while the list does not follow the playhead).
+  function step(back: boolean) {
+    const from = chosen ? (back ? chosen.first : chosen.last) : current;
+    goTo(stepFrom(toCheck, from, back));
+  }
+  function goTo(i: number) {
+    if (i < 0 || !words) return;
+    anchor = i;
+    onSelect(sel.words(i, i));
+    call(() => api.seek(words!.start[i] / 1000, true));
+    if (laid && scroller) {
+      ours = Math.max(0, Math.round(laid.rowOf[i] * ROW - height / 3));
+      scroller.scrollTop = ours;
+      pausedUntil = performance.now() + FOLLOW_PAUSE_MS;
+    }
+  }
+  // Confirms the selected flagged word (it keeps what Whisper heard) and goes on to the next.
+  function looksRight() {
+    const i = checking;
+    if (i < 0) return;
+    const next = stepFrom(toCheck, i, false);
+    call(async () => {
+      await api.confirmWord(i);
+      goTo(next);
+    });
+  }
+
   // Following the playhead: scroll so the current word's row stays in view, unless the user has
   // scrolled lately. Our own scrolls are told apart by the position they set.
   let pausedUntil = 0;
@@ -321,6 +370,18 @@
 <section class="panel">
   <header>
     <span>Transcript</span>
+    {#if toCheck.length}
+      <span class="check" title="Words Whisper was less sure of than {flagBelow} % (Settings)">
+        <button onclick={() => step(true)} aria-label="Previous word to check">‹</button>
+        <span>{toCheck.length.toLocaleString()} to check</span>
+        <button onclick={() => step(false)} aria-label="Next word to check">›</button>
+        <button
+          disabled={checking < 0}
+          onclick={looksRight}
+          title="The selected word is right as heard: stop flagging it and go to the next">Looks right</button
+        >
+      </span>
+    {/if}
     {#if words}
       <span class="muted">{words.text.length.toLocaleString()} words</span>
     {/if}
@@ -404,10 +465,13 @@
                   class="w"
                   class:cur={t.i === current}
                   class:sel={chosen && t.i >= chosen.first && t.i <= chosen.last}
+                  class:doubt={doubt(t.i)}
                   style:box-shadow={words.also[t.i] ? `inset 0 -2px 0 ${colour(words.also[t.i])}` : null}
                   title={words.also[t.i]
                     ? `${nameOf(words.speaker[t.i])} and ${nameOf(words.also[t.i])} at once`
-                    : "Double-click to fix the spelling"}
+                    : doubt(t.i)
+                      ? `Whisper was ${words.sure[t.i]} % sure of this word: double-click to fix it, or "Looks right" above`
+                      : "Double-click to fix the spelling"}
                   data-i={t.i}>{words.text[t.i]}</span
                 >
               {:else if t.kind === "cutword"}
@@ -511,6 +575,24 @@
   .w.cur {
     color: #101114;
     background: var(--accent);
+  }
+  .w.doubt {
+    text-decoration: underline wavy rgba(242, 179, 61, 0.9);
+    text-decoration-thickness: 1px;
+    text-underline-offset: 4px;
+  }
+  .check {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-weight: 400;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .check button {
+    padding: 0 6px;
+    font-size: 12px;
+    line-height: 18px;
   }
   .cutword {
     color: var(--muted);

@@ -423,6 +423,14 @@ pub async fn fix_word(
     }
 }
 
+/// Marks transcript word `index` as checked (5o): it keeps what Whisper heard and is no longer
+/// flagged. Nothing joins the word list.
+#[tauri::command]
+pub async fn confirm_word(app: State<'_, App>, index: usize) -> Result<(), String> {
+    let e = app.editable()?;
+    e.confirm_word(e.file(), index)
+}
+
 /// Sets speaker `id`'s caption colour (`#RRGGBB`).
 #[tauri::command]
 pub async fn recolor_speaker(app: State<'_, App>, id: u32, color: String) -> Result<(), String> {

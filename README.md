@@ -164,6 +164,9 @@ above the timeline (shift-drag on the timeline selects a stretch). Boundaries sn
 and a list the app did not write itself is first kept as `edit.junctur.bak` (then `.bak2`, ...).
 Double-click a misheard word to fix its spelling: the fix is a `fix` line in `edit.junctur`, shown in the
 transcript, the caption preview and the SRT, and the spelling joins the word list (below).
+Words Whisper was unsure of (the lowest probability of their letters' tokens under 25 %, `flag_below`
+below) are underlined; the panel's header steps through them, and "Looks right" keeps one as heard and
+stops flagging it (a `fix` line with the heard text). Transcripts made before this have no flags.
 
 Setup, once (Node.js 20+ for the frontend):
 
@@ -214,6 +217,9 @@ stretch it hears, so they come out spelled that way. It applies to the next tran
 is not redone or called out of date. A list too long for Whisper's prompt (about 220 tokens) is cut from
 the end, and the log says what was left out. The app edits it in Settings and adds every word you fix at
 the top of the list, so a newly fixed word is always told to Whisper.
+
+`flag_below` (default 25, 0 for none) is the percentage under which the app's transcript flags a word to
+check; only the app reads it.
 
 `captions` holds the caption defaults: what a recording whose edit list has no `captions` line of its own
 cuts its captions with (`on`, `chars` per line, `lines` per speaker, `words` per speaker with 0 for no

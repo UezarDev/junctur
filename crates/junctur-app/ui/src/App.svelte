@@ -27,7 +27,7 @@
   import type { MenuId } from "./lib/menus";
   import { Talk, same } from "./lib/talking";
   import * as sel from "./lib/selection";
-  import { words as toWords, type Words } from "./lib/transcript";
+  import { sureOf, words as toWords, type Words } from "./lib/transcript";
 
   // Raw (not deeply reactive): these are replaced whole on every update, and a 30 h transcript or
   // edit list read through a reactive proxy makes every layout pass several times slower.
@@ -73,6 +73,8 @@
   let windowWidth = $state(window.innerWidth);
   let windowHeight = $state(window.innerHeight);
   let settingsOpen = $state(false);
+  // The transcript flags words Whisper was less sure of than this (5o, Settings); none until read.
+  let flagBelow = $state(0);
   // Each open counts one up, and so does a close (2i): an open's answers that arrive after a close,
   // or after a newer open, are dropped. `closedAt` is the count a close left, so an open that lost
   // to a close (nothing opened since) closes again what the player opened meanwhile.
@@ -247,6 +249,7 @@
             text: view.text,
             speaker: Uint32Array.from(view.speaker),
             also: Uint32Array.from(view.also ?? []),
+            sure: sureOf(view),
           };
         }
       },
@@ -387,7 +390,8 @@
   }
 
   // A model change surfaces as 2d's out-of-date notice for the open recording; nothing re-runs.
-  function settingsSaved() {
+  function settingsSaved(v: api.SettingsView) {
+    flagBelow = v.settings.flagBelow;
     const o = opened;
     if (!o) return;
     api.outdated(o.file).then(
@@ -483,6 +487,10 @@
   onMount(() => {
     // A transcription started before the page (a reload) has sent no event yet; one that has wins.
     api.transcription().then((t) => (lane ??= t), () => {});
+    api.settings().then(
+      (v) => (flagBelow = v.settings.flagBelow),
+      () => {},
+    );
     api.playerState().then(
       async (s) => {
         player = s;
@@ -638,6 +646,7 @@
           {player}
           {edit}
           {selection}
+          {flagBelow}
           onSelect={(s) => (selection = s)}
           onError={(e) => (failure = e)}
         />

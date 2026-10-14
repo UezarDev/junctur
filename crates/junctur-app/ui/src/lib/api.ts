@@ -242,6 +242,8 @@ export interface Settings {
   captions: Captions;
   /** The word list Whisper is told (5h), first entries first. */
   words: string[];
+  /** The transcript flags words Whisper was less sure of than this many percent (5o); 0 for none. */
+  flagBelow: number;
 }
 
 export interface SettingsView {
@@ -277,6 +279,9 @@ export interface TranscriptView {
   speaker: number[];
   /** Someone else saying the word too (two people at once), 0 for none. */
   also: number[];
+  /** How sure Whisper was of each word (5o), whole percent; 255 when it is never flagged (an older
+   * transcript, or a word the user fixed or confirmed). */
+  sure: number[];
 }
 
 export type StageState = "pending" | "running" | "done" | "failed";
@@ -416,6 +421,9 @@ export const renameSpeaker = (id: number, name: string) =>
 /** Fixes the spelling of word `index` (5h; empty or the heard text again removes the fix); resolves
  * to the entry it added to the word list, if any. Saved at once, not an undo step. */
 export const fixWord = (index: number, text: string) => invoke<string | null>("fix_word", { index, text });
+/** Marks word `index` as checked (5o): it keeps what Whisper heard and is no longer flagged. Saved at
+ * once, not an undo step. */
+export const confirmWord = (index: number) => invoke<void>("confirm_word", { index });
 /** Sets speaker `id`'s caption colour (`#RRGGBB`). */
 export const recolorSpeaker = (id: number, color: string) =>
   invoke<void>("recolor_speaker", { id, color });

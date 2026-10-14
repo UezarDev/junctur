@@ -687,6 +687,20 @@ impl Core {
         Ok((word.text.clone(), fixed))
     }
 
+    /// Marks transcript word `index` as checked (5o) in the edit list and saves it, so it is no longer
+    /// flagged. Not an undo step, like a fix.
+    pub fn confirm_word(&self, file: Option<&str>, index: usize) -> Result<(), String> {
+        self.prepare();
+        let words = lock(&self.editor)
+            .words
+            .clone()
+            .ok_or("this recording has no transcript")?;
+        let (Some(word), Some(&track)) = (words.list.get(index), words.tracks.get(index)) else {
+            return Err("no such word in the transcript".into());
+        };
+        self.change(file, |ed, list, _| ed.confirm_word(list, track, word))
+    }
+
     /// Sets the edit list's caption settings and saves them.
     pub fn set_captions(&self, file: Option<&str>, captions: Captions) -> Result<(), String> {
         self.change(file, |ed, list, _| ed.set_captions(list, captions))

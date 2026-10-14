@@ -61,6 +61,14 @@ pub struct Settings {
     /// The word list (5h), in its order: the first entries win when Whisper's prompt is full.
     #[serde(default)]
     pub words: Vec<String>,
+    /// The transcript panel flags a word Whisper was less sure of than this many percent (5o); 0
+    /// flags none.
+    #[serde(default = "flag_below")]
+    pub flag_below: u8,
+}
+
+fn flag_below() -> u8 {
+    config::FLAG_BELOW
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -90,6 +98,7 @@ fn from_config(c: &Config) -> Settings {
         whisper_model: c.whisper_model.unwrap_or_default().key().to_string(),
         captions: c.captions.clone().unwrap_or_default(),
         words: c.words.clone(),
+        flag_below: c.flag_below(),
     }
 }
 
@@ -105,10 +114,14 @@ fn to_config(s: &Settings) -> Result<Config, String> {
         existing_clips: ExistingClips::Ask,
         ..s.captions.clone()
     };
+    if s.flag_below > 100 {
+        return Err("flag words under at most 100 %".into());
+    }
     Ok(Config {
         whisper_model: (model != ModelPref::Auto).then_some(model),
         captions: (captions != Captions::default()).then_some(captions),
         words: wordlist::normalize(&s.words),
+        flag_below: (s.flag_below != config::FLAG_BELOW).then_some(s.flag_below),
     })
 }
 
@@ -219,6 +232,7 @@ mod tests {
                 ..Default::default()
             },
             words: vec!["Uezar".into(), "Tsunheto".into()],
+            flag_below: 25,
         };
         let c = to_config(&s).unwrap();
         assert_eq!(c.whisper_model, Some(ModelPref::LargeV3));
@@ -236,6 +250,7 @@ mod tests {
                 ..Default::default()
             },
             words: vec![],
+            flag_below: config::FLAG_BELOW,
         };
         let saved = to_config(&s).unwrap().captions.unwrap();
         assert!(saved.on);
@@ -257,6 +272,7 @@ mod tests {
             whisper_model: "auto".into(),
             captions: Captions::default(),
             words: vec![" Uezar ".into(), "".into(), "Delay".into(), "Uezar".into()],
+            flag_below: config::FLAG_BELOW,
         };
         assert_eq!(
             to_config(&s).unwrap().words,
@@ -276,6 +292,7 @@ mod tests {
             whisper_model: "large-v4".into(),
             captions: Captions::default(),
             words: vec![],
+            flag_below: config::FLAG_BELOW,
         };
         assert!(to_config(&s).is_err());
         let s = Settings {
@@ -285,7 +302,33 @@ mod tests {
                 ..Default::default()
             },
             words: vec![],
+            flag_below: config::FLAG_BELOW,
         };
         assert!(to_config(&s).unwrap_err().contains("caption defaults"));
+    }
+
+    /// 5o: the flag threshold is written only off its default, 0 (none flagged) included, and a
+    /// percentage over 100 is refused.
+    #[test]
+    fn the_flag_threshold_is_saved_off_its_default_only() {
+        let s = from_config(&Config::default());
+        assert_eq!(s.flag_below, config::FLAG_BELOW);
+        assert_eq!(to_config(&s).unwrap().flag_below, None);
+        let off = Settings {
+            flag_below: 0,
+            ..s.clone()
+        };
+        assert_eq!(to_config(&off).unwrap().flag_below, Some(0));
+        assert_eq!(from_config(&to_config(&off).unwrap()).flag_below, 0);
+        let bad = Settings {
+            flag_below: 101,
+            ..s.clone()
+        };
+        assert!(to_config(&bad).is_err());
+        // Settings sent without it (a page from before 5o): the default.
+        let mut v = serde_json::to_value(Settings { flag_below: 7, ..s }).unwrap();
+        v.as_object_mut().unwrap().remove("flagBelow").unwrap();
+        let old: Settings = serde_json::from_value(v).unwrap();
+        assert_eq!(old.flag_below, config::FLAG_BELOW);
     }
 }

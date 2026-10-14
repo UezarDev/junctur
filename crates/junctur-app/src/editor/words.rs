@@ -131,6 +131,19 @@ pub struct TranscriptView {
     pub speaker: Vec<u32>,
     /// Someone else who says the word too (5b: two people talking at once), 0 for none.
     pub also: Vec<u32>,
+    /// How sure Whisper was of the word (5o): its lowest token probability in whole percent, rounded
+    /// down, which the panel flags under the user's threshold. [`NOT_FLAGGED`] when there is nothing
+    /// to flag it by: a transcript from before 5o, or a word the user fixed or confirmed (5h's fix
+    /// lines). The threshold is the page's to apply, so changing it needs no new words.
+    pub sure: Vec<u8>,
+}
+
+/// [`TranscriptView::sure`] of a word that is never flagged, above every percentage.
+pub const NOT_FLAGGED: u8 = u8::MAX;
+
+/// `p` (0..1) in whole percent, rounded down, so a word at 39.9 % is under a threshold of 40.
+fn percent(p: f32) -> u8 {
+    (p.clamp(0.0, 1.0) * 100.0).floor() as u8
 }
 
 impl TranscriptView {
@@ -150,6 +163,14 @@ impl TranscriptView {
                 )
             })
             .unzip();
+        let sure = w
+            .iter()
+            .zip(&words.tracks)
+            .map(|(w, &t)| match w.p_min {
+                Some(p) if fixed.of(t, w).is_none() => percent(p),
+                _ => NOT_FLAGGED,
+            })
+            .collect();
         Self {
             text: w
                 .iter()
@@ -160,6 +181,7 @@ impl TranscriptView {
             end: w.iter().map(|w| ms(w.end)).collect(),
             speaker,
             also,
+            sure,
         }
     }
 }
@@ -174,6 +196,7 @@ mod tests {
             end,
             text: text.into(),
             p: 1.0,
+            p_min: None,
         }
     }
 
@@ -261,6 +284,35 @@ mod tests {
         };
         let v = TranscriptView::new(&sample(), &Speakers::default(), &[fix]);
         assert_eq!(v.text, vec!["uno", "Uezar", "tres"]);
+    }
+
+    /// 5o: each word's confidence in percent, none for a word from an older transcript or one the
+    /// user fixed or confirmed (a fix line with the heard text).
+    #[test]
+    fn a_word_is_sure_as_its_weakest_piece_until_the_user_checks_it() {
+        let sure = |p: Option<f32>, start: f64, text: &str| Word {
+            p_min: p,
+            ..word(start, start + 0.4, text)
+        };
+        let w = Words::from_words(vec![
+            sure(Some(0.399), 10.0, "uno"),
+            sure(Some(1.0), 10.5, "Wezar"),
+            sure(None, 11.0, "viejo"),
+            sure(Some(0.05), 11.5, "Tsunejo"),
+            sure(Some(0.2), 12.0, "bien"),
+        ]);
+        let none = Speakers::default();
+        let v = TranscriptView::new(&w, &none, &[]);
+        assert_eq!(v.sure, vec![39, 100, NOT_FLAGGED, 5, 20]);
+        let fix = |start: f64, text: &str| Fix {
+            track: 0,
+            start,
+            text: text.into(),
+        };
+        // "Tsunejo" fixed, "bien" confirmed (its own text): neither is flagged any more.
+        let v = TranscriptView::new(&w, &none, &[fix(11.5, "Tsunheto"), fix(12.0, "bien")]);
+        assert_eq!(v.sure, vec![39, 100, NOT_FLAGGED, NOT_FLAGGED, NOT_FLAGGED]);
+        assert_eq!(v.text[3..], ["Tsunheto", "bien"]);
     }
 
     #[test]

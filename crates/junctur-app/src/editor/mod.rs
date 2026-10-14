@@ -216,6 +216,20 @@ impl Editor {
         })
     }
 
+    /// Marks `word`, heard on `track`, as checked by the user (5o: a fix line with the heard text, so
+    /// the transcript panel no longer flags it) and saves; a word fixed already is left as it is.
+    /// Like a fix, not an undo step.
+    pub fn confirm_word(
+        &mut self,
+        list: &EditList,
+        track: usize,
+        word: &Word,
+    ) -> Result<Option<Edited>, String> {
+        self.restyle(list, |l| {
+            edit::confirm_fix(&mut l.fixes, track, word.start, &word.text).map(|_| ())
+        })
+    }
+
     /// Puts `speakers` in place of the list's (5b: labelled again after a voice was enrolled or
     /// forgotten) and saves. Like a rename, not an undo step.
     pub fn respeak(
@@ -480,6 +494,7 @@ mod tests {
             end,
             text: text.into(),
             p: 1.0,
+            p_min: None,
         };
         e.words = Some(Arc::new(Words::from_words(vec![
             w(10.0, 10.4, "uno"),
@@ -593,6 +608,7 @@ mod tests {
             end: 12.8,
             text: " Wezar,".into(),
             p: 0.6,
+            p_min: None,
         };
         let l0 = list(vec![r(1.0, 30.0)]);
         let l1 = e
@@ -621,6 +637,12 @@ mod tests {
             .unwrap()
             .list;
         assert!(l3.fixes.is_empty());
+        // 5o: confirmed, the word keeps its heard text in a fix line, saved at once.
+        let l4 = e.confirm_word(&l3, 1, &heard).unwrap().unwrap().list;
+        assert_eq!(l4.fixes[0].text, "Wezar,");
+        assert_eq!(reread(&path), l4);
+        assert!(!e.can_undo(), "not an undo step");
+        assert!(e.confirm_word(&l4, 1, &heard).unwrap().is_none(), "once");
         let _ = std::fs::remove_dir_all(&d);
     }
 }
