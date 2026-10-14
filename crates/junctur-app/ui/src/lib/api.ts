@@ -191,8 +191,16 @@ export interface Sent {
 
 /** A Whisper model the Settings dialog offers (src/settings.rs). */
 export interface ModelChoice {
+  /** What the config file holds. */
   key: string;
-  label: string;
+  /** The readable name ("Fast"). */
+  name: string;
+  /** The line under it in the picker (2v). */
+  summary: string;
+  /** Which icon the picker draws. */
+  family: "auto" | "turbo" | "large";
+  /** The Whisper model it loads ("large-v3-turbo"). */
+  model: string;
   note: string;
 }
 
