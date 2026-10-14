@@ -1,7 +1,11 @@
+use super::again::{AGAIN_FILE, BEFORE_FILE, SET_ASIDE_FILE};
+use super::editlist::{back_up, is_generated, Draft};
+use super::speaker_files::{set_aside, write_speakers};
 use super::*;
+use crate::edit::Speakers;
 
 /// The code of every `.rs` file under `src/<rel>` (a folder or one file), without its
-/// `mod tests`, CRLF read as LF.
+/// `mod tests` or a `tests.rs` beside it, CRLF read as LF.
 fn code_under(rel: &str) -> Vec<(String, String)> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut todo = vec![root.join(rel)];
@@ -9,7 +13,9 @@ fn code_under(rel: &str) -> Vec<(String, String)> {
     while let Some(at) = todo.pop() {
         if at.is_dir() {
             todo.extend(std::fs::read_dir(&at).unwrap().map(|e| e.unwrap().path()));
-        } else if at.extension().is_some_and(|x| x == "rs") {
+        } else if at.extension().is_some_and(|x| x == "rs")
+            && at.file_name().is_some_and(|n| n != "tests.rs")
+        {
             let src = std::fs::read_to_string(&at).unwrap().replace("\r\n", "\n");
             let code = match src.find("#[cfg(test)]\nmod tests") {
                 Some(k) => src[..k].to_string(),
@@ -54,14 +60,26 @@ fn tracks_speech_and_speakers_open_their_models_on_the_cpu_only() {
     }
     // The VAD's, the segmenter's and the embedder's.
     assert!(opened >= 3, "{opened}");
-    let (_, this) = code_under("pipeline/mod.rs").remove(0);
+    // The run's own code: this module and the files it was split into.
+    let this = [
+        "pipeline/mod.rs",
+        "pipeline/again.rs",
+        "pipeline/editlist.rs",
+        "pipeline/speaker_files.rs",
+        "pipeline/stages.rs",
+    ]
+    .map(|rel| code_under(rel).remove(0).1)
+    .join(
+        "
+",
+    );
     for banned in [
         "runtime::open",
         "Session::builder",
         "ort::ep",
         "DevicePref::Auto",
     ] {
-        assert!(!this.contains(banned), "pipeline/mod.rs has {banned}");
+        assert!(!this.contains(banned), "the run's code has {banned}");
     }
     // Every `device` field this file writes is transcription's (its own options' declaration
     // aside), and the run's device is only ever written into one.
