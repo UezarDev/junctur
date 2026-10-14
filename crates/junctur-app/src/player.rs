@@ -448,6 +448,20 @@ impl Drop for Player {
 /// An edit refused because another recording was opened while it was asked for (2m).
 pub const OPENED_MEANWHILE: &str = "another recording was opened meanwhile: nothing was changed";
 
+/// A word edit refused because the transcript changed between reading the word and saving (5ad: a
+/// finished re-transcription landing there would have put the fix on the old word's place in a
+/// list whose fixes were just carried onto the new words).
+pub const WORDS_CHANGED: &str =
+    "the transcript changed meanwhile: nothing was changed, try again on the words shown now";
+
+/// `ed`'s words are still `words`, the ones a word edit read its word from ([`WORDS_CHANGED`]).
+fn same_words(ed: &Editor, words: &Arc<Words>) -> Result<(), String> {
+    match &ed.words {
+        Some(w) if Arc::ptr_eq(w, words) => Ok(()),
+        _ => Err(WORDS_CHANGED.into()),
+    }
+}
+
 impl Core {
     pub fn state(&self) -> PlayerState {
         lock(&self.state).clone()
@@ -782,6 +796,7 @@ impl Core {
         let fixed = junctur_core::edit::check_fix(text)?;
         let mut done = FixDone::default();
         self.change(file, |ed, list, _| {
+            same_words(ed, &words)?;
             let r = ed.fix_word(list, track, word, nth, &fixed)?;
             if let Some(e) = &r {
                 (done.others, done.heard) = (e.others.clone(), e.heard.clone());
@@ -806,7 +821,10 @@ impl Core {
             return Err("no such word in the transcript".into());
         };
         let nth = words.nth(index);
-        self.change(file, |ed, list, _| ed.confirm_word(list, track, word, nth))
+        self.change(file, |ed, list, _| {
+            same_words(ed, &words)?;
+            ed.confirm_word(list, track, word, nth)
+        })
     }
 
     /// Fixes transcript words `first..=last` as one text (5x) in the edit list and saves it, the same
@@ -841,6 +859,7 @@ impl Core {
         let run = words.retyped(first, last, &fixed, &speakers, &times)?;
         let mut done = FixDone::default();
         self.change(file, |ed, list, _| {
+            same_words(ed, &words)?;
             let r = ed.fix_words(list, &run, &fixed)?;
             if let Some(e) = &r {
                 (done.others, done.heard) = (e.others.clone(), e.heard.clone());

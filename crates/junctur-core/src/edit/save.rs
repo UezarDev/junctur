@@ -86,7 +86,8 @@ fn latest_backup(edit_path: &Path) -> Option<String> {
 /// untouched editor save, the same text, or the same as the newest backup (so a retried save does
 /// not pile up copies). The text goes to a temporary file and is renamed over the list, so a
 /// reader (or a crash) never sees a half-written or missing list; a failed save removes the
-/// temporary file and leaves the list as it was.
+/// temporary file and leaves the list as it was. A list the parser would not read back is refused,
+/// nothing written ([`EditList::checked_text`], 5ad).
 pub fn save(path: &Path, list: &EditList) -> std::io::Result<Saved> {
     let _one = hold();
     save_now(path, list)
@@ -145,7 +146,8 @@ pub enum Amended {
 /// is there: an untouched editor save is saved again (stamped, as the editor would), and a list in
 /// Junctur's own form (its text is what its parse writes back) is written plain, as the pipeline
 /// wrote it. Anything else is left. For the pipeline putting word counts into a list the user may
-/// be editing (2j); under the same lock as [`save`].
+/// be editing (2j); under the same lock as [`save`]. A change the parser would not read back is
+/// refused as [`save`] refuses it, the file left as it was.
 pub fn amend(path: &Path, change: impl FnOnce(&mut EditList)) -> std::io::Result<Amended> {
     let _one = hold();
     let old = match std::fs::read_to_string(path) {
@@ -169,13 +171,20 @@ pub fn amend(path: &Path, change: impl FnOnce(&mut EditList)) -> std::io::Result
     if editor {
         save_now(path, &new)?;
     } else {
-        crate::output::write_replacing(path, new.to_text())?;
+        crate::output::write_replacing(path, checked(&new)?)?;
     }
     Ok(Amended::Written(new))
 }
 
+/// `list`'s text when the parser reads it back ([`EditList::checked_text`], 5ad), else an
+/// `InvalidData` error: the file is left as it was.
+fn checked(list: &EditList) -> std::io::Result<String> {
+    list.checked_text()
+        .map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidData, why))
+}
+
 fn save_now(path: &Path, list: &EditList) -> std::io::Result<Saved> {
-    let text = stamped(list.to_text());
+    let text = stamped(checked(list)?);
     let old = match std::fs::read_to_string(path) {
         Ok(t) => Some(t),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -308,6 +317,35 @@ mod tests {
         assert_eq!(amend(&path, counted).unwrap(), Amended::Left);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep x");
         assert!(!dir.join("edit.junctur.bak").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_list_the_parser_would_refuse_is_never_written() {
+        // 5ad: 5aa's carry could write a kept-as-heard span longer than a span's text may be, and
+        // the next open failed on that line. Every writer now checks the text reads back.
+        use super::super::Fix;
+        let dir = scratch("refused");
+        let path = dir.join("edit.junctur");
+        let mut bad = list(5.0);
+        bad.fixes = vec![Fix {
+            track: 0,
+            start: 1.0,
+            nth: 0,
+            through: Some(super::super::WordAt { start: 2.0, nth: 0 }),
+            text: "x".repeat(super::super::MAX_SPAN + 1),
+        }];
+        assert!(bad.checked_text().is_err());
+        let e = save(&path, &bad).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+        assert!(!path.exists(), "nothing written");
+        // As the pipeline writes it, and as an editor save: amend refuses too, the file as it was.
+        for first in [list(5.0).to_text(), save(&path, &list(5.0)).unwrap().text] {
+            std::fs::write(&path, &first).unwrap();
+            let e = amend(&path, |e| e.fixes = bad.fixes.clone()).unwrap_err();
+            assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

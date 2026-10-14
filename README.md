@@ -182,9 +182,10 @@ same save; a line under the panel's header says how many, with Undo those. **Cor
 the word bar's row of speakers, does it for the whole recording: every fix given to the words heard the
 same way, then the speakers heard again against the remembered voices and the recording transcribed
 again with the word list, your cuts, names, fixes and caption settings kept. It is an analysis like any
-other (on the transcription lane, pausable, the words coming back five minutes at a time); the fixes
-move onto the new words, one whose word Whisper now spells your way is no longer needed, and one
-whose word is heard otherwise now is set aside and listed above the transcript until you dismiss it.
+other (on the transcription lane, pausable, the words coming back five minutes at a time); the fixes,
+and the word times set by moving a cut's edge, move onto the new words, one whose word Whisper now
+spells your way is no longer needed, and one whose word is heard otherwise now is set aside and listed
+above the transcript until you dismiss it.
 Words Whisper was unsure of (the lowest probability of their letters' tokens under 25 %, `flag_below`
 below) are underlined; the panel's header steps through them, and "Looks right" keeps one as heard and
 stops flagging it (a `fix` line with the heard text). Transcripts made before this have no flags.

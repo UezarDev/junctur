@@ -353,8 +353,17 @@
     );
   });
   async function forgetSetAside() {
+    // Only what was shown (5ad): a run may have set more aside since, which stay to be seen.
+    const seen = setAside;
     setAside = [];
-    await call(() => api.forgetFixesSetAside());
+    await call(() => api.forgetFixesSetAside(seen));
+  }
+  // A set-aside fix, or a word time set by moving a cut's edge (5ad), as the line lists it.
+  function asideText(s: api.SetAside): string {
+    if (s.retimed) {
+      return `the time of "${s.text}" (${stamp(s.at * 1000)}, set to ${stamp(s.retimed[0] * 1000)} to ${stamp(s.retimed[1] * 1000)})`;
+    }
+    return `"${s.text}" (was "${s.heard}", ${stamp(s.at * 1000)})`;
   }
   async function correctAll() {
     const r = await correct();
@@ -595,9 +604,8 @@
   {#if setAside.length}
     <div class="spread" role="status">
       <span class="grow"
-        >Set aside, heard otherwise now: {setAside
-          .map((s) => `"${s.text}" (was "${s.heard}", ${stamp(s.at * 1000)})`)
-          .join(", ")}. Fix those words again where they are now.</span
+        >Set aside, heard otherwise now: {setAside.map(asideText).join(", ")}. Fix those words again where
+        they are now.</span
       >
       <button class="x" onclick={() => void forgetSetAside()} aria-label="Dismiss" title="Seen: stop listing them">×</button>
     </div>
