@@ -17,16 +17,19 @@ mod scores;
 mod speakers;
 mod splice;
 mod spread;
+mod times;
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 pub use caption_text::{Case, CensorStyle, Replace};
-pub use captions::{default_color, parse_color, Captions, Layout};
+pub use captions::{
+    default_color, parse_color, title_name, Animation, Captions, ExistingClips, Layout,
+};
 pub use fixes::{
-    check_fix, check_span, clash, same_millisecond, set_fix, set_span, Fix, Fixed, Fixes, WordAt,
-    MAX_FIX, MAX_SPAN,
+    check_fix, check_span, clash, confirm_fix, same_millisecond, set_fix, set_span, Fix, Fixed,
+    Fixes, WordAt, MAX_FIX, MAX_SPAN,
 };
 pub use format::{parse, FORMAT_VERSION};
 pub use frames::{frame_ranges, frame_span, frames_ceil, frames_floor};
@@ -40,6 +43,7 @@ pub use splice::{cut_span, keep_span};
 pub use spread::{
     carry, keep_heard, likeness, snapshot, spread, Carried, CarryReport, Spread, Which,
 };
+pub use times::{set_time, to_ms, Retime, Times};
 
 /// A kept stretch of the source, in seconds.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -108,6 +112,10 @@ pub struct EditList {
     /// Words the user fixed (5h), and runs of words fixed as one text (5x), in time order: shown in
     /// place of what Whisper heard.
     pub fixes: Vec<Fix>,
+    /// Words the user retimed by moving a cut's edge (2w), in heard order: their start and end in
+    /// place of Whisper's wherever a word's time is read.
+    #[serde(default)]
+    pub times: Vec<Retime>,
     pub windows: Vec<Window>,
 }
 

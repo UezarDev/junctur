@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use junctur_core::edit::{Captions, Fix};
+use junctur_core::edit::{Captions, ExistingClips, Fix};
 use junctur_core::export::layout::Placed;
 use junctur_core::resolve::{Answer, Outcome};
 use serde::Serialize;
@@ -484,6 +484,21 @@ pub async fn edit_frames(
     e.edit(e.file(), Step::Do(Op::Frames { start, end, keep }))
 }
 
+/// Moves a cut's edge (2w: the lanes' drag, review's and the range toolbar's steppers): the frame
+/// edit `[start, end)` (`keep`) that moves edge `from` to its other end, and the words beside the
+/// edge with it, as one undo step; an edit that moves no edge of the list is the frame edit alone.
+#[tauri::command]
+pub async fn move_edge(
+    app: State<'_, App>,
+    start: u64,
+    end: u64,
+    keep: bool,
+    from: u64,
+) -> Result<(), String> {
+    let e = app.editable()?;
+    e.move_edge(e.file(), (start, end, keep), from)
+}
+
 /// Renames speaker `id` in the edit list.
 #[tauri::command]
 pub async fn rename_speaker(app: State<'_, App>, id: u32, name: String) -> Result<(), String> {
@@ -524,6 +539,14 @@ pub async fn fix_word(app: State<'_, App>, index: usize, text: String) -> Result
     let e = app.editable()?;
     let done = e.fix_word(e.file(), index, &text)?;
     Ok(learned(done, &text))
+}
+
+/// Marks transcript word `index` as checked (5o): it keeps what Whisper heard and is no longer
+/// flagged. Nothing joins the word list.
+#[tauri::command]
+pub async fn confirm_word(app: State<'_, App>, index: usize) -> Result<(), String> {
+    let e = app.editable()?;
+    e.confirm_word(e.file(), index)
 }
 
 /// Fixes transcript words `first..=last` as one text (5x: a sentence retyped; empty or the heard
@@ -659,16 +682,19 @@ pub async fn caption_cues(app: State<'_, App>, aspect: f64) -> Result<Vec<Placed
 
 /// Sends the edit into DaVinci Resolve as a timeline of its own with the captions on it as Text+
 /// clips (5z, 5g), through the Junctur script running there; installs or refreshes that script
-/// first. `answer` ("new" or "replace") is the user's word on a timeline of that name already
-/// there; without it such a send changes nothing and answers `exists` for the page to ask. Off the
-/// async runtime: Resolve can take minutes over a long recording.
+/// first. `answer` ("new", "update" or "replace") is the user's word on a timeline of that name
+/// already there; without it such a send changes nothing and answers `exists` for the page to ask.
+/// `existing` (5n): the user's answer to a send that found clips Junctur did not place in the
+/// captions' way (an update, 5ab, on a timeline that has them), for this send only. Off the async
+/// runtime: Resolve can take minutes over a long recording.
 #[tauri::command]
 pub async fn send_to_resolve(
     app: State<'_, App>,
     answer: Option<Answer>,
+    existing: Option<ExistingClips>,
 ) -> Result<Outcome, String> {
     let core = app.core()?;
-    tauri::async_runtime::spawn_blocking(move || core.send_to_resolve(answer))
+    tauri::async_runtime::spawn_blocking(move || core.send_to_resolve(answer, existing))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -730,6 +756,16 @@ pub async fn translation_languages() -> Vec<Language> {
         .collect();
     l.sort_by_key(|l| l.name);
     l
+}
+
+/// The Fusion Titles in the open Resolve project's media pool, for the template picker (5m),
+/// through the Junctur script running there. Off the async runtime: a script not listening takes
+/// seconds to give up on, a busy Resolve longer.
+#[tauri::command]
+pub async fn resolve_templates() -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(junctur_core::resolve::templates)
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// The voices Junctur remembers (5b).

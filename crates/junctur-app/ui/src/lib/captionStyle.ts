@@ -63,3 +63,38 @@ export function captionStyle(c: Captions, pictureHeight: number): string {
     `text-shadow: ${captionOutline(c, px)}`,
   ].join("; ");
 }
+
+/** A speaker's colours under the word highlight (5l), as the engine gives Resolve
+ * (`Captions::highlight_colors`): the text's and the lit word's. With no highlight colour chosen
+ * the text is white and the word the speaker's; a chosen one lights the word over the speaker's
+ * colour; a speaker with no colour (or white) gets a yellow word. */
+export function highlightColors(c: Pick<Captions, "highlightColor">, speaker: string | undefined): [string, string] {
+  const valid = (x: string | undefined) => (x && /^#[0-9a-fA-F]{6}$/.test(x) ? x.toUpperCase() : null);
+  const own = valid(speaker) ?? "#FFFFFF";
+  const chosen = valid(c.highlightColor);
+  if (chosen) return [own, chosen];
+  return own === "#FFFFFF" ? ["#FFFFFF", "#FFD400"] : ["#FFFFFF", own];
+}
+
+/** How far a caption is into its in or out animation at output second `t` (5l), 0 hidden to 1
+ * whole, as the animated caption plays it in Resolve: in over `animationLength` after its start, out
+ * over the same before its end. */
+export function animationProgress(
+  c: Pick<Captions, "animation" | "animationLength">,
+  start: number,
+  end: number,
+  t: number,
+): number {
+  if (c.animation === "none" || c.animationLength <= 0) return 1;
+  const p = Math.min(t - start, end - t) / c.animationLength;
+  return Math.max(0, Math.min(1, p));
+}
+
+/** The CSS a caption block gets at animation progress `p`, on top of its centring. */
+export function animationStyle(c: Pick<Captions, "animation">, p: number): { opacity: string; transform: string } {
+  const centre = "translate(-50%, -50%)";
+  if (c.animation === "none" || p >= 1) return { opacity: "1", transform: centre };
+  const grow = c.animation === "pop" ? ` scale(${(0.6 + 0.4 * p).toFixed(3)})` : "";
+  const rise = c.animation === "slide" ? ` translateY(${((1 - p) * 0.6).toFixed(3)}em)` : "";
+  return { opacity: p.toFixed(3), transform: centre + rise + grow };
+}

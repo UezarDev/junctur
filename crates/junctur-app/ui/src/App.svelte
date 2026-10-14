@@ -80,6 +80,9 @@
   let windowWidth = $state(window.innerWidth);
   let windowHeight = $state(window.innerHeight);
   let settingsOpen = $state(false);
+  // The transcript flags words Whisper was less sure of than this (5o, Settings); none until read.
+  // The default (25) is the core's `config::FLAG_BELOW`, sent with the settings; not repeated here.
+  let flagBelow = $state(0);
   // Each open counts one up, and so does a close (2i): an open's answers that arrive after a close,
   // or after a newer open, are dropped. `closedAt` is the count a close left, so an open that lost
   // to a close (nothing opened since) closes again what the player opened meanwhile.
@@ -255,15 +258,20 @@
     }
   }
 
+  // Each refetch's number: the latest one asked for wins (2w repair: two quick edge moves each ask
+  // again, and taking only a reply onto the words the ask started from dropped the later one).
+  let relabel = 0;
   $effect(() => {
     const key = wordsKey();
     if (!words || wordsLoading || key === labelledWith) return;
     labelledWith = key;
-    const before = words;
+    const ask = ++relabel;
+    const gen = loadGen;
     api.transcript().then(
       (view) => {
-        // Only onto the same transcript (another file may have opened meanwhile).
-        if (view && words === before && view.speaker.length === before.text.length) {
+        // Only the latest ask, onto the same recording's transcript (another file may have opened
+        // meanwhile) and the same words.
+        if (view && ask === relabel && gen === loadGen && words && view.speaker.length === words.text.length) {
           // Text, speakers and the spans fixed as one text (5x) all come from the view.
           words = toWords(view);
         }
@@ -457,7 +465,8 @@
   }
 
   // A model change surfaces as 2d's out-of-date notice for the open recording; nothing re-runs.
-  function settingsSaved() {
+  function settingsSaved(v: api.SettingsView) {
+    flagBelow = v.settings.flagBelow;
     const o = opened;
     if (!o) return;
     api.outdated(o.file).then(
@@ -562,6 +571,10 @@
   onMount(() => {
     // A transcription started before the page (a reload) has sent no event yet; one that has wins.
     api.transcription().then((t) => (lane ??= t), () => {});
+    api.settings().then(
+      (v) => (flagBelow = v.settings.flagBelow),
+      () => {},
+    );
     api.playerState().then(
       async (s) => {
         player = s;
@@ -731,6 +744,7 @@
           {player}
           {edit}
           {selection}
+          {flagBelow}
           {reviewing}
           onSelect={(s) => (selection = s)}
           onError={(e) => (failure = e)}

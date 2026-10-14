@@ -230,6 +230,41 @@ pub fn clash(fixes: &[Fix]) -> bool {
         .any(|w| w[0].0 == w[1].0 && w[1].1 <= w[0].2)
 }
 
+/// Marks the word heard as `heard` on `track` at `start`, the `nth` starting in that millisecond (5w),
+/// as checked by the user (5o): a fix line with the heard text, so every fix line means "the user
+/// vouched for this word" and the transcript panel flags none of them. Not a line kind of its own: an
+/// older build reads it as a fix that changes nothing, where a new kind would need a format version
+/// it refuses. A word with a fix already is left as it is, and so is a word inside a span (5x): the
+/// span is the user's text for it. Whether anything changed. Being a fix line, it goes the way of
+/// one: the heard text (or nothing) typed into the fix field takes it away ([`set_fix`]) and the
+/// word is flagged again, on purpose, so there is one rule for what that field does whatever the
+/// line was made by; a span set over it takes it away too, and the span vouches for the word.
+pub fn confirm_fix(
+    fixes: &mut Vec<Fix>,
+    track: usize,
+    start: f64,
+    nth: usize,
+    heard: &str,
+) -> Result<bool, String> {
+    let new = Fix {
+        track,
+        start,
+        nth,
+        through: None,
+        text: String::new(),
+    };
+    if fixes.iter().any(|f| f.overlaps(&new)) {
+        return Ok(false);
+    }
+    let text = check_fix(heard)?;
+    if text.is_empty() {
+        return Err("this word has no text to confirm".into());
+    }
+    fixes.push(Fix { text, ..new });
+    sort(fixes);
+    Ok(true)
+}
+
 /// The list's order: by start, then track, then which word of the millisecond.
 pub(super) fn sort(fixes: &mut [Fix]) {
     fixes.sort_by(|a, b| {
@@ -349,6 +384,7 @@ mod tests {
             end: start + 0.3,
             text: text.into(),
             p: 1.0,
+            p_min: None,
         }
     }
 
@@ -379,6 +415,59 @@ mod tests {
         assert!(set_fix(&mut f, 0, 3.0, 0, "a", "Tsun\nheto").unwrap());
         assert_eq!(f[0].text, "Tsun heto");
         assert!(set_fix(&mut f, 0, 3.0, 0, "a", &"x".repeat(MAX_FIX + 1)).is_err());
+    }
+
+    /// 5o: a confirmed word is a fix to its own text; a fixed word stays fixed, and the heard text
+    /// typed in again (5h) takes the confirmation away like any fix.
+    #[test]
+    fn a_word_is_confirmed_as_a_fix_to_what_was_heard() {
+        let mut f = Vec::new();
+        assert!(confirm_fix(&mut f, 1, 12.34, 0, " Uezar, ").unwrap());
+        assert_eq!(f[0].text, "Uezar,");
+        assert!(!confirm_fix(&mut f, 1, 12.34, 0, "Uezar,").unwrap(), "once");
+        assert_eq!(Fixes::new(&f).text(1, &word(12.34, "Uezar,")), "Uezar,");
+        assert!(set_fix(&mut f, 0, 3.0, 0, "Wezar", "Uezar").unwrap());
+        assert!(!confirm_fix(&mut f, 0, 3.0, 0, "Wezar").unwrap());
+        assert_eq!(f[0].text, "Uezar", "the fix stands");
+        assert!(set_fix(&mut f, 1, 12.34, 0, "Uezar,", "Uezar,").unwrap());
+        assert_eq!(f.len(), 1);
+        assert!(confirm_fix(&mut f, 0, 9.0, 0, "  ").is_err());
+    }
+
+    /// 5o with 5x: a word inside a span is not confirmed beside it (the span is the user's text for
+    /// it), and a span set over a confirmed word takes the confirmation into it.
+    #[test]
+    fn a_confirmation_and_a_span_never_both_name_a_word() {
+        let at = |start| WordAt { start, nth: 0 };
+        let mut f = Vec::new();
+        assert!(confirm_fix(&mut f, 0, 2.0, 0, "dos").unwrap());
+        assert!(set_span(&mut f, 0, at(1.0), at(3.0), "uno dos tres", "one two three").unwrap());
+        assert_eq!(f.len(), 1, "the confirmation went into the span");
+        assert!(f[0].is_span());
+        assert!(!confirm_fix(&mut f, 0, 2.0, 0, "dos").unwrap());
+        assert_eq!(f.len(), 1, "no confirmation inside a span");
+        // Outside it, on another track or past its end: confirmed as before.
+        assert!(confirm_fix(&mut f, 1, 2.0, 0, "dos").unwrap());
+        assert!(confirm_fix(&mut f, 0, 4.0, 0, "cuatro").unwrap());
+    }
+
+    /// 5o with 5w: confirming one of the words starting in one millisecond confirms that word alone,
+    /// next to another's fix, and taking it away leaves the other.
+    #[test]
+    fn a_word_of_those_starting_together_is_confirmed_alone() {
+        let ws = same_start();
+        let mut f = Vec::new();
+        assert!(set_fix(&mut f, 0, 54.944, 0, "en", "de").unwrap());
+        assert!(confirm_fix(&mut f, 0, 54.944, 1, "él").unwrap());
+        assert!(
+            !confirm_fix(&mut f, 0, 54.944, 0, "en").unwrap(),
+            "fixed already"
+        );
+        assert_eq!(f.iter().map(|x| x.nth).collect::<Vec<_>>(), [0, 1]);
+        assert_eq!(said(&f, &ws), ["manada", "de", "él", "y"]);
+        assert!(set_fix(&mut f, 0, 54.944, 1, "él", "").unwrap());
+        assert_eq!(said(&f, &ws), ["manada", "de", "él", "y"]);
+        assert_eq!(f.len(), 1);
     }
 
     #[test]

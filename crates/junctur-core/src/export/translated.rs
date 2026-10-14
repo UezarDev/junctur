@@ -37,6 +37,12 @@ fn ends(text: &str) -> bool {
 /// The sentences of `shown` (time order), as indices into it: one speaker's words on one track,
 /// until a word ends a sentence, the speaker changes, a pause of `pause` output seconds, or
 /// [`MOST_WORDS`]. `speaker` and `out` give a word's speaker and output time of a point.
+///
+/// A word with no text (cleaning left it empty: a fix or a Whisper word of tags only) has no say
+/// in any of that (5q): it joins its track's open sentence, or is a sentence of its own when none
+/// is open, and the pause, the full stop and the count look at the words with text. Counted, it
+/// could join two sentences a second apart, hide the full stop before it, or split one by the
+/// speaker its time fell to, which moved the translation over the words.
 pub(super) fn sentences(
     shown: &[Shown],
     speaker: impl Fn(&Shown) -> u32,
@@ -44,18 +50,30 @@ pub(super) fn sentences(
     pause: f64,
 ) -> Vec<Vec<usize>> {
     let mut done: Vec<Vec<usize>> = Vec::new();
-    // Open sentence per track: its words and its speaker.
+    // Open sentence per track: its words and its speaker. It opens on a word with text.
     let mut open: Vec<(usize, u32, Vec<usize>)> = Vec::new();
     for (i, w) in shown.iter().enumerate() {
+        if w.text.is_empty() {
+            match open.iter_mut().find(|(t, _, _)| *t == w.track) {
+                Some((_, _, words)) => words.push(i),
+                None => done.push(vec![i]),
+            }
+            continue;
+        }
         let who = speaker(w);
         let at = open.iter().position(|(t, _, _)| *t == w.track);
         if let Some(k) = at {
             let (_, s, words) = &open[k];
-            let last = &shown[*words.last().expect("never empty")];
+            let mut said = words
+                .iter()
+                .map(|&j| &shown[j])
+                .filter(|w| !w.text.is_empty());
+            let count = said.clone().count();
+            let last = said.next_back().expect("opened on a word with text");
             if *s != who
                 || out(w.start) - out(last.end) >= pause
                 || ends(&last.text)
-                || words.len() >= MOST_WORDS
+                || count >= MOST_WORDS
             {
                 done.push(open.remove(k).2);
             }
@@ -218,6 +236,45 @@ mod tests {
             [MOST_WORDS, MOST_WORDS, 100 - 2 * MOST_WORDS]
         );
         assert!(sentences(&[], |_| 1, |p| p.1, 1.0).is_empty());
+    }
+
+    #[test]
+    fn an_empty_word_neither_joins_nor_splits_sentences() {
+        // A word cleaning left empty (a fix or a Whisper word of tags only) stays with the words
+        // around it but plays no part in where sentences end (5q).
+        let n = |shown: &[Shown]| sentences(shown, |_| 1, |p| p.1, 1.0);
+        // 0.6 s on either side of it, 1.4 s between the words with text: a pause.
+        let pause = vec![
+            w(0, 0.0, 0.4, "uno"),
+            w(0, 1.0, 1.2, ""),
+            w(0, 1.8, 2.0, "dos"),
+        ];
+        assert_eq!(n(&pause), [vec![0, 1], vec![2]]);
+        // A full stop before it still ends the sentence.
+        let stop = vec![
+            w(0, 0.0, 0.4, "Fin."),
+            w(0, 0.5, 0.6, ""),
+            w(0, 0.7, 1.0, "Otra"),
+        ];
+        assert_eq!(texts(&stop, &n(&stop)), ["Fin.", "Otra"]);
+        // The speaker its time falls to does not close the sentence; the next word's still does.
+        let three = vec![w(0, 0.0, 0.4, "a"), w(0, 0.4, 0.5, ""), w(0, 0.5, 0.9, "b")];
+        let s = sentences(&three, |w| u32::from(w.text.is_empty()) + 1, |p| p.1, 1.0);
+        assert_eq!(s, [vec![0, 1, 2]]);
+        let s = sentences(&three, |w| u32::from(w.start.1 >= 0.45) + 1, |p| p.1, 1.0);
+        assert_eq!(s, [vec![0, 1], vec![2]]);
+        // Empty words do not count toward MOST_WORDS.
+        let long: Vec<Shown> = (0..MOST_WORDS * 2)
+            .map(|i| {
+                let t = i as f64 * 0.1;
+                w(0, t, t + 0.05, if i % 2 == 0 { "la" } else { "" })
+            })
+            .collect();
+        assert_eq!(n(&long).len(), 1);
+        // One with no sentence open on its track is a sentence of its own, with no text.
+        let alone = vec![w(0, 0.0, 0.1, ""), w(0, 0.2, 0.5, "hola")];
+        assert_eq!(n(&alone), [vec![0], vec![1]]);
+        assert_eq!(texts(&alone, &n(&alone)), ["", "hola"]);
     }
 
     #[test]

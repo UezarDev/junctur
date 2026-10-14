@@ -33,6 +33,7 @@
     selection,
     onSelect,
     onError,
+    onLooksRight = null,
     retyping = $bindable(false),
     onFixed,
     onCorrect,
@@ -43,6 +44,8 @@
     selection: sel.Selection;
     onSelect: (s: sel.Selection | null) => void;
     onError: (message: string) => void;
+    /** The selection is one flagged word (5o): confirms it as heard and goes to the next; else null. */
+    onLooksRight?: (() => void) | null;
     /** The Fix text field is open (the panel opens it on a double-click, 5x). */
     retyping?: boolean;
     /** What a fix did besides itself: the word list's new entries, the other places fixed (5aa). */
@@ -91,7 +94,8 @@
 
   // Fix text (5x). The field is for the stretch it was opened on. Leaving it saves what was typed,
   // as 5t's one-word field does on leaving: another selection (a Shift+click extending it), the
-  // selection cleared, the bar gone (5x repair: the draft was dropped). Escape, and the field's own
+  // selection cleared, the bar gone (5x repair: the draft was dropped), the Fix text button pressed
+  // again to close it. Escape, and the field's own
   // ×, leave the text as it was, as 5t's Escape does.
   let draft = $state("");
   let shown = "";
@@ -200,11 +204,22 @@
     <button onclick={() => call(() => sel.apply(selection, true))} title="Keep every selected stretch (K)">Keep</button>
     <button
       disabled={!one}
-      onclick={() => (retyping = !retyping)}
+      onclick={() => {
+        // Closing the field by its button saves what was typed, as leaving it does.
+        if (retyping) leave();
+        retyping = !retyping;
+      }}
       title={one
         ? "Retype these words as one text: shown in the transcript and the captions in their place (double-click a selection does this too)"
         : "Select one stretch of words to fix its text: one text cannot go in several places"}>Fix text</button
     >
+    {#if onLooksRight}
+      <button
+        onclick={onLooksRight}
+        title="Whisper was unsure of this word but it is right as heard: stop flagging it and go to the next"
+        >Looks right</button
+      >
+    {/if}
     <span class="grow"></span>
     <button class="x" onclick={() => onSelect(null)} title="Clear the selection (Esc)" aria-label="Clear the selection">×</button>
   </div>

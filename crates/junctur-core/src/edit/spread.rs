@@ -600,6 +600,7 @@ mod tests {
             end: start + 0.3,
             text: text.into(),
             p: 1.0,
+            p_min: None,
         }
     }
 

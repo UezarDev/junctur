@@ -15,14 +15,20 @@
   // A fix lands on every other word heard the same way too (5aa); a line under the header says how
   // many, with Undo those. The word bar's Correct does that for every fix, then hears the speakers and
   // the words again (App asks first and starts the run).
+  // Words Whisper was unsure of are underlined (5o) and stepped through from the header; "Looks
+  // right", which confirms the one flagged word selected, is among the word actions at the bottom
+  // (2p's place for them). A fixed or confirmed word, or one in a retyped text, is not flagged (the
+  // core decides, `words.sure`).
   import { onMount } from "svelte";
   import { SvelteSet } from "svelte/reactivity";
   import * as api from "./api";
   import * as sel from "./selection";
   import { toSeconds } from "./time";
   import {
+    flagged,
     pack,
     stamp,
+    stepFrom,
     together,
     tokens,
     widen,
@@ -44,6 +50,7 @@
     player,
     edit,
     selection,
+    flagBelow = 0,
     reviewing = false,
     onSelect,
     onError,
@@ -64,6 +71,8 @@
     player: api.PlayerState | null;
     edit: api.EditState | null;
     selection: sel.Selection | null;
+    /** Kept words Whisper was less sure of than this many percent are flagged (5o); 0 for none. */
+    flagBelow?: number;
     /** Review mode (2o) has the editing: the word bar is not shown meanwhile. */
     reviewing?: boolean;
     onSelect: (s: sel.Selection | null) => void;
@@ -378,6 +387,43 @@
   const joined = $derived(sel.runs(selection));
   const latest = $derived(sel.latest(selection));
 
+  // Flagged words (5o): per edit or threshold, the kept ones to check, in order.
+  const toCheck = $derived(toks && words ? flagged(toks, words.sure, flagBelow) : []);
+  const doubt = (i: number) => flagBelow > 0 && words != null && words.sure[i] < flagBelow;
+  // The one word selected (a single stretch of one word), when it is flagged: what "Looks right"
+  // confirms.
+  const checking = $derived(
+    joined.length === 1 && joined[0].first === joined[0].last && doubt(joined[0].first) ? joined[0].first : -1,
+  );
+
+  // Next or previous flagged word from the selection, else from the word under the playhead: it is
+  // selected, played from and scrolled to (even while the list does not follow the playhead). Each
+  // button is greyed when there is none that way (no wrapping: the end of the list stays an end).
+  // With several stretches selected (2p), from the first one's start and the last one's end.
+  const before = $derived(stepFrom(toCheck, joined.length ? joined[0].first : current, true));
+  const after = $derived(stepFrom(toCheck, joined.length ? joined[joined.length - 1].last : current, false));
+  function goTo(i: number) {
+    if (i < 0 || !words) return;
+    anchor = i;
+    onSelect(sel.words(i, i));
+    call(() => api.seek(words!.start[i] / 1000, true));
+    if (laid && scroller) {
+      ours = Math.max(0, Math.round(laid.rowOf[i] * ROW - height / 3));
+      scroller.scrollTop = ours;
+      pausedUntil = performance.now() + FOLLOW_PAUSE_MS;
+    }
+  }
+  // Confirms the selected flagged word (it keeps what Whisper heard) and goes on to the next.
+  function looksRight() {
+    const i = checking;
+    if (i < 0) return;
+    const next = stepFrom(toCheck, i, false);
+    call(async () => {
+      await api.confirmWord(i);
+      goTo(next);
+    });
+  }
+
   // Following the playhead: scroll so the current word's row stays in view, unless the user has
   // scrolled lately. Our own scrolls are told apart by the position they set.
   let pausedUntil = 0;
@@ -533,6 +579,13 @@
 <section class="panel">
   <header>
     <span>Transcript</span>
+    {#if toCheck.length}
+      <span class="check" title="Words Whisper was less sure of than {flagBelow} % (Settings)">
+        <button onclick={() => goTo(before)} disabled={before < 0} aria-label="Previous word to check">‹</button>
+        <span>{toCheck.length.toLocaleString()} to check</span>
+        <button onclick={() => goTo(after)} disabled={after < 0} aria-label="Next word to check">›</button>
+      </span>
+    {/if}
     {#if learned}
       <span class="muted learned" role="status">{learned} added to the word list</span>
     {:else if words}
@@ -644,10 +697,13 @@
                   class="w"
                   class:cur={t.i === current}
                   class:sel={sel.has(joined, t.i)}
+                  class:doubt={doubt(t.i)}
                   style:box-shadow={words.also[t.i] ? `inset 0 -2px 0 ${colour(words.also[t.i])}` : null}
                   title={words.also[t.i]
                     ? `${nameOf(words.speaker[t.i])} and ${nameOf(words.also[t.i])} at once`
-                    : "Double-click to fix the spelling"}
+                    : doubt(t.i)
+                      ? `Whisper was ${words.sure[t.i]} % sure of this word: double-click to fix it, or select it and "Looks right" below`
+                      : "Double-click to fix the spelling"}
                   data-i={t.i}>{words.text[t.i]}</span
                 >
               {:else if t.kind === "spanword"}
@@ -695,7 +751,17 @@
     {/if}
   </div>
   {#if selection?.kind === "words" && words && edit?.editable && !reviewing}
-    <WordBar {edit} {words} {selection} {onSelect} {onError} bind:retyping onFixed={tellFixed} onCorrect={correctAll} />
+    <WordBar
+      {edit}
+      {words}
+      {selection}
+      {onSelect}
+      {onError}
+      bind:retyping
+      onFixed={tellFixed}
+      onCorrect={correctAll}
+      onLooksRight={checking >= 0 ? looksRight : null}
+    />
   {/if}
 </section>
 
@@ -790,6 +856,24 @@
   .w.cur {
     color: #101114;
     background: var(--accent);
+  }
+  .w.doubt {
+    text-decoration: underline wavy rgba(242, 179, 61, 0.9);
+    text-decoration-thickness: 1px;
+    text-underline-offset: 4px;
+  }
+  .check {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-weight: 400;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .check button {
+    padding: 0 6px;
+    font-size: 12px;
+    line-height: 18px;
   }
   .cutword {
     color: var(--muted);

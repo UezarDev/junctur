@@ -208,6 +208,7 @@ mod tests {
             speakers: Default::default(),
             captions: Default::default(),
             fixes: Vec::new(),
+            times: Vec::new(),
             windows: vec![],
         };
         std::fs::write(p.edit_path(), e.to_text()).unwrap();

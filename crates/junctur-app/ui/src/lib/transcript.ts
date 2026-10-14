@@ -19,13 +19,21 @@ import { msOf } from "./time";
 
 export interface Words {
   text: string[];
-  /** Milliseconds. */
+  /** Milliseconds, where the edit list's retimed words (2w) put them. */
   start: Float64Array;
   end: Float64Array;
+  /** Each word's start as heard (2w repair): what fixes name a word by. `start` itself when no
+   * word is retimed. */
+  heard: Float64Array;
+  /** Word indices by `start` when retimes left `start` out of order (2w repair), for `wordAt`;
+   * null while it is in order. */
+  byStart: Int32Array | null;
   /** Speaker id per word, 0 for none. */
   speaker: Uint32Array;
   /** A second speaker saying the word at the same time (5b), 0 for none. */
   also: Uint32Array;
+  /** How sure Whisper was of each word, whole percent; 255 for never flagged (5o). */
+  sure: Uint8Array;
   /** The audio track each word was heard on (5x). */
   track: Uint32Array;
   /** The span fixed as one text each word is in, 1-based, 0 for none (5x). */
@@ -48,12 +56,19 @@ export function words(v: TranscriptView): Words {
     if (spanFirst[s] < 0) spanFirst[s] = i;
     spanLast[s] = i;
   }
+  const start = Float64Array.from(v.start);
+  let sorted = true;
+  for (let i = 1; i < start.length && sorted; i++) sorted = start[i - 1] <= start[i];
+  const byStart = sorted ? null : Int32Array.from(start.keys()).sort((a, b) => start[a] - start[b] || a - b);
   return {
     text: v.text,
-    start: Float64Array.from(v.start),
+    start,
     end: Float64Array.from(v.end),
+    heard: v.heard?.length ? Float64Array.from(v.heard) : start,
+    byStart,
     speaker: Uint32Array.from(v.speaker ?? []),
     also: Uint32Array.from(v.also ?? []),
+    sure: sureOf(v),
     track: Uint32Array.from(v.track ?? []),
     span,
     spans,
@@ -61,6 +76,40 @@ export function words(v: TranscriptView): Words {
     spanFirst,
     spanLast,
   };
+}
+
+/** A word that is never flagged (5o): no confidence to go by, or the user fixed or confirmed it. The
+ * core's `NOT_FLAGGED` (src/editor/words.rs), which sends it. */
+export const NOT_FLAGGED = 255;
+
+/** The view's confidences, every word unflagged when it has none (an app from before 5o). */
+export function sureOf(v: TranscriptView): Uint8Array {
+  return v.sure?.length === v.text.length ? Uint8Array.from(v.sure) : new Uint8Array(v.text.length).fill(NOT_FLAGGED);
+}
+
+/**
+ * The kept words to check (5o), in order: those Whisper was less sure of than `below` percent. Cut
+ * words are left out: they are in no caption. One pass over the tokens.
+ */
+export function flagged(t: Tokens, sure: Uint8Array, below: number): number[] {
+  const out: number[] = [];
+  if (below <= 0) return out;
+  for (const tok of t.list) if (tok.kind === "word" && sure[tok.i] < below) out.push(tok.i);
+  return out;
+}
+
+/** The first of `list` (ascending) after `from`, or before it with `back`; -1 for none. */
+export function stepFrom(list: number[], from: number, back: boolean): number {
+  let lo = 0;
+  let hi = list.length;
+  // `lo` ends at how many entries come before `from` (going back), or at or before it (forward).
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (back ? list[mid] < from : list[mid] <= from) lo = mid + 1;
+    else hi = mid;
+  }
+  if (back) return lo > 0 ? list[lo - 1] : -1;
+  return lo < list.length ? list[lo] : -1;
 }
 
 /** `r` reaching over the whole of any span it starts or ends in (5x): a span is selected whole. */
@@ -74,13 +123,15 @@ export function widen(w: Words, r: { first: number; last: number }): { first: nu
 }
 
 /** The words on word `i`'s track starting in its millisecond, when there are several (5w's same-start
- * words, opened as one field in 5x); `null` for a word alone in its millisecond. Sorted by start, so
- * they sit together (another track's words among them are left out of the count). */
+ * words, opened as one field in 5x); `null` for a word alone in its millisecond. By the start as heard
+ * (2w repair: a retimed word is still named by it), by which the words are sorted, so they sit
+ * together (another track's words among them are left out of the count). */
 export function together(w: Words, i: number): { first: number; last: number } | null {
+  const h = w.heard;
   let first = i;
   let last = i;
-  for (let j = i - 1; j >= 0 && w.start[j] === w.start[i]; j--) if (w.track[j] === w.track[i]) first = j;
-  for (let j = i + 1; j < w.start.length && w.start[j] === w.start[i]; j++) if (w.track[j] === w.track[i]) last = j;
+  for (let j = i - 1; j >= 0 && h[j] === h[i]; j--) if (w.track[j] === w.track[i]) first = j;
+  for (let j = i + 1; j < h.length && h[j] === h[i]; j++) if (w.track[j] === w.track[i]) last = j;
   return last > first ? { first, last } : null;
 }
 
@@ -229,8 +280,12 @@ export function tokens(
       g++;
     }
   };
+  // The latest start so far: a retimed word may start before the one before it (2w repair), and the
+  // gaps go in by time, never back.
+  let reached = -Infinity;
   for (let i = 0; i < n; ) {
-    gapsUntil(w.start[i]);
+    reached = Math.max(reached, w.start[i]);
+    gapsUntil(reached);
     if (kept[i]) {
       const s = w.span[i] ?? 0;
       if (!s) push({ kind: "word", i }, w.start[i], w.end[i]);
@@ -319,16 +374,19 @@ export function pack(
   return { rows, rowOf };
 }
 
-/** The last word starting at or before `ms` (-1 before the first). */
+/** The last word starting at or before `ms` (-1 before the first); through `byStart` when retimed
+ * words left the starts out of order (2w repair). */
 export function wordAt(w: Words, ms: number): number {
+  const order = w.byStart;
+  const at = (k: number) => w.start[order ? order[k] : k];
   let lo = 0;
   let hi = w.start.length;
   while (lo < hi) {
     const mid = (lo + hi) >> 1;
-    if (w.start[mid] <= ms) lo = mid + 1;
+    if (at(mid) <= ms) lo = mid + 1;
     else hi = mid;
   }
-  return lo - 1;
+  return lo === 0 ? -1 : order ? order[lo - 1] : lo - 1;
 }
 
 /** `h:mm:ss` for a paragraph's gutter. */

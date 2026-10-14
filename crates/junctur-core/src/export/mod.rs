@@ -113,20 +113,35 @@ pub fn write_captions(
     out: &Path,
 ) -> Result<CaptionFiles> {
     output::refuse_source(&edit.source, out)?;
+    let cues = finished_cues(edit, captions, words, num, den, translations)?;
+    std::fs::write(out, srt::write(&cues, edit, captions))?;
+    Ok(CaptionFiles {
+        cues: cues.len(),
+        stale: stale_files(out),
+    })
+}
+
+/// The cues of a finished caption output, the SRT or the send to Resolve (5g): refused while the
+/// translation is not all made ([`untranslated`]), else [`srt::cues`] with every translation. One
+/// place for both, so a change to how a file is cut reaches the send too, and the preview
+/// (`srt::cues` with what is translated so far) stays what they give (5q).
+pub fn finished_cues(
+    edit: &EditList,
+    captions: &Captions,
+    words: &[(usize, &Word)],
+    num: u64,
+    den: u64,
+    translations: &Translations,
+) -> Result<Vec<srt::Cue>> {
     untranslated(edit, captions, words, num, den, translations)?;
-    let cues = srt::cues(
+    Ok(srt::cues(
         edit,
         captions,
         words.iter().copied(),
         num,
         den,
         Some(translations),
-    );
-    std::fs::write(out, srt::write(&cues, edit, captions))?;
-    Ok(CaptionFiles {
-        cues: cues.len(),
-        stale: stale_files(out),
-    })
+    ))
 }
 
 /// Refuses captions to be translated whose translation is not all made yet (5k): a file or a

@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use junctur_core::edit::{Captions, EditList, Fix, Speakers, Spread};
+use junctur_core::edit::{Captions, EditList, ExistingClips, Fix, Speakers, Spread};
 use junctur_core::export::layout::{self, Placed};
 use junctur_core::export::srt;
 use junctur_core::export::{self, CaptionFiles};
@@ -493,7 +493,14 @@ impl Core {
         if new_list.is_some() && new_list != in_play {
             eprintln!("junctur-app: edit.junctur changed on disk, taken ({by})");
         }
-        if new_list.is_some() && new_list.map(|l| &l.keep) != in_play.map(|l| &l.keep) {
+        // The history holds the ranges and the retimed words (2w): an outside change to either
+        // would be undone over.
+        // Compared as the file writes them, so a list read back equals the one saved.
+        let undone = |l: &EditList| {
+            let times: Vec<_> = l.times.iter().map(edit_key).collect();
+            (l.keep.clone(), times)
+        };
+        if new_list.is_some() && new_list.map(undone) != in_play.map(undone) {
             ed.changed_elsewhere();
             // A first list (the app's own analysis just wrote it, 2d) had no history to clear.
             let notice =
@@ -540,6 +547,18 @@ impl Core {
             self.prepare();
         }
         self.change(file, |ed, list, fps| ed.edit(list, step, fps))
+    }
+
+    /// Moves a cut's edge (2w): frame edit `frames` (start, end, keep) moving edge `from`, and the
+    /// words beside it with it, as one undo step. See [`Editor::move_edge`].
+    pub fn move_edge(
+        &self,
+        file: Option<&str>,
+        frames: (u64, u64, bool),
+        from: u64,
+    ) -> Result<(), String> {
+        self.prepare();
+        self.change(file, |ed, list, fps| ed.move_edge(list, frames, from, fps))
     }
 
     /// Cuts (`keep` false) or keeps every run of transcript words in `runs` (`first..=last` each)
@@ -602,9 +621,14 @@ impl Core {
         if self.file().as_deref() != Some(file) {
             return Err(OPENED_MEANWHILE.into());
         }
+        let times = lock(&self.ctl)
+            .edit
+            .list
+            .as_ref()
+            .map_or_else(Vec::new, |l| l.times.clone());
         let stretches = runs
             .iter()
-            .map(|&(first, last)| words.stretch(first, last))
+            .map(|&(first, last)| words.stretch(first, last, &times))
             .collect::<Option<Vec<_>>>()
             .ok_or("no such words in the transcript")?;
         let (found, line) = voices::enroll(file, name, &stretches)?;
@@ -770,6 +794,21 @@ impl Core {
         Ok(done)
     }
 
+    /// Marks transcript word `index` as checked (5o) in the edit list and saves it, so it is no longer
+    /// flagged. Not an undo step, like a fix.
+    pub fn confirm_word(&self, file: Option<&str>, index: usize) -> Result<(), String> {
+        self.prepare();
+        let words = lock(&self.editor)
+            .words
+            .clone()
+            .ok_or("this recording has no transcript")?;
+        let (Some(word), Some(&track)) = (words.list.get(index), words.tracks.get(index)) else {
+            return Err("no such word in the transcript".into());
+        };
+        let nth = words.nth(index);
+        self.change(file, |ed, list, _| ed.confirm_word(list, track, word, nth))
+    }
+
     /// Fixes transcript words `first..=last` as one text (5x) in the edit list and saves it, the same
     /// words heard elsewhere included (5aa); returns what the word list is to learn and the fixes
     /// made elsewhere. Refused, saying why, for a run across two tracks, or a new text over two
@@ -794,7 +833,12 @@ impl Core {
             .map(|l| l.speakers.clone())
             .unwrap_or_default();
         let fixed = junctur_core::edit::check_span(text)?;
-        let run = words.retyped(first, last, &fixed, &speakers)?;
+        let times = lock(&self.ctl)
+            .edit
+            .list
+            .as_ref()
+            .map_or_else(Vec::new, |l| l.times.clone());
+        let run = words.retyped(first, last, &fixed, &speakers, &times)?;
         let mut done = FixDone::default();
         self.change(file, |ed, list, _| {
             let r = ed.fix_words(list, &run, &fixed)?;
@@ -872,7 +916,7 @@ impl Core {
     /// shows what Resolve will, cue for cue. Translated captions (5k) show what is translated so
     /// far, the rest as said.
     pub fn caption_cues(&self, aspect: f64) -> Result<Vec<Placed>, String> {
-        let (list, captions, cues) = self.cut_captions()?;
+        let (list, captions, cues) = self.cut_captions(false, |_| Ok(()))?;
         Ok(layout::place(&cues, &list, &captions, aspect))
     }
 
@@ -880,48 +924,77 @@ impl Core {
     /// recording, every audio track, cut as the list says) with its captions on it as Text+ clips
     /// (5g), laid out for that timeline's shape, through the Junctur script running there. When the
     /// project already has the timeline and `answer` does not say what to do, nothing is changed
-    /// and the outcome says so. Blocks until Resolve answers (minutes for a long recording), so the
+    /// and the outcome says so; answered Update (5ab), only the captions on that timeline are
+    /// updated. Blocks until Resolve answers (minutes for a long recording), so the
     /// command runs it off the async runtime. Refused, like the export, while translated captions
-    /// are not all translated (5k); a recording with no transcript sends its timeline alone.
+    /// are not all translated (5k); a recording with no transcript sends its timeline alone. The
+    /// captions are cut as the preview and the SRT cut them (5q). `existing`: what to do this once
+    /// with clips Junctur did not place in the captions' way (5n), the user's answer when the send
+    /// before asked; else the recording's remembered choice, or asking (on the fresh timeline 5z
+    /// makes, its caption tracks are new, so nothing is in their way).
     pub fn send_to_resolve(
         &self,
         answer: Option<resolve::Answer>,
+        existing: Option<ExistingClips>,
     ) -> Result<resolve::Outcome, String> {
-        let (list, captions, words, fps) = self.edit_source()?;
+        let (list, mut captions, words, fps) = self.edit_source()?;
+        if let Some(e) = existing {
+            captions.existing_clips = e;
+        }
         captions.check()?;
         let cues = match words {
-            Some(words) => {
-                let tracked: Vec<_> = words
-                    .tracks
-                    .iter()
-                    .copied()
-                    .zip(words.list.iter())
-                    .collect();
-                let tr = self.translations();
-                export::untranslated(&list, &captions, &tracked, fps.num, fps.den, &tr)
-                    .map_err(|e| e.to_string())?;
-                srt::cues(
-                    &list,
-                    &captions,
-                    tracked.iter().copied(),
-                    fps.num,
-                    fps.den,
-                    Some(&*tr),
-                )
-            }
+            Some(words) => self.cut(&list, &captions, &words, fps, true)?,
             None => Vec::new(),
         };
         resolve::send(&cues, &list, &captions, answer)
     }
 
-    /// The list in play, its caption settings and its cues as the SRT export cuts them, with what
-    /// is translated so far (5k): what the preview lays out.
-    fn cut_captions(&self) -> Result<(Arc<EditList>, Captions, Vec<srt::Cue>), String> {
-        let (list, captions, words, fps) = self.caption_source()?;
-        let tracked = words.tracks.iter().copied().zip(words.list.iter());
-        let tr = self.translations();
-        let cues = srt::cues(&list, &captions, tracked, fps.num, fps.den, Some(&*tr));
+    /// The list in play, its caption settings and its cues as the SRT export cuts them: the one
+    /// cut the preview and the send share, so the preview shows what Resolve gets (5q; the send
+    /// had a copy of its own that could drift). `finished`: the send's cut, refused while the
+    /// translation is not all made (`export::finished_cues`, as the SRT); else with what is
+    /// translated so far (5k), what the preview lays out. `adjust` sets or checks the settings
+    /// before cutting.
+    fn cut_captions(
+        &self,
+        finished: bool,
+        adjust: impl FnOnce(&mut Captions) -> Result<(), String>,
+    ) -> Result<(Arc<EditList>, Captions, Vec<srt::Cue>), String> {
+        let (list, mut captions, words, fps) = self.caption_source()?;
+        adjust(&mut captions)?;
+        let cues = self.cut(&list, &captions, &words, fps, finished)?;
         Ok((list, captions, cues))
+    }
+
+    /// [`Self::cut_captions`]' cut of `words`, apart so a send without a transcript (5z) shares it.
+    fn cut(
+        &self,
+        list: &EditList,
+        captions: &Captions,
+        words: &Words,
+        fps: Fps,
+        finished: bool,
+    ) -> Result<Vec<srt::Cue>, String> {
+        let tracked: Vec<_> = words
+            .tracks
+            .iter()
+            .copied()
+            .zip(words.list.iter())
+            .collect();
+        let tr = self.translations();
+        Ok(if finished {
+            export::finished_cues(list, captions, &tracked, fps.num, fps.den, &tr)
+                .map_err(|e| e.to_string())?
+        } else {
+            srt::cues(
+                list,
+                captions,
+                tracked.iter().copied(),
+                fps.num,
+                fps.den,
+                Some(&*tr),
+            )
+        })
     }
 
     /// The open recording's translations (5k), from its project folder: the background run writes
@@ -1107,7 +1180,8 @@ impl Core {
         let none = Speakers::default();
         let speakers = list.as_deref().map_or(&none, |l| &l.speakers);
         let fixes = list.as_deref().map_or(&[][..], |l| &l.fixes);
-        Some(TranscriptView::new(&words, speakers, fixes))
+        let times = list.as_deref().map_or(&[][..], |l| &l.times);
+        Some(TranscriptView::new(&words, speakers, fixes, times))
     }
 
     /// Keeps the right-hand `right`, bottom `bottom` and top `top` shares of the window (0..1) free
@@ -1664,6 +1738,14 @@ fn event_loop(events: &mut Events, shared: &Shared) {
             held = true;
         }
     }
+}
+
+/// A retimed word as the edit list writes it (2w repair): track, heard start, nth, new start and
+/// end, all to the millisecond, so the history's comparison with the file is not thrown by a last
+/// bit.
+fn edit_key(t: &junctur_core::edit::Retime) -> (usize, i64, usize, i64, i64) {
+    let ms = |s: f64| (s * 1000.0).round() as i64;
+    (t.track, ms(t.start), t.nth, ms(t.from), ms(t.to))
 }
 
 #[cfg(test)]

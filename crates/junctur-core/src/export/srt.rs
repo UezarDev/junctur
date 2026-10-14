@@ -25,7 +25,7 @@ use serde::Serialize;
 
 use super::caption_text;
 use super::translated::{self, Shown};
-use crate::edit::{frame_ranges, frames_ceil, Captions, EditList, Fixed, Fixes, Labeller};
+use crate::edit::{frame_ranges, frames_ceil, Captions, EditList, Fixed, Fixes, Labeller, Times};
 use crate::transcribe::Word;
 use crate::translate::{Sentence, Translations};
 
@@ -47,6 +47,19 @@ pub struct Part {
     /// Speaker id, 0 for none.
     pub speaker: u32,
     pub lines: Vec<String>,
+    /// What the lines say, unit by unit in order, with when each was said (5l: the word highlight
+    /// in Resolve and the preview). The SRT does not use them.
+    #[serde(skip)]
+    pub words: Vec<Spoken>,
+}
+
+/// A unit of a caption (a word, or a phrase 5j's find and replace made one) and when it was said,
+/// in output seconds: the words' own times, translated words spread over their sentence (5k).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Spoken {
+    pub text: String,
+    pub start: f64,
+    pub end: f64,
 }
 
 /// A caption: one part per speaker talking in it, in the order they started, so more than one only
@@ -231,12 +244,16 @@ pub fn cues<'a>(
 /// shows as fixed (5h), here and so in the preview, every export, and the sentences translated
 /// (5k), before the text options (5j) and the word limit (5i). The kept words of a span fixed as one
 /// text (5x) give way to the text's own words ([`spread`]), which everything after takes as words.
+/// A word the user retimed by moving a cut's edge (2w) is placed, kept or cut and timed by its new
+/// start and end, here and so everywhere a caption's time comes from: the one place word times are
+/// read on their way to the timeline, as the fixes are for their text.
 fn kept<'a>(
     tl: &Timeline,
     edit: &EditList,
     words: impl IntoIterator<Item = (usize, &'a Word)>,
 ) -> Vec<Shown> {
     let mut fixes = Fixes::new(&edit.fixes);
+    let mut times = Times::new(&edit.times);
     // Stable, so words starting together keep the transcript's order, which tells their fixes
     // apart (5w).
     let mut words: Vec<(usize, &Word)> = words.into_iter().collect();
@@ -249,19 +266,21 @@ fn kept<'a>(
     for (track, w) in words {
         // Read before a cut word is dropped: `Fixes` counts every word.
         let fixed = fixes.of(track, w);
-        let Some(r) = tl.range_of((w.start + w.end) / 2.0) else {
+        // Counted in heard order as the fixes are, cut words too.
+        let (start, end) = times.of(track, w);
+        let Some(r) = tl.range_of((start + end) / 2.0) else {
             continue;
         };
         let text = match fixed {
             Some(Fixed::Span { index, text }) => {
                 match at.get(&index) {
-                    Some(&k) => spans[k].said.push((r, w)),
+                    Some(&k) => spans[k].said.push((r, start, end)),
                     None => {
                         at.insert(index, spans.len());
                         spans.push(SpanSaid {
                             track,
                             text,
-                            said: vec![(r, w)],
+                            said: vec![(r, start, end)],
                         });
                     }
                 }
@@ -272,12 +291,16 @@ fn kept<'a>(
         };
         out.push(Shown {
             track,
-            start: (r, w.start),
-            end: (r, w.end),
+            start: (r, start),
+            end: (r, end),
             text: clean(text),
         });
     }
     if spans.is_empty() {
+        if !times.is_empty() {
+            // A retimed word may now start before a word heard before it (another track's).
+            out.sort_by(|a, b| a.start.1.total_cmp(&b.start.1));
+        }
         return out;
     }
     for s in &spans {
@@ -288,11 +311,12 @@ fn kept<'a>(
     out
 }
 
-/// A span fixed as one text (5x), and its kept words in time order with their kept ranges.
+/// A span fixed as one text (5x), and its kept words in time order: each one's kept range, start
+/// and end (as retimed, 2w).
 struct SpanSaid<'a> {
     track: usize,
     text: &'a str,
-    said: Vec<(usize, &'a Word)>,
+    said: Vec<(usize, f64, f64)>,
 }
 
 /// A span's text (5x) as words on the timeline, over `said`, the span's kept words in time order
@@ -302,7 +326,7 @@ struct SpanSaid<'a> {
 /// and the last ends where its last kept word does, every word lands in a kept range (through the
 /// range of the word it falls on, even with a cut through the span), and none is put over a pause.
 /// Words with no length at all leave nothing to share: then every word starts and ends with the first.
-fn spread(track: usize, text: &str, said: &[(usize, &Word)]) -> Vec<Shown> {
+fn spread(track: usize, text: &str, said: &[(usize, f64, f64)]) -> Vec<Shown> {
     let new: Vec<&str> = text.split_whitespace().collect();
     if new.is_empty() || said.is_empty() {
         return Vec::new();
@@ -310,10 +334,10 @@ fn spread(track: usize, text: &str, said: &[(usize, &Word)]) -> Vec<Shown> {
     // Each word's stretch, from where the one before it ended (words on one track may overlap).
     let mut stretches: Vec<(usize, f64, f64)> = Vec::with_capacity(said.len());
     let mut at = f64::NEG_INFINITY;
-    for (r, w) in said {
-        let a = w.start.max(at);
-        let b = w.end.max(a);
-        stretches.push((*r, a, b));
+    for &(r, start, end) in said {
+        let a = start.max(at);
+        let b = end.max(a);
+        stretches.push((r, a, b));
         at = b;
     }
     let total: f64 = stretches.iter().map(|(_, a, b)| b - a).sum();
@@ -410,12 +434,22 @@ impl Said {
     fn others(&self) -> &[u32] {
         self.speakers.get(1..).unwrap_or(&[])
     }
+
+    fn spoken(&self, text: &str) -> Spoken {
+        Spoken {
+            text: text.to_string(),
+            start: self.start,
+            end: self.end,
+        }
+    }
 }
 
 /// A speaker's part of the open cue; its lines are wrapped as words arrive, so a word costs O(1).
 struct OpenPart {
     speaker: u32,
     lines: Vec<String>,
+    /// The units on the lines with their times (5l).
+    spoken: Vec<Spoken>,
     /// Units taken (5i's word limit), one per word or replaced phrase (5j), whatever spaces its
     /// text holds; `last_words` of them on the last line.
     words: u32,
@@ -431,6 +465,7 @@ impl OpenPart {
     fn new(w: &Said, text: String) -> Self {
         let mut p = Self {
             speaker: w.speaker(),
+            spoken: vec![w.spoken(&text)],
             lines: vec![text],
             words: 1,
             last_words: 1,
@@ -483,6 +518,9 @@ impl Open {
                 parts.push(OpenPart {
                     speaker: p.speaker,
                     lines: p.lines.last().cloned().into_iter().collect(),
+                    // The last line's units go with it.
+                    spoken: p.spoken[p.spoken.len().saturating_sub(p.last_words as usize)..]
+                        .to_vec(),
                     words: p.last_words,
                     last_words: p.last_words,
                     track: p.track,
@@ -531,6 +569,7 @@ impl Open {
                 }
                 let had = p.lines.len();
                 p.lines = wrap_onto(std::mem::take(&mut p.lines), text, chars);
+                p.spoken.push(w.spoken(text));
                 p.words += 1;
                 p.last_words = if p.lines.len() > had {
                     1
@@ -562,6 +601,7 @@ impl Open {
                 .map(|p| Part {
                     speaker: p.speaker,
                     lines: p.lines,
+                    words: p.spoken,
                 })
                 .collect(),
         }
@@ -639,7 +679,10 @@ fn settle(cues: &mut Vec<Cue>, longest: f64, floor: f64, total: f64) {
 fn join(parts: &mut Vec<Part>, more: Vec<Part>) {
     for part in more {
         match parts.iter_mut().find(|p| p.speaker == part.speaker) {
-            Some(p) => p.lines.extend(part.lines),
+            Some(p) => {
+                p.lines.extend(part.lines);
+                p.words.extend(part.words);
+            }
             None => parts.push(part),
         }
     }
@@ -742,6 +785,7 @@ mod tests {
             end,
             text: text.into(),
             p: 1.0,
+            p_min: None,
         }
     }
 
@@ -797,6 +841,7 @@ mod tests {
             ),
             captions: Some(captions),
             fixes: vec![],
+            times: Vec::new(),
             windows: vec![],
         }
     }
@@ -820,6 +865,43 @@ mod tests {
             parts(&c[0]),
             vec![(1, "Wezar hola".into()), (2, "Uezar".into())]
         );
+    }
+
+    #[test]
+    fn a_retimed_word_is_kept_cut_and_timed_by_its_new_time() {
+        // 2w: the kept range ends at 11.0. Whisper put "dos" at 10.2-10.8 and "tres" at 10.9-11.6
+        // ("tres" cut by its middle); the edge moved to 11.4 retimes "dos" to end there and "tres"
+        // to start there, so "tres" stays cut and the cue runs to the edge.
+        let mut e = edit(&[(10.0, 11.4)], Captions::default());
+        let w = [
+            word(10.0, 10.2, "uno"),
+            word(10.2, 10.8, "dos"),
+            word(10.9, 11.6, "tres"),
+        ];
+        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1, None);
+        assert_eq!(
+            solo(&c),
+            ["uno dos tres"],
+            "as heard, the moved edge keeps tres"
+        );
+        let t = |start, from, to| crate::edit::Retime {
+            track: 0,
+            start,
+            nth: 0,
+            from,
+            to,
+        };
+        e.times = vec![t(10.2, 10.2, 11.4), t(10.9, 11.4, 11.6)];
+        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1, None);
+        assert_eq!(solo(&c), ["uno dos"]);
+        assert!((c[0].end - 1.4).abs() < 1e-6, "{:?}", c[0]);
+        // Another track's word is not retimed, nor one of the right track at another start.
+        let c = cues(&e, &own(&e), w.iter().map(|w| (1, w)), 30, 1, None);
+        assert_eq!(solo(&c), ["uno dos tres"]);
+        // The sentences translated are the same words.
+        let s = sentences(&e, w.iter().map(|w| (0, w)), 30, 1);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].text.trim(), "uno dos");
     }
 
     #[test]
@@ -1010,6 +1092,42 @@ mod tests {
         assert!(text.contains("<font color=\"#5FB3F2\">qué tal</font>"));
     }
 
+    /// Each unit of a part with its output times, to the millisecond.
+    fn units(p: &Part) -> Vec<(String, f64, f64)> {
+        let ms = |t: f64| (t * 1000.0).round() / 1000.0;
+        p.words
+            .iter()
+            .map(|w| (w.text.clone(), ms(w.start), ms(w.end)))
+            .collect()
+    }
+
+    #[test]
+    fn each_unit_keeps_when_it_was_said_on_the_edited_timeline() {
+        use crate::edit::Replace;
+        // Kept 10-12 and 30-33 at 30 fps: output 0-2 then 2-5 (5l's word highlight reads these).
+        let c = Captions {
+            replace: vec![Replace {
+                from: "qué tal".into(),
+                to: "¿qué tal?".into(),
+            }],
+            ..Default::default()
+        };
+        let e = edit(&[(10.0, 12.0), (30.0, 33.0)], c);
+        let w = [
+            word(10.5, 11.0, "hola"),
+            word(11.2, 11.6, "amigos"),
+            word(30.2, 30.6, "qué"),
+            word(30.7, 31.0, "tal"),
+        ];
+        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1, None);
+        assert_eq!(
+            units(&c[0].parts[0]),
+            [("hola".into(), 0.5, 1.0), ("amigos".into(), 1.2, 1.6)]
+        );
+        // A replaced phrase is one unit, from its first word's start to its last word's end.
+        assert_eq!(units(&c[1].parts[0]), [("¿qué tal?".into(), 2.2, 3.0)]);
+    }
+
     #[test]
     fn frame_rounding_does_not_drift_across_many_cuts() {
         // 200 kept ranges of 0.51 s at 30 fps: each is 16 frames once rounded (start down, end
@@ -1105,6 +1223,32 @@ mod tests {
         for p in one.windows(2) {
             assert!(p[0].end <= p[1].start + 1e-9, "{one:?}");
         }
+    }
+
+    #[test]
+    fn finished_cues_refuse_untranslated_and_cut_as_the_srt_does() {
+        // The SRT and the send to Resolve cut through `finished_cues` (5q): refused while a
+        // sentence is not translated, then the very cues the preview cuts with every translation.
+        use crate::export::finished_cues;
+        let w = [word(0.0, 0.4, "Hola."), word(10.5, 11.0, "Adiós.")];
+        let words: Vec<(usize, &Word)> = w.iter().map(|w| (0, w)).collect();
+        let c = Captions {
+            translate: "en".into(),
+            ..Default::default()
+        };
+        let e = edit(&[(0.0, 5.0), (10.0, 40.0)], c.clone());
+        let mut t = Translations::default();
+        t.insert("es", "en", "Hola.", "Hello.");
+        let refused = finished_cues(&e, &c, &words, 30, 1, &t).unwrap_err();
+        assert!(refused.to_string().contains("1 of 2"), "{refused}");
+        t.insert("es", "en", "Adiós.", "Goodbye.");
+        let got = finished_cues(&e, &c, &words, 30, 1, &t).unwrap();
+        assert_eq!(got, cues(&e, &c, words.iter().copied(), 30, 1, Some(&t)));
+        assert_eq!(solo(&got), ["Hello.", "Goodbye."]);
+        // Not translated: never refused, cut as said.
+        let plain = Captions::default();
+        let got = finished_cues(&e, &plain, &words, 30, 1, &Translations::default()).unwrap();
+        assert_eq!(solo(&got), ["Hola.", "Adiós."]);
     }
 
     #[test]
@@ -1505,6 +1649,17 @@ mod tests {
         // Speaker 2 is on screen without a gap from "sí" until "claro" ends.
         assert!((c[0].end - c[1].start).abs() < 1e-9, "{c:?}");
         assert!(c[1].end >= 1.7 - 1e-9, "{c:?}");
+        // The carried line keeps its word's time (5l), and every part's units are its lines' words.
+        assert_eq!(
+            units(&c[1].parts[1]),
+            [("sí".into(), 0.5, 1.3), ("claro".into(), 1.4, 1.7)]
+        );
+        for cue in &c {
+            for p in &cue.parts {
+                let units: Vec<&str> = p.words.iter().map(|w| w.text.as_str()).collect();
+                assert_eq!(units.join(" "), p.lines.join(" "), "{cue:?}");
+            }
+        }
     }
 
     #[test]
