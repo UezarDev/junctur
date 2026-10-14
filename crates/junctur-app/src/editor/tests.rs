@@ -1,5 +1,6 @@
 use super::*;
 use crate::test_support::scratch;
+use junctur_core::edit::Captions;
 use junctur_core::edit::CutSettings;
 use junctur_core::transcribe::Word;
 

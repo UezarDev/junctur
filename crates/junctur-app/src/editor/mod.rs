@@ -1,18 +1,18 @@
 //! Text-based and range editing of the edit list: each edit is saved to `edit.junctur` at once and
 //! can be undone in the session. Apart from the player so the editing rules are tested without mpv.
 
+mod fixing;
+mod styling;
 pub mod words;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 
 use junctur_core::edit::{
-    self, check_name, frame_ranges, frames_ceil, Captions, EditList, Envelope, Fix, Range, Retime,
-    Saved, Spread, SpreadIndex, Which, WordAt,
+    self, frame_ranges, frames_ceil, EditList, Envelope, Fix, Range, Retime, Saved, SpreadIndex,
 };
 
 use crate::cuts::Fps;
-use junctur_core::transcribe::Word;
 pub use words::{Retyped, Side, TranscriptView, Words};
 
 /// What a word edit under a frame is refused with: [`Editor::edit_all`] tells it from the others.
@@ -317,221 +317,6 @@ impl Editor {
             list: new,
             saved,
             unsnapped,
-            skipped: 0,
-            others: Vec::new(),
-            heard: Vec::new(),
-        }))
-    }
-
-    /// Renames speaker `id` and saves; `None` when the name is already that. Like every styling
-    /// change, not an undo step: the history holds kept ranges and retimed words only, so undoing a
-    /// cut keeps the new name.
-    pub fn rename(
-        &mut self,
-        list: &EditList,
-        id: u32,
-        name: &str,
-    ) -> Result<Option<Edited>, String> {
-        let name = check_name(name)?;
-        self.restyle(list, |l| {
-            l.speakers
-                .rename(id, name)
-                .then_some(())
-                .ok_or(format!("there is no speaker {id}"))
-        })
-    }
-
-    /// Sets speaker `id`'s caption colour (`#RRGGBB`) and saves.
-    pub fn recolor(
-        &mut self,
-        list: &EditList,
-        id: u32,
-        color: &str,
-    ) -> Result<Option<Edited>, String> {
-        let color = edit::parse_color(color.trim())
-            .ok_or_else(|| format!("{color:?} is not a colour like #F2B33D"))?;
-        self.restyle(list, |l| {
-            l.speakers
-                .recolor(id, &color)
-                .then_some(())
-                .ok_or(format!("there is no speaker {id}"))
-        })
-    }
-
-    /// Sets the caption settings (switches, style, how cues are cut) and saves.
-    pub fn set_captions(
-        &mut self,
-        list: &EditList,
-        captions: Captions,
-    ) -> Result<Option<Edited>, String> {
-        captions.check()?;
-        self.restyle(list, |l| {
-            l.captions = Some(captions);
-            Ok(())
-        })
-    }
-
-    /// Fixes the spelling of `word`, heard on `track`, the `nth` of that track's words starting in
-    /// its millisecond ([`super::Words::nth`]), and saves; empty text or the heard text again takes
-    /// the fix away. Every word heard like it gets the same fix in the same save
-    /// ([`edit::spread`]), [`Edited::others`] naming those. Like a rename, not an undo step.
-    pub fn fix_word(
-        &mut self,
-        list: &EditList,
-        track: usize,
-        word: &Word,
-        nth: usize,
-        text: &str,
-    ) -> Result<Option<Edited>, String> {
-        let at = WordAt {
-            start: word.start,
-            nth,
-        };
-        let mut fixes = list.fixes.clone();
-        edit::set_fix(&mut fixes, track, word.start, nth, &word.text, text)?;
-        let s = self.spread(
-            &mut fixes,
-            Which::Words {
-                track,
-                first: at,
-                last: at,
-            },
-        );
-        self.set_fixes(list, fixes, s)
-    }
-
-    /// Marks `word` (as for [`Self::fix_word`]) as checked by the user, a fix line with the heard
-    /// text so the transcript panel stops flagging it, and saves; a word fixed already is left as
-    /// it is. Not an undo step.
-    pub fn confirm_word(
-        &mut self,
-        list: &EditList,
-        track: usize,
-        word: &Word,
-        nth: usize,
-    ) -> Result<Option<Edited>, String> {
-        self.restyle(list, |l| {
-            edit::confirm_fix(&mut l.fixes, track, word.start, nth, &word.text).map(|_| ())
-        })
-    }
-
-    /// Sets the text of the run `r` names ([`super::Words::retyped`]) as one fix, and saves; the
-    /// fixes of words inside it, and a span overlapping it, go. Empty text or the heard text again
-    /// takes them all away. Spreads as [`Self::fix_word`] does. Not an undo step.
-    pub fn fix_words(
-        &mut self,
-        list: &EditList,
-        r: &Retyped,
-        text: &str,
-    ) -> Result<Option<Edited>, String> {
-        let mut fixes = list.fixes.clone();
-        edit::set_span(&mut fixes, r.track, r.first, r.last, &r.heard, text)?;
-        let s = self.spread(
-            &mut fixes,
-            Which::Words {
-                track: r.track,
-                first: r.first,
-                last: r.last,
-            },
-        );
-        self.set_fixes(list, fixes, s)
-    }
-
-    /// Gives every word heard like a fixed one the same fix (the Correct button's first step),
-    /// and saves; what was added and the heard texts two fixes disagree on. Not an undo step.
-    pub fn spread_all(&mut self, list: &EditList) -> Result<(Option<Edited>, Spread), String> {
-        let mut fixes = list.fixes.clone();
-        let s = self.spread(&mut fixes, Which::All);
-        let edited = self.set_fixes(list, fixes, s.clone())?;
-        Ok((edited, s))
-    }
-
-    /// Takes back the fixes a fix also made elsewhere (the note's Undo), those still as they
-    /// were: their words keep what they were heard as (`heard`), as fixes of the heard text, so no
-    /// later spread gives them the fix again ([`edit::keep_heard`]). Saved; not an undo step.
-    pub fn keep_heard(
-        &mut self,
-        list: &EditList,
-        others: &[Fix],
-        heard: &[String],
-    ) -> Result<(Option<Edited>, usize), String> {
-        let mut fixes = list.fixes.clone();
-        let n = edit::keep_heard(&mut fixes, others, heard);
-        Ok((self.set_fixes(list, fixes, Spread::default())?, n))
-    }
-
-    /// [`edit::spread`] over the transcript the editor has (none yet: nothing to spread over).
-    fn spread(&mut self, fixes: &mut Vec<Fix>, which: Which) -> Spread {
-        let Some(w) = self.words.clone() else {
-            return Spread::default();
-        };
-        let words = w.in_order();
-        let index = match &self.spread_index {
-            Some((of, index)) if Weak::ptr_eq(of, &Arc::downgrade(&w)) => index.clone(),
-            _ => {
-                let index = Arc::new(SpreadIndex::new(&words));
-                self.spread_index = Some((Arc::downgrade(&w), index.clone()));
-                index
-            }
-        };
-        edit::spread_with(fixes, &words, &index, which)
-    }
-
-    /// Saves `fixes` as the list's, `s` saying what of them a spread added.
-    fn set_fixes(
-        &mut self,
-        list: &EditList,
-        fixes: Vec<Fix>,
-        s: Spread,
-    ) -> Result<Option<Edited>, String> {
-        // Never save a list the parser would refuse; a spread checks this itself, this is the
-        // last line.
-        if edit::clash(&fixes) {
-            return Err("that would give a word two fixes: nothing was changed".into());
-        }
-        let edited = self.restyle(list, |l| {
-            l.fixes = fixes;
-            Ok(())
-        })?;
-        Ok(edited.map(|e| Edited {
-            others: s.added,
-            heard: s.heard,
-            ..e
-        }))
-    }
-
-    /// Puts `speakers` in place of the list's (labelled again after a voice was enrolled or
-    /// forgotten) and saves. Like a rename, not an undo step.
-    pub fn respeak(
-        &mut self,
-        list: &EditList,
-        speakers: junctur_core::edit::Speakers,
-    ) -> Result<Option<Edited>, String> {
-        self.restyle(list, |l| {
-            l.speakers = speakers;
-            Ok(())
-        })
-    }
-
-    /// Applies `f` to a copy of `list` and saves it; `None` when it changed nothing.
-    fn restyle(
-        &mut self,
-        list: &EditList,
-        f: impl FnOnce(&mut EditList) -> Result<(), String>,
-    ) -> Result<Option<Edited>, String> {
-        let mut new = list.clone();
-        f(&mut new)?;
-        if new == *list {
-            return Ok(None);
-        }
-        let path = self.path.clone().ok_or("no edit list is open")?;
-        let saved =
-            edit::save(&path, &new).map_err(|e| format!("saving {}: {e}", path.display()))?;
-        self.written = Some(saved.text.clone());
-        Ok(Some(Edited {
-            list: new,
-            saved,
-            unsnapped: false,
             skipped: 0,
             others: Vec::new(),
             heard: Vec::new(),
