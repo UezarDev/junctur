@@ -12,7 +12,7 @@ use ort::value::Tensor;
 use serde::{Deserialize, Serialize};
 
 use crate::ffmpeg::PcmReader;
-use crate::runtime::{self, Device, DevicePref};
+use crate::runtime;
 use crate::vad::{Region, RATE};
 use crate::Result;
 
@@ -52,18 +52,22 @@ pub struct Diarization {
     pub turns: Vec<Turn>,
 }
 
+/// Which embeddings a cached window or a remembered voiceprint holds: CAM++ on the CPU (5r). Part of
+/// [`hearing_settings`] and of a voiceprint's model key, so ones made before 5r are not trusted.
+pub const EMBEDDINGS_MARK: &str = "cpu";
+
 pub struct Embedder {
     session: Session,
-    pub device: Device,
     fbank: fbank::Fbank,
 }
 
 impl Embedder {
-    pub fn open(model: &Path, pref: DevicePref) -> Result<Self> {
-        let (session, device) = runtime::open(model, pref)?;
+    /// Always on the CPU (5r): ONNX Runtime's CUDA provider gives CAM++ embeddings that agree with the
+    /// CPU's at only 0.1 to 0.4 cosine for the same input, whatever its options, so on the GPU every
+    /// window became its own speaker. No device argument, so no caller can put it back there.
+    pub fn open(model: &Path) -> Result<Self> {
         Ok(Self {
-            session,
-            device,
+            session: runtime::open_on_cpu(model, None)?,
             fbank: fbank::Fbank::new(),
         })
     }
@@ -123,7 +127,10 @@ pub fn segments(regions: &[Region]) -> Vec<Region> {
 /// Every setting that shapes what hearing finds (windows, and overlaps through
 /// [`segment::settings`]): part of the key that says when cached results are stale.
 pub fn hearing_settings() -> String {
-    format!("{SEGMENT_S} {MIN_SEGMENT_S} {}", segment::settings())
+    format!(
+        "{SEGMENT_S} {MIN_SEGMENT_S} {} emb={EMBEDDINGS_MARK}",
+        segment::settings()
+    )
 }
 
 /// What one read of a track gives the `speakers` stage (5b): the fixed embedding windows over its
@@ -358,6 +365,60 @@ mod tests {
 
     fn r(start: f64, end: f64) -> Region {
         Region { start, end }
+    }
+
+    /// 5r: the embeddings hearing makes must be CAM++'s, which the CPU gives. Through
+    /// [`Embedder::open`], batched and one at a time, against a plain CPU session on the same
+    /// features. In a `cuda` build the embedder on the CUDA provider gave 0.39 here (and the
+    /// embedder can only open through [`runtime::open_on_cpu`] since).
+    #[test]
+    #[ignore = "downloads models"]
+    fn embeddings_agree_with_the_cpu_reference() {
+        let m = crate::models::ensure(
+            &crate::models::SPEAKER_EMBEDDING,
+            &crate::cache::default_dir(),
+        )
+        .unwrap();
+        let clips: Vec<Vec<f32>> = (1..=3)
+            .map(|k| {
+                (0..24_000)
+                    .map(|i| {
+                        let t = i as f32;
+                        0.2 * (t * 0.011 * k as f32).sin() * (t * 0.0013).sin()
+                            + 0.05 * (t * 0.37 / k as f32).sin()
+                    })
+                    .collect()
+            })
+            .collect();
+        let refs: Vec<&[f32]> = clips.iter().map(Vec::as_slice).collect();
+        let (mut cpu, device) = runtime::open(&m, runtime::DevicePref::Cpu).unwrap();
+        assert_eq!(device, runtime::Device::Cpu);
+        let fb = fbank::Fbank::new();
+        let reference: Vec<Vec<f32>> = refs
+            .iter()
+            .map(|c| {
+                let f = fb.compute(c);
+                let flat: Vec<f32> = f.iter().flatten().copied().collect();
+                let x = Tensor::from_array(([1, f.len(), fbank::BINS], flat)).unwrap();
+                let res = cpu.run(ort::inputs!["x" => x]).unwrap();
+                let mut e = res["embedding"]
+                    .try_extract_tensor::<f32>()
+                    .unwrap()
+                    .1
+                    .to_vec();
+                cluster::normalize(&mut e);
+                e
+            })
+            .collect();
+        let mut emb = Embedder::open(&m).unwrap();
+        let cos = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+        let batched = emb.embed_batch(&refs).unwrap();
+        assert_eq!(batched.len(), 3);
+        for (k, (b, r)) in batched.iter().zip(&reference).enumerate() {
+            let one = emb.embed(refs[k]).unwrap().unwrap();
+            assert!(cos(b, r) > 0.999, "clip {k} batched: {}", cos(b, r));
+            assert!(cos(&one, r) > 0.999, "clip {k} alone: {}", cos(&one, r));
+        }
     }
 
     #[test]

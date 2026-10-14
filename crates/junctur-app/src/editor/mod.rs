@@ -16,6 +16,9 @@ use crate::cuts::Fps;
 use junctur_core::transcribe::Word;
 pub use words::{TranscriptView, Words};
 
+/// What a word edit under a frame is refused with: [`Editor::edit_all`] tells it from the others.
+const UNDER_A_FRAME: &str = "that is shorter than a frame: select a little more";
+
 /// Undo steps kept. A 30 h list has ~10 000 ranges (160 kB a step); this caps memory near 30 MB.
 const HISTORY: usize = 200;
 
@@ -47,6 +50,31 @@ pub struct Edited {
     pub saved: Saved,
     /// A word edit placed its boundaries by the pads alone: the project has no speech envelope.
     pub unsnapped: bool,
+    /// Stretches of a several-stretch edit left out as under a frame ([`Editor::edit_all`]).
+    pub skipped: usize,
+}
+
+/// Runs of transcript words (`(first, last)`, inclusive) as the engine takes them from the page:
+/// sorted and joined where they overlap or touch, so no word is cut, kept or (above all) fed into
+/// a voiceprint twice (2p repair: the page joins them too, but the engine does not rely on it).
+/// No runs, or a run that ends before it starts, is refused.
+pub fn join_runs(runs: &[(usize, usize)]) -> Result<Vec<(usize, usize)>, String> {
+    if runs.is_empty() {
+        return Err("select the words first".into());
+    }
+    if let Some(&(first, last)) = runs.iter().find(|(first, last)| first > last) {
+        return Err(format!("words {first} to {last} run backwards"));
+    }
+    let mut sorted = runs.to_vec();
+    sorted.sort_unstable();
+    let mut out: Vec<(usize, usize)> = Vec::with_capacity(sorted.len());
+    for (first, last) in sorted {
+        match out.last_mut() {
+            Some(prev) if first <= prev.1.saturating_add(1) => prev.1 = prev.1.max(last),
+            _ => out.push((first, last)),
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Default)]
@@ -114,6 +142,66 @@ impl Editor {
             Step::Undo => (self.undo.last().cloned().ok_or("nothing to undo")?, false),
             Step::Redo => (self.redo.last().cloned().ok_or("nothing to redo")?, false),
         };
+        self.commit(list, step, keep, unsnapped, fps)
+    }
+
+    /// Applies every op of `ops` in order to `list` and saves the result as **one** undo step (2p:
+    /// a selection of several stretches is cut or kept at once, and one undo puts all of it back).
+    /// Each op sees the ranges the ones before it left, so overlapping ops land as they would one
+    /// after another. `None` when together they change nothing; no ops is that.
+    ///
+    /// A stretch under a frame among others is left out and counted ([`Edited::skipped`], said in
+    /// the notice; 2p repair): one stray short word in a selection of someone's lines should not
+    /// refuse the lot. When every stretch is under a frame, or the ones left change nothing, it is
+    /// refused saying so. Any other refusal (a word out of range, no transcript) refuses the whole
+    /// batch and nothing is written.
+    pub fn edit_all(
+        &mut self,
+        list: &EditList,
+        ops: &[Op],
+        fps: Fps,
+    ) -> Result<Option<Edited>, String> {
+        let Some(&first) = ops.first() else {
+            return Ok(None);
+        };
+        let mut now = list.clone();
+        let mut unsnapped = false;
+        let mut skipped = 0;
+        for &op in ops {
+            match self.apply(&now, op, fps) {
+                Ok((keep, u)) => {
+                    now.keep = keep;
+                    unsnapped |= u;
+                }
+                Err(e) if e == UNDER_A_FRAME && ops.len() > 1 => skipped += 1,
+                Err(e) => return Err(e),
+            }
+        }
+        if skipped == ops.len() {
+            return Err(format!(
+                "each of the {skipped} selected stretches is shorter than a frame: select a little more"
+            ));
+        }
+        if skipped > 0 && now.keep == list.keep {
+            return Err(format!(
+                "{skipped} of the {} selected stretches {} shorter than a frame and the rest change nothing",
+                ops.len(),
+                if skipped == 1 { "is" } else { "are" }
+            ));
+        }
+        let edited = self.commit(list, Step::Do(first), now.keep, unsnapped, fps)?;
+        Ok(edited.map(|e| Edited { skipped, ..e }))
+    }
+
+    /// Saves `keep` as the list's new ranges after `step` and moves the history (see [`Self::edit`]).
+    fn commit(
+        &mut self,
+        list: &EditList,
+        step: Step,
+        keep: Vec<Range>,
+        unsnapped: bool,
+        fps: Fps,
+    ) -> Result<Option<Edited>, String> {
         if keep == list.keep {
             // Nothing to write; an undo or redo step that is already in play is still used up,
             // so the next one moves on.
@@ -151,6 +239,7 @@ impl Editor {
             list: new,
             saved,
             unsnapped,
+            skipped: 0,
         }))
     }
 
@@ -262,6 +351,7 @@ impl Editor {
             list: new,
             saved,
             unsnapped: false,
+            skipped: 0,
         }))
     }
 
@@ -305,7 +395,7 @@ impl Editor {
         // A word span under a frame would be joined back on the frame grid: say so instead.
         // (A frame span is a whole number of frames, written a millisecond inside each end.)
         if matches!(op, Op::Words { .. }) && b > a && b - a < fps.seconds(1) {
-            return Err("that is shorter than a frame: select a little more".into());
+            return Err(UNDER_A_FRAME.into());
         }
         let kept = if b <= a {
             list.keep.clone()
@@ -443,6 +533,106 @@ mod tests {
         e.changed_elsewhere();
         assert!(!e.can_undo());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn several_stretches_are_one_undo_step_or_none() {
+        let d = scratch("many");
+        let path = d.join("edit.junctur");
+        let mut e = Editor::default();
+        e.reset(Some(path.clone()));
+        let l0 = list(vec![r(0.0, 20.0)]);
+        let cut = |start, end| Op::Frames {
+            start,
+            end,
+            keep: false,
+        };
+        // No ops, or ops that change nothing, write nothing and leave no undo step.
+        assert!(e.edit_all(&l0, &[], FPS).unwrap().is_none());
+        assert!(!path.exists());
+        // Two stretches apart and a third overlapping the first: one save, one undo step.
+        let ops = [cut(30, 60), cut(300, 330), cut(45, 90)];
+        let l1 = e.edit_all(&l0, &ops, FPS).unwrap().expect("a change").list;
+        assert_eq!(l1.keep, vec![r(0.0, 1.0), r(3.0, 10.0), r(11.0, 20.0)]);
+        assert_eq!(reread(&path), l1);
+        assert!(e.edit_all(&l1, &ops, FPS).unwrap().is_none(), "already cut");
+        let back = step(&mut e, &l1, Step::Undo, FPS);
+        assert_eq!(back.keep, l0.keep, "one undo puts every stretch back");
+        assert!(!e.can_undo() && e.can_redo());
+        assert_eq!(step(&mut e, &back, Step::Redo, FPS), l1);
+
+        // A stretch under a frame among others is left out and counted; the rest is one step.
+        e.words = Some(Arc::new(Words::from_words(vec![
+            Word {
+                start: 12.0,
+                end: 12.5,
+                text: "uno".into(),
+                p: 1.0,
+                p_min: None,
+            },
+            Word {
+                start: 12.51,
+                end: 12.52,
+                text: "y".into(),
+                p: 1.0,
+                p_min: None,
+            },
+            Word {
+                start: 12.53,
+                end: 13.0,
+                text: "dos".into(),
+                p: 1.0,
+                p_min: None,
+            },
+        ])));
+        let words = |first, last| Op::Words {
+            first,
+            last,
+            keep: false,
+        };
+        let edited = e
+            .edit_all(&l1, &[cut(450, 480), words(1, 1)], FPS)
+            .unwrap()
+            .expect("the frame cut is made");
+        assert_eq!(edited.skipped, 1);
+        let l2 = edited.list;
+        assert_eq!(
+            l2.keep,
+            vec![r(0.0, 1.0), r(3.0, 10.0), r(11.0, 15.0), r(16.0, 20.0)]
+        );
+        // Only short stretches, or short ones and the rest already done: refused, nothing written.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let all = e.edit_all(&l2, &[words(1, 1), words(1, 1)], FPS);
+        assert!(all.unwrap_err().contains("each of the 2"));
+        let rest = e.edit_all(&l2, &[cut(450, 480), words(1, 1)], FPS);
+        assert!(rest.unwrap_err().contains("1 of the 2"));
+        // A single short stretch keeps the plain refusal.
+        assert_eq!(
+            e.edit_all(&l2, &[words(1, 1)], FPS).unwrap_err(),
+            UNDER_A_FRAME
+        );
+        // Any other refusal refuses the batch.
+        assert!(e
+            .edit_all(&l2, &[cut(510, 540), words(7, 9)], FPS)
+            .unwrap_err()
+            .contains("no such words"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn word_runs_are_sorted_joined_and_checked() {
+        assert_eq!(
+            join_runs(&[(20, 25), (3, 5), (4, 9), (10, 10), (30, 30)]).unwrap(),
+            vec![(3, 10), (20, 25), (30, 30)],
+            "overlapping and touching runs join, in order"
+        );
+        assert_eq!(join_runs(&[(7, 7), (7, 7)]).unwrap(), vec![(7, 7)]);
+        assert_eq!(join_runs(&[(5, 9), (6, 7)]).unwrap(), vec![(5, 9)]);
+        assert!(join_runs(&[]).is_err());
+        assert!(join_runs(&[(1, 2), (9, 4)])
+            .unwrap_err()
+            .contains("backwards"));
     }
 
     #[test]

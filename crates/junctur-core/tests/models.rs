@@ -60,7 +60,7 @@ fn vad_hears_no_speech_in_tones_or_silence() {
 #[ignore = "downloads models"]
 fn segmentation_hears_nobody_in_silence_or_a_tone() {
     let m = models::ensure(&models::SEGMENTATION, &cache::default_dir()).unwrap();
-    let mut s = Segmenter::open(&m, DevicePref::Cpu).unwrap();
+    let mut s = Segmenter::open(&m).unwrap();
     let n = segment::window_samples();
     let tone: Vec<f32> = (0..n)
         .map(|i| 0.3 * (i as f32 * 440.0 * std::f32::consts::TAU / 16_000.0).sin())
@@ -177,7 +177,7 @@ fn separation_streams_and_stems_add_up_to_the_mix() {
 #[ignore = "downloads models"]
 fn embeddings_are_unit_vectors_and_stable() {
     let m = models::ensure(&models::SPEAKER_EMBEDDING, &cache::default_dir()).unwrap();
-    let mut e = Embedder::open(&m, DevicePref::Auto).unwrap();
+    let mut e = Embedder::open(&m).unwrap();
     let x: Vec<f32> = (0..24_000)
         .map(|i| 0.2 * (i as f32 * 0.07).sin() * (i as f32 * 0.0013).sin())
         .collect();

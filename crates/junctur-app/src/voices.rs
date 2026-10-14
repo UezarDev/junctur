@@ -14,7 +14,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use junctur_core::pipeline::{self, Found, Project};
-use junctur_core::runtime::DevicePref;
 use junctur_core::voices::{self, Voice, Voices};
 use serde::Serialize;
 
@@ -104,7 +103,7 @@ pub fn rehear(file: &str) -> Result<(Found, Rehearing), String> {
         let _held = crate::lock::lock(&LOCK);
         load()?.1
     };
-    let found = pipeline::rehear(&p, &usable(&v), DevicePref::Auto, &mut |l| {
+    let found = pipeline::rehear(&p, &usable(&v), &mut |l| {
         eprintln!("junctur-app: speakers again: {l}")
     })
     .map_err(|e| e.to_string())?;
@@ -139,38 +138,44 @@ fn commit(
     Ok(labelled.map(|(_, f)| f))
 }
 
-/// The open recording's speakers labelled with `v`, not saved; `None` for one whose speakers
-/// cannot be relabelled (tracks, or heard before 5b), which keeps its speakers. `renamed`: a
-/// remembered person renamed (from, to), whose pinned seconds (5c) follow the new name.
+/// The open recording's speakers labelled with `v`, not saved; `None` when there is nothing to
+/// change: speakers that are tracks, or speakers heard by an older Junctur (before 5b, or before
+/// 5r: maybe on the GPU), which keep their labels until heard again. `renamed`: a remembered
+/// person renamed (from, to), whose pinned seconds (5c) follow the new name, on a recording heard
+/// by an older Junctur too, so a rename never leaves them on a name no voice has. A forgotten
+/// voice's pins are kept either way (ignored until the name is remembered again).
 fn labelled(
     file: &str,
     v: &Voices,
     renamed: Option<(&str, &str)>,
 ) -> Result<Option<(Project, Found)>, String> {
     let p = project(file)?;
-    match p.speakers() {
-        Some(f) if f.heard.is_some() => {
-            let found = match renamed {
-                Some((from, to)) => pipeline::labelled_renamed(&p, &usable(v), from, to),
-                None => pipeline::labelled(&p, &usable(v)),
-            }
-            .map_err(|e| e.to_string())?;
-            Ok(Some((p, found)))
+    let Some(f) = p.speakers() else {
+        return Ok(None);
+    };
+    let found = match renamed {
+        Some((from, to)) if f.method == pipeline::Method::Voices => {
+            pipeline::labelled_renamed(&p, &usable(v), from, to)
         }
-        _ => Ok(None),
+        None if !f.heard_by_an_older_junctur() && f.method == pipeline::Method::Voices => {
+            pipeline::labelled(&p, &usable(v))
+        }
+        _ => return Ok(None),
     }
+    .map_err(|e| e.to_string())?;
+    Ok(Some((p, found)))
 }
 
 /// Remembers `name`'s voice from source seconds `a..b` of `file` (any length, 5c), pins those
 /// seconds to them and labels its speakers again. Returns the new speakers and a line for the user.
-pub fn enroll(file: &str, name: &str, (a, b): (f64, f64)) -> Result<(Found, String), String> {
+pub fn enroll(file: &str, name: &str, stretches: &[(f64, f64)]) -> Result<(Found, String), String> {
     let _held = crate::lock::lock(&LOCK);
     not_while_rehearing()?;
     let p = project(file)?;
     let (path, mut v) = load()?;
     let before = v.get(name).map_or(0.0, |x| x.seconds);
     let (found, added) =
-        pipeline::enroll(&p, &mut v, name, &[(a, b)]).map_err(|e| e.to_string())?;
+        pipeline::enroll(&p, &mut v, name, stretches).map_err(|e| e.to_string())?;
     v.save(&path).map_err(|e| e.to_string())?;
     pipeline::save_speakers(&p, &found).map_err(|e| e.to_string())?;
     let voice = v.get(name).expect("just enrolled");

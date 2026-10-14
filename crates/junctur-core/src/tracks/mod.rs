@@ -109,7 +109,8 @@ pub struct TrackReport {
     pub from_cache: bool,
 }
 
-fn entry(file: &Path, opts: &AnalyzeOptions) -> Result<PathBuf> {
+/// Where [`analyze`] caches its report of `file` with `opts`' settings.
+pub(crate) fn entry(file: &Path, opts: &AnalyzeOptions) -> Result<PathBuf> {
     let dir = opts.cache_dir.clone().unwrap_or_else(cache::default_dir);
     Ok(cache::entry_path(
         &dir,

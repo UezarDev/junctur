@@ -132,7 +132,10 @@ pub fn cut(a: Args) -> Result<(), String> {
     let p = project(&a)?;
     // The voices may have changed since `analyze`: label the speakers again first (cheap). A
     // project heard before 5b cannot be; its speakers stay as they were.
-    if p.speakers().is_some() {
+    if let Some(f) = p.speakers() {
+        if f.heard_by_an_older_junctur() {
+            eprintln!("junctur: speakers were found by an older Junctur: run `junctur analyze` to hear them again");
+        }
         let voices = voices::remembered_or_none(&mut |m| eprintln!("junctur: {m}"));
         if let Err(e) = pipeline::relabel(&p, &voices) {
             eprintln!("junctur: speakers not relabelled: {e}");

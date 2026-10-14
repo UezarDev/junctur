@@ -15,8 +15,9 @@
 //! captions over the picture; each caption it shows is a `caption preview` line in `ui`),
 //! `enroll=<first>-<last>:<name>` (5b: remember a voice from transcript words) and `forget=<name>`. Set `JUNCTUR_VOICES` to a
 //! scratch file for these, or they change the user's own voices. `reanalyse` (2d) analyses the open
-//! recording again, replacing user edits (a recording without an edit list is analysed as it
-//! opens); the report's `analysis` is the open recording's analysis progress and `outdated` what
+//! recording again as its Re-analyse button does, keeping user edits (5s; a recording without an
+//! edit list is analysed as it opens), and `reanalyse_fresh` as "Start over with a fresh cut" does
+//! once its question is answered yes (re-cut, user edits kept as `edit.junctur.bak*`); the report's `analysis` is the open recording's analysis progress and `outdated` what
 //! the project panel would offer a re-analysis for. Set `JUNCTUR_RECENT` and `JUNCTUR_CACHE_DIR` to
 //! scratch places too. `mute=<n>` / `unmute=<n>` (2e) mute or unmute audio track n (from 1, as
 //! the play bar numbers them); each step's report and the final one add the mutes (`mixer`) and
@@ -26,6 +27,8 @@
 //! `menu=close`, back to the start window, and `menu=settings`, the Settings dialog). The final
 //! report adds how far the waveforms are (`waves`) and the settings the dialog shows (`settings`;
 //! set `JUNCTUR_CONFIG` to a scratch file before anything saves them);
+//! `speed=1.5`, `loop=<a>-<b>` (source seconds: into review, the whole file playing) and `unloop`
+//! (out of it, the skip toggle back) drive review's speed and loop of one clip (2o), each step's report adding what mpv has then (`speedLoop`: speed, `ab-loop-a`, `-b`);
 //! the picture's shape is in the `state` (`width`, `height`, `aspect`). Each step's
 //! report adds the edit state it left, and the final report re-reads `edit.junctur` from disk
 //! (`disk`: does it parse, and is it the list in play), counts the loads asked of mpv (a save must
@@ -95,13 +98,18 @@ enum Action {
     Srt(String),
     Enroll(usize, usize, String),
     Forget(String),
-    Reanalyse,
+    /// Whether it is a fresh cut (5s).
+    Reanalyse(bool),
     /// Audio track (0-based) and whether to mute it.
     Mute(usize, bool),
     /// Audio track (0-based) and whether to solo it (2g).
     Solo(usize, bool),
     /// A menu item chosen (2g), by id.
     Menu(String),
+    /// 2o: playback speed, and review's loop of one clip (source seconds) or review's end.
+    Speed(f64),
+    Loop(f64, f64),
+    Unloop,
 }
 
 /// The frontend's log lines (`ui_log`), kept for the report.
@@ -182,10 +190,20 @@ fn parse_steps(s: &str) -> Result<Vec<(f64, Action)>, String> {
                 Action::Solo(n.checked_sub(1).ok_or_else(bad)?, kind == "solo")
             }
             Some(("menu", id)) if !id.is_empty() => Action::Menu(id.to_string()),
+            Some(("speed", v)) => Action::Speed(v.trim().parse().map_err(|_| bad())?),
+            Some(("loop", v)) => {
+                let (a, b) = v.split_once('-').ok_or_else(bad)?;
+                Action::Loop(
+                    a.trim().parse().map_err(|_| bad())?,
+                    b.trim().parse().map_err(|_| bad())?,
+                )
+            }
             None if action == "pause" => Action::Pause,
             None if action == "undo" => Action::Edit(Step::Undo),
             None if action == "redo" => Action::Edit(Step::Redo),
-            None if action == "reanalyse" => Action::Reanalyse,
+            None if action == "reanalyse" => Action::Reanalyse(false),
+            None if action == "reanalyse_fresh" => Action::Reanalyse(true),
+            None if action == "unloop" => Action::Unloop,
             _ => return Err(bad()),
         };
         steps.push((at, action));
@@ -225,13 +243,13 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
         use tauri::Emitter;
         return app.emit(MENU_EVENT, id).map_err(|e| e.to_string());
     }
-    if let Action::Reanalyse = a {
+    if let Action::Reanalyse(fresh) = *a {
         let file = with_player(app, |p| p.file())?.ok_or("no file is open")?;
         let state = app.try_state::<App>().ok_or("app not set up")?;
         let notify = crate::commands::notifier(app.clone());
         let r = state
             .analysis
-            .reanalyse(std::path::Path::new(&file), true, notify)?;
+            .reanalyse(std::path::Path::new(&file), fresh, fresh, notify)?;
         eprintln!(
             "junctur-app test: reanalyse started: {}",
             r.progress.is_some()
@@ -263,7 +281,7 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
         }
         Action::Enroll(first, last, name) => {
             return edit(&|e| {
-                e.enroll_voice(e.file(), *first, *last, name)
+                e.enroll_voice(e.file(), &[(*first, *last)], name)
                     .map(|line| eprintln!("junctur-app test: {line}"))
             })
         }
@@ -280,6 +298,9 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
         }),
         Action::Mute(track, muted) => p.set_muted(*track, *muted),
         Action::Solo(track, on) => p.set_solo(*track, *on),
+        Action::Speed(x) => p.set_speed(*x),
+        Action::Loop(a, b) => p.play_between(*a, *b),
+        Action::Unloop => p.end_review(),
         _ => unreachable!("run above"),
     })?
 }
@@ -329,6 +350,7 @@ impl Ran<'_> {
             "after": after,
             "edit": edit,
             "mixer": mixer(app),
+            "speedLoop": with_player(app, |p| p.looping()).ok(),
         })
     }
 }
@@ -479,8 +501,14 @@ mod tests {
                 (8.0, Action::KeySeek(1.0)),
             ]
         );
-        let s = parse_steps("9:reanalyse").unwrap();
-        assert_eq!(s, vec![(9.0, Action::Reanalyse)]);
+        let s = parse_steps("9:reanalyse;10:reanalyse_fresh").unwrap();
+        assert_eq!(
+            s,
+            vec![
+                (9.0, Action::Reanalyse(false)),
+                (10.0, Action::Reanalyse(true))
+            ]
+        );
         let s = parse_steps("1:cutw=3-5;2:keepf=30-60;3:undo;4:redo").unwrap();
         assert_eq!(
             s.iter().map(|x| x.1.clone()).collect::<Vec<_>>(),
@@ -534,6 +562,16 @@ mod tests {
             parse_steps("3:menu=talking").unwrap(),
             vec![(3.0, Action::Menu("talking".into()))]
         );
+        assert_eq!(
+            parse_steps("1:speed=1.5;2:loop=10.5-12;3:unloop").unwrap(),
+            vec![
+                (1.0, Action::Speed(1.5)),
+                (2.0, Action::Loop(10.5, 12.0)),
+                (3.0, Action::Unloop)
+            ]
+        );
+        assert!(parse_steps("1:loop=10").is_err());
+        assert!(parse_steps("1:speed=fast").is_err());
         assert!(parse_steps("1:mute=x").is_err());
         assert!(parse_steps("1:enroll=10:Ana").is_err());
         assert!(parse_steps("1:forget=").is_err());

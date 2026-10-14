@@ -2,7 +2,8 @@
 //!
 //! Pass 1 groups windows into many tight clusters (centroid clustering at [`FIRST`]); pass 2 merges
 //! the clusters' centroids, closest pair first, while they are at least [`MERGE`]-similar; clusters
-//! still under a minimum share are dropped, and every window goes to its nearest remaining centroid.
+//! still under a minimum share, or under [`MIN_WINDOWS`], are dropped, and every window goes to its
+//! nearest remaining centroid.
 //!
 //! 1a's one pass (merge at 0.5 as it went, then fold strays) found a single speaker on the 4-track
 //! sample, on the vocal stem and on the mix alike: a running centroid drifts toward a "mean voice"
@@ -18,6 +19,23 @@ pub const FIRST: f32 = 0.7;
 /// plateau (three speakers, stem and mix agreeing); 0.7 joins two of them, 0.85 and up splits voices
 /// into five or more.
 pub const MERGE: f32 = 0.78;
+
+/// Fewest windows a cluster needs to be a speaker of its own, whatever its share (5u). Clusters
+/// under it fold into their nearest speaker like those under the minimum share. The share alone
+/// vanished on little talk: 3% of the 2-minute clip's 33 windows is under one, so five single
+/// windows (a laugh, one short line) were five people, nine speakers for three. Measured there
+/// against the user's pins: a floor of 2 still split one person in three; 3 gives two speakers.
+/// 3 windows are 4.5 s of one voice, so a few sentences stay a person. Added to the share, never
+/// in place of it: alone, on the 1 h 45 4-track sample, it kept 13 speakers for 3, its clusters of
+/// 3 to 31 windows being pieces of the main voices (0.70-0.78 to them, just under [`MERGE`]). Both
+/// apply at every length; with the 3% share the floor is the higher bar up to 100 windows (2.5 min
+/// of speech) and the share past that.
+pub const MIN_WINDOWS: usize = 3;
+
+/// Whether a cluster of `count` of `n` windows is big enough to be a speaker of its own.
+fn big_enough(count: usize, n: usize, min_share: f64) -> bool {
+    count >= MIN_WINDOWS && count as f64 >= min_share * n as f64
+}
 
 pub fn normalize(v: &mut [f32]) {
     let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -151,12 +169,12 @@ fn merge(groups: &mut [Group], threshold: f32) -> (Vec<bool>, Vec<usize>) {
     }
 }
 
-/// Speaker label per embedding, two-pass (module docs). Clusters holding under `min_share` of the
-/// windows are dropped and their windows go to the nearest kept centroid however unlike it they
-/// are: 1a left a stray under 0.3 similar as a "minor" speaker of its own, but a word needs a
-/// speaker to be shown under, and a minor one is noise in a transcript or a caption. When no
-/// cluster reaches the share, every merged cluster is kept. Labels are dense, ordered by first
-/// appearance.
+/// Speaker label per embedding, two-pass (module docs). Clusters under `min_share` of the windows
+/// or under [`MIN_WINDOWS`] of them are dropped, and their windows go to the nearest kept centroid
+/// however unlike it they are: 1a left a stray under 0.3 similar as a "minor" speaker of its own,
+/// but a word needs a speaker to be shown under, and a minor one is noise in a transcript or a
+/// caption. When no cluster is big enough (a clip of a few windows), every merged cluster is kept:
+/// a recording with speech has speakers. Labels are dense, ordered by first appearance.
 pub fn two_pass(embeddings: &[Vec<f32>], first: f32, merge_at: f32, min_share: f64) -> Vec<usize> {
     two_pass_capped(embeddings, first, merge_at, min_share, MAX_GROUPS)
 }
@@ -174,7 +192,7 @@ fn two_pass_capped(
     let (groups, _) = merged(embeddings, first, merge_at, cap);
     let big: Vec<&Group> = groups
         .iter()
-        .filter(|g| g.count as f64 >= min_share * embeddings.len() as f64)
+        .filter(|g| big_enough(g.count, embeddings.len(), min_share))
         .collect();
     let kept = if big.is_empty() {
         groups.iter().collect()
@@ -259,10 +277,14 @@ pub struct Labels {
 ///
 /// A window at least `threshold` similar to its nearest voice is that voice. The others are
 /// clustered in two passes; a cluster whose centroid is at least `centroid` similar to a voice is
-/// that voice too (a person's quieter windows, clustered together, are still them); clusters under
-/// `min_share` of all windows are dropped; then every one of these windows goes to its nearest kept
-/// cluster or voice, as in [`two_pass`]. With no voices this is exactly [`two_pass`] (the clusters
-/// ordered by size). Voiceprints must be unit length, like the embeddings.
+/// that voice too (a person's quieter windows, clustered together, are still them). The other
+/// clusters under `min_share` of all windows or under [`MIN_WINDOWS`] are dropped, and their
+/// windows go to the nearest kept cluster or voice, as in [`two_pass`]. A voice is never dropped,
+/// however few its windows (5u): what matched a voice, by window or by cluster, is that voice.
+/// When no cluster is big enough and no voice is heard, every cluster is kept, as in
+/// [`two_pass`], rather than a short clip of strangers going to remembered voices it is not like.
+/// With no voices this is exactly [`two_pass`] (the clusters ordered by size). Voiceprints must be
+/// unit length, like the embeddings.
 pub fn label(
     embeddings: &[Vec<f32>],
     voices: &[Vec<f32>],
@@ -332,9 +354,17 @@ pub fn label_fixed(
         let kept: Vec<&Group> = groups
             .iter()
             .zip(&as_voice)
-            .filter(|(g, v)| v.is_none() && g.count as f64 >= min_share * n as f64)
+            .filter(|(g, v)| v.is_none() && big_enough(g.count, n, min_share))
             .map(|(g, _)| g)
             .collect();
+        // No cluster big enough and no voice heard: keep them all, as `two_pass` does (5u repair).
+        // Folding them into the voices would name strangers after people who are not here.
+        let heard = who.iter().any(Option::is_some) || as_voice.iter().any(Option::is_some);
+        let kept: Vec<&Group> = if kept.is_empty() && !heard {
+            groups.iter().collect()
+        } else {
+            kept
+        };
         // Candidates for the other windows: the kept clusters, then the voices.
         let candidates: Vec<&[f32]> = kept
             .iter()
@@ -567,6 +597,112 @@ mod tests {
         let l = label(&e, &[ana, bea], 0.99, CENTROID_MATCH, 0.03);
         assert_eq!(l.voices, vec![Some(0)]);
         assert!(l.windows.iter().all(|&x| x == 0), "{:?}", l.windows);
+    }
+
+    #[test]
+    fn a_single_window_folds_into_its_nearest_speaker_on_a_short_recording() {
+        // 5u: 31 windows, so the 3% share is under one window and a lone window used to be a
+        // speaker of its own. It is nearest the first voice, unlike enough to be its own cluster.
+        let mut e = voice(&axis(0), 15, 0.2);
+        e.extend(voice(&axis(1), 15, 0.2));
+        e.push(unit(&[0.65, 0.0, 0.76, 0.0, 0.0, 0.0, 0.0, 0.0]));
+        let (groups, _) = merged(&e, FIRST, MERGE, MAX_GROUPS);
+        assert_eq!(groups.len(), 3, "the lone window is a cluster of its own");
+        let l = two_pass(&e, FIRST, MERGE, 0.03);
+        assert_eq!(l.iter().max(), Some(&1), "{l:?}");
+        assert_eq!(l[30], l[0]);
+        // The same with voices enrolled: the lone window is not a third speaker either.
+        let l = label(&e, &[unit(&axis(6))], VOICE_MATCH, CENTROID_MATCH, 0.03);
+        assert_eq!(l.voices, vec![None, None]);
+        assert_eq!(l.windows[30], l.windows[0]);
+    }
+
+    #[test]
+    fn a_short_speaker_with_a_few_sentences_stays_a_speaker() {
+        // Four windows (6 s) of a third voice on a short recording: over the floor, a person.
+        let mut e = voice(&axis(0), 15, 0.2);
+        e.extend(voice(&axis(1), 15, 0.2));
+        e.extend(voice(&axis(2), MIN_WINDOWS + 1, 0.2));
+        let l = two_pass(&e, FIRST, MERGE, 0.03);
+        assert_eq!(l.iter().max(), Some(&2), "{l:?}");
+        assert!(l[30..].iter().all(|&x| x == l[30]) && l[30] != l[0] && l[30] != l[15]);
+        // On a long recording the floor asks nothing more than the share: 13 of 413 windows is
+        // over 3%, and they stay a speaker.
+        let mut e = voice(&axis(0), 200, 0.2);
+        e.extend(voice(&axis(1), 200, 0.2));
+        e.extend(voice(&axis(2), 13, 0.2));
+        let l = two_pass(&e, FIRST, MERGE, 0.03);
+        assert_eq!(l.iter().max(), Some(&2));
+        assert!(l[400..].iter().all(|&x| x == l[400]) && l[400] != l[0]);
+    }
+
+    #[test]
+    fn a_remembered_or_pinned_single_window_is_never_folded() {
+        // One window that is a remembered voice (Ana's print), and one window of the first
+        // stranger's voice the user pinned to Bea: each a speaker though a single window.
+        let mut e = voice(&axis(0), 15, 0.2);
+        e.extend(voice(&axis(1), 15, 0.2));
+        e.push(unit(&axis(2)));
+        e.push(e[0].clone());
+        let prints = vec![unit(&axis(2)), unit(&axis(7))];
+        let mut fixed = vec![None; 31];
+        fixed.push(Some(1));
+        let l = label_fixed(&e, &prints, &fixed, VOICE_MATCH, CENTROID_MATCH, 0.03);
+        assert_eq!(l.voices, vec![Some(0), Some(1), None, None]);
+        assert_eq!(l.windows[30], 0);
+        assert_eq!(l.windows[31], 1);
+        assert!(l.windows[..30].iter().all(|&x| x >= 2), "{:?}", l.windows);
+    }
+
+    #[test]
+    fn the_floor_decides_on_a_short_recording_and_the_share_on_a_long_one() {
+        // Three windows of a third voice: at the floor. Beside 40 and 40 (2.5 windows' share)
+        // they are a speaker; beside 200 and 200 they are under 3% and fold, as before 5u.
+        for (each, speakers) in [(40, 3), (200, 2)] {
+            let mut e = voice(&axis(0), each, 0.2);
+            e.extend(voice(&axis(1), each, 0.2));
+            e.extend(voice(&axis(2), MIN_WINDOWS, 0.2));
+            let l = two_pass(&e, FIRST, MERGE, 0.03);
+            assert_eq!(l.iter().max(), Some(&(speakers - 1)), "{each} each");
+        }
+    }
+
+    #[test]
+    fn a_short_clip_with_no_cluster_big_enough_keeps_its_clusters_with_or_without_voices() {
+        // Two windows of each of two strangers: no cluster reaches the floor. They stay two
+        // speakers, and a remembered voice not heard here does not take them.
+        let mut e = voice(&axis(0), 2, 0.2);
+        e.extend(voice(&axis(1), 2, 0.2));
+        assert_eq!(two_pass(&e, FIRST, MERGE, 0.03), vec![0, 0, 1, 1]);
+        let l = label(&e, &[unit(&axis(6))], VOICE_MATCH, CENTROID_MATCH, 0.03);
+        assert_eq!(l.voices, vec![None, None]);
+        assert_eq!(l.windows, vec![0, 0, 1, 1]);
+        // When a voice is heard, the small clusters fold into the nearest speaker, the voice.
+        let mut heard = e.clone();
+        heard.push(unit(&axis(6)));
+        let l = label(&heard, &[unit(&axis(6))], VOICE_MATCH, CENTROID_MATCH, 0.03);
+        assert_eq!(l.voices, vec![Some(0)]);
+    }
+
+    #[test]
+    fn a_small_cluster_like_a_voice_is_that_voice() {
+        // Two windows, each under the window threshold against Ana's print, whose centroid is
+        // over the centroid one: a cluster under the floor, kept as Ana, never folded.
+        let mut e = voice(&axis(1), 15, 0.2);
+        e.extend(voice(&axis(2), 15, 0.2));
+        for k in [3, 4] {
+            let mut v = axis(0);
+            v[k] = 0.5;
+            e.push(unit(&v));
+        }
+        let print = unit(&axis(0));
+        assert!(e[30..].iter().all(|w| dot(w, &print) < 0.95));
+        let l = label(&e, &[print], 0.95, CENTROID_MATCH, 0.03);
+        assert_eq!(l.voices, vec![Some(0), None, None]);
+        assert_eq!(&l.windows[30..], &[0, 0]);
+        // Without the voice the same two windows fold into a stranger.
+        let l = label(&e, &[], 0.95, CENTROID_MATCH, 0.03);
+        assert_eq!(l.voices, vec![None, None]);
     }
 
     #[test]
