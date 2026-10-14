@@ -1,10 +1,13 @@
 //! The timeline a send makes in Resolve (5z): its name, and what to do when the open project already
 //! has a timeline of that name. Decided here, from the names the script lists, so the question the
-//! app asks and the name Create new picks are tested without Resolve.
+//! app asks and the name Create new picks are tested without Resolve. Since 5ab the answer can also
+//! be to update only the captions on the timeline that is there, and [`cut_note`] says when that
+//! timeline's cut no longer matches the edit's.
 
 use serde::Deserialize;
 
-use crate::edit::EditList;
+use super::reply::Timeline;
+use crate::edit::{frame_ranges, frames_ceil, EditList};
 
 /// The user's answer when the timeline already exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -14,6 +17,8 @@ pub enum Answer {
     New,
     /// Delete it and make it again from this edit.
     Replace,
+    /// Leave it and its cut as they are and refresh only Junctur's captions on it (5ab).
+    Update,
 }
 
 /// What the send does with the timeline.
@@ -23,6 +28,8 @@ pub enum Decision {
     Ask,
     /// Make the timeline `name`; `replace` the one of that name already there.
     Build { name: String, replace: bool },
+    /// Refresh the captions on the one timeline called `name` (5ab).
+    Update { name: String },
 }
 
 /// `<file stem> (Junctur)`: the FCPXML export's own project name, so a send and a by-hand import
@@ -62,6 +69,13 @@ pub fn free(names: &[String], name: &str) -> String {
 /// Junctur's to guess.
 pub fn decide(names: &[String], name: &str, answer: Option<Answer>) -> Result<Decision, String> {
     let n = taken(names, name);
+    // Gone since the pop-up: building one would send the cut too, which Update did not choose.
+    if n == 0 && answer == Some(Answer::Update) {
+        return Err(format!(
+            "Resolve no longer has a timeline called \"{name}\", so there are no captions to \
+             update: nothing was changed. Send again to make it"
+        ));
+    }
     if n == 0 {
         return Ok(Decision::Build {
             name: name.to_string(),
@@ -85,7 +99,56 @@ pub fn decide(names: &[String], name: &str, answer: Option<Answer>) -> Result<De
             name: name.to_string(),
             replace: true,
         },
+        Some(Answer::Update) if n > 1 => {
+            return Err(format!(
+                "Resolve has {n} timelines called \"{name}\", so Junctur cannot tell which to \
+                 update: nothing was changed. Rename or delete all but one, or choose Create new \
+                 timeline"
+            ))
+        }
+        Some(Answer::Update) => Decision::Update {
+            name: name.to_string(),
+        },
     })
+}
+
+/// The edit's cut in frames of `fps`, as the FCPXML lays its kept ranges end to end: the
+/// imported timeline runs at the source's rate, which `fps` (Resolve's, made exact for NTSC by
+/// [`super::reply::rate`]) is taken back to as a fraction.
+fn cut_frames(edit: &EditList, fps: f64) -> i64 {
+    let (num, den) = if (fps - fps.round()).abs() < 1e-6 {
+        (fps.round() as u64, 1)
+    } else if ((fps * 1001.0) - (fps * 1001.0).round()).abs() < 1e-3 {
+        ((fps * 1001.0).round() as u64, 1001)
+    } else {
+        ((fps * 1000.0).round() as u64, 1000)
+    };
+    let total = frames_ceil(edit.duration, num, den);
+    frame_ranges(&edit.keep, num, den, total)
+        .iter()
+        .map(|(a, b)| (b - a) as i64)
+        .sum()
+}
+
+/// What an update says when the timeline's cut is not the edit's (5ab): its clips (captions
+/// aside) ending at `cut_end`, more than a frame off the edit's length (Resolve's end frame may
+/// count the last frame or not). Not a refusal: a trim made in Resolve on purpose is the user's.
+/// No clips on it (`None`) says nothing: there is no cut to compare.
+pub fn cut_note(edit: &EditList, t: &Timeline, cut_end: Option<i64>) -> Option<String> {
+    let theirs = cut_end? - t.start;
+    let ours = cut_frames(edit, t.fps);
+    if (theirs - ours).abs() <= 1 {
+        return None;
+    }
+    let secs = |f: i64| f as f64 / t.fps;
+    Some(format!(
+        "Junctur's cut is {:.2} s long and the timeline's is {:.2} s: the cut was changed in \
+         Junctur or in Resolve since the timeline was made. The captions follow Junctur's cut, so \
+         they may not line up with this timeline's; choose Create new timeline or Replace to send \
+         the cut too",
+        secs(ours),
+        secs(theirs)
+    ))
 }
 
 #[cfg(test)]
@@ -179,6 +242,82 @@ mod tests {
         assert_eq!(a, Answer::New);
         let a: Answer = serde_json::from_str("\"replace\"").unwrap();
         assert_eq!(a, Answer::Replace);
+        let a: Answer = serde_json::from_str("\"update\"").unwrap();
+        assert_eq!(a, Answer::Update);
         assert!(serde_json::from_str::<Answer>("\"overwrite\"").is_err());
+    }
+
+    #[test]
+    fn update_needs_exactly_one_timeline_of_the_name() {
+        let n = names(&["Main", " REC (Junctur)"]);
+        assert_eq!(
+            decide(&n, "rec (Junctur)", Some(Answer::Update)).unwrap(),
+            Decision::Update {
+                name: "rec (Junctur)".into()
+            }
+        );
+        // Gone since the pop-up: refused, never built.
+        let e = decide(&names(&["Main"]), "rec (Junctur)", Some(Answer::Update)).unwrap_err();
+        assert!(
+            e.contains("no longer has") && e.contains("nothing was changed"),
+            "{e}"
+        );
+        let n = names(&["rec (Junctur)", "REC (JUNCTUR)"]);
+        let e = decide(&n, "rec (Junctur)", Some(Answer::Update)).unwrap_err();
+        assert!(e.contains("2 timelines") && e.contains("update"), "{e}");
+    }
+
+    fn timeline(fps: f64, start: i64) -> Timeline {
+        Timeline {
+            name: "rec (Junctur)".into(),
+            id: "T-1".into(),
+            fps,
+            start,
+            end: start + 1,
+            width: 1920,
+            height: 1080,
+            template: String::new(),
+            template_fps: fps,
+        }
+    }
+
+    #[test]
+    fn a_cut_that_changed_is_said_and_the_same_cut_is_not() {
+        let mut edit = EditList {
+            source: "rec.mp4".into(),
+            duration: 60.0,
+            settings: Default::default(),
+            keep: vec![
+                crate::edit::Range {
+                    start: 0.0,
+                    end: 10.0,
+                },
+                crate::edit::Range {
+                    start: 20.0,
+                    end: 25.0,
+                },
+            ],
+            speakers: Default::default(),
+            captions: None,
+            fixes: Vec::new(),
+            windows: Vec::new(),
+        };
+        // 15 s at 24 fps is 360 frames; Resolve's end one frame either way is the same cut.
+        let t = timeline(24.0, 86400);
+        assert_eq!(cut_note(&edit, &t, Some(86400 + 360)), None);
+        assert_eq!(cut_note(&edit, &t, Some(86400 + 361)), None);
+        assert_eq!(cut_note(&edit, &t, None), None);
+        let note = cut_note(&edit, &t, Some(86400 + 240)).unwrap();
+        assert!(
+            note.contains("15.00 s") && note.contains("10.00 s") && note.contains("Replace"),
+            "{note}"
+        );
+        // NTSC: the timeline's 29.97 is taken back to 30000/1001, the FCPXML's grid.
+        edit.keep.truncate(1);
+        let t = timeline(30000.0 / 1001.0, 0);
+        let frames = frame_ranges(&edit.keep, 30000, 1001, frames_ceil(60.0, 30000, 1001));
+        let n: u64 = frames.iter().map(|(a, b)| b - a).sum();
+        assert_eq!(cut_note(&edit, &t, Some(n as i64)), None);
+        assert!(cut_note(&edit, &t, Some(n as i64 + 5)).is_some());
     }
 }

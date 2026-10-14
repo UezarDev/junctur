@@ -8,6 +8,7 @@
 //! Since 5z a send hands Resolve the whole edit: the script imports Junctur's own FCPXML as a new
 //! timeline (the recording, every audio track, cut as the edit list says, [`timeline`] names it and
 //! decides what to do when the project already has it) and the captions go on that timeline.
+//! Since 5ab the answer to "it already has it" can be to update only the captions on it.
 //!
 //! A module of its own rather than in `export`: it talks to a running program, and everything it
 //! computes (frames, tracks, Text+ inputs) is in [`job`] so the script inside Resolve stays a thin
@@ -36,7 +37,8 @@ use std::path::PathBuf;
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Outcome {
     /// The open project already has a timeline called `name`: nothing was changed, the app asks
-    /// whether to make a new one or replace it, and sends again with the answer.
+    /// whether to make a new one, update only its captions or replace it, and sends again with the
+    /// answer.
     Exists {
         name: String,
     },
@@ -48,6 +50,7 @@ pub enum Outcome {
 /// there and `answer` does not say what to do with it, has the script import the edit as a
 /// timeline (Junctur's FCPXML: the recording, every audio track, cut as the edit list says), place
 /// `cues` on it as Text+ clips laid out for its shape, and for Replace only then delete the old one.
+/// With [`Answer::Update`] nothing is imported: the captions are updated on the timeline there.
 pub fn send(
     cues: &[Cue],
     edit: &EditList,
@@ -106,6 +109,7 @@ mod tests {
         assert_eq!(sent["kind"], "sent");
         assert_eq!(sent["placed"], 2);
         assert_eq!(sent["replaced"], true);
+        assert_eq!(sent["updated"], false);
         assert_eq!(sent["note"], serde_json::Value::Null);
         assert_eq!(sent["firstError"], serde_json::Value::Null);
     }

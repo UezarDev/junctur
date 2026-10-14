@@ -3,6 +3,8 @@
 //! `place` (its captions) and, for Replace, `finish` (the old timeline deleted, the new one given
 //! its name). The old timeline goes last, once the new one has its captions, so a send that fails
 //! part way never costs it; and once a timeline has been made, every error says what is in Resolve.
+//! "Update captions only" (5ab) is `check`, `open` (the timeline there made current, nothing
+//! changed) and `place`: 5g's tagged captions restyled, removed or placed, nothing else touched.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -29,7 +31,8 @@ pub trait Link {
 pub const OLD_SCRIPT: &str = "The Junctur script running in Resolve is from an older Junctur: in \
      Resolve choose Workspace > Scripts > Junctur again, then send again";
 
-/// `check` is the first request a 5z script knows: an older one calls it unknown.
+/// `check` is the first request a 5z script knows, `open` the first a 5ab one does: an older script
+/// calls them unknown.
 pub fn older(e: String) -> String {
     if e.starts_with("unknown request") {
         OLD_SCRIPT.into()
@@ -37,6 +40,10 @@ pub fn older(e: String) -> String {
         e
     }
 }
+
+/// An update with nothing to place would delete every caption of the recording on the timeline.
+pub const NO_CAPTIONS: &str = "This edit has no captions to send (no transcript, or no words \
+     kept), so there are none to update: nothing was changed in Resolve";
 
 /// The send after the script is installed: see the module's comment.
 pub fn run(
@@ -46,10 +53,14 @@ pub fn run(
     c: &Captions,
     answer: Option<Answer>,
 ) -> Result<Outcome, String> {
+    if answer == Some(Answer::Update) && cues.is_empty() {
+        return Err(NO_CAPTIONS.into());
+    }
     let names = link.request("check", vec![]).map_err(older)?;
     let wanted = timeline::name(edit);
     let (name, replace) = match timeline::decide(&reply::timeline_names(&names), &wanted, answer)? {
         timeline::Decision::Ask => return Ok(Outcome::Exists { name: wanted }),
+        timeline::Decision::Update { name } => return update(link, cues, edit, c, &name),
         timeline::Decision::Build { name, replace } => (name, replace),
     };
     let file = link.write_timeline(edit)?;
@@ -69,10 +80,7 @@ pub fn run(
     let mut sent = if cues.is_empty() {
         reply::sent(&HashMap::new(), made)
     } else {
-        let aspect = timeline.height as f64 / timeline.width.max(1) as f64;
-        let placed = layout::place(cues, edit, c, aspect);
-        let job = job::build(&placed, edit, c, &timeline);
-        let done = link.request("place", job.to_lua()).map_err(|e| {
+        let done = place(link, cues, edit, c, &timeline).map_err(|e| {
             if replace {
                 format!(
                     "Timeline \"{made}\" was made in Resolve beside \"{name}\", which is untouched, \
@@ -108,6 +116,56 @@ pub fn run(
     Ok(Outcome::Sent(sent))
 }
 
+/// Lays `cues` out for the timeline's shape and has the script place them on it (5g).
+fn place(
+    link: &mut impl Link,
+    cues: &[Cue],
+    edit: &EditList,
+    c: &Captions,
+    timeline: &reply::Timeline,
+) -> Result<HashMap<String, String>, String> {
+    let aspect = timeline.height as f64 / timeline.width.max(1) as f64;
+    let placed = layout::place(cues, edit, c, aspect);
+    let job = job::build(&placed, edit, c, timeline);
+    link.request("place", job.to_lua())
+}
+
+/// "Update captions only" (5ab) on the one timeline called `name`: made current by `open`, which
+/// changes nothing on it, then `place`, which touches only the clips tagged for this recording
+/// and the `Junctur …` tracks. Its cut is never rebuilt; when it no longer matches the edit's, the
+/// result says so (the captions follow Junctur's cut).
+fn update(
+    link: &mut impl Link,
+    cues: &[Cue],
+    edit: &EditList,
+    c: &Captions,
+    name: &str,
+) -> Result<Outcome, String> {
+    let opened = link
+        .request(
+            "open",
+            vec![("name", name.into()), ("template", job::template(c).into())],
+        )
+        .map_err(older)?;
+    let timeline = reply::timeline(&opened)?;
+    let made = timeline.name.as_str();
+    let done = place(link, cues, edit, c, &timeline).map_err(|e| {
+        format!(
+            "The captions on timeline \"{made}\" in Resolve were not updated: {e}. An update \
+             touches only Junctur's captions, so its cuts, its media and your own clips are as \
+             they were; it is the open timeline now. Send again"
+        )
+    })?;
+    let mut sent = reply::sent(&done, made);
+    sent.updated = true;
+    let cut_end = opened
+        .get("cutEnd")
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .map(|v| v.round() as i64);
+    sent.note = timeline::cut_note(edit, &timeline, cut_end);
+    Ok(Outcome::Sent(sent))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,8 +196,15 @@ mod tests {
             f.answers.insert("place", Ok(vec![("placed", "1".into())]));
             f
         }
-        fn built(mut self, name: &str) -> Self {
-            let a = [
+        fn built(self, name: &str) -> Self {
+            self.answered("build", name, None)
+        }
+        /// The timeline already there, as `open` (5ab) finds it, its cut ending at `cut_end`.
+        fn opened(self, name: &str, cut_end: &str) -> Self {
+            self.answered("open", name, Some(cut_end))
+        }
+        fn answered(mut self, kind: &'static str, name: &str, cut_end: Option<&str>) -> Self {
+            let mut a = vec![
                 ("name", name),
                 ("id", "T-9"),
                 ("fps", "24"),
@@ -150,8 +215,11 @@ mod tests {
                 ("template", "Junctur Caption"),
                 ("templateFps", "24"),
             ];
+            if let Some(e) = cut_end {
+                a.push(("cutEnd", e));
+            }
             self.answers.insert(
-                "build",
+                kind,
                 Ok(a.iter().map(|(k, v)| (*k, v.to_string())).collect()),
             );
             self
@@ -393,5 +461,74 @@ mod tests {
         .unwrap_err();
         assert!(e.contains("2 timelines"), "{e}");
         assert_eq!((f.kinds(), f.written), (vec!["check"], 0));
+    }
+
+    fn update(f: &mut Fake, cues: &[Cue]) -> Result<Outcome, String> {
+        run(f, cues, &edit(), &Captions::default(), Some(Answer::Update))
+    }
+
+    #[test]
+    fn update_places_on_the_timeline_there_and_builds_nothing() {
+        // The edit keeps 5 s: 120 frames at 24, the cut the timeline has.
+        let mut f = Fake::new(&["Main", "REC (Junctur)"]).opened("REC (Junctur)", "120");
+        let s = sent(update(&mut f, &cues()).unwrap());
+        assert_eq!(f.kinds(), ["check", "open", "place"]);
+        assert_eq!(f.written, 0);
+        assert_eq!(f.field("open", "name"), Some("rec (Junctur)"));
+        assert_eq!(f.field("place", "timeline"), Some("T-9"));
+        assert_eq!(
+            (s.placed, s.updated, s.replaced, s.timeline.as_str()),
+            (1, true, false, "REC (Junctur)")
+        );
+        assert_eq!(s.note, None);
+        // No clips on it to measure: nothing said about the cut.
+        let mut f = Fake::new(&["rec (Junctur)"]).opened("rec (Junctur)", "");
+        assert_eq!(sent(update(&mut f, &cues()).unwrap()).note, None);
+    }
+
+    #[test]
+    fn update_says_when_the_timelines_cut_is_not_the_edits() {
+        let mut f = Fake::new(&["rec (Junctur)"]).opened("rec (Junctur)", "96");
+        let s = sent(update(&mut f, &cues()).unwrap());
+        let note = s.note.unwrap();
+        assert!(
+            note.contains("5.00 s")
+                && note.contains("4.00 s")
+                && note.contains("follow Junctur's cut"),
+            "{note}"
+        );
+        assert_eq!((s.placed, f.kinds().len()), (1, 3));
+    }
+
+    #[test]
+    fn update_failures_say_what_is_in_resolve() {
+        let mut f = Fake::new(&["rec (Junctur)"]).opened("rec (Junctur)", "120");
+        f.answers.insert("place", Err("took too long".into()));
+        let e = update(&mut f, &cues()).unwrap_err();
+        assert!(
+            e.contains("\"rec (Junctur)\" in Resolve were not updated")
+                && e.contains("its cuts, its media and your own clips are as they were")
+                && e.contains("took too long"),
+            "{e}"
+        );
+        // Gone since the pop-up, or doubled: refused before anything but check.
+        let mut f = Fake::new(&["Main"]).opened("x", "0");
+        let e = update(&mut f, &cues()).unwrap_err();
+        assert!(e.contains("no longer has"), "{e}");
+        let mut f = Fake::new(&["rec (Junctur)", "rec (junctur)"]).opened("x", "0");
+        let e = update(&mut f, &cues()).unwrap_err();
+        assert!(e.contains("which to update"), "{e}");
+        assert_eq!((f.kinds(), f.written), (vec!["check"], 0));
+        // A 5z script, which knows check but not open.
+        let mut f = Fake::new(&["rec (Junctur)"]);
+        assert_eq!(update(&mut f, &cues()).unwrap_err(), OLD_SCRIPT);
+        assert_eq!(f.kinds(), ["check", "open"]);
+    }
+
+    #[test]
+    fn update_with_no_captions_asks_resolve_nothing() {
+        let mut f = Fake::new(&["rec (Junctur)"]).opened("rec (Junctur)", "120");
+        assert_eq!(update(&mut f, &[]).unwrap_err(), NO_CAPTIONS);
+        assert!(f.kinds().is_empty());
     }
 }

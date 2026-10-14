@@ -6,7 +6,8 @@
   // carries only text, timing, colour, bold, italic and underline into DaVinci Resolve (5d, 5f); the
   // font, size, position, outline and where people talking at once go (5g) reach it through "Send to
   // Resolve", Text+ clips placed by the Junctur script running in Resolve on the timeline the send makes
-  // of the edit (5z), and drive the preview.
+  // of the edit (5z), and drive the preview. When Resolve already has that timeline, `TimelineExists`
+  // asks what to do, Update captions only (5ab) among the choices.
   // Export writes one file
   // (5e): a Resolve subtitle track shows one caption at a time, so people talking at once share one
   // caption, a line each; 5b's per-speaker files left beside it are listed. The remembered voices
@@ -18,13 +19,14 @@
   // its own settings follows the user's defaults, and "Save as default" makes this recording's the
   // defaults. Each group is a `Section`; what used to be a paragraph under it is its (i) (2t), and
   // only status and results show as text.
-  import { message, save } from "@tauri-apps/plugin-dialog";
+  import { save } from "@tauri-apps/plugin-dialog";
   import * as api from "./api";
   import { captionFace, captionFont } from "./captionStyle";
   import CaptionRules from "./CaptionRules.svelte";
   import CaptionTranslation from "./CaptionTranslation.svelte";
   import InfoTip from "./InfoTip.svelte";
   import Section from "./Section.svelte";
+  import TimelineExists from "./TimelineExists.svelte";
   import { section } from "./captionSections";
 
   let {
@@ -94,11 +96,21 @@
 
   // Send to Resolve (5g, 5z): one at a time; the reply says what landed. The send makes the edit's
   // own timeline; when the project already has one of that name nothing is changed until the
-  // pop-up is answered, and Cancel (or closing it) sends nothing.
+  // pop-up is answered (Create new, Update captions only (5ab) or Replace), and Cancel (or Escape,
+  // or a press outside it) sends nothing.
   let sending = $state(false);
   let sentLines = $state<string[] | null>(null);
-  const CREATE = "Create new timeline (recommended)";
-  const REPLACE = "Replace";
+  let asking = $state<{ name: string; answer: (a: api.TimelineAnswer | null) => void } | null>(null);
+  const ask = (name: string) =>
+    new Promise<api.TimelineAnswer | null>((answer) => {
+      asking = {
+        name,
+        answer: (a) => {
+          asking = null;
+          answer(a);
+        },
+      };
+    });
   async function sendResolve() {
     if (sending) return;
     sending = true;
@@ -106,16 +118,7 @@
     try {
       let r = await api.sendToResolve();
       if (r.kind === "exists") {
-        const pick = await message(
-          `Resolve already has a timeline called "${r.name}". Create new timeline makes "${r.name} 2" (or the next free number) beside it and leaves it as it is. Replace deletes "${r.name}" and makes it again from this edit.`,
-          {
-            title: "This timeline is already in Resolve",
-            kind: "warning",
-            buttons: { yes: CREATE, no: REPLACE, cancel: "Cancel" },
-          },
-        );
-        // The plugin answers with the label pressed; anything else (Cancel, the dialog closed) sends nothing.
-        const answer = pick === CREATE ? "new" : pick === REPLACE ? "replace" : null;
+        const answer = await ask(r.name);
         if (!answer) {
           sentLines = ["Nothing was sent."];
           return;
@@ -130,7 +133,9 @@
       const n = (k: number, what: string) => `${k.toLocaleString()} ${what}`;
       const captioned = r.placed + r.restyled + r.failed > 0;
       sentLines = [
-        `Timeline "${r.timeline}" made in Resolve${r.replaced ? ", replacing the old one" : ""}.`,
+        r.updated
+          ? `Captions updated on timeline "${r.timeline}" in Resolve; its cuts were left as they are.`
+          : `Timeline "${r.timeline}" made in Resolve${r.replaced ? ", replacing the old one" : ""}.`,
         ...(r.note ? [r.note] : []),
         ...(captioned
           ? [`Captions: ${n(r.placed, "placed")}, ${n(r.restyled, "updated")}, ${n(r.removed, "removed")}.`]
@@ -199,6 +204,8 @@
     }
   }
 </script>
+
+{#if asking}<TimelineExists name={asking.name} onPick={asking.answer} />{/if}
 
 <section class="panel">
   <header>
