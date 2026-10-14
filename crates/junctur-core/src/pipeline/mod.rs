@@ -39,6 +39,11 @@ const ENVELOPE_FILE: &str = "envelope.f32";
 /// ([`BEFORE_FILE`]).
 const AGAIN_FILE: &str = "transcribe-again";
 
+/// What [`AGAIN_FILE`] holds once the re-transcription it asks for has written its transcript and
+/// the carry is still to come (5ad repair): a run that finds it carries rather than hearing the
+/// recording again. Empty while the hearing is still asked for.
+const HEARD: &[u8] = b"heard";
+
 /// The transcript a re-transcription replaces, copied when it is asked for (5aa repair): the fixes are
 /// read against it at the end, and `transcript.json` is the new one from the moment Whisper finishes,
 /// so a run that stopped between that write and the carry would otherwise carry against the new words.
@@ -64,6 +69,29 @@ pub struct SetAside {
     /// word (5ad): the start and end the user had given it. `None` for a fix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retimed: Option<[f64; 2]>,
+    /// Its track has no words in the new transcript at all (5ad repair): not heard otherwise, not
+    /// heard (or not transcribed) this time.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub silent: bool,
+    /// Not a fix: what the carry could not do, said where the user looks until they have seen it
+    /// (5ad repair: the log's line was gone by the run's end). The other fields are empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl SetAside {
+    /// A [`SetAside::note`].
+    fn note(text: &str) -> Self {
+        SetAside {
+            track: 0,
+            at: 0.0,
+            heard: String::new(),
+            text: String::new(),
+            retimed: None,
+            silent: false,
+            note: Some(text.to_string()),
+        }
+    }
 }
 
 /// The fixes re-transcriptions of `p` set aside and the user has not yet seen (5aa).
@@ -361,6 +389,7 @@ pub fn finish(
                 return Err(e);
             }
         };
+        heard_again(p, log);
         carry_fixes(p, &t, log);
         // The counts are for later modes, nothing reads them yet: a list that cannot be written
         // now is no reason to fail a finished transcription.
@@ -452,6 +481,8 @@ fn hear_again(p: &Project, opts: &PipelineOptions, log: &mut dyn FnMut(&str)) ->
     let mark = p.dir.join(AGAIN_FILE);
     if opts.retranscribe {
         if mark.is_file() {
+            // Asked for again: heard again, whatever the last ask got to.
+            crate::output::write_replacing(&mark, b"")?;
             log("transcribing again with the word list as it is now (the fixed words still on the transcript before the last ask)");
             return Ok(true);
         }
@@ -481,13 +512,27 @@ fn hear_again(p: &Project, opts: &PipelineOptions, log: &mut dyn FnMut(&str)) ->
     Ok(true)
 }
 
-/// A re-transcription asked for has written its transcript (5ad): `transcript.json` is there and is
-/// not the copy of the one it replaces (or there was none to copy).
+/// A re-transcription asked for has written its transcript (5ad): the mark says so ([`HEARD`],
+/// written by [`heard_again`] once the transcription stage ends) and the transcript is there. Told
+/// by the mark, not by the transcript differing from the copy (5ad repair: a hearing that came out
+/// the same would have been heard again on every open).
 fn heard_again_already(p: &Project) -> bool {
-    let Ok(now) = std::fs::read(transcribe::path(&p.dir)) else {
-        return false;
-    };
-    std::fs::read(p.dir.join(BEFORE_FILE)).map_or(true, |before| before != now)
+    std::fs::read(p.dir.join(AGAIN_FILE)).is_ok_and(|m| m == HEARD)
+        && transcribe::path(&p.dir).is_file()
+}
+
+/// The transcription stage of a run with [`AGAIN_FILE`] there has ended with the new transcript
+/// (5ad repair): the mark says so, so a run stopped before the carry carries on the next open
+/// instead of hearing the recording again.
+fn heard_again(p: &Project, log: &mut dyn FnMut(&str)) {
+    let mark = p.dir.join(AGAIN_FILE);
+    if mark.is_file() {
+        if let Err(e) = crate::output::write_replacing(&mark, HEARD) {
+            log(&format!(
+                "could not mark the transcription as heard again ({e})"
+            ));
+        }
+    }
 }
 
 /// A transcription that failed (5aa repair): a re-transcription asked for is forgotten when nothing of
@@ -533,13 +578,24 @@ fn carry_fixes(p: &Project, t: &Transcript, log: &mut dyn FnMut(&str)) {
         .map_err(|e| e.to_string())
         .and_then(|b| serde_json::from_slice::<Transcript>(&b).map_err(|e| e.to_string()));
     let words = t.in_order();
+    // Said where the user looks too (5ad repair), when there was anything to carry.
+    let left = |why: &str, log: &mut dyn FnMut(&str)| {
+        log(&format!(
+            "{why}: fixed words and word times are left where they were"
+        ));
+        let any = p
+            .edit()
+            .is_ok_and(|e| !e.fixes.is_empty() || !e.times.is_empty());
+        let note = format!("Correct could not move your fixed words and word times onto the new transcript ({why}); they are where they were, and some may now show on other words.");
+        if any {
+            if let Err(e) = keep_set_aside(p, vec![SetAside::note(&note)]) {
+                log(&format!("{SET_ASIDE_FILE} not written ({e})"));
+            }
+        }
+    };
     match old {
-        Err(e) => log(&format!(
-            "the transcript before was not kept ({e}): fixed words and word times are left where they were"
-        )),
-        Ok(_) if words.is_empty() => log(
-            "the new transcript has no words: fixed words and word times are left where they were",
-        ),
+        Err(e) => left(&format!("the transcript before was not kept: {e}"), log),
+        Ok(_) if words.is_empty() => left("the new transcript has no words", log),
         Ok(old) => carry_onto(p, &old.in_order(), &words, log),
     }
     for f in [AGAIN_FILE, BEFORE_FILE] {
@@ -619,32 +675,62 @@ fn carry_onto(
             (e.fixes, e.times) = was.clone();
         }
     });
+    // A track the new transcript has no words on: its fixes are set aside as not heard, not as
+    // heard otherwise (5ad repair).
+    let heard: std::collections::HashSet<usize> = words.iter().map(|&(t, _)| t).collect();
+    let why = |track: usize| {
+        if heard.contains(&track) {
+            "is heard otherwise now"
+        } else {
+            "is on a track with no words this time"
+        }
+    };
+    let mut aside: Vec<SetAside> = Vec::new();
     match amended {
-        Ok(edit::Amended::Written(_) | edit::Amended::Same(_)) if took == Took::Nothing => log(
-            "edit list: carrying the fixed words would give a list that does not read back; they are left as they were",
-        ),
+        Ok(edit::Amended::Written(_) | edit::Amended::Same(_)) if took == Took::Nothing => {
+            log("edit list: carrying the fixed words would give a list that does not read back; they are left as they were");
+            aside.push(SetAside::note("Correct could not move your fixed words and word times onto the new transcript (the edit list would not have read back); they are where they were, and some may now show on other words."));
+        }
         Ok(edit::Amended::Written(_) | edit::Amended::Same(_)) => {
             if took == Took::Carried {
                 log("edit list: spreading the fixed words would give a list that does not read back; carried without spreading");
+                aside.push(SetAside::note("Correct moved your fixed words onto the new transcript but did not give them to the other words heard the same way (the edit list would not have read back)."));
             }
             log(&carried_line(&done));
             for g in &done.fixes.gone {
                 log(&format!(
-                    "fixed word set aside: \"{}\" (heard \"{}\") at {} is heard otherwise now",
+                    "fixed word set aside: \"{}\" (heard \"{}\") at {} {}",
                     g.fix.text,
                     g.heard.join(" "),
-                    clock(g.from)
+                    clock(g.from),
+                    why(g.fix.track)
                 ));
+                aside.push(SetAside {
+                    track: g.fix.track,
+                    at: g.from,
+                    heard: g.heard.join(" "),
+                    text: g.fix.text.clone(),
+                    retimed: None,
+                    silent: !heard.contains(&g.fix.track),
+                    note: None,
+                });
             }
             for g in &done.times.gone {
                 log(&format!(
-                    "word time set aside: \"{}\" at {} is heard otherwise now",
+                    "word time set aside: \"{}\" at {} {}",
                     g.heard,
-                    clock(g.start)
+                    clock(g.start),
+                    why(g.time.track)
                 ));
-            }
-            if let Err(e) = keep_set_aside(p, &done.fixes.gone, &done.times.gone) {
-                log(&format!("{SET_ASIDE_FILE} not written ({e})"));
+                aside.push(SetAside {
+                    track: g.time.track,
+                    at: g.start,
+                    heard: g.heard.clone(),
+                    text: g.fixed.clone().unwrap_or_else(|| g.heard.clone()),
+                    retimed: Some([g.time.from, g.time.to]),
+                    silent: !heard.contains(&g.time.track),
+                    note: None,
+                });
             }
         }
         Ok(edit::Amended::Left) => {
@@ -653,29 +739,19 @@ fn carry_onto(
         Ok(edit::Amended::Missing) => {}
         Err(e) => log(&format!("edit list: fixed words not carried ({e})")),
     }
+    if let Err(e) = keep_set_aside(p, aside) {
+        log(&format!("{SET_ASIDE_FILE} not written ({e})"));
+    }
 }
 
-/// Adds `gone` and `times` to the fixes set aside for `p` ([`SET_ASIDE_FILE`]). Called under the
-/// edit list's writer lock ([`carry_fixes`]), as [`forget_fixes_set_aside`] is.
-fn keep_set_aside(p: &Project, gone: &[edit::Carried], times: &[edit::CarriedTime]) -> Result<()> {
-    if gone.is_empty() && times.is_empty() {
+/// Adds `new` to the fixes set aside for `p` ([`SET_ASIDE_FILE`]). Called under the edit list's
+/// writer lock ([`carry_fixes`]), as [`forget_fixes_set_aside`] is.
+fn keep_set_aside(p: &Project, new: Vec<SetAside>) -> Result<()> {
+    if new.is_empty() {
         return Ok(());
     }
     let mut all = fixes_set_aside(p);
-    all.extend(gone.iter().map(|g| SetAside {
-        track: g.fix.track,
-        at: g.from,
-        heard: g.heard.join(" "),
-        text: g.fix.text.clone(),
-        retimed: None,
-    }));
-    all.extend(times.iter().map(|g| SetAside {
-        track: g.time.track,
-        at: g.start,
-        heard: g.heard.clone(),
-        text: g.fixed.clone().unwrap_or_else(|| g.heard.clone()),
-        retimed: Some([g.time.from, g.time.to]),
-    }));
+    all.extend(new);
     crate::output::write_replacing(
         &p.dir.join(SET_ASIDE_FILE),
         serde_json::to_vec_pretty(&all)?,
@@ -2149,6 +2225,8 @@ keep x
                 heard: "Mel".into(),
                 text: "Mell".into(),
                 retimed: None,
+                silent: false,
+                note: None,
             }]
         );
         forget_fixes_set_aside(&p, &fixes_set_aside(&p)).unwrap();
@@ -2201,13 +2279,22 @@ keep x
             }],
             speakers: Default::default(),
             captions: Default::default(),
-            fixes: vec![edit::Fix {
-                track: 0,
-                start: 1.0,
-                nth: 0,
-                through: None,
-                text: "Vayne".into(),
-            }],
+            fixes: vec![
+                edit::Fix {
+                    track: 0,
+                    start: 1.0,
+                    nth: 0,
+                    through: None,
+                    text: "Vayne".into(),
+                },
+                edit::Fix {
+                    track: 1,
+                    start: 6.0,
+                    nth: 0,
+                    through: None,
+                    text: "Hola,".into(),
+                },
+            ],
             // "Bane" heard 1.0 to 1.3, its end moved out to 1.6; "Mel" 5.0 to 5.3, to 5.5.
             times: vec![
                 edit::Retime {
@@ -2228,7 +2315,11 @@ keep x
             windows: vec![],
         };
         std::fs::write(p.edit_path(), e.to_text()).unwrap();
-        let old = transcript_of(&[(1.0, " Bane"), (5.0, " Mel")]);
+        let mut old = transcript_of(&[(1.0, " Bane"), (5.0, " Mel")]);
+        // A second track, which the new transcript has no words on.
+        let mut other = transcript_of(&[(6.0, " hola")]).segments.remove(0);
+        other.track = 1;
+        old.segments.push(other);
         let old_bytes = serde_json::to_vec(&old).unwrap();
         std::fs::write(transcribe::path(&p.dir), &old_bytes).unwrap();
         let lines = std::cell::RefCell::new(Vec::<String>::new());
@@ -2243,12 +2334,15 @@ keep x
         // Whisper wrote the new transcript, then the app stopped before the carry.
         let new = transcript_of(&[(1.2, " Bane"), (5.0, " and")]);
         std::fs::write(transcribe::path(&p.dir), serde_json::to_vec(&new).unwrap()).unwrap();
-        // Correct asked again: the copy stays the transcript the fixes are on.
+        heard_again(&p, &mut log);
+        // Opened again: that transcription had finished, so it is carried, not heard again.
+        assert!(!hear_again(&p, &plain, &mut log).unwrap());
+        // Correct asked again instead: the copy stays the transcript the fixes are on, and the
+        // recording is heard again (also on the next open, until that hearing ends).
         assert!(hear_again(&p, &asked, &mut log).unwrap());
         assert_eq!(std::fs::read(&before).unwrap(), old_bytes);
-        // Opened again instead: that transcription had finished, so it is carried, not heard
-        // again.
-        assert!(!hear_again(&p, &plain, &mut log).unwrap());
+        assert!(hear_again(&p, &plain, &mut log).unwrap());
+        heard_again(&p, &mut log);
         carry_fixes(&p, &new, &mut log);
         assert!(!mark.exists() && !before.exists());
         let now = p.edit().unwrap();
@@ -2267,20 +2361,36 @@ keep x
                 to: 1.6,
             }]
         );
-        // "Mel" is heard as "and" now: its time is set aside and listed, with what it was.
+        // "Mel" is heard as "and" now: its time is set aside and listed, with what it was. The fix
+        // on track 1, which has no words this time, is set aside as such, not as heard otherwise.
         let aside = fixes_set_aside(&p);
         assert_eq!(
             aside,
-            [SetAside {
-                track: 0,
-                at: 5.0,
-                heard: "Mel".into(),
-                text: "Mel".into(),
-                retimed: Some([5.0, 5.5]),
-            }]
+            [
+                SetAside {
+                    track: 1,
+                    at: 6.0,
+                    heard: "hola".into(),
+                    text: "Hola,".into(),
+                    retimed: None,
+                    silent: true,
+                    note: None,
+                },
+                SetAside {
+                    track: 0,
+                    at: 5.0,
+                    heard: "Mel".into(),
+                    text: "Mel".into(),
+                    retimed: Some([5.0, 5.5]),
+                    silent: false,
+                    note: None,
+                }
+            ]
         );
         assert!(lines.borrow().iter().any(|l| l
-            == "fixed words: 1 kept on their words, 0 no longer needed, 0 set aside; 0 more place(s) fixed; word times: 1 kept on their words, 0 no longer needed, 1 set aside"),
+            == "fixed word set aside: \"Hola,\" (heard \"hola\") at 0:00:06 is on a track with no words this time"));
+        assert!(lines.borrow().iter().any(|l| l
+            == "fixed words: 1 kept on their words, 0 no longer needed, 1 set aside; 0 more place(s) fixed; word times: 1 kept on their words, 0 no longer needed, 1 set aside"),
             "{:?}", lines.borrow());
         // A run adds one more after the panel listed the first: "seen" forgets only that first.
         let more = SetAside {
@@ -2289,6 +2399,8 @@ keep x
             heard: "hom".into(),
             text: "home".into(),
             retimed: None,
+            silent: true,
+            note: None,
         };
         std::fs::write(
             p.dir.join(SET_ASIDE_FILE),
@@ -2310,7 +2422,26 @@ keep x
         assert!(lines
             .borrow()
             .iter()
-            .any(|l| l.starts_with("the transcript before was not kept (")));
+            .any(|l| l.starts_with("the transcript before was not kept: ")));
+        // Said above the transcript too, not only in a progress line the run's end replaces.
+        let aside = fixes_set_aside(&p);
+        assert_eq!(aside.len(), 1);
+        assert!(aside[0]
+            .note
+            .as_deref()
+            .is_some_and(|n| n.starts_with("Correct could not move your fixed words")));
+        forget_fixes_set_aside(&p, &aside).unwrap();
+        // A hearing that came out exactly as the transcript it replaces is still finished: carried
+        // on the next open, not heard again (5ad repair: told by the mark, not by the bytes).
+        assert!(hear_again(&p, &asked, &mut log).unwrap());
+        heard_again(&p, &mut log);
+        assert_eq!(
+            std::fs::read(&before).unwrap(),
+            std::fs::read(transcribe::path(&p.dir)).unwrap()
+        );
+        assert!(!hear_again(&p, &plain, &mut log).unwrap());
+        carry_fixes(&p, &new, &mut log);
+        assert!(!mark.exists());
         // A mark that cannot be written leaves no copy behind.
         std::fs::create_dir(&mark).unwrap();
         assert!(hear_again(&p, &asked, &mut log).is_err());
