@@ -4,6 +4,7 @@
 //! thread: an mpv command blocks until mpv takes it, and a dragged seek bar sends many.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use junctur_core::edit::Captions;
@@ -167,11 +168,24 @@ pub struct Opened {
     pub outdated: Vec<String>,
 }
 
+/// Whether the page has had the command line's file (2q).
+static STARTUP_TAKEN: AtomicBool = AtomicBool::new(false);
+
 /// A file named on the command line (`junctur-app <file>`, or "Open with"), for the page to open
-/// once it is ready.
+/// once it is ready. Only the first page start gets it (2q): before, a reloaded page (F5) opened it
+/// again from its start, whatever recording was open by then.
 #[tauri::command]
 pub fn startup_file() -> Option<String> {
-    std::env::args().nth(1)
+    once(&STARTUP_TAKEN, std::env::args().nth(1))
+}
+
+/// `arg` the first time, nothing after.
+fn once(taken: &AtomicBool, arg: Option<String>) -> Option<String> {
+    if taken.swap(true, Ordering::SeqCst) {
+        None
+    } else {
+        arg
+    }
 }
 
 #[tauri::command]
@@ -252,20 +266,51 @@ pub async fn open_file(
             core.transcribed(&absolute, now.words_through());
         }
     }
-    let (project, project_error) = match status {
-        Ok(s) => (Some(s), None),
-        Err(e) => (None, Some(e)),
+    Ok(Opened::new(file, status, analysis, outdated))
+}
+
+impl Opened {
+    fn new(
+        file: &Path,
+        status: Result<ProjectStatus, String>,
+        analysis: Option<Progress>,
+        outdated: Vec<String>,
+    ) -> Opened {
+        let (project, project_error) = match status {
+            Ok(s) => (Some(s), None),
+            Err(e) => (None, Some(e)),
+        };
+        Opened {
+            file: std::path::absolute(file)
+                .unwrap_or_else(|_| file.to_path_buf())
+                .display()
+                .to_string(),
+            project,
+            project_error,
+            analysis,
+            outdated,
+        }
+    }
+}
+
+/// The recording the player has open, as [`open_file`] returned it, without opening it again: for a
+/// page that started over while the app went on (2q: F5 reloaded the page, which then showed the
+/// recording playing with an empty Transcript and Properties). Nothing starts here: a run its
+/// opening needed was started then and goes on, so its progress is read as it is now.
+#[tauri::command]
+pub async fn current_recording(app: State<'_, App>) -> Result<Option<Opened>, String> {
+    let Some(path) = app.core()?.file() else {
+        return Ok(None);
     };
-    Ok(Opened {
-        file: std::path::absolute(file)
-            .unwrap_or_else(|_| file.to_path_buf())
-            .display()
-            .to_string(),
-        project,
-        project_error,
-        analysis,
-        outdated,
-    })
+    let file = Path::new(&path);
+    let status = project::status(file, None);
+    let analysis = app.analysis.progress(file);
+    let outdated = if status.is_ok() && !app.analysis.busy(file) {
+        analysis::outdated(file)
+    } else {
+        Vec::new()
+    };
+    Ok(Some(Opened::new(file, status, analysis, outdated)))
 }
 
 /// The recordings opened before, newest first, for the start window.
@@ -807,4 +852,20 @@ pub fn snap_layouts(window: tauri::WebviewWindow) -> Result<(), String> {
 #[tauri::command]
 pub fn ui_log(message: String) {
     crate::testmode::ui_log(message);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_file_is_given_once() {
+        let taken = AtomicBool::new(false);
+        assert_eq!(once(&taken, Some("a.mp4".into())).as_deref(), Some("a.mp4"));
+        // A reloaded page asks again: the file is not opened a second time.
+        assert_eq!(once(&taken, Some("a.mp4".into())), None);
+        let none = AtomicBool::new(false);
+        assert_eq!(once(&none, None), None);
+        assert_eq!(once(&none, Some("late.mp4".into())), None);
+    }
 }
