@@ -97,8 +97,25 @@ pub struct Sent {
     /// Text+ inputs the template did not take (a user's own title may lack some): those clips are
     /// placed with the template's own value for them.
     pub unstyled: Vec<String>,
-    /// The timeline they went on.
+    /// The timeline they went on: the one the send made (5z).
     pub timeline: String,
+    /// Whether it replaced a timeline of that name (5z).
+    pub replaced: bool,
+    /// What went wrong making the timeline without stopping the send: an old timeline Resolve
+    /// would not delete or a name it would not take.
+    pub note: Option<String>,
+}
+
+/// The open project's timeline names, as the `check` request lists them (5z): `timelines` = n,
+/// then `timeline1` … `timelineN`.
+pub fn timeline_names(a: &HashMap<String, String>) -> Vec<String> {
+    let n: usize = a
+        .get("timelines")
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0);
+    (1..=n)
+        .filter_map(|k| a.get(&format!("timeline{k}")).cloned())
+        .collect()
 }
 
 /// The script's own error, if it answered with one.
@@ -148,6 +165,8 @@ pub fn sent(a: &HashMap<String, String>, timeline: &str) -> Sent {
             })
             .unwrap_or_default(),
         timeline: timeline.to_string(),
+        replaced: false,
+        note: None,
     }
 }
 
@@ -223,5 +242,19 @@ mod tests {
         assert!(timeline(&bad).is_err());
         let e: HashMap<String, String> = [("error".to_string(), "No timeline".to_string())].into();
         assert_eq!(error(&e).as_deref(), Some("No timeline"));
+    }
+
+    #[test]
+    fn the_projects_timelines_as_check_lists_them() {
+        let text = format!(
+            "JuncturReply = \"8:{}\"",
+            hex("timelines\t2\ntimeline1\tMain\ntimeline2\trec (Junctur)")
+        );
+        let a = answer(&text, "8").unwrap();
+        assert_eq!(timeline_names(&a), ["Main", "rec (Junctur)"]);
+        assert!(timeline_names(&HashMap::new()).is_empty());
+        // What a send made, beside the captions' counts: none unless the build says.
+        let s = sent(&a, "rec (Junctur)");
+        assert_eq!((s.replaced, s.note), (false, None));
     }
 }

@@ -29,6 +29,7 @@ use junctur_core::export::layout::{self, Placed};
 use junctur_core::export::srt;
 use junctur_core::export::{self, CaptionFiles};
 use junctur_core::pipeline::{self, Found};
+use junctur_core::resolve;
 use junctur_core::transcribe;
 use junctur_core::translate::Translations;
 use serde::Serialize;
@@ -43,6 +44,9 @@ use crate::state::{Change, PlayerState, OBSERVED};
 use crate::trace::Trace;
 use crate::translation;
 use crate::voices;
+
+/// The list in play, its caption settings, its words if transcribed, and the frame rate.
+type EditSource = (Arc<EditList>, Captions, Option<Arc<Words>>, Fps);
 
 pub const STATE_EVENT: &str = "player-state";
 pub const EDIT_EVENT: &str = "edit-state";
@@ -772,31 +776,42 @@ impl Core {
         Ok(layout::place(&cues, &list, &captions, aspect))
     }
 
-    /// Sends the captions of the list in play into DaVinci Resolve as Text+ clips (5g), laid out
-    /// for the Resolve timeline's shape, to the Junctur script running there. Blocks until Resolve
-    /// answers (minutes for a long recording), so the command runs it off the async runtime.
-    /// Refused, like the export, while translated captions are not all translated (5k).
-    pub fn send_to_resolve(&self) -> Result<junctur_core::resolve::Sent, String> {
-        let (list, captions, words, fps) = self.caption_source()?;
+    /// Sends the list in play into DaVinci Resolve (5z): the edit as a timeline of its own (the
+    /// recording, every audio track, cut as the list says) with its captions on it as Text+ clips
+    /// (5g), laid out for that timeline's shape, through the Junctur script running there. When the
+    /// project already has the timeline and `answer` does not say what to do, nothing is changed
+    /// and the outcome says so. Blocks until Resolve answers (minutes for a long recording), so the
+    /// command runs it off the async runtime. Refused, like the export, while translated captions
+    /// are not all translated (5k); a recording with no transcript sends its timeline alone.
+    pub fn send_to_resolve(
+        &self,
+        answer: Option<resolve::Answer>,
+    ) -> Result<resolve::Outcome, String> {
+        let (list, captions, words, fps) = self.edit_source()?;
         captions.check()?;
-        let tracked: Vec<_> = words
-            .tracks
-            .iter()
-            .copied()
-            .zip(words.list.iter())
-            .collect();
-        let tr = self.translations();
-        export::untranslated(&list, &captions, &tracked, fps.num, fps.den, &tr)
-            .map_err(|e| e.to_string())?;
-        let cues = srt::cues(
-            &list,
-            &captions,
-            tracked.iter().copied(),
-            fps.num,
-            fps.den,
-            Some(&*tr),
-        );
-        junctur_core::resolve::send(&cues, &list, &captions)
+        let cues = match words {
+            Some(words) => {
+                let tracked: Vec<_> = words
+                    .tracks
+                    .iter()
+                    .copied()
+                    .zip(words.list.iter())
+                    .collect();
+                let tr = self.translations();
+                export::untranslated(&list, &captions, &tracked, fps.num, fps.den, &tr)
+                    .map_err(|e| e.to_string())?;
+                srt::cues(
+                    &list,
+                    &captions,
+                    tracked.iter().copied(),
+                    fps.num,
+                    fps.den,
+                    Some(&*tr),
+                )
+            }
+            None => Vec::new(),
+        };
+        resolve::send(&cues, &list, &captions, answer)
     }
 
     /// The list in play, its caption settings and its cues as the SRT export cuts them, with what
@@ -879,11 +894,17 @@ impl Core {
     /// defaults it shows, 2i, so export and preview agree with the panel), the words the editor
     /// holds (an `Arc`, not a copy; each lock is held only to take its part) and the frame rate.
     fn caption_source(&self) -> Result<(Arc<EditList>, Captions, Arc<Words>, Fps), String> {
+        let (list, captions, words, fps) = self.edit_source()?;
+        let words =
+            words.ok_or("captions need a transcript: run the pipeline on this recording")?;
+        Ok((list, captions, words, fps))
+    }
+
+    /// The list in play, its caption settings, its words when there is a transcript, and the
+    /// frame rate: what a send to Resolve needs (5z), which goes without captions too.
+    fn edit_source(&self) -> Result<EditSource, String> {
         self.prepare();
-        let words = lock(&self.editor)
-            .words
-            .clone()
-            .ok_or("captions need a transcript: run the pipeline on this recording")?;
+        let words = lock(&self.editor).words.clone();
         let (list, fps) = {
             let c = lock(&self.ctl);
             let list = c.edit.list.clone().ok_or("no edit list yet")?;

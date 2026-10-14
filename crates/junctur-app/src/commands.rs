@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use junctur_core::edit::Captions;
 use junctur_core::export::layout::Placed;
-use junctur_core::resolve::Sent;
+use junctur_core::resolve::{Answer, Outcome};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -500,13 +500,18 @@ pub async fn caption_cues(app: State<'_, App>, aspect: f64) -> Result<Vec<Placed
     app.core()?.caption_cues(aspect)
 }
 
-/// Sends the captions into DaVinci Resolve as Text+ clips (5g), through the Junctur script running
-/// there; installs or refreshes that script first. Off the async runtime: Resolve can take minutes
-/// over a long recording.
+/// Sends the edit into DaVinci Resolve as a timeline of its own with the captions on it as Text+
+/// clips (5z, 5g), through the Junctur script running there; installs or refreshes that script
+/// first. `answer` ("new" or "replace") is the user's word on a timeline of that name already
+/// there; without it such a send changes nothing and answers `exists` for the page to ask. Off the
+/// async runtime: Resolve can take minutes over a long recording.
 #[tauri::command]
-pub async fn send_to_resolve(app: State<'_, App>) -> Result<Sent, String> {
+pub async fn send_to_resolve(
+    app: State<'_, App>,
+    answer: Option<Answer>,
+) -> Result<Outcome, String> {
     let core = app.core()?;
-    tauri::async_runtime::spawn_blocking(move || core.send_to_resolve())
+    tauri::async_runtime::spawn_blocking(move || core.send_to_resolve(answer))
         .await
         .map_err(|e| e.to_string())?
 }

@@ -186,7 +186,12 @@ export interface Sent {
   firstError: string | null;
   /** Text+ inputs the template did not take (a user's own title may lack some). */
   unstyled: string[];
+  /** The timeline the send made (5z). */
   timeline: string;
+  /** Whether it replaced one of that name. */
+  replaced: boolean;
+  /** What went wrong making it without stopping the send (an old timeline not deleted). */
+  note: string | null;
 }
 
 /** A Whisper model the Settings dialog offers (src/settings.rs). */
@@ -403,8 +408,16 @@ export const exportCaptions = (path: string) => invoke<Exported>("export_caption
 /** The captions as the export cuts them, for the preview over the picture (5d), placed on a
  * picture `aspect` (height over width) in shape (5g). */
 export const captionCues = (aspect: number) => invoke<Cue[]>("caption_cues", { aspect });
-/** Sends the captions into DaVinci Resolve as Text+ clips through the Junctur script there (5g). */
-export const sendToResolve = () => invoke<Sent>("send_to_resolve");
+/** What to do when Resolve already has the timeline a send makes (5z): make another beside it, or
+ * replace it. */
+export type TimelineAnswer = "new" | "replace";
+/** What a send came to (junctur-core resolve/mod.rs): sent, or held back because Resolve already
+ * has a timeline called `name` (nothing changed; send again with an answer). */
+export type SendOutcome = { kind: "exists"; name: string } | ({ kind: "sent" } & Sent);
+/** Sends the edit into DaVinci Resolve as a timeline of its own, captions on it as Text+ clips,
+ * through the Junctur script there (5z, 5g). */
+export const sendToResolve = (answer: TimelineAnswer | null = null) =>
+  invoke<SendOutcome>("send_to_resolve", { answer });
 /** A caption translation run in the background (5k, src/translation.rs). */
 export interface TranslationRun {
   /** The recording, as opened. */

@@ -49,38 +49,53 @@ local function world(opts)
         return it
     end
 
-    local tracks = w.tracks
-    local timeline = {}
-    w.timeline = timeline
-    function timeline:GetTrackCount() return #tracks end
-    function timeline:GetTrackName(_, i) return tracks[i].name end
-    function timeline:AddTrack()
-        if opts.no_tracks then return false end
-        tracks[#tracks + 1] = { name = "", items = {} }
-        return true
+    -- A timeline with its own tracks; `w.tracks` stays the first one's ("Main", the one open).
+    local function Timeline(name, id, frames)
+        local tracks = { { name = "Video 1", items = {} } }
+        local timeline = { name = name, id = id, tracks = tracks, frames = frames }
+        function timeline:GetTrackCount() return #tracks end
+        function timeline:GetTrackName(_, i) return tracks[i].name end
+        function timeline:AddTrack()
+            if opts.no_tracks then return false end
+            tracks[#tracks + 1] = { name = "", items = {} }
+            return true
+        end
+        function timeline:SetTrackName(_, i, n) tracks[i].name = n return true end
+        function timeline:GetItemListInTrack(_, i) return tracks[i].items end
+        function timeline:DeleteClips(list)
+            if opts.no_delete then return false end
+            for _, d in ipairs(list) do for _, t in ipairs(tracks) do drop(t.items, d) end end
+            return true
+        end
+        function timeline:GetIsTrackLocked(_, i) return tracks[i].locked == true end
+        function timeline:SetTrackLock(_, i, v) tracks[i].locked = v return true end
+        function timeline:GetName() return self.name end
+        function timeline:SetName(n)
+            if opts.no_rename then return false end
+            self.name = n
+            return true
+        end
+        function timeline:GetUniqueId() return (self == w.main and w.timeline_id) or self.id end
+        function timeline:GetSetting(k)
+            return ({ timelineFrameRate = "24", timelineResolutionWidth = "1920",
+                timelineResolutionHeight = "1080" })[k]
+        end
+        function timeline:GetStartFrame() return self.frames and 0 or 86400 end
+        function timeline:GetEndFrame() return self.frames or 90000 end
+        return timeline
     end
-    function timeline:SetTrackName(_, i, n) tracks[i].name = n return true end
-    function timeline:GetItemListInTrack(_, i) return tracks[i].items end
-    function timeline:DeleteClips(list)
-        if opts.no_delete then return false end
-        for _, d in ipairs(list) do for _, t in ipairs(tracks) do drop(t.items, d) end end
-        return true
-    end
-    function timeline:GetIsTrackLocked(_, i) return tracks[i].locked == true end
-    function timeline:SetTrackLock(_, i, v) tracks[i].locked = v return true end
-    function timeline:GetName() return "Main" end
-    function timeline:GetUniqueId() return w.timeline_id or "T-1" end
-    function timeline:GetSetting(k)
-        return ({ timelineFrameRate = "24", timelineResolutionWidth = "1920",
-            timelineResolutionHeight = "1080" })[k]
-    end
-    function timeline:GetStartFrame() return 86400 end
-    function timeline:GetEndFrame() return 90000 end
+    w.main = Timeline("Main", "T-1")
+    w.timeline = w.main
+    w.tracks = w.main.tracks
+    w.timelines = { w.main }
+    w.current = w.main
+    local function tracks_now() return w.current.tracks end
 
-    local function Clip(name, lacks)
-        local c = { name = name, lacks = lacks }
+    local function Clip(name, lacks, path)
+        local c = { name = name, lacks = lacks, path = path }
         function c:GetClipProperty(k)
-            if k == "Clip Name" then return self.name elseif k == "FPS" then return "24" end
+            if k == "Clip Name" then return self.name elseif k == "FPS" then return "24"
+            elseif k == "File Path" then return self.path or "" end
         end
         function c:SetClipProperty(_, v) self.name = v return true end
         return c
@@ -141,6 +156,7 @@ local function world(opts)
     function pool:AppendToTimeline(infos)
         w.appends = w.appends + 1
         local out = {}
+        local tracks = tracks_now()
         for _, info in ipairs(infos) do
             assert(info.recordFrame == math.floor(info.recordFrame), "a non-integer frame")
             assert(not tracks[info.trackIndex].locked, "appended to a locked track")
@@ -157,13 +173,49 @@ local function world(opts)
         if opts.short and #infos > 1 then return {} end
         return out
     end
+    -- 5z: a timeline made from a file. Importing the source clips puts the recording in the
+    -- current folder; linking finds it only in the folders handed over (or, opts.link_fails, not
+    -- at all).
+    w.made = {}
+    function pool:ImportTimelineFromFile(file, o)
+        w.made[#w.made + 1] = { file = file, opts = o }
+        if opts.no_import then return nil end
+        if o.importSourceClips == false then
+            local found = false
+            for _, f in ipairs(o.sourceClipsFolders or {}) do
+                for _, c in ipairs(f.clips) do
+                    if c.path and c.path:lower():gsub("\\", "/") == w.source:lower():gsub("\\", "/") then
+                        found = true
+                    end
+                end
+            end
+            if opts.link_fails or not found then return nil end
+        else
+            table.insert(self.current.clips, Clip("rec.mp4", nil, w.source))
+        end
+        for _, t in ipairs(w.timelines) do
+            assert(t.name ~= o.timelineName, "imported under a taken name")
+        end
+        local t = Timeline(o.timelineName, "T-" .. (#w.timelines + 1), 2400)
+        w.timelines[#w.timelines + 1] = t
+        return t
+    end
+    function pool:DeleteTimelines(list)
+        if opts.no_delete_timelines then return false end
+        for _, t in ipairs(list) do drop(w.timelines, t) end
+        return true
+    end
+    w.source = [[C:\Videos\rec.mp4]]
     local project = {}
     w.project = project
-    function project:GetCurrentTimeline() return timeline end
+    function project:GetCurrentTimeline() return w.current end
+    function project:SetCurrentTimeline(t) w.current = t return true end
+    function project:GetTimelineCount() return #w.timelines end
+    function project:GetTimelineByIndex(i) return w.timelines[i] end
     function project:GetMediaPool() return pool end
     local resolve = {}
     function resolve:GetProjectManager()
-        return { GetCurrentProject = function() return project end }
+        return { GetCurrentProject = function() if not w.no_project then return project end end }
     end
 
     local chunk = assert(loadfile(SCRIPT))
@@ -188,20 +240,112 @@ local function request(clips, extra)
     return r
 end
 
--- info: the bundled bin imported once, its Text+ kept in a Junctur bin, the import's folder gone,
--- the user's own AutoSubs bin untouched.
+-- A build request (5z) as Junctur sends it.
+local function build(extra)
+    local r = { file = [[C:\J\timeline.fcpxml]], name = "rec (Junctur)", replace = false,
+        source = [[c:/videos/REC.mp4]], captions = true, template = "" }
+    for k, v in pairs(extra or {}) do r[k] = v end
+    return r
+end
+local function names(w)
+    local out = {}
+    for _, t in ipairs(w.timelines) do out[#out + 1] = t.name end
+    return table.concat(out, ", ")
+end
+
+-- 5z check: the project's timeline names; no project is an error.
 local w = world()
-local info = w.m.handlers.info({ template = "" })
+local c = w.m.handlers.check({})
+check(c.timelines == 1 and c.timeline1 == "Main", "check lists the timelines")
+w.no_project = true
+check(w.m.handlers.check({}).error ~= nil, "check without a project")
+check(w.m.handlers.build(build()).error ~= nil, "build without a project")
+w.no_project = nil
+
+-- 5z build: the timeline made from the file under the name, the current one now; the recording
+-- imported by Resolve the first time. The template: the bundled bin imported once, its Text+ kept
+-- in a Junctur bin, the import's folder gone, the user's own AutoSubs bin untouched.
+local info = w.m.handlers.build(build())
 check(info.error == nil, tostring(info.error))
-check(info.template == "Junctur Caption" and info.fps == "24" and info.start == 86400, "info")
-check(info.id == "T-1", "timeline id")
+check(info.name == "rec (Junctur)" and info.id == "T-2" and w.current.name == "rec (Junctur)", "made, current")
+check(info.template == "Junctur Caption" and info.fps == "24" and info.start == 0 and info["end"] == 2400, "info")
+check(info.replaced == false and info.note == "", "nothing replaced")
+check(w.made[1].file == [[C:\J\timeline.fcpxml]] and w.made[1].opts.timelineName == "rec (Junctur)", "the file")
+check(w.made[1].opts.importSourceClips == true, "the recording imported the first time")
+check(names(w) == "Main, rec (Junctur)" and w.main.name == "Main", "Main untouched")
 check(#w.root.subs == 2 and w.root.subs[1] == w.theirs and #w.theirs.clips == 2, "their bin untouched")
 check(w.root.subs[2].name == "Junctur" and #w.root.subs[2].clips == 1, "Junctur bin")
-w.m.handlers.info({ template = "" })
-check(w.imports == 1, "imported once")
-check(w.m.handlers.info({ template = "Nope" }).error ~= nil, "a missing template is an error")
-check(w.m.handlers.info({ template = "My Title" }).template == "My Title", "the user's own template")
+check(w.imports == 1, "template imported")
+c = w.m.handlers.check({})
+check(c.timelines == 2 and c.timeline2 == "rec (Junctur)", "check sees it")
 
+-- The name taken and not replacing (another send took it meanwhile): refused, nothing made.
+local r = w.m.handlers.build(build({ name = " REC (junctur) " }))
+check(r.error ~= nil and #w.made == 1, "a taken name is refused")
+
+-- Create new: another timeline beside it; the recording already in the pool (its path written
+-- otherwise) is linked to, not imported again; the template not imported again.
+info = w.m.handlers.build(build({ name = "rec (Junctur) 2" }))
+check(info.error == nil and info.name == "rec (Junctur) 2", tostring(info.error))
+check(w.made[2].opts.importSourceClips == false and w.made[2].opts.sourceClipsFolders[1] == w.root,
+    "the recording linked to")
+check(#w.root.clips == 1 and w.imports == 1, "nothing imported twice")
+check(names(w) == "Main, rec (Junctur), rec (Junctur) 2", "beside it")
+
+-- Linking refused: Resolve imports the recording itself.
+w = world({ link_fails = true })
+w.m.handlers.build(build())
+info = w.m.handlers.build(build({ name = "again" }))
+check(info.error == nil and #w.made == 3 and w.made[3].opts.importSourceClips == true, "link failed, imported")
+
+-- Replace, the old one open: made under a free name, switched to, the old deleted, renamed.
+w = world()
+w.m.handlers.build(build())
+local old = w.current
+w.m.handlers.build(build({ name = "rec (Junctur) (new)" }))
+w.current = old
+info = w.m.handlers.build(build({ replace = true }))
+check(info.error == nil and info.replaced == true and info.note == "", tostring(info.error))
+check(w.made[3].opts.timelineName == "rec (Junctur) (new 2)", "made under a free name first")
+check(info.name == "rec (Junctur)" and w.current ~= old and w.current.name == "rec (Junctur)", "renamed, current")
+check(names(w) == "Main, rec (Junctur) (new), rec (Junctur)", "the old one gone: " .. names(w))
+
+-- Replace with the delete refused: both kept, the new one under its own name, the send says so.
+w = world({ no_delete_timelines = true })
+w.m.handlers.build(build())
+info = w.m.handlers.build(build({ replace = true }))
+check(info.error == nil and info.replaced == false and info.name == "rec (Junctur) (new)", "delete refused")
+check(info.note:find("did not delete") ~= nil and names(w) == "Main, rec (Junctur), rec (Junctur) (new)", info.note)
+
+-- Replace with the rename refused: the old one gone, the new one says its name.
+w = world({ no_rename = true })
+w.m.handlers.build(build())
+info = w.m.handlers.build(build({ replace = true }))
+check(info.replaced == true and info.note:find("did not rename") ~= nil, "rename refused")
+
+-- The import refused: an error, the old timeline kept and still open; no template looked for
+-- when there are no captions.
+w = world({ no_import = true })
+r = w.m.handlers.build(build({ captions = false }))
+check(r.error ~= nil and w.current == w.main and names(w) == "Main" and w.imports == 0, "import refused")
+w = world()
+info = w.m.handlers.build(build({ captions = false }))
+check(info.template == "" and w.imports == 0, "no captions, no template")
+
+-- A missing named template stops the build before anything is made; the user's own is used.
+w = world()
+check(w.m.handlers.build(build({ template = "Nope" })).error ~= nil and #w.made == 0, "a missing template")
+check(w.m.handlers.build(build({ template = "My Title" })).template == "My Title", "the user's own template")
+
+-- The captions land on the made timeline, not on the one open before.
+w = world()
+info = w.m.handlers.build(build())
+r = w.m.handlers.place(request({ clip(1, 0, "hola") }, { timeline = info.id }))
+check(r.placed == 1 and #w.current.tracks == 3 and #w.main.tracks == 1, "captions on the made timeline")
+check(w.current.tracks[2].items[1].start == 0, "at its frames")
+
+-- 5g's place, on the timeline open.
+w = world()
 local tracks = w.tracks
 local r = w.m.handlers.place(request({ clip(1, 86400, "hola\ntodos"), clip(2, 86400, "qué tal") }))
 check(r.placed == 2 and r.restyled == 0 and r.removed == 0 and r.failed == 0, "first send")
@@ -286,8 +430,8 @@ check(r.removed == 0 and r.firstError:find("delete") ~= nil, "failed delete: " .
 
 -- Folders without ids: the import is not trusted, nothing moved or deleted.
 w = world({ no_ids = true })
-info = w.m.handlers.info({ template = "" })
-check(info.error ~= nil and w.imports == 0, "no ids, no import")
+info = w.m.handlers.build(build())
+check(info.error ~= nil and w.imports == 0 and #w.made == 0, "no ids, no import, no timeline")
 check(#w.root.subs == 1 and #w.theirs.clips == 2, "their bin untouched without ids")
 
 print("ALL OK")
