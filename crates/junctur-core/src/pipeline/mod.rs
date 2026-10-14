@@ -26,6 +26,7 @@ use crate::transcribe::{self, Languages, ModelPref, Source, TranscribeOptions, T
 use crate::voices::{Voice, Voices};
 use crate::{cache, hidden, Error, Result};
 
+const EDIT_FILE: &str = "edit.junctur";
 const ENVELOPE_FILE: &str = "envelope.f32";
 
 /// There while a re-transcription asked for (the Correct button) has not finished: a run resumed
@@ -159,7 +160,7 @@ impl Project {
     }
 
     pub fn edit_path(&self) -> PathBuf {
-        self.dir.join("edit.junctur")
+        self.dir.join(EDIT_FILE)
     }
     fn speech_path(&self) -> PathBuf {
         self.dir.join("speech.json")
@@ -891,17 +892,15 @@ fn speakers_stage(
 
 /// Remembers `name`'s voice from `stretches` of this recording (source seconds; one word will do)
 /// into `voices`, pins them to `name` ([`Found::pin`]) and labels the speakers with it. Nothing is
-/// written: the caller saves the voices, then the speakers ([`save_speakers`]), so new labels never
-/// stand on unsaved voices. Returns the speakers and the seconds of speech this added to the voice.
+/// written ([`enroll_and_save`] writes both). Returns the speakers and the seconds of speech this
+/// added to the voice.
 pub fn enroll(
     p: &Project,
     voices: &mut Voices,
     name: &str,
     stretches: &[(f64, f64)],
 ) -> Result<(Found, f64)> {
-    let mut found = p
-        .speakers()
-        .ok_or_else(|| Error::Edit("run `junctur analyze` on this file first".into()))?;
+    let mut found = p.speakers().ok_or_else(not_analysed)?;
     let (mut sample, mut seconds) = speakers::voice_sample(&found, &p.dir, stretches)?;
     if sample.is_empty() {
         let track = found.heard.as_ref().map_or(0, |h| h.track);
@@ -912,10 +911,24 @@ pub fn enroll(
     changed.enroll(name, &refs, seconds)?;
     let named = changed.get(name).map_or(name, |v| v.name.as_str());
     found.pin(named, stretches);
-    let usable: Vec<Voice> = changed.usable().into_iter().cloned().collect();
-    let again = speakers::relabel(&found, &p.dir, &usable)?;
+    let again = speakers::relabel(&found, &p.dir, &changed.usable_owned())?;
     *voices = changed;
     Ok((again, seconds))
+}
+
+/// [`enroll`], then saves the voices to `voices_path`, then the speakers: new labels never stand on
+/// voices that were not saved.
+pub fn enroll_and_save(
+    p: &Project,
+    voices: &mut Voices,
+    voices_path: &Path,
+    name: &str,
+    stretches: &[(f64, f64)],
+) -> Result<(Found, f64)> {
+    let (found, added) = enroll(p, voices, name, stretches)?;
+    voices.save(voices_path)?;
+    save_speakers(p, &found)?;
+    Ok((found, added))
 }
 
 /// Hears the project's speakers again from the audio ("Analyse speakers again"), the windows
@@ -923,8 +936,7 @@ pub fn enroll(
 /// stages' results are reused, never rerun (they need nothing new: `--force` would redo Whisper
 /// for minutes). Saves `speakers.json`; the edit list is the caller's ([`respeak`]).
 pub fn rehear(p: &Project, voices: &[Voice], log: &mut dyn FnMut(&str)) -> Result<Found> {
-    let missing = || Error::Edit("run `junctur analyze` on this file first".into());
-    let speech = p.speech().ok_or_else(missing)?;
+    let speech = p.speech().ok_or_else(not_analysed)?;
     let report = tracks::analyze(
         &p.file,
         &tracks::AnalyzeOptions {
@@ -945,9 +957,7 @@ pub fn rehear(p: &Project, voices: &[Voice], log: &mut dyn FnMut(&str)) -> Resul
 /// The project's speakers labelled again with `voices` from what the stage heard (no audio),
 /// without saving them.
 pub fn labelled(p: &Project, voices: &[Voice]) -> Result<Found> {
-    let found = p
-        .speakers()
-        .ok_or_else(|| Error::Edit("run `junctur analyze` on this file first".into()))?;
+    let found = p.speakers().ok_or_else(not_analysed)?;
     speakers::relabel(&found, &p.dir, voices)
 }
 
@@ -956,9 +966,7 @@ pub fn labelled(p: &Project, voices: &[Voice]) -> Result<Found> {
 /// labelled again, but their pins still follow the name, so that the next hearing gives those
 /// seconds to the renamed person instead of dropping them; the rest is kept as it is.
 pub fn labelled_renamed(p: &Project, voices: &[Voice], from: &str, to: &str) -> Result<Found> {
-    let mut found = p
-        .speakers()
-        .ok_or_else(|| Error::Edit("run `junctur analyze` on this file first".into()))?;
+    let mut found = p.speakers().ok_or_else(not_analysed)?;
     found.rename_pins(from, to);
     if found.heard_by_an_older_junctur() {
         return Ok(found);
@@ -966,42 +974,17 @@ pub fn labelled_renamed(p: &Project, voices: &[Voice], from: &str, to: &str) -> 
     speakers::relabel(&found, &p.dir, voices)
 }
 
-/// Writes `speakers.json` whole through a temporary file of its own renamed over it (retried
-/// briefly when a reader holds it on Windows, like the voices file): it holds the user's
-/// pins, and a write torn by a crash would lose them.
+/// Writes `speakers.json` whole ([`crate::output::write_replacing`]): it holds the user's pins, and
+/// a write torn by a crash would lose them.
 fn write_speakers(p: &Project, found: &Found) -> Result<()> {
-    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = p.speakers_path();
-    let tmp = path.with_extension(format!("json.{}-{n}.tmp", std::process::id()));
-    std::fs::write(&tmp, serde_json::to_vec_pretty(found)?)?;
-    let mut tries = 0;
-    loop {
-        match std::fs::rename(&tmp, &path) {
-            Ok(()) => return Ok(()),
-            Err(_) if tries < 5 => {
-                tries += 1;
-                std::thread::sleep(std::time::Duration::from_millis(40));
-            }
-            Err(e) => {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(e.into());
-            }
-        }
-    }
+    crate::output::write_replacing(&p.speakers_path(), serde_json::to_vec_pretty(found)?)?;
+    Ok(())
 }
 
 /// Renames `path` to the first free `<name>.unreadable`, `<name>.unreadable2`, ... beside it;
 /// returns the new path.
 fn set_aside(path: &Path) -> Result<PathBuf> {
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let free = (1..)
-        .map(|n| match n {
-            1 => path.with_file_name(format!("{name}.unreadable")),
-            n => path.with_file_name(format!("{name}.unreadable{n}")),
-        })
-        .find(|p| !p.exists())
-        .expect("some name is free");
+    let free = crate::output::first_free(path, "unreadable");
     std::fs::rename(path, &free)?;
     Ok(free)
 }
@@ -1346,24 +1329,21 @@ fn is_generated(old: &str, regenerate: impl Fn(&CutSettings) -> Vec<String>) -> 
     edit::parse(body).is_ok_and(|e| regenerate(&e.settings).iter().any(|t| t == body))
 }
 
-/// Keeps `old` at the first free `edit.junctur.bak`, `edit.junctur.bak2`, ... Backups are never
-/// overwritten: a single `.bak` would lose a hand edit to the next re-cut.
+/// Keeps `old` at the first free `edit.junctur.bak`, `edit.junctur.bak2`, ... ([`edit::backup_path`],
+/// the names the editor's saves use too).
 fn back_up(dir: &Path, old: &str) -> Result<()> {
-    let free = (1..)
-        .map(|n| match n {
-            1 => dir.join("edit.junctur.bak"),
-            n => dir.join(format!("edit.junctur.bak{n}")),
-        })
-        .find(|p| !p.exists())
-        .expect("some name is free");
-    std::fs::write(free, old)?;
+    std::fs::write(edit::backup_path(&dir.join(EDIT_FILE)), old)?;
     Ok(())
+}
+
+/// What a step that needs the analysis answers before there is one.
+fn not_analysed() -> Error {
+    Error::Edit("run `junctur analyze` on this file first".into())
 }
 
 /// Re-cut from what earlier stages left, without running them.
 pub fn recut(p: &Project, settings: &CutSettings) -> Result<EditList> {
-    let missing = || Error::Edit("run `junctur analyze` on this file first".into());
-    let speech = p.speech().ok_or_else(missing)?;
+    let speech = p.speech().ok_or_else(not_analysed)?;
     let report = tracks::analyze(&p.file, &tracks_options(p, false))?;
     let transcript = transcribe::load(&p.dir);
     let t0 = Instant::now();

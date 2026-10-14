@@ -29,18 +29,7 @@ struct Piece {
 
 impl Piece {
     fn new(i: usize, text: &str) -> Self {
-        let start = text.find(char::is_alphanumeric);
-        let (lead, core, trail) = match start {
-            None => (text, "", ""),
-            Some(a) => {
-                let b = text
-                    .char_indices()
-                    .rev()
-                    .find(|(_, c)| c.is_alphanumeric())
-                    .map_or(text.len(), |(k, c)| k + c.len_utf8());
-                (&text[..a], &text[a..b], &text[b..])
-            }
-        };
+        let (lead, core, trail) = crate::text::split_bare(text);
         Self {
             first: i,
             last: i,
@@ -275,7 +264,7 @@ fn unpunctuated(s: &str) -> String {
             out.push(ch);
         }
     }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
+    crate::text::one_spaced(&out)
 }
 
 /// Every piece of a censored word or phrase has its core masked; its punctuation stays.

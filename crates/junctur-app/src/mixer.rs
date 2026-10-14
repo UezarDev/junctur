@@ -378,6 +378,7 @@ pub fn heard(json: &str) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::scratch;
     use junctur_core::signal::Activity;
     use junctur_core::tracks::{LogicalTrack, Sameness};
 
@@ -417,13 +418,6 @@ mod tests {
 
     fn muted(m: &Mixer) -> Vec<bool> {
         m.state().tracks.iter().map(|t| t.muted).collect()
-    }
-
-    fn scratch(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("junctur-mixer-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
     }
 
     #[test]
@@ -483,7 +477,7 @@ mod tests {
 
     /// A project in a scratch folder (the file itself is never read).
     fn project(name: &str) -> (PathBuf, Project) {
-        let d = scratch(name);
+        let d = scratch("mixer", name);
         let file = d.join("rec.mp4");
         std::fs::write(&file, b"not a video").unwrap();
         let p = Project::open(&file, Some(d.join("cache")), Some(d.join("project"))).unwrap();

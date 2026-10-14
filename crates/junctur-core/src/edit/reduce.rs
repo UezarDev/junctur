@@ -2,6 +2,7 @@
 //! silences between it, each boundary moved to the quietest instant nearby to land in a real gap.
 
 use super::{CutSettings, Range};
+use crate::spans::{joined, push_joined, Join};
 use crate::vad::Region;
 
 /// Envelope resolution: 10 ms.
@@ -83,13 +84,7 @@ pub fn keep_ranges(speech: &[Region], env: &Envelope, total: f64, s: &CutSetting
     let mut regions: Vec<Region> = speech.to_vec();
     regions.sort_by(|a, b| a.start.total_cmp(&b.start));
     // Speech spans: union of all tracks, with pauses under `merge_gap` filled in.
-    let mut spans: Vec<Region> = Vec::new();
-    for r in regions {
-        match spans.last_mut() {
-            Some(last) if r.start - last.end < s.merge_gap => last.end = last.end.max(r.end),
-            _ => spans.push(r),
-        }
-    }
+    let spans = joined(regions, Join::Within(s.merge_gap));
     let mut out: Vec<Range> = Vec::new();
     for sp in spans {
         let start = (sp.start - s.pad_before).max(0.0);
@@ -104,10 +99,7 @@ pub fn keep_ranges(speech: &[Region], env: &Envelope, total: f64, s: &CutSetting
         if end <= start {
             continue;
         }
-        match out.last_mut() {
-            Some(last) if start <= last.end => last.end = last.end.max(end),
-            _ => out.push(Range { start, end }),
-        }
+        push_joined(&mut out, Range { start, end }, Join::Touching);
     }
     out
 }

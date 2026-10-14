@@ -12,6 +12,7 @@ use crate::diarize::{
 };
 use crate::edit::{Person, Turn};
 use crate::ffmpeg::{PcmReader, Span};
+use crate::hash::{fnv, Fnv};
 use crate::vad::{Region, RATE};
 use crate::voices::Voice;
 use crate::{models, Result};
@@ -99,13 +100,7 @@ impl Found {
             )
             .collect();
         mine.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let mut joined: Vec<(f64, f64)> = Vec::new();
-        for (a, b) in mine {
-            match joined.last_mut() {
-                Some(last) if a <= last.1 => last.1 = last.1.max(b),
-                _ => joined.push((a, b)),
-            }
-        }
+        let joined = crate::spans::joined(mine, crate::spans::Join::Touching);
         let mut pins: Vec<Pin> = self
             .pins
             .iter()
@@ -235,29 +230,16 @@ pub fn hearing_key(track: usize) -> String {
     format!("{:016x}", fnv(what.as_bytes()))
 }
 
-fn fnv(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| {
-        (h ^ b as u64).wrapping_mul(0x100_0000_01b3)
-    })
-}
-
 /// FNV-1a over the speech tracks and their regions.
 pub fn speech_key(speech: &Speech) -> String {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut eat = |x: u64| {
-        for b in x.to_le_bytes() {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x100_0000_01b3);
-        }
-    };
+    let mut h = Fnv::new();
     for t in &speech.tracks {
-        eat(t.track as u64);
+        h.u64(t.track as u64);
         for r in &t.regions {
-            eat(r.start.to_bits());
-            eat(r.end.to_bits());
+            h.u64(r.start.to_bits()).u64(r.end.to_bits());
         }
     }
-    format!("{h:016x}")
+    h.hex()
 }
 
 /// How speakers are found for these speech tracks.
@@ -772,6 +754,7 @@ fn by_track(tracks: &[&SpeechTrack]) -> Found {
 mod tests {
     use super::*;
     use crate::pipeline::SpeechTrack;
+    use crate::test_support::scratch;
     use crate::vad::Region;
 
     #[test]
@@ -895,14 +878,6 @@ mod tests {
     fn unit(v: &[f32]) -> Vec<f32> {
         let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         v.iter().map(|x| x / n).collect()
-    }
-
-    fn scratch(name: &str) -> PathBuf {
-        let d =
-            std::env::temp_dir().join(format!("junctur-speakers-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
     }
 
     fn voice(name: &str, print: Vec<f32>) -> Voice {
@@ -1038,7 +1013,7 @@ mod tests {
 
     #[test]
     fn a_voice_sample_is_the_chosen_windows_without_overlapping_talk() {
-        let d = scratch("sample");
+        let d = scratch("speakers", "sample");
         let o = Overlap {
             start: 3.2,
             end: 3.4,
@@ -1224,7 +1199,7 @@ mod tests {
 
     #[test]
     fn a_short_selection_takes_the_clear_windows_around_it() {
-        let d = scratch("short");
+        let d = scratch("speakers", "short");
         let o = Overlap {
             start: 3.2,
             end: 3.4,

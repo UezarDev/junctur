@@ -56,10 +56,7 @@ fn normalize(sorted: Vec<Range>, join: f64) -> Vec<Range> {
         if r.end <= r.start {
             continue;
         }
-        match out.last_mut() {
-            Some(last) if r.start - last.end < join.max(1e-9) => last.end = last.end.max(r.end),
-            _ => out.push(r),
-        }
+        crate::spans::push_joined(&mut out, r, crate::spans::Join::Within(join.max(1e-9)));
     }
     out
 }

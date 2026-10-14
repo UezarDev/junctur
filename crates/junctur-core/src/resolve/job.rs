@@ -102,7 +102,7 @@ pub struct Job {
 /// differs between recordings.
 pub fn recording_key(edit: &EditList) -> String {
     let digest = Sha256::digest(edit.source.to_string_lossy().as_bytes());
-    digest[..6].iter().map(|b| format!("{b:02x}")).collect()
+    crate::hash::hex(&digest[..6])
 }
 
 /// The template the settings name, as both requests send it: empty for Junctur's own.

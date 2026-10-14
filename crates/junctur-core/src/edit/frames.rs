@@ -2,6 +2,7 @@
 //! same way (start down, end up), so a kept range means the same frames in Resolve and in the render.
 
 use super::Range;
+use crate::spans::{push_joined, Join};
 
 pub fn frames_ceil(s: f64, num: u64, den: u64) -> u64 {
     (s * num as f64 / den as f64 - 1e-6).ceil().max(0.0) as u64
@@ -20,10 +21,7 @@ pub fn frame_ranges(keep: &[Range], num: u64, den: u64, total: u64) -> Vec<(u64,
         if b <= a {
             continue;
         }
-        match out.last_mut() {
-            Some(last) if a <= last.1 => last.1 = last.1.max(b),
-            _ => out.push((a, b)),
-        }
+        push_joined(&mut out, (a, b), Join::Touching);
     }
     out
 }

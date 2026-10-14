@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::fixes::{self, check_fix, check_span, Fix, Fixed, Fixes, WordAt};
 use super::times::{self, set_time, to_ms, Retime};
+use crate::text::{bare, split_bare};
 use crate::transcribe::Word;
 
 /// A word's text as two hearings of the same word compare: trimmed of the punctuation around it,
@@ -13,20 +14,10 @@ pub fn likeness(text: &str) -> String {
     bare(text).to_lowercase()
 }
 
-/// `s` without the punctuation around it.
-fn bare(s: &str) -> &str {
-    s.trim_matches(|c: char| !c.is_alphanumeric())
-}
-
 /// `s`'s punctuation before and after its word.
 fn around(s: &str) -> (&str, &str) {
-    let s = s.trim();
-    let b = bare(s);
-    if b.is_empty() {
-        return (s, "");
-    }
-    let at = s.find(b).unwrap_or(0);
-    (&s[..at], &s[at + b.len()..])
+    let (lead, _, trail) = split_bare(s.trim());
+    (lead, trail)
 }
 
 /// One word of the stream, as the scans need it.

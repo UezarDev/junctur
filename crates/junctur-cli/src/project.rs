@@ -9,9 +9,7 @@ use junctur_core::transcribe;
 use junctur_core::{config, export, voices};
 
 use crate::args::Args;
-
-const PROJECT_FLAGS: &[&str] = &["--project", "--cache-dir"];
-const CUT_FLAGS: &[&str] = &["--pad-before", "--pad-after", "--merge-gap", "--crossfade"];
+use crate::flags;
 
 fn project(a: &Args) -> Result<Project, String> {
     Project::open(&a.file()?, a.path("--cache-dir"), a.path("--project")).map_err(|e| e.to_string())
@@ -41,20 +39,8 @@ fn cut_settings(a: &Args) -> Result<CutSettings, String> {
     Ok(s)
 }
 
-fn known(extra: &[&'static str]) -> Vec<&'static str> {
-    PROJECT_FLAGS.iter().chain(extra).copied().collect()
-}
-
 pub fn analyze(a: Args) -> Result<(), String> {
-    let mut k = known(&[
-        "--cpu",
-        "--model",
-        "--force",
-        "--no-transcript",
-        "--no-speakers",
-    ]);
-    k.extend(CUT_FLAGS);
-    a.reject_unknown(&k)?;
+    a.reject_unknown(&flags::known("analyze"))?;
     let p = project(&a)?;
     // The model (`--model`, else the config file's `whisper_model`, else `auto`), as the app's
     // analysis takes it too; then this command's own flags.
@@ -96,7 +82,7 @@ pub fn analyze(a: Args) -> Result<(), String> {
 }
 
 pub fn status(a: Args) -> Result<(), String> {
-    a.reject_unknown(PROJECT_FLAGS)?;
+    a.reject_unknown(&flags::known("status"))?;
     let p = project(&a)?;
     let jobs = p.jobs();
     println!("{}", p.file.display());
@@ -126,9 +112,7 @@ pub fn status(a: Args) -> Result<(), String> {
 }
 
 pub fn cut(a: Args) -> Result<(), String> {
-    let mut k = known(&[]);
-    k.extend(CUT_FLAGS);
-    a.reject_unknown(&k)?;
+    a.reject_unknown(&flags::known("cut"))?;
     let p = project(&a)?;
     // The voices may have changed since `analyze`: label the speakers again first (cheap). A
     // project heard by an older Junctur cannot be; its speakers stay as they were.
@@ -147,7 +131,7 @@ pub fn cut(a: Args) -> Result<(), String> {
 }
 
 pub fn export(a: Args) -> Result<(), String> {
-    a.reject_unknown(&known(&["--fcpxml", "--srt"]))?;
+    a.reject_unknown(&flags::known("export"))?;
     let (fcpxml, srt) = (a.path("--fcpxml"), a.path("--srt"));
     if fcpxml.is_none() && srt.is_none() {
         return Err("export needs --fcpxml <out.fcpxml> and/or --srt <out.srt>".into());
@@ -225,7 +209,7 @@ fn print_captions(out: &std::path::Path, files: &export::CaptionFiles) {
 }
 
 pub fn render(a: Args) -> Result<(), String> {
-    a.reject_unknown(&known(&["--out", "--full", "--force", "--jobs"]))?;
+    a.reject_unknown(&flags::known("render"))?;
     let out = a.path("--out").ok_or("render needs --out <out.mp4>")?;
     let p = project(&a)?;
     let e = p.edit().map_err(|e| e.to_string())?;

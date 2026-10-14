@@ -145,7 +145,7 @@ fn clean(text: &str) -> String {
             }
         }
     }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
+    crate::text::one_spaced(&out)
 }
 
 /// The cues for `edit`'s kept words. `words` is every transcript word with its track, in any
@@ -573,8 +573,9 @@ fn lines_with(lines: &[String], w: &str, chars: usize) -> usize {
     }
 }
 
-/// `lines` with `w` added by the greedy wrap.
-fn wrap_onto(mut lines: Vec<String>, w: &str, chars: usize) -> Vec<String> {
+/// `lines` with `w` added by the greedy wrap; the layout wraps a side-by-side column with it too,
+/// so the preview and Resolve break lines alike.
+pub(super) fn wrap_onto(mut lines: Vec<String>, w: &str, chars: usize) -> Vec<String> {
     match lines.last_mut() {
         Some(l) if width(l) + 1 + width(w) <= chars => {
             l.push(' ');

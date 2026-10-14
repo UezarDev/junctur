@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use junctur_core::pipeline::{self, Found, Project};
-use junctur_core::voices::{self, Voice, Voices};
+use junctur_core::voices::{self, Voices};
 use serde::Serialize;
 
 /// A voice as the Captions panel lists it.
@@ -30,10 +30,6 @@ fn load() -> Result<(PathBuf, Voices), String> {
     let path = path()?;
     let v = Voices::load(&path).map_err(|e| e.to_string())?;
     Ok((path, v))
-}
-
-fn usable(v: &Voices) -> Vec<Voice> {
-    v.usable().into_iter().cloned().collect()
 }
 
 /// The project of the recording at `file`, where the CLI and the app keep it.
@@ -93,7 +89,7 @@ pub fn rehear(file: &str) -> Result<(Found, Rehearing), String> {
         let _held = crate::lock::lock(&LOCK);
         load()?.1
     };
-    let found = pipeline::rehear(&p, &usable(&v), &mut |l| {
+    let found = pipeline::rehear(&p, &v.usable_owned(), &mut |l| {
         eprintln!("junctur-app: speakers again: {l}")
     })
     .map_err(|e| e.to_string())?;
@@ -143,10 +139,10 @@ fn labelled(
     };
     let found = match renamed {
         Some((from, to)) if f.method == pipeline::Method::Voices => {
-            pipeline::labelled_renamed(&p, &usable(v), from, to)
+            pipeline::labelled_renamed(&p, &v.usable_owned(), from, to)
         }
         None if !f.heard_by_an_older_junctur() && f.method == pipeline::Method::Voices => {
-            pipeline::labelled(&p, &usable(v))
+            pipeline::labelled(&p, &v.usable_owned())
         }
         _ => return Ok(None),
     }
@@ -163,9 +159,7 @@ pub fn enroll(file: &str, name: &str, stretches: &[(f64, f64)]) -> Result<(Found
     let (path, mut v) = load()?;
     let before = v.get(name).map_or(0.0, |x| x.seconds);
     let (found, added) =
-        pipeline::enroll(&p, &mut v, name, stretches).map_err(|e| e.to_string())?;
-    v.save(&path).map_err(|e| e.to_string())?;
-    pipeline::save_speakers(&p, &found).map_err(|e| e.to_string())?;
+        pipeline::enroll_and_save(&p, &mut v, &path, name, stretches).map_err(|e| e.to_string())?;
     let voice = v.get(name).expect("just enrolled");
     Ok((
         found,

@@ -17,6 +17,8 @@ mod project;
 mod recent;
 mod settings;
 mod state;
+#[cfg(test)]
+mod test_support;
 mod testmode;
 mod trace;
 mod translation;

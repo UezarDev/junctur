@@ -370,10 +370,7 @@ pub(crate) mod tests {
     use super::*;
 
     pub fn scratch(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("junctur-hidden-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        fs::create_dir_all(&d).unwrap();
-        d
+        crate::test_support::scratch("hidden", name)
     }
 
     /// Writes a file modified a minute ago (settled), or now when `fresh`.

@@ -2,6 +2,8 @@
 //! spelled the user's way. The rules (what an entry is, what a fix adds, how a long list is cut to
 //! the prompt) live here once for the config file, the app and the transcriber.
 
+use crate::text::bare;
+
 /// Longest entry kept, in characters: a name or a short phrase, not a paragraph.
 pub const MAX_ENTRY: usize = 100;
 
@@ -9,12 +11,7 @@ pub const MAX_ENTRY: usize = 100;
 /// line break would split it in Settings) as spaces, runs of space as one, at most [`MAX_ENTRY`]
 /// characters; `None` when nothing is left.
 pub fn entry(raw: &str) -> Option<String> {
-    let spaced: String = raw
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
-    let joined = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
-    let cut: String = joined.chars().take(MAX_ENTRY).collect();
+    let cut: String = crate::text::squeezed(raw).chars().take(MAX_ENTRY).collect();
     let cut = cut.trim_end().to_string();
     (!cut.is_empty()).then_some(cut)
 }
@@ -42,11 +39,6 @@ pub fn add_first(list: &mut Vec<String>, raw: &str) -> bool {
         }
         _ => false,
     }
-}
-
-/// `s` without the punctuation around it (`"Ana,"` is the name `Ana`).
-fn bare(s: &str) -> &str {
-    s.trim_matches(|c: char| !c.is_alphanumeric())
 }
 
 /// What a word fixed from `heard` to `fixed` adds to the list: the fixed spelling without the

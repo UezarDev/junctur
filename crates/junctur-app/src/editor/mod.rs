@@ -602,6 +602,7 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::scratch;
     use junctur_core::edit::CutSettings;
     use junctur_core::transcribe::Word;
 
@@ -614,13 +615,6 @@ mod tests {
 
     fn r(start: f64, end: f64) -> Range {
         Range { start, end }
-    }
-
-    fn scratch(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("junctur-editor-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
     }
 
     fn list(keep: Vec<Range>) -> EditList {
@@ -648,7 +642,7 @@ mod tests {
 
     #[test]
     fn frame_edits_are_frame_exact_through_the_file() {
-        let d = scratch("frames");
+        let d = scratch("editor", "frames");
         let path = d.join("edit.junctur");
         for fps in [
             FPS,
@@ -684,7 +678,7 @@ mod tests {
 
     #[test]
     fn undo_redo_and_no_op_edits() {
-        let d = scratch("undo");
+        let d = scratch("editor", "undo");
         let path = d.join("edit.junctur");
         let mut e = Editor::default();
         e.reset(Some(path.clone()));
@@ -729,7 +723,7 @@ mod tests {
 
     #[test]
     fn several_stretches_are_one_undo_step_or_none() {
-        let d = scratch("many");
+        let d = scratch("editor", "many");
         let path = d.join("edit.junctur");
         let mut e = Editor::default();
         e.reset(Some(path.clone()));
@@ -829,7 +823,7 @@ mod tests {
 
     #[test]
     fn backs_up_a_list_it_did_not_write_once() {
-        let d = scratch("bak");
+        let d = scratch("editor", "bak");
         let path = d.join("edit.junctur");
         let l0 = list(vec![r(1.0, 10.0)]);
         std::fs::write(&path, l0.to_text()).unwrap();
@@ -860,7 +854,7 @@ mod tests {
 
     #[test]
     fn word_edits_snap_and_need_a_transcript() {
-        let d = scratch("words");
+        let d = scratch("editor", "words");
         let path = d.join("edit.junctur");
         let mut e = Editor::default();
         e.reset(Some(path.clone()));
@@ -916,7 +910,7 @@ mod tests {
     #[test]
     fn renames_are_saved_and_survive_undo() {
         use junctur_core::edit::{Speakers, Turn};
-        let d = scratch("rename");
+        let d = scratch("editor", "rename");
         let path = d.join("edit.junctur");
         let mut e = Editor::default();
         e.reset(Some(path.clone()));
@@ -981,7 +975,7 @@ mod tests {
 
     #[test]
     fn a_fixed_word_is_saved_at_once_and_outlives_an_undo() {
-        let d = scratch("fix");
+        let d = scratch("editor", "fix");
         let path = d.join("edit.junctur");
         let mut e = Editor::default();
         e.reset(Some(path.clone()));
@@ -1031,7 +1025,7 @@ mod tests {
     #[test]
     fn a_fix_lands_on_every_word_heard_alike_and_those_can_be_taken_back() {
         use super::Words;
-        let d = scratch("spread");
+        let d = scratch("editor", "spread");
         let path = d.join("edit.junctur");
         let mut e = Editor::default();
         e.reset(Some(path.clone()));
@@ -1085,7 +1079,7 @@ mod tests {
     fn a_retyped_sentence_is_saved_at_once_and_replaces_its_word_fixes() {
         // One fix for the run, saved as a `span` line; the word fix inside it goes.
         use super::Words;
-        let d = scratch("span");
+        let d = scratch("editor", "span");
         let path = d.join("edit.junctur");
         let mut e = Editor::default();
         e.reset(Some(path.clone()));
@@ -1136,7 +1130,7 @@ mod tests {
     fn a_moved_edge_moves_the_words_beside_it_and_undoes_with_it() {
         // Kept 10.0-11.0 at 30 fps; moving the end out to 11.4 would keep "tres" (10.9-11.6) by its
         // middle: "dos" follows the edge, "tres" starts at it and stays cut.
-        let d = scratch("edge");
+        let d = scratch("editor", "edge");
         let path = d.join("edit.junctur");
         let mut e = Editor::default();
         e.reset(Some(path.clone()));
@@ -1224,7 +1218,7 @@ mod tests {
     fn a_word_far_from_the_edge_is_not_stretched_and_one_passed_whole_turns_kept() {
         // A word not beside the edge is left as it is; an end moved over a whole short word keeps
         // that word, the word following the edge stopping at it.
-        let d = scratch("edge-far");
+        let d = scratch("editor", "edge-far");
         let path = d.join("edit.junctur");
         let mut e = Editor::default();
         e.reset(Some(path));
@@ -1266,7 +1260,7 @@ mod tests {
     fn an_edge_moved_across_a_cut_into_the_next_range_trims_none_of_its_words() {
         // Kept 10.0-11.0 and 11.5-20.0; the first end stepped to 11.7 joins them. The word in the
         // second range keeps its head, and the one before follows the edge only to where it starts.
-        let d = scratch("edge-join");
+        let d = scratch("editor", "edge-join");
         let mut e = Editor::default();
         e.reset(Some(d.join("edit.junctur")));
         let w = |start, end| Word {
@@ -1295,7 +1289,7 @@ mod tests {
     fn a_word_left_with_under_a_frame_kept_is_cut_whole() {
         // Kept 10.0-11.0; the end moved in to 10.7 leaves "z" under a frame on the kept side: it is
         // cut, its head clipped to the edge.
-        let d = scratch("edge-straddle");
+        let d = scratch("editor", "edge-straddle");
         let mut e = Editor::default();
         e.reset(Some(d.join("edit.junctur")));
         e.words = Some(Arc::new(Words::from_words(vec![Word {

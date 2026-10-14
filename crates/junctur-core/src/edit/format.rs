@@ -385,14 +385,7 @@ pub fn parse(text: &str) -> Result<EditList, String> {
     e.speakers.turns.sort_by(|a, b| a.start.total_cmp(&b.start));
     // Hand edits may leave ranges out of order or overlapping; the renderer wants neither.
     e.keep.sort_by(|a, b| a.start.total_cmp(&b.start));
-    let mut merged: Vec<Range> = Vec::new();
-    for r in e.keep {
-        match merged.last_mut() {
-            Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
-            _ => merged.push(r),
-        }
-    }
-    e.keep = merged;
+    e.keep = crate::spans::joined(e.keep, crate::spans::Join::Touching);
     Ok(e)
 }
 

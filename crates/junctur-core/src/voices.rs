@@ -57,7 +57,7 @@ pub fn remembered() -> Result<Vec<Voice>> {
     let path = default_path()?
         .ok_or_else(|| Error::Config(format!("no config folder to keep voices in (set {ENV})")))?;
     let v = Voices::load(&path)?;
-    Ok(v.usable().into_iter().cloned().collect())
+    Ok(v.usable_owned())
 }
 
 /// [`remembered`], but a voices file that cannot be read is told to `say` and labelling goes on
@@ -100,31 +100,13 @@ impl Voices {
         Ok(v)
     }
 
-    /// Writes the file whole through a temporary file of its own (two writers never share one)
-    /// renamed over it, retried briefly when a reader holds the file on Windows, as edit lists are.
+    /// Writes the file whole ([`crate::output::write_replacing`]).
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        static SAVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = SAVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tmp = path.with_extension(format!("json.{}-{n}.tmp", std::process::id()));
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
-        let mut tries = 0;
-        loop {
-            match std::fs::rename(&tmp, path) {
-                Ok(()) => return Ok(()),
-                Err(e) if tries < 5 => {
-                    let _ = e;
-                    tries += 1;
-                    std::thread::sleep(std::time::Duration::from_millis(40));
-                }
-                Err(e) => {
-                    let _ = std::fs::remove_file(&tmp);
-                    return Err(e.into());
-                }
-            }
-        }
+        crate::output::write_replacing(path, serde_json::to_vec_pretty(self)?)?;
+        Ok(())
     }
 
     /// The voices whose prints this build's embedding model can compare with.
@@ -133,6 +115,11 @@ impl Voices {
             .iter()
             .filter(|v| v.model == print_model() && !v.print.is_empty())
             .collect()
+    }
+
+    /// [`usable`](Self::usable), cloned.
+    pub fn usable_owned(&self) -> Vec<Voice> {
+        self.usable().into_iter().cloned().collect()
     }
 
     fn find(&self, name: &str) -> Option<usize> {

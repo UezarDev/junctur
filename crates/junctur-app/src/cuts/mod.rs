@@ -253,14 +253,11 @@ impl EditState {
 /// FNV-1a over 64-bit values, as a string, since a 64-bit number does not survive JSON into
 /// JavaScript exactly.
 fn key(values: impl IntoIterator<Item = u64>) -> String {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut h = junctur_core::hash::Fnv::new();
     for x in values {
-        for b in x.to_le_bytes() {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x100_0000_01b3);
-        }
+        h.u64(x);
     }
-    format!("{h:016x}")
+    h.hex()
 }
 
 /// Over the turns and speaker tracks (not the names): what the words' labels depend on.
@@ -307,16 +304,10 @@ fn fixes_key(fixes: &[edit::Fix], times: &[edit::Retime]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::scratch;
     use junctur_core::edit::{CutSettings, EditList, Range};
 
     const FPS: Fps = Fps { num: 30, den: 1 };
-
-    fn scratch(name: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("junctur-cuts-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
 
     fn list(keep: Vec<Range>) -> String {
         EditList {
@@ -335,7 +326,7 @@ mod tests {
 
     #[test]
     fn reads_an_edit_list() {
-        let d = scratch("read");
+        let d = scratch("cuts", "read");
         let p = d.join("edit.junctur");
         assert!(read(&p, FPS).is_none(), "no file yet");
 
@@ -392,7 +383,7 @@ mod tests {
 
     #[test]
     fn ranges_in_play_survive_a_missing_or_broken_file() {
-        let d = scratch("merge");
+        let d = scratch("cuts", "merge");
         let p = d.join("edit.junctur");
         std::fs::write(
             &p,

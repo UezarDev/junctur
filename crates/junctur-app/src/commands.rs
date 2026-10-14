@@ -365,11 +365,7 @@ pub async fn reanalyse(
     // Off the async runtime: asking whether the list holds user edits reads the track analysis
     // and the transcript.
     let analysis = app.analysis.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        analysis.reanalyse(Path::new(&path), fresh, replace, notifier(handle))
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    blocking(move || analysis.reanalyse(Path::new(&path), fresh, replace, notifier(handle))).await
 }
 
 /// Plays only the kept ranges (`on`) or the whole file.
@@ -677,9 +673,7 @@ pub async fn send_to_resolve(
     existing: Option<ExistingClips>,
 ) -> Result<Outcome, String> {
     let core = app.core()?;
-    tauri::async_runtime::spawn_blocking(move || core.send_to_resolve(answer, existing))
-        .await
-        .map_err(|e| e.to_string())?
+    blocking(move || core.send_to_resolve(answer, existing)).await
 }
 
 /// Translates the open recording's captions in the background, into the language its caption
@@ -688,9 +682,7 @@ pub async fn send_to_resolve(
 #[tauri::command]
 pub async fn translate_captions(app: State<'_, App>, handle: AppHandle) -> Result<Run, String> {
     let core = app.core()?;
-    let job = tauri::async_runtime::spawn_blocking(move || core.translation_job())
-        .await
-        .map_err(|e| e.to_string())??;
+    let job = blocking(move || core.translation_job()).await?;
     Ok(app.translation.start(handle, job))
 }
 
@@ -714,9 +706,7 @@ pub struct TranslationStatus {
 #[tauri::command]
 pub async fn translation_status(app: State<'_, App>) -> Result<TranslationStatus, String> {
     let core = app.core()?;
-    let (missing, sentences) = tauri::async_runtime::spawn_blocking(move || core.untranslated())
-        .await
-        .map_err(|e| e.to_string())??;
+    let (missing, sentences) = blocking(move || core.untranslated()).await?;
     Ok(TranslationStatus {
         run: app.translation.run(),
         missing,
@@ -746,9 +736,7 @@ pub async fn translation_languages() -> Vec<Language> {
 /// seconds to give up on, a busy Resolve longer.
 #[tauri::command]
 pub async fn resolve_templates() -> Result<Vec<String>, String> {
-    tauri::async_runtime::spawn_blocking(junctur_core::resolve::templates)
-        .await
-        .map_err(|e| e.to_string())?
+    blocking(junctur_core::resolve::templates).await
 }
 
 /// The voices Junctur remembers.
@@ -776,11 +764,7 @@ pub async fn enroll_voice(
 pub async fn reanalyze_speakers(app: State<'_, App>) -> Result<(), String> {
     let e = app.editable()?;
     let analysis = app.analysis.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        analysis.exclusive(|| e.reanalyze_speakers(e.file()))
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    blocking(move || analysis.exclusive(|| e.reanalyze_speakers(e.file()))).await
 }
 
 /// Forgets voice `name`, relabelling the open recording.
@@ -862,18 +846,13 @@ pub async fn waves(
 /// async runtime: it opens the project and may start ffprobe.
 #[tauri::command]
 pub async fn recent_info(path: String) -> Result<RecordingInfo, String> {
-    tauri::async_runtime::spawn_blocking(move || project::info(Path::new(&path), None))
-        .await
-        .map_err(|e| e.to_string())?
+    blocking(move || project::info(Path::new(&path), None)).await
 }
 
 /// A recent recording's still, as JPEG bytes (made once into its project folder).
 #[tauri::command]
 pub async fn thumbnail(path: String) -> Result<tauri::ipc::Response, String> {
-    let bytes =
-        tauri::async_runtime::spawn_blocking(move || project::thumbnail(Path::new(&path), None))
-            .await
-            .map_err(|e| e.to_string())??;
+    let bytes = blocking(move || project::thumbnail(Path::new(&path), None)).await?;
     Ok(tauri::ipc::Response::new(bytes))
 }
 

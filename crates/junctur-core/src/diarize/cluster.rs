@@ -380,12 +380,6 @@ pub fn label_fixed(
 mod tests {
     use super::*;
 
-    fn unit(v: &[f32]) -> Vec<f32> {
-        let mut v = v.to_vec();
-        normalize(&mut v);
-        v
-    }
-
     /// `n` embeddings spread around `centre`, each tilted a little along its own axis.
     fn voice(centre: &[f32], n: usize, spread: f32) -> Vec<Vec<f32>> {
         (0..n)

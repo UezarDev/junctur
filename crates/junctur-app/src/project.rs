@@ -205,18 +205,12 @@ const THUMBNAIL: &str = "thumb.jpg";
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::scratch;
     use junctur_core::edit::{CutSettings, EditList, Range};
-
-    fn scratch(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("junctur-app-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
 
     #[test]
     fn new_project_has_nothing_yet() {
-        let d = scratch("new");
+        let d = scratch("app", "new");
         let file = d.join("rec.mp4");
         std::fs::write(&file, b"not a video").unwrap();
         let s = status(&file, Some(d.join("cache"))).unwrap();
@@ -230,7 +224,7 @@ mod tests {
 
     #[test]
     fn reports_edit_list_and_transcript() {
-        let d = scratch("edit");
+        let d = scratch("app", "edit");
         let file = d.join("rec.mp4");
         std::fs::write(&file, b"not a video").unwrap();
         let p = Project::open(&file, Some(d.join("cache")), None).unwrap();
@@ -272,7 +266,7 @@ mod tests {
 
     #[test]
     fn a_kept_parse_says_what_parsing_the_list_again_says() {
-        let d = scratch("parsed");
+        let d = scratch("app", "parsed");
         let file = d.join("rec.mp4");
         std::fs::write(&file, b"not a video").unwrap();
         let p = Project::open(&file, Some(d.join("cache")), None).unwrap();
@@ -332,7 +326,7 @@ mod tests {
 
     #[test]
     fn a_recordings_info_and_still() {
-        let d = scratch("info");
+        let d = scratch("app", "info");
         let file = d.join("rec.mkv");
         let ok = std::process::Command::new("ffmpeg")
             .args([
@@ -370,7 +364,7 @@ mod tests {
 
     #[test]
     fn missing_file_is_an_error() {
-        let d = scratch("missing");
+        let d = scratch("app", "missing");
         assert!(status(&d.join("nope.mp4"), Some(d.join("cache"))).is_err());
         let _ = std::fs::remove_dir_all(&d);
     }

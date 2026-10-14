@@ -16,8 +16,8 @@ pub fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 /// A rename can meet a reader (an antivirus scan, the edit-list watch) holding the file on
-/// Windows; it is retried this many times, this far apart, before it fails.
-const RENAME_TRIES: u32 = 5;
+/// Windows; it is tried this many times, this far apart, before it fails.
+const RENAME_TRIES: u32 = 6;
 const RENAME_WAIT: Duration = Duration::from_millis(40);
 
 /// Renames `tmp` over `path`, retrying while a reader holds `path` ([`RENAME_TRIES`]).
@@ -68,6 +68,24 @@ pub fn write_replacing(path: &Path, bytes: impl AsRef<[u8]>) -> std::io::Result<
         let _ = std::fs::remove_file(&tmp);
     }
     result
+}
+
+/// `<name>.<suffix>` beside `path` for `n` 1, else `<name>.<suffix><n>`: backups and files set
+/// aside, numbered so none is ever overwritten.
+pub fn numbered(path: &Path, suffix: &str, n: u32) -> PathBuf {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    match n {
+        1 => path.with_file_name(format!("{name}.{suffix}")),
+        n => path.with_file_name(format!("{name}.{suffix}{n}")),
+    }
+}
+
+/// The first [`numbered`] name that does not exist.
+pub fn first_free(path: &Path, suffix: &str) -> PathBuf {
+    (1..)
+        .map(|n| numbered(path, suffix, n))
+        .find(|p| !p.exists())
+        .expect("some name is free")
 }
 
 /// Refuse `out` when it is `source`.

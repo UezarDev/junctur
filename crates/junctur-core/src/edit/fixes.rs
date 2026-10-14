@@ -128,11 +128,7 @@ pub fn check_span(text: &str) -> Result<String, String> {
 }
 
 fn check_text(text: &str, max: usize, what: &str) -> Result<String, String> {
-    let one: String = text
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
-    let one = one.split_whitespace().collect::<Vec<_>>().join(" ");
+    let one = crate::text::squeezed(text);
     if one.chars().count() > max {
         return Err(format!("{what} is at most {max} characters"));
     }

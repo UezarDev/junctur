@@ -3,6 +3,7 @@
 
 mod args;
 mod commands;
+mod flags;
 mod project;
 mod voices;
 
@@ -22,6 +23,7 @@ const USAGE: &str = "usage:
   junctur render <file> --out <out.mp4> [--project <dir>] [--cache-dir <dir>] [--full] [--force]
                         [--jobs <n>]
   junctur voices [<file> --add <name> --at <start>-<end>[,...] | <file> --rehear] [--forget <name>]
+                 [--project <dir>] [--cache-dir <dir>]
 cut flags: [--pad-before <s>] [--pad-after <s>] [--merge-gap <s>] [--crossfade <ms>]";
 
 fn main() -> ExitCode {

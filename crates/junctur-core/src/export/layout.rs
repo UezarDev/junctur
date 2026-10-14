@@ -6,7 +6,7 @@
 
 use serde::Serialize;
 
-use super::srt::{Cue, Spoken};
+use super::srt::{wrap_onto, Cue, Spoken};
 use crate::edit::{Captions, EditList, Layout};
 
 /// Line height over the em, the usual default of a text renderer (Fusion's and a browser's).
@@ -253,21 +253,10 @@ fn rewrap(lines: &[String], chars: usize) -> Vec<String> {
     if lines.iter().all(|l| l.chars().count() <= chars) {
         return lines.to_vec();
     }
-    let mut out: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    for word in lines.iter().flat_map(|l| l.split_whitespace()) {
-        if !cur.is_empty() && cur.chars().count() + 1 + word.chars().count() > chars {
-            out.push(std::mem::take(&mut cur));
-        }
-        if !cur.is_empty() {
-            cur.push(' ');
-        }
-        cur.push_str(word);
-    }
-    if !cur.is_empty() {
-        out.push(cur);
-    }
-    out
+    lines
+        .iter()
+        .flat_map(|l| l.split_whitespace())
+        .fold(Vec::new(), |out, w| wrap_onto(out, w, chars))
 }
 
 #[cfg(test)]
@@ -440,6 +429,57 @@ mod tests {
         let stacked = &place(&[cue], &edit(), &settings(Layout::Stacked, ""), 9.0 / 16.0)[0];
         assert_eq!(stacked.parts[0].lines, [long]);
         assert_eq!(rewrap(&["a b".into(), "c".into()], 3), ["a b", "c"]);
+    }
+
+    /// Reference: the greedy wrap written out word by word.
+    fn rewrap_before(lines: &[String], chars: usize) -> Vec<String> {
+        if lines.iter().all(|l| l.chars().count() <= chars) {
+            return lines.to_vec();
+        }
+        let mut out: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        for word in lines.iter().flat_map(|l| l.split_whitespace()) {
+            if !cur.is_empty() && cur.chars().count() + 1 + word.chars().count() > chars {
+                out.push(std::mem::take(&mut cur));
+            }
+            if !cur.is_empty() {
+                cur.push(' ');
+            }
+            cur.push_str(word);
+        }
+        if !cur.is_empty() {
+            out.push(cur);
+        }
+        out
+    }
+
+    #[test]
+    fn a_column_wraps_as_the_cues_do() {
+        let texts = [
+            vec![],
+            vec![""],
+            vec!["   "],
+            vec!["one"],
+            vec!["a b c d e f g h i j k l m n o p"],
+            vec![
+                "supercalifragilistic is long",
+                "and so is antidisestablishment",
+            ],
+            vec!["  spaced   out	words ", "", "next line"],
+            vec!["ünïcødé wörds çan wräp", "日本語 の 字幕 です 長い 行"],
+            vec!["exactly ten", "chars here", "x"],
+            vec!["¿Qué tal? — bien, gracias.", "Ça va très bien, merci!"],
+        ];
+        for lines in texts {
+            let lines: Vec<String> = lines.into_iter().map(String::from).collect();
+            for chars in [0, 1, 3, 5, 7, 10, 11, 16, 24, 42, 200] {
+                assert_eq!(
+                    rewrap(&lines, chars),
+                    rewrap_before(&lines, chars),
+                    "{lines:?} at {chars}"
+                );
+            }
+        }
     }
 
     #[test]

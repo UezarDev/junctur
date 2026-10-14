@@ -69,11 +69,15 @@ pub fn decode_windows(
 /// track is padded with silence to that length, so a track that ends early does not cut the others.
 fn merge_args(tracks: &[usize], rate: u32, pad: Option<f64>) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
-    if let Some(len) = pad {
+    if let ([t], None) = (tracks, pad) {
+        args.extend(["-map".into(), format!("0:a:{t}"), "-ac".into(), "1".into()]);
+        args.extend(["-ar".into(), rate.to_string()]);
+    } else {
+        let apad = if pad.is_some() { ",apad" } else { "" };
         let mut g = String::new();
         for (i, t) in tracks.iter().enumerate() {
             g += &format!(
-                "[0:a:{t}]aformat=sample_fmts=flt:sample_rates={rate}:channel_layouts=mono,apad[a{i}];"
+                "[0:a:{t}]aformat=sample_fmts=flt:sample_rates={rate}:channel_layouts=mono{apad}[a{i}];"
             );
         }
         if tracks.len() == 1 {
@@ -86,22 +90,9 @@ fn merge_args(tracks: &[usize], rate: u32, pad: Option<f64>) -> Vec<String> {
             g += &format!("amerge=inputs={}[out]", tracks.len());
         }
         args.extend(["-filter_complex".into(), g, "-map".into(), "[out]".into()]);
-        args.extend(["-t".into(), format!("{len:.3}")]);
-    } else if let [t] = tracks {
-        args.extend(["-map".into(), format!("0:a:{t}"), "-ac".into(), "1".into()]);
-        args.extend(["-ar".into(), rate.to_string()]);
-    } else {
-        let mut g = String::new();
-        for (i, t) in tracks.iter().enumerate() {
-            g += &format!(
-                "[0:a:{t}]aformat=sample_fmts=flt:sample_rates={rate}:channel_layouts=mono[a{i}];"
-            );
+        if let Some(len) = pad {
+            args.extend(["-t".into(), format!("{len:.3}")]);
         }
-        for i in 0..tracks.len() {
-            g += &format!("[a{i}]");
-        }
-        g += &format!("amerge=inputs={}[out]", tracks.len());
-        args.extend(["-filter_complex".into(), g, "-map".into(), "[out]".into()]);
     }
     args.extend(["-f".into(), "f32le".into(), "-".into()]);
     args
@@ -259,6 +250,64 @@ impl PcmWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reference: each case's arguments written out on their own.
+    fn merge_args_before(tracks: &[usize], rate: u32, pad: Option<f64>) -> Vec<String> {
+        let mut args: Vec<String> = Vec::new();
+        if let Some(len) = pad {
+            let mut g = String::new();
+            for (i, t) in tracks.iter().enumerate() {
+                g += &format!(
+                    "[0:a:{t}]aformat=sample_fmts=flt:sample_rates={rate}:channel_layouts=mono,apad[a{i}];"
+                );
+            }
+            if tracks.len() == 1 {
+                g.pop();
+                g = g.replace("[a0]", "[out]");
+            } else {
+                for i in 0..tracks.len() {
+                    g += &format!("[a{i}]");
+                }
+                g += &format!("amerge=inputs={}[out]", tracks.len());
+            }
+            args.extend(["-filter_complex".into(), g, "-map".into(), "[out]".into()]);
+            args.extend(["-t".into(), format!("{len:.3}")]);
+        } else if let [t] = tracks {
+            args.extend(["-map".into(), format!("0:a:{t}"), "-ac".into(), "1".into()]);
+            args.extend(["-ar".into(), rate.to_string()]);
+        } else {
+            let mut g = String::new();
+            for (i, t) in tracks.iter().enumerate() {
+                g += &format!(
+                    "[0:a:{t}]aformat=sample_fmts=flt:sample_rates={rate}:channel_layouts=mono[a{i}];"
+                );
+            }
+            for i in 0..tracks.len() {
+                g += &format!("[a{i}]");
+            }
+            g += &format!("amerge=inputs={}[out]", tracks.len());
+            args.extend(["-filter_complex".into(), g, "-map".into(), "[out]".into()]);
+        }
+        args.extend(["-f".into(), "f32le".into(), "-".into()]);
+        args
+    }
+
+    #[test]
+    fn merge_args_are_the_reference_ones() {
+        for tracks in [&[0][..], &[2], &[0, 1], &[3, 0, 1]] {
+            for pad in [None, Some(12.0), Some(3600.25)] {
+                assert_eq!(
+                    merge_args(tracks, 16_000, pad),
+                    merge_args_before(tracks, 16_000, pad),
+                    "{tracks:?} {pad:?}"
+                );
+            }
+        }
+        assert_eq!(
+            merge_args(&[1], 8000, Some(2.0)).join(" "),
+            "-filter_complex [0:a:1]aformat=sample_fmts=flt:sample_rates=8000:channel_layouts=mono,apad[out] -map [out] -t 2.000 -f f32le -"
+        );
+    }
 
     #[test]
     fn decode_failure_carries_the_ffmpeg_message() {

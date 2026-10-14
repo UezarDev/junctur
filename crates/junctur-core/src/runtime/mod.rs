@@ -85,8 +85,12 @@ fn backends(pref: DevicePref) -> Vec<Box<dyn Backend>> {
 /// Open `model` on the first backend that takes it. A GPU that fails is not fatal: the session
 /// falls back to CPU, and the returned device says which one ran.
 pub fn open(model: &Path, pref: DevicePref) -> Result<(Session, Device)> {
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-    open_with_threads(model, pref, threads)
+    open_with_threads(model, pref, cores())
+}
+
+/// This machine's cores, or 4 when the OS will not say.
+fn cores() -> usize {
+    std::thread::available_parallelism().map_or(4, |n| n.get())
 }
 
 /// [`open`] with `threads` CPU threads per operator, for a small model run on several threads of
@@ -111,8 +115,7 @@ pub fn open_with_threads(
 /// The only way the Tracks, Speech and Speakers stages open a model: only transcription uses the
 /// GPU, and CAM++ on ONNX Runtime's CUDA provider makes a speaker of every sentence.
 pub fn open_on_cpu(model: &Path, threads: Option<usize>) -> Result<Session> {
-    let threads =
-        threads.unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
+    let threads = threads.unwrap_or_else(cores);
     Cpu.open(model, threads)?
         .ok_or_else(|| crate::Error::Model("the CPU could not open the model".into()))
 }

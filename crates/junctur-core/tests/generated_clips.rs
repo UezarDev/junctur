@@ -1,27 +1,13 @@
 //! End-to-end track analysis on tiny clips generated with ffmpeg `lavfi` sources, one per layout
 //! the real recordings showed. Clips and caches go to a per-run temp dir, never beside any input.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+mod common;
+
+use common::{ffmpeg, workdir};
+use std::path::Path;
 
 use junctur_core::tracks::{Role, Sameness};
 use junctur_core::{analyze, AnalyzeOptions};
-
-fn workdir(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("junctur-test-{}-{name}", std::process::id()));
-    std::fs::create_dir_all(&d).unwrap();
-    d
-}
-
-fn ffmpeg(args: &[&str]) {
-    let ok = Command::new("ffmpeg")
-        .args(["-v", "error", "-nostdin", "-y"])
-        .args(args)
-        .status()
-        .expect("ffmpeg on PATH")
-        .success();
-    assert!(ok, "ffmpeg failed: {args:?}");
-}
 
 fn opts(dir: &Path) -> AnalyzeOptions {
     AnalyzeOptions {
@@ -36,7 +22,7 @@ fn opts(dir: &Path) -> AnalyzeOptions {
 
 #[test]
 fn four_identical_aac_tracks_collapse() {
-    let d = workdir("four");
+    let d = workdir("test", "four");
     let f = d.join("four.mp4");
     let f_s = f.to_str().unwrap();
     ffmpeg(&[
@@ -73,7 +59,7 @@ fn four_identical_aac_tracks_collapse() {
 #[test]
 // lavfi `sine` defaults to amplitude 1/8, so volume=0.005 lands near -75 dB, like the real faint track.
 fn loud_faint_and_silent_tracks_are_told_apart() {
-    let d = workdir("lfs");
+    let d = workdir("test", "lfs");
     let f = d.join("lfs.mp4");
     ffmpeg(&[
         "-f",
@@ -108,7 +94,7 @@ fn loud_faint_and_silent_tracks_are_told_apart() {
 
 #[test]
 fn a_track_that_sums_the_others_is_the_mix() {
-    let d = workdir("sum");
+    let d = workdir("test", "sum");
     let f = d.join("sum.mkv");
     ffmpeg(&[
         "-f",
@@ -139,7 +125,7 @@ fn a_track_that_sums_the_others_is_the_mix() {
 
 #[test]
 fn second_run_is_served_from_the_cache_dir() {
-    let d = workdir("cache");
+    let d = workdir("test", "cache");
     let f = d.join("one.mp4");
     ffmpeg(&[
         "-f",
@@ -170,7 +156,7 @@ fn second_run_is_served_from_the_cache_dir() {
 
 #[test]
 fn missing_file_is_an_error_not_a_panic() {
-    let d = workdir("missing");
+    let d = workdir("test", "missing");
     assert!(analyze(&d.join("nope.mp4"), &opts(&d)).is_err());
     std::fs::remove_dir_all(d).ok();
 }

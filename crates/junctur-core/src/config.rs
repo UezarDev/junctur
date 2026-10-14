@@ -45,11 +45,7 @@ impl Config {
 /// The user's Junctur folder in the OS config folder (`%APPDATA%\junctur`), where the config file,
 /// the voices and the app's recent recordings live; `None` when there is no config folder.
 pub fn folder() -> Option<PathBuf> {
-    std::env::var_os("APPDATA")
-        .or_else(|| std::env::var_os("XDG_CONFIG_HOME"))
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .map(|b| b.join("junctur"))
+    crate::paths::config_home().map(|b| b.join("junctur"))
 }
 
 /// The files of [`folder`] core reads, each with the variable that points it elsewhere.

@@ -96,13 +96,8 @@ pub fn regions(probs: &[f32], offset: f64) -> Vec<Region> {
     if let Some(s) = start {
         raw.push(span(s, probs.len(), offset));
     }
-    let mut merged: Vec<Region> = Vec::new();
-    for r in raw {
-        match merged.last_mut() {
-            Some(last) if r.start - last.end < MIN_GAP_S => last.end = r.end,
-            _ => merged.push(r),
-        }
-    }
+    // The raw spans come from one forward scan, so a joined one's end is the later span's.
+    let mut merged = crate::spans::joined(raw, crate::spans::Join::Within(MIN_GAP_S));
     merged.retain(|r| r.end - r.start >= MIN_SPEECH_S);
     merged
 }

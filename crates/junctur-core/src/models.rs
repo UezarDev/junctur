@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use sha2::{Digest, Sha256};
 
+use crate::hash::hex;
 use crate::{Error, Result};
 
 pub struct Model {
@@ -180,11 +181,7 @@ fn marker(path: &Path) -> PathBuf {
 /// `size mtime sha256` of `path`, as the marker holds it.
 fn stamp(model: &Model, path: &Path) -> Result<String> {
     let meta = std::fs::metadata(path)?;
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_nanos());
+    let mtime = crate::cache::mtime_nanos(&meta);
     Ok(format!("{} {mtime} {}", meta.len(), model.sha256))
 }
 
@@ -225,10 +222,6 @@ fn sha256_file(path: &Path) -> Result<String> {
 #[cfg(test)]
 fn sha256_hex(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
-}
-
-fn hex(digest: &[u8]) -> String {
-    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]

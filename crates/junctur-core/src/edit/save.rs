@@ -19,12 +19,9 @@ pub struct Saved {
     pub replaced_unreadable: bool,
 }
 
-/// FNV-1a: stable across builds and platforms, unlike std's hasher. It only tells an untouched
-/// save from an edited one; it protects nothing.
+/// FNV-1a of the text: it only tells an untouched save from an edited one; it protects nothing.
 fn hash(s: &str) -> u64 {
-    s.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
-        (h ^ b as u64).wrapping_mul(0x100_0000_01b3)
-    })
+    crate::hash::fnv(s.as_bytes())
 }
 
 fn stamped(text: String) -> String {
@@ -51,23 +48,13 @@ pub fn unstamped(text: &str) -> &str {
 }
 
 fn backup_name(edit_path: &Path, n: u32) -> PathBuf {
-    let name = edit_path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    match n {
-        1 => edit_path.with_file_name(format!("{name}.bak")),
-        n => edit_path.with_file_name(format!("{name}.bak{n}")),
-    }
+    crate::output::numbered(edit_path, "bak", n)
 }
 
 /// The first free backup name beside `edit_path`: `<name>.bak`, then `<name>.bak2`, ... Backups are
 /// never overwritten: a single `.bak` rewritten each time would lose hand edits.
 pub fn backup_path(edit_path: &Path) -> PathBuf {
-    (1..)
-        .map(|n| backup_name(edit_path, n))
-        .find(|p| !p.exists())
-        .expect("some name is free")
+    crate::output::first_free(edit_path, "bak")
 }
 
 /// The newest backup's text, if any.
@@ -211,6 +198,7 @@ fn replace(path: &Path, tmp: &Path, old: Option<String>, text: &str) -> std::io:
 mod tests {
     use super::super::{CutSettings, Range};
     use super::*;
+    use crate::test_support::scratch;
 
     fn list(end: f64) -> EditList {
         EditList {
@@ -226,16 +214,9 @@ mod tests {
         }
     }
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("junctur-save-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
     #[test]
     fn backs_up_only_what_someone_else_wrote() {
-        let dir = scratch("bak");
+        let dir = scratch("save", "bak");
         let path = dir.join("edit.junctur");
         let read = |name: &str| std::fs::read_to_string(dir.join(name)).ok();
 
@@ -265,7 +246,7 @@ mod tests {
     #[test]
     fn amend_rewrites_only_what_loses_nothing() {
         use super::super::Window;
-        let dir = scratch("amend");
+        let dir = scratch("save", "amend");
         let path = dir.join("edit.junctur");
         let counted = |e: &mut EditList| {
             e.windows = vec![Window {
@@ -313,7 +294,7 @@ mod tests {
     fn a_list_the_parser_would_refuse_is_never_written() {
         // A kept-as-heard span longer than a span's text may be would fail the next open.
         use super::super::Fix;
-        let dir = scratch("refused");
+        let dir = scratch("save", "refused");
         let path = dir.join("edit.junctur");
         let mut bad = list(5.0);
         bad.fixes = vec![Fix {
@@ -339,7 +320,7 @@ mod tests {
 
     #[test]
     fn a_retried_save_does_not_pile_up_backups() {
-        let dir = scratch("retry");
+        let dir = scratch("save", "retry");
         let path = dir.join("edit.junctur");
         std::fs::write(&path, "hand").unwrap();
         // An earlier attempt backed it up, then failed to rename: the list is still the hand edit.

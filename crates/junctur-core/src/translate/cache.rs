@@ -143,17 +143,11 @@ impl Translations {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("junctur-tr-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
+    use crate::test_support::scratch as dir;
 
     #[test]
     fn translations_round_trip_and_another_model_is_not_used() {
-        let d = dir("cache");
+        let d = dir("tr", "cache");
         assert_eq!(Translations::load(&d), Translations::default());
         let mut t = Translations::default();
         t.insert("es", "fr", "Hola, ¿qué tal?", "Bonjour, comment ça va ?");
@@ -187,7 +181,7 @@ mod tests {
 
     #[test]
     fn a_save_keeps_what_another_saved_meanwhile() {
-        let d = dir("merge");
+        let d = dir("tr", "merge");
         let mut a = Translations::default();
         a.insert("es", "fr", "uno", "un");
         let mut b = Translations::default();
