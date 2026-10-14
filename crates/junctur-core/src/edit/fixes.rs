@@ -66,7 +66,7 @@ impl Fix {
     }
 
     /// Its first and last words' keys on its track.
-    fn ends(&self) -> ((i64, usize), (i64, usize)) {
+    pub(super) fn ends(&self) -> ((i64, usize), (i64, usize)) {
         let first = (millis(self.start), self.nth);
         (first, self.through.map_or(first, |t| t.key()))
     }
@@ -104,7 +104,7 @@ pub fn same_millisecond(a: f64, b: f64) -> bool {
 }
 
 /// Seconds to whole milliseconds, half away from zero.
-fn millis(start: f64) -> i64 {
+pub(super) fn millis(start: f64) -> i64 {
     (start * 1000.0).round() as i64
 }
 

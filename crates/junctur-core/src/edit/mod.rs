@@ -16,6 +16,7 @@ mod save;
 mod scores;
 mod speakers;
 mod splice;
+mod spread;
 
 use std::path::PathBuf;
 
@@ -36,6 +37,9 @@ pub use speakers::{
     check_name, default_name, Labeller, Person, SpeakerName, Speakers, Turn, MAX_NAME,
 };
 pub use splice::{cut_span, keep_span};
+pub use spread::{
+    carry, keep_heard, likeness, snapshot, spread, Carried, CarryReport, Spread, Which,
+};
 
 /// A kept stretch of the source, in seconds.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

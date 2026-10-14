@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use junctur_core::edit::{
-    self, check_name, frame_ranges, frames_ceil, Captions, EditList, Envelope, Range, Saved,
+    self, check_name, frame_ranges, frames_ceil, Captions, EditList, Envelope, Fix, Range, Saved,
+    Spread, Which, WordAt,
 };
 
 use crate::cuts::Fps;
@@ -52,6 +53,10 @@ pub struct Edited {
     pub unsnapped: bool,
     /// Stretches of a several-stretch edit left out as under a frame ([`Editor::edit_all`]).
     pub skipped: usize,
+    /// Fixes a word fix also made on the words heard like it (5aa, [`Editor::fix_word`]), and what
+    /// those words were heard as.
+    pub others: Vec<Fix>,
+    pub heard: Vec<String>,
 }
 
 /// Runs of transcript words (`(first, last)`, inclusive) as the engine takes them from the page:
@@ -240,6 +245,8 @@ impl Editor {
             saved,
             unsnapped,
             skipped: 0,
+            others: Vec::new(),
+            heard: Vec::new(),
         }))
     }
 
@@ -293,7 +300,9 @@ impl Editor {
 
     /// Fixes the spelling of `word`, heard on `track` (5h), the `nth` of that track's words starting
     /// in its millisecond (5w, [`super::Words::nth`]), and saves; empty text or the heard text again
-    /// takes the fix away. Like a rename, not an undo step: the history holds kept ranges.
+    /// takes the fix away. Every other word heard like it gets the same fix in the same save (5aa,
+    /// [`edit::spread`]), [`Edited::others`] naming those. Like a rename, not an undo step: the
+    /// history holds kept ranges.
     pub fn fix_word(
         &mut self,
         list: &EditList,
@@ -302,23 +311,93 @@ impl Editor {
         nth: usize,
         text: &str,
     ) -> Result<Option<Edited>, String> {
-        self.restyle(list, |l| {
-            edit::set_fix(&mut l.fixes, track, word.start, nth, &word.text, text).map(|_| ())
-        })
+        let at = WordAt {
+            start: word.start,
+            nth,
+        };
+        let mut fixes = list.fixes.clone();
+        edit::set_fix(&mut fixes, track, word.start, nth, &word.text, text)?;
+        let s = self.spread(
+            &mut fixes,
+            Which::Words {
+                track,
+                first: at,
+                last: at,
+            },
+        );
+        self.set_fixes(list, fixes, s)
     }
 
     /// Sets the text of the run `r` names (5x, [`super::Words::retyped`]) as one fix, and saves;
     /// the fixes of words inside it, and a span overlapping it, go. Empty text or the heard text again
-    /// takes them all away. Like [`Self::fix_word`], not an undo step.
+    /// takes them all away. The same words heard elsewhere get the same text (5aa), as for
+    /// [`Self::fix_word`]. Not an undo step.
     pub fn fix_words(
         &mut self,
         list: &EditList,
         r: &Retyped,
         text: &str,
     ) -> Result<Option<Edited>, String> {
-        self.restyle(list, |l| {
-            edit::set_span(&mut l.fixes, r.track, r.first, r.last, &r.heard, text).map(|_| ())
-        })
+        let mut fixes = list.fixes.clone();
+        edit::set_span(&mut fixes, r.track, r.first, r.last, &r.heard, text)?;
+        let s = self.spread(
+            &mut fixes,
+            Which::Words {
+                track: r.track,
+                first: r.first,
+                last: r.last,
+            },
+        );
+        self.set_fixes(list, fixes, s)
+    }
+
+    /// Gives every word heard like a fixed one the same fix (5aa: the Correct button's first step),
+    /// and saves; what was added and the heard texts two fixes disagree on. Not an undo step.
+    pub fn spread_all(&mut self, list: &EditList) -> Result<(Option<Edited>, Spread), String> {
+        let mut fixes = list.fixes.clone();
+        let s = self.spread(&mut fixes, Which::All);
+        let edited = self.set_fixes(list, fixes, s.clone())?;
+        Ok((edited, s))
+    }
+
+    /// Takes back the fixes a fix also made elsewhere (5aa: the note's Undo), those still as they
+    /// were: their words keep what they were heard as (`heard`), as fixes of the heard text, so no
+    /// later spread gives them the fix again ([`edit::keep_heard`]). Saved; not an undo step.
+    pub fn keep_heard(
+        &mut self,
+        list: &EditList,
+        others: &[Fix],
+        heard: &[String],
+    ) -> Result<Option<Edited>, String> {
+        let mut fixes = list.fixes.clone();
+        edit::keep_heard(&mut fixes, others, heard);
+        self.set_fixes(list, fixes, Spread::default())
+    }
+
+    /// [`edit::spread`] over the transcript the editor has (none yet: nothing to spread over).
+    fn spread(&self, fixes: &mut Vec<Fix>, which: Which) -> Spread {
+        match &self.words {
+            Some(w) => edit::spread(fixes, &w.in_order(), which),
+            None => Spread::default(),
+        }
+    }
+
+    /// Saves `fixes` as the list's, `s` saying what of them a spread added.
+    fn set_fixes(
+        &mut self,
+        list: &EditList,
+        fixes: Vec<Fix>,
+        s: Spread,
+    ) -> Result<Option<Edited>, String> {
+        let edited = self.restyle(list, |l| {
+            l.fixes = fixes;
+            Ok(())
+        })?;
+        Ok(edited.map(|e| Edited {
+            others: s.added,
+            heard: s.heard,
+            ..e
+        }))
     }
 
     /// Puts `speakers` in place of the list's (5b: labelled again after a voice was enrolled or
@@ -354,6 +433,8 @@ impl Editor {
             saved,
             unsnapped: false,
             skipped: 0,
+            others: Vec::new(),
+            heard: Vec::new(),
         }))
     }
 
@@ -824,6 +905,61 @@ mod tests {
             .unwrap()
             .list;
         assert!(l3.fixes.is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_fix_lands_on_every_word_heard_alike_and_those_can_be_taken_back() {
+        // 5aa: Uezar fixed one "Bane" and the other stayed.
+        use super::Words;
+        let d = scratch("spread");
+        let path = d.join("edit.junctur");
+        let mut e = Editor::default();
+        e.reset(Some(path.clone()));
+        let w = |start: f64, text: &str| Word {
+            start,
+            end: start + 0.3,
+            text: format!(" {text}"),
+            p: 1.0,
+        };
+        e.words = Some(Arc::new(Words::from_tracked(vec![
+            (0, w(2.0, "Bane")),
+            (1, w(3.0, "bane,")),
+            (0, w(4.0, "Bane")),
+            (0, w(5.0, "the")),
+        ])));
+        let words = e.words.as_ref().unwrap().list.clone();
+        let l0 = list(vec![r(1.0, 30.0)]);
+        let edited = e
+            .fix_word(&l0, 0, &words[0], 0, "Vayne")
+            .unwrap()
+            .expect("a change");
+        let l1 = edited.list;
+        assert_eq!(
+            l1.fixes.iter().map(|f| f.text.as_str()).collect::<Vec<_>>(),
+            ["Vayne", "Vayne,", "Vayne"]
+        );
+        assert_eq!(edited.others.len(), 2);
+        assert_eq!(reread(&path), l1, "one save");
+        assert!(!e.can_undo(), "not an undo step");
+        assert_eq!(edited.heard, ["bane,", "Bane"]);
+        // Correct's first step finds nothing more to spread.
+        let (none, s) = e.spread_all(&l1).unwrap();
+        assert!(none.is_none() && s.added.is_empty());
+        // The note's Undo: the two others say what was heard again, the one typed stays.
+        let l2 = e
+            .keep_heard(&l1, &edited.others, &edited.heard)
+            .unwrap()
+            .expect("a change")
+            .list;
+        assert_eq!(
+            l2.fixes.iter().map(|f| f.text.as_str()).collect::<Vec<_>>(),
+            ["Vayne", "bane,", "Bane"]
+        );
+        assert_eq!(reread(&path), l2);
+        // And it sticks: Correct's first step does not give them the fix again.
+        let (none, s) = e.spread_all(&l2).unwrap();
+        assert!(none.is_none() && s.added.is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }
 

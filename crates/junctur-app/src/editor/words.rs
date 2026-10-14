@@ -81,6 +81,12 @@ impl Words {
         }
     }
 
+    /// Every word with its track, in the list's order: the order `edit::Fixes` and `edit::spread`
+    /// read a transcript in (5w, 5aa).
+    pub fn in_order(&self) -> Vec<(usize, &Word)> {
+        self.tracks.iter().copied().zip(self.list.iter()).collect()
+    }
+
     /// Which of the words heard on its track starting in its millisecond word `i` is, 0 for the
     /// first (5w): what names it in a fix, with its track and start. The list is sorted by start, so
     /// those words sit together just before it (other tracks' words among them).

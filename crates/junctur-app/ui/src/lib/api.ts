@@ -414,14 +414,45 @@ export const editFrames = (start: number, end: number, keep: boolean) =>
 /** Renames speaker `id` in the edit list (saved at once, not an undo step). */
 export const renameSpeaker = (id: number, name: string) =>
   invoke<void>("rename_speaker", { id, name });
-/** Fixes the spelling of word `index` (5h; empty or the heard text again removes the fix); resolves
- * to the entry it added to the word list, if any. Saved at once, not an undo step. */
-export const fixWord = (index: number, text: string) => invoke<string | null>("fix_word", { index, text });
-/** Fixes words `first..=last` as one text (5x; empty or the heard words again clears their fixes);
- * resolves to the entries it added to the word list. Refused, saying why, across two voice tracks or
- * two people. Saved at once, not an undo step. */
+/** A word fix as the edit list holds it (5h, 5w, 5x): handed back to `keepHeard` as it came. */
+export interface Fix {
+  track: number;
+  start: number;
+  nth: number;
+  through?: { start: number; nth: number };
+  text: string;
+}
+/** What a fix did besides itself (5aa): the entries the word list gained, and the fixes also made on
+ * the words heard like it with what each was heard as ("Also fixed N other places", whose Undo is
+ * `keepHeard(others, heard)`). */
+export interface Fixed {
+  learned: string[];
+  others: Fix[];
+  heard: string[];
+}
+/** Fixes the spelling of word `index` (5h; empty or the heard text again removes the fix), and every
+ * other word heard like it (5aa). Saved at once, not an undo step. */
+export const fixWord = (index: number, text: string) => invoke<Fixed>("fix_word", { index, text });
+/** Fixes words `first..=last` as one text (5x; empty or the heard words again clears their fixes),
+ * and the same words heard elsewhere (5aa). Refused, saying why, across two voice tracks or two
+ * people. Saved at once, not an undo step. */
 export const fixWords = (first: number, last: number, text: string) =>
-  invoke<string[]>("fix_words", { first, last, text });
+  invoke<Fixed>("fix_words", { first, last, text });
+/** Takes back fixes a fix made on other words (5aa), those still as made: the words keep what they
+ * were heard as, and no later spread or Correct gives them the fix again. */
+export const keepHeard = (others: Fix[], heard: string[]) => invoke<void>("keep_heard", { others, heard });
+/** What the Correct button started (5aa). */
+export interface Corrected {
+  progress: Progress;
+  /** The fixes made on words heard like a fixed one, and what each was heard as. */
+  others: Fix[];
+  heard: string[];
+  /** Heard texts fixed two ways, left as heard. */
+  unclear: string[];
+}
+/** The Correct button (5aa): every fix given to the words heard like it, then the open recording's
+ * speakers heard again and its words transcribed again with the word list, the user's edits kept. */
+export const correct = () => invoke<Corrected>("correct");
 /** Sets speaker `id`'s caption colour (`#RRGGBB`). */
 export const recolorSpeaker = (id: number, color: string) =>
   invoke<void>("recolor_speaker", { id, color });

@@ -33,6 +33,12 @@ use crate::{cache, hidden, Error, Result};
 
 const ENVELOPE_FILE: &str = "envelope.f32";
 
+/// There while a re-transcription asked for (5aa: the Correct button) has not finished: a run resumed
+/// after the app closed then still hears the recording again and carries the fixes onto the new words
+/// ([`hear_again`], [`carry_fixes`]). Empty: the old transcript stays in `transcript.json` until the
+/// new one replaces it, so the fixes are read against it at the end, not written down at the start.
+const AGAIN_FILE: &str = "transcribe-again";
+
 /// The speech tracks' envelope the `speech` stage left in project folder `dir`, which hand-made
 /// cuts snap to as the reduction's do. `None` before that stage ran.
 pub fn envelope(dir: &Path) -> Option<edit::Envelope> {
@@ -139,6 +145,12 @@ pub struct PipelineOptions {
     pub voices: Vec<Voice>,
     /// Whether an edit list holding the user's edits is kept or re-cut ([`KeepList`]).
     pub keep_list: KeepList,
+    /// Hear the speakers again from the audio, cut at the user's pins, instead of reusing the
+    /// hearing (5aa: the Correct button; what 5c's [`rehear`] does outside a run).
+    pub rehear: bool,
+    /// Transcribe the recording again, the word list as it is now, and carry the edit list's fixes
+    /// onto the new words ([`finish`], 5aa: the Correct button).
+    pub retranscribe: bool,
 }
 
 /// What a run's `edit` stage does with an edit list on disk that holds the user's edits.
@@ -273,17 +285,28 @@ pub fn finish(
     let transcript = if opts.no_transcript {
         None
     } else {
+        let again = hear_again(p, opts, log)?;
+        // The transcript about to be replaced, for the fixes to be read against at the end: it is
+        // what they name (a re-transcription's own words are only in its partial meanwhile).
+        let old = p
+            .dir
+            .join(AGAIN_FILE)
+            .is_file()
+            .then(|| transcribe::load(&p.dir))
+            .flatten();
         let t = transcribe_stage(
             p,
             &mut jobs,
             &report,
             &speech,
             opts,
+            again,
             log,
             steps,
             transcribed,
             between,
         )?;
+        carry_fixes(p, old.as_ref(), &t, log);
         // The counts are for later modes, nothing reads them yet: a list that cannot be written
         // now is no reason to fail a finished transcription.
         match count_words(p, &speech, &t, log) {
@@ -358,6 +381,86 @@ fn keep_or_write(
         }
     }
     write_draft(p, d)
+}
+
+/// Whether this run's transcription hears the recording again (5aa): asked for now
+/// (`opts.retranscribe`, which leaves [`AGAIN_FILE`]), or asked for by an earlier run that stopped
+/// before its first chunk (the file is there, no partial to resume), so a reopened recording does not
+/// settle for the old transcript. A run stopped later resumes its partial as any run does.
+fn hear_again(p: &Project, opts: &PipelineOptions, log: &mut dyn FnMut(&str)) -> Result<bool> {
+    let mark = p.dir.join(AGAIN_FILE);
+    if opts.retranscribe {
+        crate::output::write_replacing(&mark, b"")?;
+        log("transcribing again with the word list as it is now");
+        return Ok(true);
+    }
+    Ok(mark.is_file() && !transcribe::interrupted(&p.dir))
+}
+
+/// After a re-transcription (5aa, [`AGAIN_FILE`] there): the edit list's fixes, read against `old`
+/// (the transcript it replaced: every fix made before, and during the run on a word it shares with the
+/// old one), are moved onto the new words ([`edit::carry`]), then every fix is spread to the words
+/// heard alike ([`edit::spread`]), in the edit list on disk through [`edit::amend`] as the word counts
+/// go. Read at the end rather than written down at the start, so a word the user kept as heard while
+/// it ran ("Undo those") is kept. The file goes in every case, the log saying when the list could not
+/// take them: left behind, it would ask for another re-transcription.
+fn carry_fixes(p: &Project, old: Option<&Transcript>, t: &Transcript, log: &mut dyn FnMut(&str)) {
+    let mark = p.dir.join(AGAIN_FILE);
+    if !mark.is_file() {
+        return;
+    }
+    let before = old.map(|o| o.in_order()).unwrap_or_default();
+    let words = t.in_order();
+    let mut report = edit::CarryReport::default();
+    let mut spread = edit::Spread::default();
+    let amended = edit::amend(&p.edit_path(), |e| {
+        let carried = edit::snapshot(&e.fixes, &before);
+        report = edit::carry(&mut e.fixes, &carried, &words);
+        spread = edit::spread(&mut e.fixes, &words, edit::Which::All);
+    });
+    match amended {
+        Ok(edit::Amended::Written(_) | edit::Amended::Same(_)) => {
+            log(&carried_line(&report, &spread));
+            for (heard, at) in &report.gone {
+                log(&format!(
+                    "fixed word dropped: \"{heard}\" at {} is heard otherwise now",
+                    clock(*at)
+                ));
+            }
+        }
+        Ok(edit::Amended::Left) => {
+            log("edit list: edited outside Junctur, its fixed words are left as they are")
+        }
+        Ok(edit::Amended::Missing) => {}
+        Err(e) => log(&format!("edit list: fixed words not carried ({e})")),
+    }
+    if let Err(e) = crate::output::remove_retrying(&mark) {
+        log(&format!("could not remove {}: {e}", mark.display()));
+    }
+}
+
+/// The log line on fixes carried onto a new transcript.
+fn carried_line(r: &edit::CarryReport, s: &edit::Spread) -> String {
+    let mut line = format!(
+        "fixed words: {} kept on their words, {} no longer needed, {} dropped; {} more place(s) fixed",
+        r.kept,
+        r.right,
+        r.gone.len(),
+        s.added.len()
+    );
+    if !s.unclear.is_empty() {
+        line.push_str(&format!(
+            "; fixed two ways, left as heard: {}",
+            s.unclear.join(", ")
+        ));
+    }
+    line
+}
+
+/// `h:mm:ss` of source seconds, for the log.
+fn clock(s: f64) -> String {
+    let t = s.max(0.0) as u64;
+    format!("{}:{:02}:{:02}", t / 3600, t / 60 % 60, t % 60)
 }
 
 /// Puts the transcript's word counts into the score windows of the edit list on disk, changing
@@ -447,6 +550,7 @@ fn speakers_stage(
     let cached = previous
         .clone()
         .filter(|_| !opts.force)
+        .filter(|_| !opts.rehear)
         .and_then(|f| speakers::cached(f, speech, &voice_tracks(report), &p.dir));
     let found = match cached {
         // Heard before: only labelled again, with the voices as they are now (cheap).
@@ -684,6 +788,7 @@ fn transcribe_stage(
     report: &TrackReport,
     speech: &Speech,
     opts: &PipelineOptions,
+    again: bool,
     log: &mut dyn FnMut(&str),
     steps: Steps,
     transcribed: &mut dyn FnMut(f64),
@@ -694,6 +799,7 @@ fn transcribe_stage(
         device: opts.device,
         languages: opts.languages.clone(),
         force: opts.force,
+        again,
         words: opts.words.clone(),
     };
     let src: Vec<Source> = speech
@@ -1678,6 +1784,114 @@ keep x
             hand_edited(&p).unwrap(),
             "a list whose analysis is gone cannot be remade"
         );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    fn transcript_of(words: &[(f64, &str)]) -> Transcript {
+        Transcript {
+            choice: transcribe::Choice {
+                model: "large-v3-turbo".into(),
+                device: crate::runtime::Device::Cpu,
+                note: None,
+            },
+            languages: vec![],
+            segments: vec![transcribe::Segment {
+                track: 0,
+                start: 0.0,
+                end: 10.0,
+                lang: "en".into(),
+                model: "large-v3-turbo".into(),
+                words: words
+                    .iter()
+                    .map(|&(start, text)| transcribe::Word {
+                        start,
+                        end: start + 0.3,
+                        text: text.into(),
+                        p: 1.0,
+                    })
+                    .collect(),
+            }],
+            audio_s: 10.0,
+            elapsed_s: 1.0,
+            resumed_chunks: 0,
+        }
+    }
+
+    #[test]
+    fn a_retranscription_carries_the_fixes_onto_the_new_words_and_spreads_them() {
+        // 5aa: the Correct button's re-transcription. At its end the fixes, read against the
+        // transcript it replaces, are moved onto the new words and spread to the words heard
+        // alike, and the mark that asked for it goes.
+        let (d, p) = scratch_project("carry");
+        let fix = |start: f64, text: &str| edit::Fix {
+            track: 0,
+            start,
+            nth: 0,
+            through: None,
+            text: text.into(),
+        };
+        let mut e = EditList {
+            source: p.file.clone(),
+            duration: 10.0,
+            settings: CutSettings::default(),
+            keep: vec![edit::Range {
+                start: 0.0,
+                end: 10.0,
+            }],
+            speakers: Default::default(),
+            captions: Default::default(),
+            fixes: vec![fix(1.0, "Vayne,"), fix(5.0, "Mell")],
+            windows: vec![],
+        };
+        std::fs::write(p.edit_path(), e.to_text()).unwrap();
+        let old = transcript_of(&[(1.0, " Bane,"), (3.0, " Bane."), (5.0, " Mel")]);
+        std::fs::write(transcribe::path(&p.dir), serde_json::to_vec(&old).unwrap()).unwrap();
+        let lines = std::cell::RefCell::new(Vec::<String>::new());
+        let mut log = |l: &str| lines.borrow_mut().push(l.to_string());
+        let asked = PipelineOptions {
+            retranscribe: true,
+            ..Default::default()
+        };
+        assert!(hear_again(&p, &asked, &mut log).unwrap());
+        let mark = p.dir.join(AGAIN_FILE);
+        assert!(mark.is_file());
+        // Asked and not started (the app closed before the first chunk): heard again, not settled
+        // for the old transcript; once a partial is there, it is resumed as any run is.
+        let plain = PipelineOptions::default();
+        assert!(hear_again(&p, &plain, &mut log).unwrap());
+        let partial = p.dir.join("transcript.partial.jsonl");
+        std::fs::write(&partial, "{}").unwrap();
+        assert!(!hear_again(&p, &plain, &mut log).unwrap());
+        std::fs::remove_file(&partial).unwrap();
+        // While it ran, the user kept the "Bane." at 3 as heard ("Undo those" on a spread): it
+        // stays so, carried like any fix, and no spread reaches it.
+        e.fixes.push(fix(3.0, "Bane."));
+        std::fs::write(p.edit_path(), e.to_text()).unwrap();
+        // The new transcript: "Bane," a little later, "Mel" now "and", a third "Bane" at 7.
+        let new = transcript_of(&[
+            (1.1, " Bane,"),
+            (3.0, " Bane."),
+            (5.0, " and"),
+            (7.0, " bane"),
+        ]);
+        carry_fixes(&p, Some(&old), &new, &mut log);
+        assert!(!mark.exists(), "the mark goes");
+        e = p.edit().unwrap();
+        let shown: Vec<(f64, &str)> = e.fixes.iter().map(|f| (f.start, f.text.as_str())).collect();
+        assert_eq!(shown, [(1.1, "Vayne,"), (3.0, "Bane."), (7.0, "Vayne")]);
+        let said = lines.borrow().clone();
+        assert!(
+            said.iter().any(|l| l
+                == "fixed words: 2 kept on their words, 0 no longer needed, 1 dropped; 1 more place(s) fixed"),
+            "{said:?}"
+        );
+        assert!(said
+            .iter()
+            .any(|l| l.contains("\"Mel\" at 0:00:05 is heard otherwise now")));
+        // Nothing asked: nothing carried, the list as it is.
+        carry_fixes(&p, Some(&old), &new, &mut log);
+        assert_eq!(p.edit().unwrap(), e);
+        assert!(!hear_again(&p, &plain, &mut log).unwrap());
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

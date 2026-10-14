@@ -170,7 +170,14 @@ above the timeline (shift-drag on the timeline selects a stretch). Boundaries sn
 `junctur cut` places them, every edit is saved to `edit.junctur` at once, Ctrl+Z / Ctrl+Y undo and redo,
 and a list the app did not write itself is first kept as `edit.junctur.bak` (then `.bak2`, ...).
 Double-click a misheard word to fix its spelling: the fix is a `fix` line in `edit.junctur`, shown in the
-transcript, the caption preview and the SRT, and the spelling joins the word list (below).
+transcript, the caption preview and the SRT, and the spelling joins the word list (below). Every other
+place the transcript has the same misheard word (case and punctuation aside) gets the same fix in the
+same save; a line under the panel's header says how many, with Undo those. **Correct**, at the end of
+the word bar's row of speakers, does it for the whole recording: every fix given to the words heard the
+same way, then the speakers heard again against the remembered voices and the recording transcribed
+again with the word list, your cuts, names, fixes and caption settings kept. It is an analysis like any
+other (on the transcription lane, pausable, the words coming back five minutes at a time); the fixes
+move onto the new words, and one whose word Whisper now spells your way is no longer needed.
 
 Setup, once (Node.js 20+ for the frontend):
 
@@ -219,8 +226,10 @@ title bar) writes the same file:
 `words` is the word list: names and terms (speaker names, recurring jargon) Whisper is told before every
 stretch it hears, so they come out spelled that way. It applies to the next transcription; a finished one
 is not redone or called out of date. A list too long for Whisper's prompt (about 220 tokens) is cut from
-the end, and the log says what was left out. The app edits it in Settings and adds every word you fix at
-the top of the list, so a newly fixed word is always told to Whisper.
+the end, and the log says what was left out. The app edits it in Settings and adds a word you fix at
+the top of the list, so a newly fixed word is always told to Whisper: only words the recording never
+heard anywhere (or a name whose case you fixed), so a retyped sentence's common words do not push the
+names out.
 
 `captions` holds the caption defaults: what a recording whose edit list has no `captions` line of its own
 cuts its captions with (`on`, `chars` per line, `lines` per speaker, `words` per speaker with 0 for no

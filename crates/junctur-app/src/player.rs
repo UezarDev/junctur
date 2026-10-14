@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use junctur_core::edit::{Captions, EditList, Speakers};
+use junctur_core::edit::{Captions, EditList, Fix, Speakers, Spread};
 use junctur_core::export::layout::{self, Placed};
 use junctur_core::export::srt;
 use junctur_core::export::{self, CaptionFiles};
@@ -32,6 +32,7 @@ use junctur_core::pipeline::{self, Found};
 use junctur_core::resolve;
 use junctur_core::transcribe;
 use junctur_core::translate::Translations;
+use junctur_core::wordlist;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
@@ -219,6 +220,22 @@ impl Deref for Player {
     fn deref(&self) -> &Core {
         &self.core
     }
+}
+
+/// What a word fix did besides itself (5h, 5aa): the entries the word list is to learn (the caller
+/// saves them, `settings::learn`), and the fixes it also made on the words heard like it.
+#[derive(Debug, Default)]
+pub struct FixDone {
+    pub learn: Vec<String>,
+    pub others: Vec<Fix>,
+    /// What each of `others`' words were heard as (what "Undo those" leaves them saying).
+    pub heard: Vec<String>,
+}
+
+/// The words `words` heard, as a fix's new words are compared with them (5aa: the word list learns
+/// only words the recording never heard).
+fn heard(words: &Words) -> wordlist::Heard {
+    wordlist::Heard::new(words.list.iter().map(|w| w.text.as_str()))
 }
 
 pub struct Core {
@@ -720,14 +737,15 @@ impl Core {
         stopped.and(left)
     }
 
-    /// Fixes the spelling of transcript word `index` (5h) in the edit list and saves it; returns the
-    /// heard text and the fixed one, for the word list. Not an undo step, like a rename.
+    /// Fixes the spelling of transcript word `index` (5h) in the edit list and saves it, the words
+    /// heard like it included (5aa); returns what the word list is to learn and the fixes made on
+    /// those other words. Not an undo step, like a rename.
     pub fn fix_word(
         &self,
         file: Option<&str>,
         index: usize,
         text: &str,
-    ) -> Result<(String, String), String> {
+    ) -> Result<FixDone, String> {
         self.prepare();
         let words = lock(&self.editor)
             .words
@@ -738,23 +756,32 @@ impl Core {
         };
         let nth = words.nth(index);
         let fixed = junctur_core::edit::check_fix(text)?;
+        let mut done = FixDone::default();
         self.change(file, |ed, list, _| {
-            ed.fix_word(list, track, word, nth, &fixed)
+            let r = ed.fix_word(list, track, word, nth, &fixed)?;
+            if let Some(e) = &r {
+                (done.others, done.heard) = (e.others.clone(), e.heard.clone());
+            }
+            Ok(r)
         })?;
-        Ok((word.text.clone(), fixed))
+        done.learn = wordlist::learned_in(&word.text, &fixed, &heard(&words))
+            .into_iter()
+            .collect();
+        Ok(done)
     }
 
-    /// Fixes transcript words `first..=last` as one text (5x) in the edit list and saves it; returns
-    /// the heard text and the fixed one, for the word list. Refused, saying why, for a run across two
-    /// tracks, or a new text over two people's words ([`Words::retyped`]; clearing never is). One word is [`Self::fix_word`]'s fix. Not an undo
-    /// step.
+    /// Fixes transcript words `first..=last` as one text (5x) in the edit list and saves it, the same
+    /// words heard elsewhere included (5aa); returns what the word list is to learn and the fixes
+    /// made elsewhere. Refused, saying why, for a run across two tracks, or a new text over two
+    /// people's words ([`Words::retyped`]; clearing never is). One word is [`Self::fix_word`]'s fix.
+    /// Not an undo step.
     pub fn fix_words(
         &self,
         file: Option<&str>,
         first: usize,
         last: usize,
         text: &str,
-    ) -> Result<(String, String), String> {
+    ) -> Result<FixDone, String> {
         self.prepare();
         let words = lock(&self.editor)
             .words
@@ -768,8 +795,47 @@ impl Core {
             .unwrap_or_default();
         let fixed = junctur_core::edit::check_span(text)?;
         let run = words.retyped(first, last, &fixed, &speakers)?;
-        self.change(file, |ed, list, _| ed.fix_words(list, &run, &fixed))?;
-        Ok((run.heard, fixed))
+        let mut done = FixDone::default();
+        self.change(file, |ed, list, _| {
+            let r = ed.fix_words(list, &run, &fixed)?;
+            if let Some(e) = &r {
+                (done.others, done.heard) = (e.others.clone(), e.heard.clone());
+            }
+            Ok(r)
+        })?;
+        let recording = heard(&words);
+        done.learn = if first == last {
+            wordlist::learned_in(&run.heard, &fixed, &recording)
+                .into_iter()
+                .collect()
+        } else {
+            wordlist::learned_all_in(&run.heard, &fixed, &recording)
+        };
+        Ok(done)
+    }
+
+    /// Gives every word heard like a fixed one the same fix and saves (5aa: the Correct button's
+    /// first step); what was added and the heard texts two fixes disagree on.
+    pub fn spread_fixes(&self, file: Option<&str>) -> Result<Spread, String> {
+        self.prepare();
+        let mut out = Spread::default();
+        self.change(file, |ed, list, _| {
+            let (r, s) = ed.spread_all(list)?;
+            out = s;
+            Ok(r)
+        })?;
+        Ok(out)
+    }
+
+    /// Takes back the fixes a fix also made elsewhere, those still as they were (5aa: the note's
+    /// Undo): their words keep what they were heard as, and no later spread reaches them. Saved.
+    pub fn keep_heard(
+        &self,
+        file: Option<&str>,
+        others: &[Fix],
+        heard: &[String],
+    ) -> Result<(), String> {
+        self.change(file, |ed, list, _| ed.keep_heard(list, others, heard))
     }
 
     /// Sets the edit list's caption settings and saves them.

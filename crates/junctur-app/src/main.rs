@@ -135,6 +135,8 @@ fn main() {
             commands::rename_speaker,
             commands::fix_word,
             commands::fix_words,
+            commands::keep_heard,
+            commands::correct,
             commands::recolor_speaker,
             commands::set_captions,
             commands::export_captions,
