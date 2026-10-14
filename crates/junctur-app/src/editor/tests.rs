@@ -707,3 +707,96 @@ fn a_word_left_with_under_a_frame_kept_is_cut_whole() {
     assert_eq!(t, [(10.69, 10.7, 10.9)]);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn a_selected_words_own_edge_moves_it_trims_its_neighbour_and_undoes_alone() {
+    // "pas" heard at 50.9-51.1, late and short; kept 49.0-52.0 at 30 fps. Its start dragged to
+    // 50.7 (frame 1521) moves only it, no cut, one undo step.
+    let d = scratch("editor", "word-edge");
+    let path = d.join("edit.junctur");
+    let mut e = Editor::default();
+    e.reset(Some(path.clone()));
+    let w = |start, end, text: &str| Word {
+        start,
+        end,
+        text: text.into(),
+        p: 1.0,
+        p_min: None,
+    };
+    e.words = Some(Arc::new(Words::from_tracked(vec![
+        (0, w(50.0, 50.4, "las")),
+        (1, w(50.5, 50.95, "si")),
+        (0, w(50.9, 51.1, "pas")),
+        (0, w(51.2, 51.6, "del")),
+    ])));
+    let spans = |l: &EditList| -> Vec<(usize, f64, f64, f64)> {
+        l.times
+            .iter()
+            .map(|t| (t.track, t.start, t.from, t.to))
+            .collect()
+    };
+    let l0 = list(vec![r(49.0, 52.0)]);
+    let l1 = e
+        .retime_word(&l0, 2, Side::Start, 1521, FPS)
+        .unwrap()
+        .expect("a change")
+        .list;
+    assert_eq!(l1.keep, l0.keep, "no cut moves");
+    assert_eq!(spans(&l1), [(0, 50.9, 50.7, 51.1)]);
+    assert_eq!(reread(&path), l1, "saved");
+    // Into "las" (ends 50.4): it is trimmed at the edge; another track's "si" is left.
+    let l2 = e
+        .retime_word(&l1, 2, Side::Start, 1509, FPS)
+        .unwrap()
+        .unwrap()
+        .list;
+    assert_eq!(spans(&l2), [(0, 50.0, 50.0, 50.3), (0, 50.9, 50.3, 51.1)]);
+    // Past "las" whole: the edge stops a frame inside its start.
+    let l3 = e
+        .retime_word(&l2, 2, Side::Start, 1490, FPS)
+        .unwrap()
+        .unwrap()
+        .list;
+    assert_eq!(
+        spans(&l3),
+        [(0, 50.0, 50.0, 50.033), (0, 50.9, 50.033, 51.1)]
+    );
+    // The end out into "del" trims its head, and no further than a frame inside its end.
+    let l4 = e
+        .retime_word(&l3, 2, Side::End, 1560, FPS)
+        .unwrap()
+        .unwrap()
+        .list;
+    assert_eq!(
+        spans(&l4),
+        [
+            (0, 50.0, 50.0, 50.033),
+            (0, 50.9, 50.033, 51.567),
+            (0, 51.2, 51.567, 51.6)
+        ]
+    );
+    // One undo each, times only; redo puts it back.
+    let back = step(&mut e, &l4, Step::Undo, FPS);
+    assert_eq!(back.times, l3.times);
+    assert_eq!(step(&mut e, &back, Step::Redo, FPS), l4);
+    let back = step(&mut e, &l4, Step::Undo, FPS);
+    let back = step(&mut e, &back, Step::Undo, FPS);
+    let back = step(&mut e, &back, Step::Undo, FPS);
+    let back = step(&mut e, &back, Step::Undo, FPS);
+    assert!(back.times.is_empty());
+    assert!(!e.can_undo());
+    // A start dragged past its own end, or an end before its start, has no room.
+    assert!(e.retime_word(&l0, 2, Side::Start, 1540, FPS).is_err());
+    assert!(e.retime_word(&l0, 2, Side::End, 1520, FPS).is_err());
+    assert!(e.retime_word(&l0, 9, Side::End, 1540, FPS).is_err());
+    // Dragged back to where it was heard: the override goes.
+    let l5 = e
+        .retime_word(&l1, 2, Side::Start, 1527, FPS)
+        .unwrap()
+        .unwrap()
+        .list;
+    assert!(l5.times.is_empty(), "{:?}", l5.times);
+    e.words = None;
+    assert!(e.retime_word(&l0, 2, Side::Start, 1521, FPS).is_err());
+    let _ = std::fs::remove_dir_all(&d);
+}

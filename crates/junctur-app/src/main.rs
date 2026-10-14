@@ -79,6 +79,7 @@ fn main() {
             commands::edit_words,
             commands::edit_frames,
             commands::move_edge,
+            commands::retime_word,
             commands::rename_speaker,
             commands::fix_word,
             commands::confirm_word,

@@ -19,7 +19,7 @@ use crate::cuts::Fps;
 /// pause should not stretch its last word over the whole pause.
 const REACH: f64 = 1.0;
 
-/// Which end of a kept range an edge is.
+/// Which end of a kept range, or of a word, an edge is.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Side {
     Start,
@@ -260,6 +260,80 @@ impl Words {
             );
         }
         out
+    }
+
+    /// The list's retimed words after dragging `side` of word `word` itself to frame `to`, for a
+    /// word heard late or short that no cut edge is beside. The neighbour on its own track (before
+    /// it for a start, after it for an end) is trimmed if run into; the edge stops a frame inside
+    /// that neighbour's far end, a frame inside the word's other end, and at the file's ends. Other
+    /// tracks' words are left, since people talking over each other is ordinary. Refused for a word
+    /// out of range or with no room to move.
+    pub fn retimed(
+        &self,
+        times: &[Retime],
+        word: usize,
+        side: Side,
+        to: u64,
+        duration: f64,
+        fps: Fps,
+    ) -> Result<Vec<Retime>, String> {
+        if word >= self.list.len() {
+            return Err("no such word in the transcript".into());
+        }
+        let t = self.timing(times);
+        let s = |i: usize| t.as_ref().map_or(self.list[i].start, |t| t.start[i]);
+        let e = |i: usize| t.as_ref().map_or(self.list[i].end, |t| t.end[i]);
+        let frame = fps.seconds(1);
+        let track = self.tracks[word];
+        let no_room = || {
+            "that word has no room to move: its neighbour or its own other end is a frame away"
+                .to_string()
+        };
+        // (word, new start, new end) for the word and the neighbour it runs into.
+        let mut moved: Vec<(usize, f64, f64)> = Vec::new();
+        match side {
+            Side::Start => {
+                let mut edge = fps.seconds(to).max(0.0);
+                let prev = (0..word).rev().find(|&j| self.tracks[j] == track);
+                if let Some(j) = prev.filter(|&j| edge < e(j)) {
+                    edge = edge.max(s(j) + frame);
+                }
+                if edge > e(word) - frame {
+                    return Err(no_room());
+                }
+                if let Some(j) = prev.filter(|&j| edge < e(j)) {
+                    moved.push((j, s(j), edge));
+                }
+                moved.push((word, edge, e(word)));
+            }
+            Side::End => {
+                let mut edge = fps.seconds(to).min(duration);
+                let next = (word + 1..self.list.len()).find(|&j| self.tracks[j] == track);
+                if let Some(j) = next.filter(|&j| edge > s(j)) {
+                    edge = edge.min(e(j) - frame);
+                }
+                if edge < s(word) + frame {
+                    return Err(no_room());
+                }
+                if let Some(j) = next.filter(|&j| edge > s(j)) {
+                    moved.push((j, edge, e(j)));
+                }
+                moved.push((word, s(word), edge));
+            }
+        }
+        let mut out = times.to_vec();
+        for (i, from, to) in moved {
+            let w = &self.list[i];
+            set_time(
+                &mut out,
+                self.tracks[i],
+                w.start,
+                self.nth(i),
+                (w.start, w.end),
+                (from, to),
+            )?;
+        }
+        Ok(out)
     }
 
     /// Which of the words heard on its track starting in its millisecond word `i` is, 0 for the

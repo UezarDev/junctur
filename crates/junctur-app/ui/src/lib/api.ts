@@ -466,6 +466,10 @@ export const editFrames = (start: number, end: number, keep: boolean) =>
  * of the list (review's clips are not always its ranges) is the frame edit alone. */
 export const moveEdge = (step: { start: number; end: number; keep: boolean }, from: number) =>
   invoke<void>("move_edge", { start: step.start, end: step.end, keep: step.keep, from });
+/** Moves word `word`'s own start or end to source frame `to` (its edge dragged on the lanes),
+ * its neighbour on its track trimmed if run into, as one undo step; no cut moves. */
+export const retimeWord = (word: number, side: "start" | "end", to: number) =>
+  invoke<void>("retime_word", { word, side, to });
 /** Renames speaker `id` in the edit list (saved at once, not an undo step). */
 export const renameSpeaker = (id: number, name: string) =>
   invoke<void>("rename_speaker", { id, name });

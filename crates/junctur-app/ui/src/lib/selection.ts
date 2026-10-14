@@ -94,6 +94,55 @@ export function seconds(
   return [{ start: toSeconds(sel.start, fps), end: toSeconds(sel.end, fps) }];
 }
 
+/**
+ * The edges of a selection of one stretch of words that can be dragged on the lanes: the
+ * start of its first word and the end of its last, in seconds, each with the frames it may be
+ * dragged between as the engine clamps it (`Words::retimed`): a frame inside the word's own other
+ * end, and a frame inside the far end of its neighbour on its track (the word before it for a
+ * start, after it for an end), whose near end the edge trims when it runs into it; the file's ends.
+ * An edge with no room is left out. Null for nothing, frames, or several stretches (which word an
+ * edge would move is not plain between them).
+ */
+export interface WordEdge {
+  word: number;
+  side: "start" | "end";
+  /** Where it is now, in source seconds. */
+  at: number;
+  lo: number;
+  hi: number;
+}
+
+export function wordEdges(
+  sel: Selection | null,
+  w: Words | null,
+  fps: api.Fps | null,
+  duration: number,
+): WordEdge[] {
+  const joined = runs(sel);
+  if (!w || !fps || joined.length !== 1) return [];
+  const { first, last } = joined[0];
+  if (last >= w.start.length) return [];
+  const per = fps.num / fps.den;
+  const frame = 1 / per;
+  const s = (i: number) => w.start[i] / 1000;
+  const e = (i: number) => w.end[i] / 1000;
+  // Whole frames inside a span of seconds, a hair allowed for the milliseconds.
+  const up = (t: number) => Math.ceil(t * per - 1e-6);
+  const down = (t: number) => Math.floor(t * per + 1e-6);
+  // The nearest word on word `i`'s track before it (`step` -1) or after it (1), or -1.
+  const near = (i: number, step: number) => {
+    for (let j = i + step; j >= 0 && j < w.start.length; j += step) if (w.track[j] === w.track[i]) return j;
+    return -1;
+  };
+  const prev = near(first, -1);
+  const next = near(last, 1);
+  const out: WordEdge[] = [];
+  const start = { word: first, side: "start" as const, at: s(first), lo: up(prev >= 0 ? s(prev) + frame : 0), hi: down(e(first) - frame) };
+  const end = { word: last, side: "end" as const, at: e(last), lo: up(s(last) + frame), hi: down(next >= 0 ? e(next) - frame : duration) };
+  for (const g of [start, end]) if (g.lo <= g.hi) out.push(g);
+  return out;
+}
+
 /** As the engine takes word runs: `[first, last]` pairs, sorted and joined. */
 export function pairs(sel: Selection | null): [number, number][] {
   return runs(sel).map((r) => [r.first, r.last]);

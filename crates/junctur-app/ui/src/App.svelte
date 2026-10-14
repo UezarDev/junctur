@@ -90,6 +90,8 @@
   const panelWidth = $derived(loaded && panelOpen ? Math.min(PANEL, windowWidth * 0.45) : 0);
   // A span per selected stretch (words can be several), for the lanes and timeline to draw.
   const spans = $derived(sel.seconds(selection, words, edit?.fps ?? null));
+  // The selected stretch's own word edges, which the lanes let be dragged.
+  const wordEdges = $derived(sel.wordEdges(selection, words, edit?.fps ?? null, player?.duration ?? 0));
   const speakers = $derived(edit?.speakers ?? []);
   // The layout from plain numbers: each is a derived value that only moves when it changes, so the
   // player's state (sent many times a second for the position) never lays the editor out again.
@@ -678,6 +680,7 @@
           thin={L.portrait}
           {wavesVersion}
           {spans}
+          {wordEdges}
           edges={!reviewing}
           onView={setView}
           onSelect={(s) => (selection = s)}

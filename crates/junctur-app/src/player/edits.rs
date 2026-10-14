@@ -10,7 +10,7 @@ use junctur_core::transcribe;
 
 use super::{same_form, Core, Ctl, EditSource, OPENED_MEANWHILE};
 use crate::cuts::{self, Edit, EditState, EditorStatus, Fps};
-use crate::editor::{Edited, Editor, Op, Step, TranscriptView, Words};
+use crate::editor::{Edited, Editor, Op, Side, Step, TranscriptView, Words};
 use crate::lock::lock;
 
 /// What the edit bar should say after a saved edit: a backup made (and why), or word boundaries
@@ -158,6 +158,21 @@ impl Core {
     ) -> Result<(), String> {
         self.prepare();
         self.change(file, |ed, list, fps| ed.move_edge(list, frames, from, fps))
+    }
+
+    /// Moves `side` of word `word` itself to frame `to`, as one undo step. See
+    /// [`Editor::retime_word`].
+    pub fn retime_word(
+        &self,
+        file: Option<&str>,
+        word: usize,
+        side: Side,
+        to: u64,
+    ) -> Result<(), String> {
+        self.prepare();
+        self.change(file, |ed, list, fps| {
+            ed.retime_word(list, word, side, to, fps)
+        })
     }
 
     /// Cuts (`keep` false) or keeps every run of transcript words in `runs` (`first..=last` each)
