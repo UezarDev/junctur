@@ -1,5 +1,6 @@
 /**
- * The title bar's menus (2i): File and View, as 2g's native menu had them, plus Close recording. One
+ * The title bar's menus (2i): File and View, as 2g's native menu had them, plus the way back to the start
+ * window (2i's "Close recording", named for where it goes in 2u, which also put it on the bar as an arrow). One
  * list of ids, so the bar, the keyboard and test mode's `menu=<id>` (src/testmode.rs) all end in
  * App.svelte's one `onMenu`. Check marks and what is enabled come from the page's own state.
  */
@@ -39,7 +40,8 @@ export const MENUS: Menu[] = [
     label: "File",
     items: [
       { id: "open", label: "Open recording…", keys: "Ctrl+O" },
-      { id: "close", label: "Close recording", keys: "Ctrl+W", needsFile: true },
+      // Still `close`, so Ctrl+W, the bar's arrow and test mode's `menu=close` keep working.
+      { id: "close", label: "Back to recordings", keys: "Ctrl+W", needsFile: true },
       { id: "settings", label: "Settings…", keys: "Ctrl+,", separator: true },
     ],
   },
@@ -59,7 +61,7 @@ export const MENUS: Menu[] = [
 /** What the menus show checked and enabled. */
 export interface MenuState {
   loaded: boolean;
-  /** A recording is open or opening: Close recording works on both. */
+  /** A recording is open or opening: the way back works on both (and the bar shows its arrow). */
   closable: boolean;
   panel: boolean;
   talking: boolean;
