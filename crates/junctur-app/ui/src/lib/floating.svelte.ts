@@ -5,6 +5,8 @@
 /** Space between the trigger and the popup, and kept between the popup and the window's edge. */
 export const GAP = 8;
 export const MARGIN = 8;
+/** A list sits closer to its trigger than a tip: it reads as the trigger opening. */
+export const LIST_GAP = 4;
 
 /**
  * The one open popup in the window, by id. A single slot rather than a flag per popup: closes are
@@ -20,21 +22,30 @@ export function release(id: string) {
 
 /**
  * Where a popup of `width` x `height` goes for a trigger at `at`, in window coordinates: above by
- * preference (the trigger is what is being looked at), below when there is no room above, centred
- * on the trigger and kept `MARGIN` inside the window.
+ * preference (a tip: the trigger is what is being looked at), below when there is no room above,
+ * centred on the trigger and kept `MARGIN` inside the window. A list (2v's model picker) prefers
+ * `"below"`, flush with the trigger's left edge, as a select's list drops.
  */
 export function place(
   at: { top: number; bottom: number; left: number; width: number },
   width: number,
   height: number,
   view: { width: number; height: number },
+  prefer: "above" | "below" = "above",
 ): { top: number; left: number } {
-  const above = at.top - height - GAP;
-  const below = Math.min(at.bottom + GAP, view.height - height - MARGIN);
+  const gap = prefer === "below" ? LIST_GAP : GAP;
+  const above = at.top - height - gap;
+  const below = Math.min(at.bottom + gap, view.height - height - MARGIN);
+  const fitsBelow = at.bottom + gap + height <= view.height - MARGIN;
   // A popup taller than the room either side starts at the top margin rather than off-screen.
-  const top = above >= MARGIN ? above : Math.max(MARGIN, below);
-  const centred = at.left + at.width / 2 - width / 2;
-  const left = Math.max(MARGIN, Math.min(centred, view.width - width - MARGIN));
+  const top =
+    prefer === "below" && (fitsBelow || above < MARGIN)
+      ? Math.max(MARGIN, below)
+      : above >= MARGIN
+        ? above
+        : Math.max(MARGIN, below);
+  const start = prefer === "below" ? at.left : at.left + at.width / 2 - width / 2;
+  const left = Math.max(MARGIN, Math.min(start, view.width - width - MARGIN));
   return { top, left };
 }
 
