@@ -1,13 +1,14 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "What the main window's page may call: Tauri's core events, the open and save dialogs, the yes/no question before a re-analysis replaces edits, and what its own title bar does to the window (2i: drag, double-click to maximise, minimise, maximise, close).",
+  "description": "What the main window's page may call: Tauri's core events, the open and save dialogs, the yes/no question before a re-analysis replaces edits, the three-way question when Resolve already has the timeline a send makes (5z), and what its own title bar does to the window (2i: drag, double-click to maximise, minimise, maximise, close).",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "dialog:allow-open",
     "dialog:allow-save",
     "dialog:allow-ask",
+    "dialog:allow-message",
     "core:window:allow-start-dragging",
     "core:window:allow-internal-toggle-maximize",
     "core:window:allow-minimize",
