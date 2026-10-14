@@ -107,7 +107,11 @@ fn place_one(cue: &Cue, protagonist: Option<u32>, c: &Captions, aspect: f64) -> 
             None => p.lines.clone(),
         })
         .collect();
-    let height = |i: usize| lines[i].len().max(1) as f64 * em * LINE;
+    let heights: Vec<f64> = lines
+        .iter()
+        .map(|l| l.len().max(1) as f64 * em * LINE)
+        .collect();
+    let height = |i: usize| heights[i];
     let width = |i: usize| {
         lines[i]
             .iter()
@@ -116,41 +120,10 @@ fn place_one(cue: &Cue, protagonist: Option<u32>, c: &Captions, aspect: f64) -> 
             .unwrap_or(0) as f64
             * glyph
     };
-    let mut at = vec![(0.5, 0.0); cue.parts.len()];
-    // A stack from `bottom` up through `ids`, each centred at `x`.
-    let stack = |ids: &[usize], x: f64, at: &mut Vec<(f64, f64)>| {
-        let mut edge = bottom;
-        for &i in ids {
-            at[i] = (x, edge + height(i) / 2.0);
-            edge += height(i) + GAP * em;
-        }
-    };
-    match c.layout {
-        Layout::Stacked => stack(&order, 0.5, &mut at),
-        Layout::TopBottom => {
-            let mut low = vec![order[0]];
-            low.extend(order.iter().skip(2));
-            stack(&low, 0.5, &mut at);
-            if let Some(&top) = order.get(1) {
-                at[top] = (0.5, 1.0 - bottom - height(top) / 2.0);
-            }
-        }
-        Layout::Side if protagonist.is_some_and(|id| cue.parts[order[0]].speaker == id) => {
-            // The protagonist stays centred; two others beside, any more above the protagonist.
-            let mut centre = vec![order[0]];
-            centre.extend(order.iter().skip(1 + BESIDE.len()));
-            stack(&centre, 0.5, &mut at);
-            for (&i, x) in order.iter().skip(1).zip(BESIDE) {
-                stack(&[i], x, &mut at);
-            }
-        }
-        Layout::Side => {
-            let n = order.len() as f64;
-            for (k, &i) in order.iter().enumerate() {
-                stack(&[i], (2.0 * k as f64 + 1.0) / (2.0 * n), &mut at);
-            }
-        }
-    }
+    // Side by side with the protagonist first: they stay centred.
+    let centred = matches!(c.layout, Layout::Side)
+        && protagonist.is_some_and(|id| cue.parts[order[0]].speaker == id);
+    let at = centres(c.layout, centred, &order, &heights, bottom, em);
     let sizes: Vec<(f64, f64)> = (0..cue.parts.len())
         .map(|i| (width(i), height(i)))
         .collect();
@@ -184,6 +157,55 @@ fn place_one(cue: &Cue, protagonist: Option<u32>, c: &Captions, aspect: f64) -> 
             })
             .collect(),
     }
+}
+
+/// Each part's centre (x, y from the bottom) by `layout`, the parts in speaking `order` with their
+/// `heights`, from `bottom` up; `centred`: side by side around the first, the protagonist.
+fn centres(
+    layout: Layout,
+    centred: bool,
+    order: &[usize],
+    heights: &[f64],
+    bottom: f64,
+    em: f64,
+) -> Vec<(f64, f64)> {
+    let height = |i: usize| heights[i];
+    let mut at = vec![(0.5, 0.0); heights.len()];
+    // A stack from `bottom` up through `ids`, each centred at `x`.
+    let stack = |ids: &[usize], x: f64, at: &mut Vec<(f64, f64)>| {
+        let mut edge = bottom;
+        for &i in ids {
+            at[i] = (x, edge + height(i) / 2.0);
+            edge += height(i) + GAP * em;
+        }
+    };
+    match layout {
+        Layout::Stacked => stack(order, 0.5, &mut at),
+        Layout::TopBottom => {
+            let mut low = vec![order[0]];
+            low.extend(order.iter().skip(2));
+            stack(&low, 0.5, &mut at);
+            if let Some(&top) = order.get(1) {
+                at[top] = (0.5, 1.0 - bottom - height(top) / 2.0);
+            }
+        }
+        Layout::Side if centred => {
+            // The protagonist stays centred; two others beside, any more above the protagonist.
+            let mut centre = vec![order[0]];
+            centre.extend(order.iter().skip(1 + BESIDE.len()));
+            stack(&centre, 0.5, &mut at);
+            for (&i, x) in order.iter().skip(1).zip(BESIDE) {
+                stack(&[i], x, &mut at);
+            }
+        }
+        Layout::Side => {
+            let n = order.len() as f64;
+            for (k, &i) in order.iter().enumerate() {
+                stack(&[i], (2.0 * k as f64 + 1.0) / (2.0 * n), &mut at);
+            }
+        }
+    }
+    at
 }
 
 /// Whitespace as Lua's `%s` has it (C's `isspace`): the animated caption splits its text into
