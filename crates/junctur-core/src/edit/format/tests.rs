@@ -489,3 +489,79 @@ fn errors_name_the_line() {
     assert!(err.starts_with("line 2"), "{err}");
     assert!(parse("junctur-edit 1\nfoo 1\n").is_err());
 }
+
+#[test]
+fn every_line_kind_says_its_line_number_what_is_wrong_and_the_line() {
+    let head = "junctur-edit 6\nsource a.mp4\n";
+    let cases = [
+        ("duration ten", "line 3: not a number: duration ten"),
+        (
+            "settings pad_before",
+            "line 3: expected key=value: settings pad_before",
+        ),
+        ("settings snap=x", "line 3: not a number: settings snap=x"),
+        (
+            "settings loud=1",
+            "line 3: unknown setting: settings loud=1",
+        ),
+        (
+            "keep 5 2",
+            "line 3: expected `keep <start> <end>` with end after start: keep 5 2",
+        ),
+        ("keep 1 x", "line 3: not a number: keep 1 x"),
+        (
+            "speaker 0 Ana",
+            "line 3: expected `speaker <id> [track=<n>] <name>`, id from 1: speaker 0 Ana",
+        ),
+        (
+            "speaker 1 track=x Ana",
+            "line 3: `track=` needs a number: speaker 1 track=x Ana",
+        ),
+        (
+            "fix 0 x Ana",
+            "line 3: expected `fix <track> <start>[+<n>] <text>`: fix 0 x Ana",
+        ),
+        (
+            "span 0 2 1 a b",
+            "line 3: a span's last word is to come after its first: span 0 2 1 a b",
+        ),
+        (
+            "time 0 1 2",
+            "line 3: expected `time <track> <start>[+<n>] <new start> <new end>`: time 0 1 2",
+        ),
+        (
+            "time 0 1 3 2",
+            "line 3: a retimed word's end is to come after its start: time 0 1 3 2",
+        ),
+        (
+            "turn 1 2 0",
+            "line 3: expected `turn <start> <end> <speaker id>` with end after start: turn 1 2 0",
+        ),
+        (
+            "window 1 2",
+            "line 3: expected `window <start> <score> <speech> <words>`: window 1 2",
+        ),
+        ("volume 11", "line 3: unknown line: volume 11"),
+    ];
+    for (line, said) in cases {
+        assert_eq!(parse(&format!("{head}{line}\n")).unwrap_err(), said);
+    }
+    // Two lines naming one thing: the second is the one refused.
+    let twice = |a: &str| parse(&format!("{head}{a}\n{a}\n")).unwrap_err();
+    assert_eq!(
+        twice("speaker 1 Ana"),
+        "line 4: a second `speaker` line for this id: speaker 1 Ana"
+    );
+    assert_eq!(
+        twice("fix 0 1 Ana"),
+        "line 4: a second `fix` line for this word: fix 0 1 Ana"
+    );
+    assert_eq!(
+        twice("time 0 1 1 2"),
+        "line 4: a second `time` line for this word: time 0 1 1 2"
+    );
+    assert_eq!(
+        parse("junctur-edit 5\nsource a.mp4\ntime 0 1 1 2\n").unwrap_err(),
+        "line 3: a `time` line needs a `junctur-edit 6` list: time 0 1 1 2"
+    );
+}

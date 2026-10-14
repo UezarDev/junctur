@@ -186,190 +186,25 @@ pub fn parse(text: &str) -> Result<EditList, String> {
     let mut turn_lines: Vec<usize> = Vec::new();
     for (n, line) in lines {
         let (key, rest) = line.split_once(' ').unwrap_or((line, ""));
-        let bad = |what: &str| format!("line {n}: {what}: {line}");
-        let nums = || -> Result<Vec<f64>, String> {
-            rest.split_whitespace()
-                .map(|x| x.parse::<f64>().map_err(|_| bad("not a number")))
-                .collect()
+        // Each kind's reader says what is wrong; the line and its number are added here.
+        let read = match key {
+            "source" => {
+                e.source = PathBuf::from(rest);
+                Ok(())
+            }
+            "duration" => number(rest.trim()).map(|d| e.duration = d),
+            "settings" => parse_settings(rest, &mut e.settings),
+            "keep" => parse_keep(rest, &mut e.keep),
+            "speaker" => parse_speaker(rest, &mut e.speakers.names),
+            "captions" => captions_line::parse(rest).map(|c| e.captions = Some(c)),
+            "fix" => parse_fix(rest, &mut e.fixes),
+            "span" => parse_span(rest, &mut e.fixes),
+            "time" => parse_time(rest, read_version, &mut e.times),
+            "turn" => parse_turn(rest, &mut e.speakers.turns).map(|()| turn_lines.push(n)),
+            "window" => parse_window(rest, &mut e.windows),
+            _ => Err("unknown line".into()),
         };
-        match key {
-            "source" => e.source = PathBuf::from(rest),
-            "duration" => e.duration = rest.trim().parse().map_err(|_| bad("not a number"))?,
-            "settings" => {
-                for kv in rest.split_whitespace() {
-                    let (k, v) = kv
-                        .split_once('=')
-                        .ok_or_else(|| bad("expected key=value"))?;
-                    let v: f64 = v.parse().map_err(|_| bad("not a number"))?;
-                    let s = &mut e.settings;
-                    match k {
-                        "pad_before" => s.pad_before = v,
-                        "pad_after" => s.pad_after = v,
-                        "merge_gap" => s.merge_gap = v,
-                        "snap" => s.snap = v,
-                        "crossfade" => s.crossfade = v,
-                        "window" => s.window = v,
-                        _ => return Err(bad("unknown setting")),
-                    }
-                }
-            }
-            "keep" => match nums()?[..] {
-                [start, end] if end > start => e.keep.push(Range { start, end }),
-                _ => return Err(bad("expected `keep <start> <end>` with end after start")),
-            },
-            "speaker" => {
-                let (id, rest) = rest.split_once(' ').unwrap_or((rest, ""));
-                let id: u32 = match id.parse() {
-                    Ok(id) if id > 0 => id,
-                    _ => return Err(bad("expected `speaker <id> [track=<n>] <name>`, id from 1")),
-                };
-                if e.speakers.names.iter().any(|n| n.id == id) {
-                    return Err(bad("a second `speaker` line for this id"));
-                }
-                let mut rest = rest.trim();
-                let mut track = None;
-                let mut color = None;
-                // `track=` then `color=`, each optional; the rest is the name.
-                if let Some(r) = rest.strip_prefix("track=") {
-                    let (t, r) = r.split_once(' ').unwrap_or((r, ""));
-                    track = Some(t.parse().map_err(|_| bad("`track=` needs a number"))?);
-                    rest = r.trim();
-                }
-                // `color=` only with a real colour after it: a list from before colours may
-                // have a name like "color=red Ana", which stays a name.
-                if let Some(r) = rest.strip_prefix("color=") {
-                    let (c, r) = r.split_once(' ').unwrap_or((r, ""));
-                    if let Some(c) = parse_color(c) {
-                        color = Some(c);
-                        rest = r.trim();
-                    }
-                }
-                let name = rest;
-                e.speakers.names.push(SpeakerName {
-                    id,
-                    // A blank name is read as the default rather than refused: it is what a
-                    // half-finished hand rename leaves.
-                    name: if name.is_empty() {
-                        default_name(id)
-                    } else {
-                        name.to_string()
-                    },
-                    track,
-                    color: color.unwrap_or_else(|| default_color(id)),
-                });
-            }
-            "captions" => {
-                e.captions = Some(captions_line::parse(rest).map_err(|why| bad(&why))?);
-            }
-            "fix" => {
-                let mut parts = rest.splitn(3, ' ');
-                let track = parts.next().and_then(|t| t.parse::<usize>().ok());
-                let at = parts.next().and_then(word_at);
-                let text = check_fix(parts.next().unwrap_or("")).map_err(|why| bad(&why))?;
-                let expected = "expected `fix <track> <start>[+<n>] <text>`";
-                let (Some(track), Some(at)) = (track, at) else {
-                    return Err(bad(expected));
-                };
-                if text.is_empty() {
-                    return Err(bad(expected));
-                }
-                let fix = Fix {
-                    track,
-                    start: at.start,
-                    nth: at.nth,
-                    through: None,
-                    text,
-                };
-                add_fix(&mut e.fixes, fix).map_err(bad)?;
-            }
-            "span" => {
-                let expected =
-                    "expected `span <track> <first start>[+<n>] <last start>[+<n>] <text>`";
-                let mut parts = rest.splitn(4, ' ');
-                let track = parts.next().and_then(|t| t.parse::<usize>().ok());
-                let first = parts.next().and_then(word_at);
-                let last = parts.next().and_then(word_at);
-                let text = check_span(parts.next().unwrap_or("")).map_err(|why| bad(&why))?;
-                let (Some(track), Some(first), Some(last)) = (track, first, last) else {
-                    return Err(bad(expected));
-                };
-                if text.is_empty() {
-                    return Err(bad(expected));
-                }
-                if !fixes::after(&last, &first) {
-                    return Err(bad("a span's last word is to come after its first"));
-                }
-                let fix = Fix {
-                    track,
-                    start: first.start,
-                    nth: first.nth,
-                    through: Some(last),
-                    text,
-                };
-                add_fix(&mut e.fixes, fix).map_err(bad)?;
-            }
-            "time" => {
-                // Written only into a version 6 list: one under an older header is not a list
-                // Junctur wrote, and the build that wrote that version refused the line.
-                if read_version < 6 {
-                    return Err(bad("a `time` line needs a `junctur-edit 6` list"));
-                }
-                let expected = "expected `time <track> <start>[+<n>] <new start> <new end>`";
-                let parts: Vec<&str> = rest.split_whitespace().collect();
-                let [track, at, from, to] = parts[..] else {
-                    return Err(bad(expected));
-                };
-                let num = |x: &str| x.parse::<f64>().ok().filter(|x| x.is_finite());
-                let (Ok(track), Some(at), Some(from), Some(to)) =
-                    (track.parse::<usize>(), word_at(at), num(from), num(to))
-                else {
-                    return Err(bad(expected));
-                };
-                if to <= from {
-                    return Err(bad("a retimed word's end is to come after its start"));
-                }
-                let t = Retime {
-                    track,
-                    start: at.start,
-                    nth: at.nth,
-                    from: times::to_ms(from),
-                    to: times::to_ms(to),
-                };
-                if e.times.iter().any(|x| {
-                    x.track == t.track
-                        && fixes::same_millisecond(x.start, t.start)
-                        && x.nth == t.nth
-                }) {
-                    return Err(bad("a second `time` line for this word"));
-                }
-                e.times.push(t);
-            }
-            "turn" => match nums()?[..] {
-                [start, end, id] if end > start && id >= 1.0 && id.fract() == 0.0 => {
-                    e.speakers.turns.push(Turn {
-                        start,
-                        end,
-                        speaker: id as u32,
-                    });
-                    turn_lines.push(n);
-                }
-                _ => {
-                    return Err(bad(
-                        "expected `turn <start> <end> <speaker id>` with end after start",
-                    ))
-                }
-            },
-            "window" => match nums()?[..] {
-                [start, score, speech, words] => e.windows.push(Window {
-                    start,
-                    score,
-                    speech,
-                    words: words as u32,
-                }),
-                _ => return Err(bad("expected `window <start> <score> <speech> <words>`")),
-            },
-            _ => return Err(bad("unknown line")),
-        }
+        read.map_err(|what| format!("line {n}: {what}: {line}"))?;
     }
     for (t, n) in e.speakers.turns.iter().zip(&turn_lines) {
         if e.speakers.name(t.speaker).is_none() {
@@ -387,6 +222,203 @@ pub fn parse(text: &str) -> Result<EditList, String> {
     e.keep.sort_by(|a, b| a.start.total_cmp(&b.start));
     e.keep = crate::spans::joined(e.keep, crate::spans::Join::Touching);
     Ok(e)
+}
+
+fn number(x: &str) -> Result<f64, String> {
+    x.parse().map_err(|_| "not a number".to_string())
+}
+
+/// Every whitespace-separated number of `rest`.
+fn numbers(rest: &str) -> Result<Vec<f64>, String> {
+    rest.split_whitespace().map(number).collect()
+}
+
+/// `settings k=v ...`.
+fn parse_settings(rest: &str, s: &mut CutSettings) -> Result<(), String> {
+    for kv in rest.split_whitespace() {
+        let (k, v) = kv.split_once('=').ok_or("expected key=value")?;
+        let v: f64 = number(v)?;
+        match k {
+            "pad_before" => s.pad_before = v,
+            "pad_after" => s.pad_after = v,
+            "merge_gap" => s.merge_gap = v,
+            "snap" => s.snap = v,
+            "crossfade" => s.crossfade = v,
+            "window" => s.window = v,
+            _ => return Err("unknown setting".into()),
+        }
+    }
+    Ok(())
+}
+
+/// `keep <start> <end>`.
+fn parse_keep(rest: &str, keep: &mut Vec<Range>) -> Result<(), String> {
+    match numbers(rest)?[..] {
+        [start, end] if end > start => keep.push(Range { start, end }),
+        _ => return Err("expected `keep <start> <end>` with end after start".into()),
+    }
+    Ok(())
+}
+
+/// `speaker <id> [track=<n>] [color=#RRGGBB] <name>`.
+fn parse_speaker(rest: &str, names: &mut Vec<SpeakerName>) -> Result<(), String> {
+    let (id, rest) = rest.split_once(' ').unwrap_or((rest, ""));
+    let id: u32 = match id.parse() {
+        Ok(id) if id > 0 => id,
+        _ => return Err("expected `speaker <id> [track=<n>] <name>`, id from 1".into()),
+    };
+    if names.iter().any(|n| n.id == id) {
+        return Err("a second `speaker` line for this id".into());
+    }
+    let mut rest = rest.trim();
+    let mut track = None;
+    let mut color = None;
+    // `track=` then `color=`, each optional; the rest is the name.
+    if let Some(r) = rest.strip_prefix("track=") {
+        let (t, r) = r.split_once(' ').unwrap_or((r, ""));
+        track = Some(t.parse().map_err(|_| "`track=` needs a number")?);
+        rest = r.trim();
+    }
+    // `color=` only with a real colour after it: a list from before colours may
+    // have a name like "color=red Ana", which stays a name.
+    if let Some(r) = rest.strip_prefix("color=") {
+        let (c, r) = r.split_once(' ').unwrap_or((r, ""));
+        if let Some(c) = parse_color(c) {
+            color = Some(c);
+            rest = r.trim();
+        }
+    }
+    let name = rest;
+    names.push(SpeakerName {
+        id,
+        // A blank name is read as the default rather than refused: it is what a
+        // half-finished hand rename leaves.
+        name: if name.is_empty() {
+            default_name(id)
+        } else {
+            name.to_string()
+        },
+        track,
+        color: color.unwrap_or_else(|| default_color(id)),
+    });
+    Ok(())
+}
+
+/// `fix <track> <start>[+<n>] <text>`.
+fn parse_fix(rest: &str, fixes: &mut Vec<Fix>) -> Result<(), String> {
+    let mut parts = rest.splitn(3, ' ');
+    let track = parts.next().and_then(|t| t.parse::<usize>().ok());
+    let at = parts.next().and_then(word_at);
+    let text = check_fix(parts.next().unwrap_or(""))?;
+    let expected = "expected `fix <track> <start>[+<n>] <text>`";
+    let (Some(track), Some(at)) = (track, at) else {
+        return Err(expected.into());
+    };
+    if text.is_empty() {
+        return Err(expected.into());
+    }
+    let fix = Fix {
+        track,
+        start: at.start,
+        nth: at.nth,
+        through: None,
+        text,
+    };
+    Ok(add_fix(fixes, fix)?)
+}
+
+/// `span <track> <first start>[+<n>] <last start>[+<n>] <text>`.
+fn parse_span(rest: &str, fixes: &mut Vec<Fix>) -> Result<(), String> {
+    let expected = "expected `span <track> <first start>[+<n>] <last start>[+<n>] <text>`";
+    let mut parts = rest.splitn(4, ' ');
+    let track = parts.next().and_then(|t| t.parse::<usize>().ok());
+    let first = parts.next().and_then(word_at);
+    let last = parts.next().and_then(word_at);
+    let text = check_span(parts.next().unwrap_or(""))?;
+    let (Some(track), Some(first), Some(last)) = (track, first, last) else {
+        return Err(expected.into());
+    };
+    if text.is_empty() {
+        return Err(expected.into());
+    }
+    if !fixes::after(&last, &first) {
+        return Err("a span's last word is to come after its first".into());
+    }
+    let fix = Fix {
+        track,
+        start: first.start,
+        nth: first.nth,
+        through: Some(last),
+        text,
+    };
+    Ok(add_fix(fixes, fix)?)
+}
+
+/// `time <track> <start>[+<n>] <new start> <new end>`, in a list of `version` 6 or later.
+fn parse_time(rest: &str, version: u32, times: &mut Vec<Retime>) -> Result<(), String> {
+    // Written only into a version 6 list: one under an older header is not a list
+    // Junctur wrote, and the build that wrote that version refused the line.
+    if version < 6 {
+        return Err("a `time` line needs a `junctur-edit 6` list".into());
+    }
+    let expected = "expected `time <track> <start>[+<n>] <new start> <new end>`";
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    let [track, at, from, to] = parts[..] else {
+        return Err(expected.into());
+    };
+    let num = |x: &str| x.parse::<f64>().ok().filter(|x| x.is_finite());
+    let (Ok(track), Some(at), Some(from), Some(to)) =
+        (track.parse::<usize>(), word_at(at), num(from), num(to))
+    else {
+        return Err(expected.into());
+    };
+    if to <= from {
+        return Err("a retimed word's end is to come after its start".into());
+    }
+    let t = Retime {
+        track,
+        start: at.start,
+        nth: at.nth,
+        from: times::to_ms(from),
+        to: times::to_ms(to),
+    };
+    if times
+        .iter()
+        .any(|x| x.track == t.track && fixes::same_millisecond(x.start, t.start) && x.nth == t.nth)
+    {
+        return Err("a second `time` line for this word".into());
+    }
+    times.push(t);
+    Ok(())
+}
+
+/// `turn <start> <end> <speaker id>`; whether the speaker is declared is checked once all is read.
+fn parse_turn(rest: &str, turns: &mut Vec<Turn>) -> Result<(), String> {
+    match numbers(rest)?[..] {
+        [start, end, id] if end > start && id >= 1.0 && id.fract() == 0.0 => {
+            turns.push(Turn {
+                start,
+                end,
+                speaker: id as u32,
+            });
+            Ok(())
+        }
+        _ => Err("expected `turn <start> <end> <speaker id>` with end after start".into()),
+    }
+}
+
+/// `window <start> <score> <speech share> <words>`.
+fn parse_window(rest: &str, windows: &mut Vec<Window>) -> Result<(), String> {
+    match numbers(rest)?[..] {
+        [start, score, speech, words] => windows.push(Window {
+            start,
+            score,
+            speech,
+            words: words as u32,
+        }),
+        _ => return Err("expected `window <start> <score> <speech> <words>`".into()),
+    }
+    Ok(())
 }
 
 /// A word as a `fix` or `span` line names it: `<start>` or `<start>+<n>`, a bare start being
