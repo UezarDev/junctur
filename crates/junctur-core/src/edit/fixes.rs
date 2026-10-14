@@ -6,7 +6,9 @@
 //! re-cuts, backed up before a list is replaced. Not beside the transcript, which is a cache a
 //! re-run replaces whole. A word is named by its track and its start to the millisecond (the list's
 //! precision): stable while a transcript grows piece by piece (2j) and the same in the app and the
-//! CLI, where word indices are not.
+//! CLI, where word indices are not. And by which of the words starting in that millisecond on that
+//! track it is (5w): Whisper gives runs of short words one start ("en" and "él" both at 54.944), and
+//! a fix keyed by the millisecond alone showed on all of them and could not be taken from one.
 
 use std::collections::HashMap;
 
@@ -24,13 +26,16 @@ pub struct Fix {
     pub track: usize,
     /// Its start in source seconds, as the transcript has it.
     pub start: f64,
+    /// Which of the words heard on `track` starting in that millisecond it is, 0 for the first, in
+    /// time order with ties in transcript order (5w; [`Fixes`] counts it).
+    pub nth: usize,
     /// What it says.
     pub text: String,
 }
 
 impl Fix {
-    fn key(&self) -> (usize, i64) {
-        key(self.track, self.start)
+    fn key(&self) -> Key {
+        key(self.track, self.start, self.nth)
     }
 
     /// Both name the same word.
@@ -39,9 +44,18 @@ impl Fix {
     }
 }
 
-/// A word's start to the millisecond, as the list writes it ([`written`]).
-fn key(track: usize, start: f64) -> (usize, i64) {
-    (track, millis(start))
+/// A word: its track, its start to the millisecond as the list writes it ([`written`]), and which of
+/// that millisecond's words it is.
+type Key = (usize, i64, usize);
+
+fn key(track: usize, start: f64, nth: usize) -> Key {
+    (track, millis(start), nth)
+}
+
+/// Both starts fall in the same millisecond, as a fix names it: words that do are told apart by
+/// their `nth` (5w).
+pub fn same_millisecond(a: f64, b: f64) -> bool {
+    millis(a) == millis(b)
 }
 
 /// Seconds to whole milliseconds, half away from zero.
@@ -73,19 +87,20 @@ pub fn check_fix(text: &str) -> Result<String, String> {
     Ok(one)
 }
 
-/// Sets the fix of the word heard as `heard` on `track` at `start` to `text` (through
-/// [`check_fix`]); empty text, or the heard text again, removes it. Kept in time order. Whether
-/// anything changed.
+/// Sets the fix of the word heard as `heard` on `track` at `start`, the `nth` starting in that
+/// millisecond, to `text` (through [`check_fix`]); empty text, or the heard text again, removes it.
+/// No other word's fix changes. Kept in time order. Whether anything changed.
 pub fn set_fix(
     fixes: &mut Vec<Fix>,
     track: usize,
     start: f64,
+    nth: usize,
     heard: &str,
     text: &str,
 ) -> Result<bool, String> {
     let text = check_fix(text)?;
     let heard = check_fix(heard).unwrap_or_default();
-    let k = key(track, start);
+    let k = key(track, start, nth);
     let at = fixes.iter().position(|f| f.key() == k);
     let before = fixes.clone();
     match at {
@@ -95,40 +110,63 @@ pub fn set_fix(
         Some(i) => fixes[i].text = text,
         None if text.is_empty() || text == heard => {}
         None => {
-            fixes.push(Fix { track, start, text });
+            fixes.push(Fix {
+                track,
+                start,
+                nth,
+                text,
+            });
             sort(fixes);
         }
     }
     Ok(*fixes != before)
 }
 
-/// The list's order: by start, then track.
+/// The list's order: by start, then track, then which word of the millisecond.
 pub(super) fn sort(fixes: &mut [Fix]) {
-    fixes.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.track.cmp(&b.track)));
+    fixes.sort_by(|a, b| {
+        a.start
+            .total_cmp(&b.start)
+            .then(a.track.cmp(&b.track))
+            .then(a.nth.cmp(&b.nth))
+    });
 }
 
-/// A list's fixes by word, for reading many words (a 30 h transcript) against a few fixes.
+/// A list's fixes by word, for reading many words (a 30 h transcript) against a few fixes. Reads the
+/// words themselves to count each one's `nth`: every word of the transcript is to be given, in time
+/// order with ties in transcript order (a stable sort by start of the segments' words, as the editor
+/// and the captions have them), a word to be left out (cut) included.
 pub struct Fixes<'a> {
-    by_word: HashMap<(usize, i64), &'a str>,
+    by_word: HashMap<Key, &'a str>,
+    /// Per track, the millisecond of the latest word read and how many of its words were read.
+    seen: HashMap<usize, (i64, usize)>,
 }
 
 impl<'a> Fixes<'a> {
     pub fn new(fixes: &'a [Fix]) -> Self {
         Self {
             by_word: fixes.iter().map(|f| (f.key(), f.text.as_str())).collect(),
+            seen: HashMap::new(),
         }
     }
 
-    /// The fixed text of `w` heard on `track`, if the user fixed it.
-    pub fn of(&self, track: usize, w: &Word) -> Option<&'a str> {
+    /// The fixed text of the next word, `w` heard on `track`, if the user fixed it.
+    pub fn of(&mut self, track: usize, w: &Word) -> Option<&'a str> {
         if self.by_word.is_empty() {
             return None;
         }
-        self.by_word.get(&key(track, w.start)).copied()
+        let ms = millis(w.start);
+        let seen = self.seen.entry(track).or_insert((ms, 0));
+        if seen.0 == ms {
+            seen.1 += 1;
+        } else {
+            *seen = (ms, 1);
+        }
+        self.by_word.get(&(track, ms, seen.1 - 1)).copied()
     }
 
-    /// What `w` heard on `track` says: its fix, else what Whisper heard.
-    pub fn text<'w>(&self, track: usize, w: &'w Word) -> &'w str
+    /// What the next word, `w` heard on `track`, says: its fix, else what Whisper heard.
+    pub fn text<'w>(&mut self, track: usize, w: &'w Word) -> &'w str
     where
         'a: 'w,
     {
@@ -152,30 +190,30 @@ mod tests {
     #[test]
     fn a_fix_is_set_changed_and_removed() {
         let mut f = Vec::new();
-        assert!(set_fix(&mut f, 1, 12.34, " Wezar,", " Uezar, ").unwrap());
+        assert!(set_fix(&mut f, 1, 12.34, 0, " Wezar,", " Uezar, ").unwrap());
         assert_eq!(f[0].text, "Uezar,");
         assert!(
-            !set_fix(&mut f, 1, 12.34, " Wezar,", "Uezar,").unwrap(),
+            !set_fix(&mut f, 1, 12.34, 0, " Wezar,", "Uezar,").unwrap(),
             "same"
         );
-        assert!(set_fix(&mut f, 0, 3.0, "a", "b").unwrap());
+        assert!(set_fix(&mut f, 0, 3.0, 0, "a", "b").unwrap());
         assert_eq!(
             f.iter().map(|x| x.track).collect::<Vec<_>>(),
             [0, 1],
             "in time"
         );
         // The heard text again, or nothing, takes the fix away.
-        assert!(set_fix(&mut f, 1, 12.34, " Wezar,", "Wezar,").unwrap());
-        assert!(set_fix(&mut f, 0, 3.0, "a", "  ").unwrap());
+        assert!(set_fix(&mut f, 1, 12.34, 0, " Wezar,", "Wezar,").unwrap());
+        assert!(set_fix(&mut f, 0, 3.0, 0, "a", "  ").unwrap());
         assert!(f.is_empty());
         assert!(
-            !set_fix(&mut f, 0, 3.0, "a", "a").unwrap(),
+            !set_fix(&mut f, 0, 3.0, 0, "a", "a").unwrap(),
             "nothing to fix"
         );
         // One line, not too long.
-        assert!(set_fix(&mut f, 0, 3.0, "a", "Tsun\nheto").unwrap());
+        assert!(set_fix(&mut f, 0, 3.0, 0, "a", "Tsun\nheto").unwrap());
         assert_eq!(f[0].text, "Tsun heto");
-        assert!(set_fix(&mut f, 0, 3.0, "a", &"x".repeat(MAX_FIX + 1)).is_err());
+        assert!(set_fix(&mut f, 0, 3.0, 0, "a", &"x".repeat(MAX_FIX + 1)).is_err());
     }
 
     #[test]
@@ -185,7 +223,7 @@ mod tests {
         assert_eq!(written(0.0004), "0.000");
         assert_eq!(written(-1.5), "-1.500");
         let start: f64 = written(12.3125).parse().unwrap();
-        assert_eq!(key(0, start), key(0, 12.3125));
+        assert_eq!(key(0, start, 0), key(0, 12.3125, 0));
     }
 
     #[test]
@@ -193,13 +231,62 @@ mod tests {
         let fixes = vec![Fix {
             track: 1,
             start: 312.34,
+            nth: 0,
             text: "Uezar".into(),
         }];
-        let by = Fixes::new(&fixes);
         // A start summed from a chunk's and a token's time, off in the last bits.
         let heard = word(300.0 + 12.34, "Wezar");
-        assert_eq!(by.text(1, &heard), "Uezar");
-        assert_eq!(by.text(0, &heard), "Wezar", "another track");
-        assert_eq!(by.text(1, &word(312.341, "Wezar")), "Wezar", "another word");
+        assert_eq!(Fixes::new(&fixes).text(1, &heard), "Uezar");
+        assert_eq!(Fixes::new(&fixes).text(0, &heard), "Wezar", "another track");
+        assert_eq!(
+            Fixes::new(&fixes).text(1, &word(312.341, "Wezar")),
+            "Wezar",
+            "another word"
+        );
+    }
+
+    /// The words of the 2026-06-15 recording around 54.9 s: Whisper gave "en" and "él" one start.
+    fn same_start() -> Vec<Word> {
+        vec![
+            word(54.174, "manada"),
+            word(54.944, "en"),
+            word(54.944, "él"),
+            word(55.5, "y"),
+        ]
+    }
+
+    /// What `ws` say, heard on track 0, read in order.
+    fn said(fixes: &[Fix], ws: &[Word]) -> Vec<String> {
+        let mut by = Fixes::new(fixes);
+        ws.iter().map(|w| by.text(0, w).to_string()).collect()
+    }
+
+    #[test]
+    fn words_starting_in_one_millisecond_each_take_their_own_fix() {
+        // 5w: a fix on "él" showed on "en" too, and neither could be taken away alone.
+        let ws = same_start();
+        let mut f = Vec::new();
+        assert!(set_fix(&mut f, 0, 54.944, 1, "él", "miel").unwrap());
+        assert_eq!(said(&f, &ws), ["manada", "en", "miel", "y"]);
+        assert!(set_fix(&mut f, 0, 54.944, 0, "en", "de").unwrap());
+        assert_eq!(said(&f, &ws), ["manada", "de", "miel", "y"]);
+        // Taking one away leaves the other.
+        assert!(set_fix(&mut f, 0, 54.944, 0, "en", "").unwrap());
+        assert_eq!(said(&f, &ws), ["manada", "en", "miel", "y"]);
+        assert!(set_fix(&mut f, 0, 54.944, 1, "él", "él").unwrap());
+        assert!(f.is_empty());
+        // Another track's word at the same moment counts on its own track.
+        let f = vec![Fix {
+            track: 0,
+            start: 54.944,
+            nth: 1,
+            text: "miel".into(),
+        }];
+        let mut by = Fixes::new(&f);
+        let other = word(54.944, "yes");
+        assert_eq!(by.text(0, &ws[1]), "en");
+        assert_eq!(by.text(2, &other), "yes");
+        assert_eq!(by.text(0, &ws[2]), "miel");
+        assert!(same_millisecond(54.944, 54.9444) && !same_millisecond(54.944, 54.945));
     }
 }
