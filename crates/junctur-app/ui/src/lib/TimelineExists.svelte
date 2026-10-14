@@ -2,10 +2,11 @@
   // The question when Resolve already has the timeline a send makes (5z, 5ab): Create new timeline
   // (recommended), Update captions only, Replace or Cancel. A dialog of its own rather than the
   // native one 5z used: that one has three buttons, and closing it answers as the third, so a
-  // fourth choice would have made closing it a Replace. Like the native one it is modal: it takes
-  // every key while open (a capture listener on the window, before App's shortcuts and Ctrl+W),
-  // Tab cycles its buttons, Enter or Space presses the focused one, Escape or a press outside is
-  // Cancel.
+  // fourth choice would have made closing it a Replace. Like the native one it is modal: a capture
+  // listener on the window stops every key from reaching the page under it (App's shortcuts, Ctrl+W)
+  // and cancels what the webview would do with it (Ctrl+F, zoom; Ctrl+R is noReload's), but Ctrl+C,
+  // which copies the dialog's text. Tab cycles its buttons, Enter or Space presses the focused one,
+  // Escape or a press outside is Cancel.
   import { onMount } from "svelte";
   import type { TimelineAnswer } from "./api";
 
@@ -40,7 +41,7 @@
       e.preventDefault();
       const b = document.activeElement;
       if (b instanceof HTMLButtonElement && box.contains(b)) b.click();
-    } else if (!e.ctrlKey && !e.metaKey) {
+    } else if (!((e.ctrlKey || e.metaKey) && e.code === "KeyC")) {
       // Nothing under the dialog acts on a key while it is open (Space would play, Delete cut).
       e.preventDefault();
     }

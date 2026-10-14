@@ -147,15 +147,15 @@ fn update(
             vec![("name", name.into()), ("template", job::template(c).into())],
         )
         .map_err(older)?;
-    let timeline = reply::timeline(&opened)?;
-    let made = timeline.name.as_str();
-    let done = place(link, cues, edit, c, &timeline).map_err(|e| {
+    // `open` may have switched Resolve to the timeline before its answer went wrong.
+    let timeline = reply::timeline(&opened).map_err(|e| {
         format!(
-            "The captions on timeline \"{made}\" in Resolve were not updated: {e}. An update \
-             touches only Junctur's captions, so its cuts, its media and your own clips are as \
-             they were; it is the open timeline now. Send again"
+            "Resolve's answer about timeline \"{name}\" could not be read ({e}): Resolve may now \
+             have it open; nothing else was changed"
         )
     })?;
+    let made = timeline.name.as_str();
+    let done = place(link, cues, edit, c, &timeline).map_err(|e| placing_failed(made, e))?;
     let mut sent = reply::sent(&done, made);
     sent.updated = true;
     let cut_end = opened
@@ -164,6 +164,28 @@ fn update(
         .map(|v| v.round() as i64);
     sent.note = timeline::cut_note(edit, &timeline, cut_end);
     Ok(Outcome::Sent(sent))
+}
+
+/// How the script's `place` starts its refusal when another timeline is open than the one it was
+/// sent for (`junctur.lua`); it refuses before touching anything.
+const SWITCHED: &str = "The open timeline in Resolve changed";
+
+/// An update's `place` that failed, said as far as it is known (5ab): a timeline switched meanwhile
+/// was left alone; anything else (a timeout above all) may have stopped part way through the
+/// captions. Either way nothing but Junctur's captions was touched.
+fn placing_failed(made: &str, e: String) -> String {
+    if e.starts_with(SWITCHED) {
+        format!(
+            "The open timeline in Resolve changed after Junctur opened \"{made}\", so no captions \
+             were placed or changed: open \"{made}\" and send again"
+        )
+    } else {
+        format!(
+            "The captions on timeline \"{made}\" in Resolve may be only partly updated: {e}. An \
+             update touches only Junctur's captions, so its cuts, its media and your own clips \
+             are as they were; send again to finish it"
+        )
+    }
 }
 
 #[cfg(test)]
@@ -506,11 +528,40 @@ mod tests {
         f.answers.insert("place", Err("took too long".into()));
         let e = update(&mut f, &cues()).unwrap_err();
         assert!(
-            e.contains("\"rec (Junctur)\" in Resolve were not updated")
+            e.contains("\"rec (Junctur)\" in Resolve may be only partly updated")
                 && e.contains("its cuts, its media and your own clips are as they were")
-                && e.contains("took too long"),
+                && e.contains("took too long")
+                && e.contains("send again to finish"),
             "{e}"
         );
+        // Another timeline opened between open and place: the script refused, nothing placed.
+        let mut f = Fake::new(&["rec (Junctur)"]).opened("rec (Junctur)", "120");
+        f.answers.insert(
+            "place",
+            Err("The open timeline in Resolve changed while sending: send again".into()),
+        );
+        let e = update(&mut f, &cues()).unwrap_err();
+        assert!(
+            e.contains("changed after Junctur opened \"rec (Junctur)\"")
+                && e.contains("no captions were placed or changed")
+                && !e.contains("partly"),
+            "{e}"
+        );
+        // An answer to open that cannot be read: it may be open now, nothing else changed.
+        let mut f = Fake::new(&["rec (Junctur)"]).opened("rec (Junctur)", "120");
+        f.answers.insert(
+            "open",
+            Ok(vec![
+                ("name", "rec (Junctur)".into()),
+                ("fps", "fast".into()),
+            ]),
+        );
+        let e = update(&mut f, &cues()).unwrap_err();
+        assert!(
+            e.contains("may now have it open") && e.contains("nothing else was changed"),
+            "{e}"
+        );
+        assert_eq!(f.kinds(), ["check", "open"]);
         // Gone since the pop-up, or doubled: refused before anything but check.
         let mut f = Fake::new(&["Main"]).opened("x", "0");
         let e = update(&mut f, &cues()).unwrap_err();

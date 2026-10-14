@@ -130,10 +130,11 @@ fn cut_frames(edit: &EditList, fps: f64) -> i64 {
         .sum()
 }
 
-/// What an update says when the timeline's cut is not the edit's (5ab): its clips (captions
-/// aside) ending at `cut_end`, more than a frame off the edit's length (Resolve's end frame may
-/// count the last frame or not). Not a refusal: a trim made in Resolve on purpose is the user's.
-/// No clips on it (`None`) says nothing: there is no cut to compare.
+/// What an update says when the timeline's clips (captions aside) end at `cut_end`, more than a
+/// frame off the edit's length (Resolve's end frame may count the last frame or not) (5ab). Only
+/// the two lengths are known, not why they differ (a cut changed on either side, or a music bed
+/// or an outro added past it), so the note says just that. Not a refusal: what was added in
+/// Resolve is the user's. No clips on it (`None`) says nothing: there is nothing to compare.
 pub fn cut_note(edit: &EditList, t: &Timeline, cut_end: Option<i64>) -> Option<String> {
     let theirs = cut_end? - t.start;
     let ours = cut_frames(edit, t.fps);
@@ -142,12 +143,12 @@ pub fn cut_note(edit: &EditList, t: &Timeline, cut_end: Option<i64>) -> Option<S
     }
     let secs = |f: i64| f as f64 / t.fps;
     Some(format!(
-        "Junctur's cut is {:.2} s long and the timeline's is {:.2} s: the cut was changed in \
-         Junctur or in Resolve since the timeline was made. The captions follow Junctur's cut, so \
-         they may not line up with this timeline's; choose Create new timeline or Replace to send \
-         the cut too",
-        secs(ours),
-        secs(theirs)
+        "Timeline \"{}\"'s clips end {:.2} s in and Junctur's cut is {:.2} s long. The \
+         captions follow Junctur's cut, so they may not line up with this timeline's clips; \
+         Create new timeline or Replace also sends the cut",
+        t.name,
+        secs(theirs),
+        secs(ours)
     ))
 }
 
@@ -309,15 +310,22 @@ mod tests {
         assert_eq!(cut_note(&edit, &t, None), None);
         let note = cut_note(&edit, &t, Some(86400 + 240)).unwrap();
         assert!(
-            note.contains("15.00 s") && note.contains("10.00 s") && note.contains("Replace"),
+            note.contains("\"rec (Junctur)\"'s clips end 10.00 s in")
+                && note.contains("Junctur's cut is 15.00 s long")
+                && note.contains("Replace")
+                && !note.contains("changed"),
             "{note}"
         );
-        // NTSC: the timeline's 29.97 is taken back to 30000/1001, the FCPXML's grid.
-        edit.keep.truncate(1);
+        // NTSC: the timeline's 29.97 is taken back to 30000/1001, the FCPXML's grid. 1 s to 2 s
+        // is frames 29 (29.97 floored) to 60 (59.94 ceiled) there: 31, where 30 fps gives 30.
+        edit.keep = vec![crate::edit::Range {
+            start: 1.0,
+            end: 2.0,
+        }];
         let t = timeline(30000.0 / 1001.0, 0);
-        let frames = frame_ranges(&edit.keep, 30000, 1001, frames_ceil(60.0, 30000, 1001));
-        let n: u64 = frames.iter().map(|(a, b)| b - a).sum();
-        assert_eq!(cut_note(&edit, &t, Some(n as i64)), None);
-        assert!(cut_note(&edit, &t, Some(n as i64 + 5)).is_some());
+        assert_eq!(cut_frames(&edit, t.fps), 31);
+        assert_eq!(cut_frames(&edit, 30.0), 30);
+        assert_eq!(cut_note(&edit, &t, Some(31)), None);
+        assert!(cut_note(&edit, &t, Some(36)).is_some());
     }
 }

@@ -444,9 +444,13 @@ function handlers.open(req)
     if not clip then return { error = err .. " (nothing was changed on the timelines)" } end
     pcall(function() project:SetCurrentTimeline(t) end)
     local now = project:GetCurrentTimeline()
+    -- Asked to switch, Resolve may have switched somewhere else: say what is open now.
     if not now or timeline_id(now) ~= timeline_id(t) then
-        return { error = "Resolve did not open the timeline \"" .. tostring(t:GetName())
-            .. "\": nothing was changed. Open it yourself and send again" }
+        local shown = now and ("now has \"" .. tostring(now:GetName()) .. "\" open")
+            or "now has no timeline open"
+        return { error = "Resolve did not switch to the timeline \"" .. tostring(t:GetName())
+            .. "\": it " .. shown .. ", and no clips were changed. Open \"" .. tostring(t:GetName())
+            .. "\" yourself and send again" }
     end
     local out = describe(t, clip)
     out.cutEnd = cut_end(t) or ""

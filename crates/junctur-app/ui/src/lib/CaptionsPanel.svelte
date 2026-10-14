@@ -19,6 +19,7 @@
   // its own settings follows the user's defaults, and "Save as default" makes this recording's the
   // defaults. Each group is a `Section`; what used to be a paragraph under it is its (i) (2t), and
   // only status and results show as text.
+  import { onDestroy, tick } from "svelte";
   import { save } from "@tauri-apps/plugin-dialog";
   import * as api from "./api";
   import { captionFace, captionFont } from "./captionStyle";
@@ -97,8 +98,11 @@
   // Send to Resolve (5g, 5z): one at a time; the reply says what landed. The send makes the edit's
   // own timeline; when the project already has one of that name nothing is changed until the
   // pop-up is answered (Create new, Update captions only (5ab) or Replace), and Cancel (or Escape,
-  // or a press outside it) sends nothing.
+  // or a press outside it) sends nothing. A panel closed under the pop-up answers it as Cancel, so
+  // the send never waits on a dialog that is gone; once the send is over, the keys go back to its
+  // button.
   let sending = $state(false);
+  let sendButton = $state<HTMLButtonElement | undefined>();
   let sentLines = $state<string[] | null>(null);
   let asking = $state<{ name: string; answer: (a: api.TimelineAnswer | null) => void } | null>(null);
   const ask = (name: string) =>
@@ -111,13 +115,16 @@
         },
       };
     });
+  onDestroy(() => asking?.answer(null));
   async function sendResolve() {
     if (sending) return;
     sending = true;
     sentLines = null;
+    let asked = false;
     try {
       let r = await api.sendToResolve();
       if (r.kind === "exists") {
+        asked = true;
         const answer = await ask(r.name);
         if (!answer) {
           sentLines = ["Nothing was sent."];
@@ -134,7 +141,7 @@
       const captioned = r.placed + r.restyled + r.failed > 0;
       sentLines = [
         r.updated
-          ? `Captions updated on timeline "${r.timeline}" in Resolve; its cuts were left as they are.`
+          ? `Captions updated on timeline "${r.timeline}" in Resolve, now the open timeline; its cuts were left as they are.`
           : `Timeline "${r.timeline}" made in Resolve${r.replaced ? ", replacing the old one" : ""}.`,
         ...(r.note ? [r.note] : []),
         ...(captioned
@@ -150,6 +157,10 @@
       onError(String(e));
     } finally {
       sending = false;
+      if (asked) {
+        await tick();
+        sendButton?.focus();
+      }
     }
   }
 
@@ -295,7 +306,7 @@
       <Section {...head("resolve")}>
         <CaptionRules value={captions} part="resolve" onChange={(c) => setCaptions(c)} {onError} />
         <div class="buttons">
-          <button class="grow" onclick={sendResolve} disabled={sending || !source}>
+          <button class="grow" bind:this={sendButton} onclick={sendResolve} disabled={sending || !source}>
             {sending ? "Sending…" : "Send to Resolve"}
           </button>
         </div>

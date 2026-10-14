@@ -458,7 +458,8 @@ check(r.error ~= nil and r.error:find("2 timelines") and w.current == w.main, "t
 w = world({ no_switch = true })
 w.m.handlers.build(build({ captions = false }))
 r = w.m.handlers.open({ name = "rec (Junctur)", template = "" })
-check(r.error ~= nil and r.error:find("did not open") and w.current == w.main, "not opened")
+check(r.error ~= nil and r.error:find("did not switch") and r.error:find("now has \"Main\" open")
+    and w.current == w.main, "not opened: " .. tostring(r.error))
 
 -- 5g's place, on the timeline open.
 w = world()
