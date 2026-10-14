@@ -12,6 +12,9 @@
  * nothing but the right and bottom margins is ever sent.
  */
 
+import type { Captions } from "./api";
+import { LINE } from "./captionStyle";
+
 /** The title bar's height (2i): TitleBar.svelte is drawn this tall and the editor is laid out in
  * the window below it, so the two cannot disagree. */
 export const TITLE = 34;
@@ -127,4 +130,38 @@ export function layout(i: Input): Layout {
       bottom: i.height > 0 ? (i.height - videoH) / i.height : 0,
     },
   };
+}
+
+/** The two bars over the picture (2r): the range toolbar (ActionBar) and review's. One size each in
+ * every state, so no label, timecode or button text moves anything (2g to 2o sized them by their
+ * contents); the components draw themselves at exactly these, so `floatAt` and the box agree. */
+export const TOOLS = { w: 344, h: 84 };
+export const REVIEW = { w: 440, h: 128 };
+/** The bars' inset from the picture's bottom-right corner, and their gap above a caption block. */
+const INSET = 12;
+const CLEAR = 8;
+
+/** What of the caption settings places a caption block on the picture (5g); the bars are given
+ * null with the preview off. */
+export type CaptionBand = Pick<Captions, "position" | "size" | "lines" | "layout">;
+
+/**
+ * Where a floating bar of `size` goes (2r): the top-left of its box in the editor's coordinates, in the
+ * picture's bottom-right corner (2n had it over the lanes, where it hid the cuts). Captions are centred
+ * (5g), and a default line spans about the middle half of a landscape picture, so a box that would
+ * reach into the picture's middle third, or any box when blocks sit side by side, rises to sit just
+ * above the caption block instead: `lines` lines at the engine's line height (`LINE`) over `position`. It
+ * depends only on the layout and the settings, never on a caption showing, so it never jumps while
+ * playing. A picture narrower than the box lets it reach left, never past the column's left edge.
+ */
+export function floatAt(picture: Rect, size: { w: number; h: number }, captions: CaptionBand | null): { left: number; top: number } {
+  const right = picture.x + picture.w - INSET;
+  const left = Math.max(4, right - size.w);
+  const bottom = picture.y + picture.h;
+  let top = bottom - INSET - size.h;
+  if (captions && (captions.layout === "side" || left < picture.x + (picture.w * 2) / 3)) {
+    const band = (picture.h * (captions.position + captions.size * LINE * Math.max(1, captions.lines))) / 100;
+    top = Math.min(top, bottom - band - CLEAR - size.h);
+  }
+  return { left: Math.round(left), top: Math.round(Math.max(picture.y + 4, top)) };
 }

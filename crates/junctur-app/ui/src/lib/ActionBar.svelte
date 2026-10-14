@@ -1,19 +1,22 @@
 <script lang="ts">
-  // Editing controls over the lanes (2g, mock B), replacing 2c's fixed edit row. They sit in one
-  // place, centred over the lanes (2n; 2g floated them beside the selection or the playhead, so
-  // they slid along while playing). With a selection (a stretch of the lanes or timeline, or
-  // transcript words while the Transcript tab is not showing): what is selected, Cut, Keep, Undo
-  // and Redo. Words selected with the Transcript tab showing have their controls at its bottom
-  // (WordBar, 2p, with the one-click speakers that replaced 5b's Remember voice… here), so this bar
-  // then holds Undo and Redo only and the two never show the same thing twice. With none: the stretch
-  // under the playhead (a kept range or a cut) with buttons that nudge either end by a frame
-  // (shift: ten) and cut or keep it whole, and Undo and Redo. Every action is one edit the
-  // engine saves to edit.junctur at once. Its notices (an outside change, a backup made) show on a
-  // line above it. The keyboard does the same without it (Delete, K, Ctrl+Z/Y).
+  // Editing controls on the picture (2g, mock B, replacing 2c's fixed edit row): one box of one size
+  // (layout.ts `TOOLS`) in the picture's bottom-right corner, clear of the captions (2r; 2n had it
+  // centred over the lanes, where it hid the cuts, and 2g beside the selection or the playhead).
+  // Every state draws in the same two rows, so no label, timecode or button text moves anything:
+  // what it acts on, the whole-stretch button's slot, Undo and Redo; then the frame nudges or the
+  // selection's buttons. With a selection (a stretch of the lanes or timeline, or transcript words
+  // while the Transcript tab is not showing): what is selected, Cut, Keep and ×. Words selected with
+  // the Transcript tab showing have their controls at its bottom (WordBar, 2p, with the one-click
+  // speakers that replaced 5b's Remember voice… here), so this box then only says so. With none: the
+  // stretch under the playhead (a kept range or a cut) with buttons that nudge either end by a frame
+  // (shift: ten) and cut or keep it whole. Every action is one edit the engine saves to
+  // edit.junctur at once. Its notices (an outside change, a backup made) float above it. The
+  // keyboard does the same without it (Delete, K, Ctrl+Z/Y).
   import * as api from "./api";
   import * as sel from "./selection";
   import { nudge, under } from "./nudge";
   import { timecode, toFrame } from "./time";
+  import { TOOLS } from "./layout";
 
   let {
     player,
@@ -29,19 +32,16 @@
     selection: sel.Selection | null;
     /** The Transcript tab is showing, with its own bar for a selection of words (2p). */
     wordsShown?: boolean;
-    /** Where to sit: centred on `x` (window pixels), kept between `min` and `max`, its bottom at
-     * `bottom`. */
-    at: { x: number; min: number; max: number; bottom: number };
+    /** Where the box's top-left goes (layout.ts `floatAt`). */
+    at: { left: number; top: number };
     onSelect: (s: sel.Selection | null) => void;
     onError: (message: string) => void;
   } = $props();
 
-  let width = $state(0);
   const fps = $derived(edit?.fps ?? null);
   const frame = $derived(player?.frame ?? (fps && player?.position != null ? toFrame(player.position, fps) : null));
   const message = $derived(edit?.error ?? edit?.notice ?? null);
   const stretch = $derived(edit && frame != null && !selection ? under(edit, frame) : null);
-  const left = $derived(Math.round(Math.min(Math.max(at.x - width / 2, at.min), Math.max(at.min, at.max - width))));
 
   // The selection this bar acts on: words are the Transcript's own while it shows them.
   const mine = $derived(selection?.kind === "words" && wordsShown ? null : selection);
@@ -62,78 +62,109 @@
 </script>
 
 {#if edit?.editable}
-  <div class="float" style:left="{left}px" style:bottom="{at.bottom}px" bind:clientWidth={width}>
+  <div class="float" style:left="{at.left}px" style:top="{at.top}px" style:width="{TOOLS.w}px" style:height="{TOOLS.h}px">
     {#if message}
       <div class="message" class:bad={!!edit.error}>{message}</div>
     {/if}
-    <div class="bar">
+    <div class="row">
       {#if mine}
-        {@const m = mine}
-        <span class="what mono">{sel.describe(m, fps)}</span>
-        <button onclick={() => call(() => sel.apply(m, false))} title="Cut the selection (Delete)">Cut</button>
-        <button onclick={() => call(() => sel.apply(m, true))} title="Keep the selection (K)">Keep</button>
+        <span class="what" title={sel.describe(mine, fps)}>{sel.describe(mine, fps)}</span>
+      {:else if selection}
+        <span class="what">Selected in the Transcript</span>
       {:else if stretch && fps}
-        <span class="kind" class:cut={!stretch.kept}>{stretch.kept ? `Range ${stretch.index}` : "Cut"}</span>
-        <button class="n" onclick={(e) => move("start", -1, e)} title="Start one frame earlier (shift: 10)">◀</button>
-        <span class="mono">{timecode(stretch.start, fps)}</span>
-        <button class="n" onclick={(e) => move("start", 1, e)} title="Start one frame later (shift: 10)">▶</button>
-        <span class="dash">–</span>
-        <button class="n" onclick={(e) => move("end", -1, e)} title="End one frame earlier (shift: 10)">◀</button>
-        <span class="mono">{timecode(stretch.end, fps)}</span>
-        <button class="n" onclick={(e) => move("end", 1, e)} title="End one frame later (shift: 10)">▶</button>
+        <span class="what kind" class:cut={!stretch.kept}>{stretch.kept ? `Range ${stretch.index}` : "Cut"}</span>
         <button
+          class="whole"
           onclick={() => call(() => api.editFrames(stretch!.start, stretch!.end, !stretch!.kept))}
           title={stretch.kept ? "Cut this whole range" : "Keep this whole cut"}>{stretch.kept ? "Cut range" : "Keep cut"}</button
         >
+      {:else}
+        <span class="what"></span>
       {/if}
       <button class="i" disabled={!edit.canUndo} onclick={() => call(api.undo)} title="Undo (Ctrl+Z)" aria-label="Undo">↶</button>
       <button class="i" disabled={!edit.canRedo} onclick={() => call(api.redo)} title="Redo (Ctrl+Y)" aria-label="Redo">↷</button>
+    </div>
+    <div class="row">
       {#if mine}
+        {@const m = mine}
+        <button class="act" onclick={() => call(() => sel.apply(m, false))} title="Cut the selection (Delete)">Cut</button>
+        <button class="act" onclick={() => call(() => sel.apply(m, true))} title="Keep the selection (K)">Keep</button>
+        <span class="gap"></span>
         <button class="i x" onclick={() => onSelect(null)} title="Clear the selection (Esc)" aria-label="Clear the selection">×</button>
+      {:else if stretch && fps && !selection}
+        <button class="n" onclick={(e) => move("start", -1, e)} title="Start one frame earlier (shift: 10)">◀</button>
+        <span class="tc mono">{timecode(stretch.start, fps)}</span>
+        <button class="n" onclick={(e) => move("start", 1, e)} title="Start one frame later (shift: 10)">▶</button>
+        <span class="dash">–</span>
+        <button class="n" onclick={(e) => move("end", -1, e)} title="End one frame earlier (shift: 10)">◀</button>
+        <span class="tc mono">{timecode(stretch.end, fps)}</span>
+        <button class="n" onclick={(e) => move("end", 1, e)} title="End one frame later (shift: 10)">▶</button>
       {/if}
     </div>
   </div>
 {/if}
 
 <style>
+  /* Drawn at exactly TOOLS' size (border and padding inside), which floatAt places by. */
   .float {
     position: absolute;
     z-index: 5;
+    box-sizing: border-box;
     display: flex;
     flex-direction: column;
-    align-items: flex-start;
-    gap: 4px;
-    max-width: 90vw;
+    justify-content: center;
+    gap: 6px;
+    padding: 8px 12px;
+    border-radius: 16px;
+    background: rgba(28, 29, 34, 0.94);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5);
+    white-space: nowrap;
   }
-  .bar {
+  .row {
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 4px 6px;
-    border-radius: 8px;
-    background: rgba(28, 29, 34, 0.96);
-    border: 1px solid rgba(255, 255, 255, 0.16);
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
-    white-space: nowrap;
+    height: 28px;
   }
   .what {
-    padding: 0 4px;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
   }
   .kind {
-    padding: 0 4px;
     color: var(--good);
+    font-weight: 600;
   }
   .kind.cut {
     color: var(--bad);
   }
+  button {
+    border-radius: 999px;
+    padding: 3px 10px;
+  }
+  /* As wide as "Keep cut" / "Cut range", whichever shows. */
+  .whole {
+    width: 92px;
+  }
+  .act {
+    width: 80px;
+    font-weight: 600;
+  }
+  .gap {
+    flex: 1;
+  }
   .n {
-    padding: 2px 6px;
+    width: 26px;
+    padding: 2px 0;
     font-size: 11px;
   }
   .i {
-    padding: 2px 8px;
+    width: 34px;
+    padding: 2px 0;
   }
   .x {
     color: var(--muted);
@@ -141,16 +172,20 @@
   .dash {
     color: var(--muted);
   }
-  .mono {
+  /* 11 figures: room for 10:00:00:00, so the hours never move the steppers. */
+  .tc {
+    width: 11ch;
+    text-align: center;
     font-size: 12px;
   }
-  button {
-    padding: 3px 9px;
-  }
   .message {
-    max-width: 520px;
-    padding: 3px 8px;
-    border-radius: 6px;
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 6px);
+    max-width: 100%;
+    box-sizing: border-box;
+    padding: 4px 10px;
+    border-radius: 12px;
     background: rgba(16, 17, 20, 0.92);
     color: var(--muted);
     font-size: 12px;
