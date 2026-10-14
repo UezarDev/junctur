@@ -454,6 +454,28 @@ pub const OPENED_MEANWHILE: &str = "another recording was opened meanwhile: noth
 pub const WORDS_CHANGED: &str =
     "the transcript changed meanwhile: nothing was changed, try again on the words shown now";
 
+/// A fix field's words are not where the page had them when it opened (5ae): a reload or a
+/// re-transcription gave their indices to other words while the field was open.
+pub const FIELD_MOVED: &str = "these words are no longer where the fix field was opened (the transcript changed meanwhile): nothing was saved, open the field again on the words shown now";
+
+/// Whether the editor's words `first` and `last` start where the page had them when it opened the
+/// field (`at`: their heard starts, whole milliseconds, as the page has `words.heard`). The index alone
+/// named whatever word had it at the time of the save (5ae: a field left open over a change of words
+/// wrote its text onto other words, out of sight).
+fn named(words: &Words, first: usize, last: usize, at: [u64; 2]) -> Result<(), String> {
+    let ms = |i: usize| {
+        words
+            .list
+            .get(i)
+            .map(|w| (w.start.max(0.0) * 1000.0).round() as u64)
+    };
+    if ms(first) == Some(at[0]) && ms(last) == Some(at[1]) {
+        Ok(())
+    } else {
+        Err(FIELD_MOVED.into())
+    }
+}
+
 /// The editor's words were let go while a word edit was asked for (a piece of a running
 /// transcription landed, 2j): the edit reads them again and retries ([`Core::retrying`]).
 const WORDS_LET_GO: &str = "the editor's words were read again meanwhile";
@@ -805,9 +827,10 @@ impl Core {
         &self,
         file: Option<&str>,
         index: usize,
+        at: u64,
         text: &str,
     ) -> Result<FixDone, String> {
-        self.retrying(|| self.fix_word_once(file, index, text))
+        self.retrying(|| self.fix_word_once(file, index, at, text))
     }
 
     /// A word edit, read again when the editor let its words go meanwhile ([`WORDS_LET_GO`]):
@@ -832,6 +855,7 @@ impl Core {
         &self,
         file: Option<&str>,
         index: usize,
+        at: u64,
         text: &str,
     ) -> Result<FixDone, String> {
         self.prepare();
@@ -839,6 +863,7 @@ impl Core {
             .words
             .clone()
             .ok_or("this recording has no transcript")?;
+        named(&words, index, index, [at, at])?;
         let (Some(word), Some(&track)) = (words.list.get(index), words.tracks.get(index)) else {
             return Err("no such word in the transcript".into());
         };
@@ -891,9 +916,10 @@ impl Core {
         file: Option<&str>,
         first: usize,
         last: usize,
+        at: [u64; 2],
         text: &str,
     ) -> Result<FixDone, String> {
-        self.retrying(|| self.fix_words_once(file, first, last, text))
+        self.retrying(|| self.fix_words_once(file, first, last, at, text))
     }
 
     fn fix_words_once(
@@ -901,6 +927,7 @@ impl Core {
         file: Option<&str>,
         first: usize,
         last: usize,
+        at: [u64; 2],
         text: &str,
     ) -> Result<FixDone, String> {
         self.prepare();
@@ -908,6 +935,7 @@ impl Core {
             .words
             .clone()
             .ok_or("this recording has no transcript")?;
+        named(&words, first, last, at)?;
         let speakers = lock(&self.ctl)
             .edit
             .list
@@ -965,6 +993,38 @@ impl Core {
         let mut n = 0;
         self.change(file, |ed, list, _| {
             let (r, k) = ed.keep_heard(list, others, heard)?;
+            n = k;
+            Ok(r)
+        })?;
+        Ok(n)
+    }
+
+    /// The list's fixes on the words of the transcript in the editor (5ae: the list of fixes the
+    /// user takes wrong ones out of), in the list's order.
+    pub fn fixes_list(&self) -> Result<Vec<junctur_core::edit::Placed>, String> {
+        self.prepare();
+        let words = lock(&self.editor)
+            .words
+            .clone()
+            .ok_or("this recording has no transcript")?;
+        let fixes = lock(&self.ctl)
+            .edit
+            .list
+            .as_deref()
+            .map(|l| l.fixes.clone())
+            .ok_or("this recording has no edit list")?;
+        Ok(junctur_core::edit::placed(&fixes, &words.in_order()))
+    }
+
+    /// Takes the fixes of `gone`, as [`Self::fixes_list`] gave them, back to what their words were
+    /// heard as (5ae), those still as listed. Saved, not an undo step. How many.
+    pub fn remove_fixes(&self, file: Option<&str>, gone: &[Fix]) -> Result<usize, String> {
+        self.prepare();
+        let mut n = 0;
+        self.change(file, |ed, list, _| {
+            // The words as they are under the writer lock: what the removed fixes' words read as.
+            let words = ed.words.clone().ok_or("this recording has no transcript")?;
+            let (r, k) = ed.remove_fixes(list, gone, &words)?;
             n = k;
             Ok(r)
         })?;
@@ -1864,6 +1924,30 @@ mod tests {
         let crowded = Words::from_words(vec![w(1.0, " uh"), w(1.0, " Bane"), w(2.0, " is")]);
         let first = Words::from_words(vec![w(1.0, " Bane"), w(2.0, " is")]);
         assert!(!same_target(&crowded, &first, 0, 0));
+    }
+
+    #[test]
+    fn a_fix_field_saves_only_onto_the_words_it_was_opened_on() {
+        // 5ae: a field left open while its words' indices went to other words (a reload, a
+        // re-transcription) wrote its text onto those, out of sight. The save names its words by
+        // their heard starts as the page had them, and is refused when the index holds another.
+        use super::{named, Words, FIELD_MOVED};
+        use junctur_core::transcribe::Word;
+        let w = |start: f64, text: &str| Word {
+            start,
+            end: start + 0.3,
+            text: text.into(),
+            p: 1.0,
+            p_min: None,
+        };
+        let then = Words::from_words(vec![w(1.0, " no"), w(2.0, " lo"), w(3.0, " sé")]);
+        assert_eq!(named(&then, 0, 0, [1000, 1000]), Ok(()));
+        assert_eq!(named(&then, 1, 2, [2000, 3000]), Ok(()));
+        // Heard again: index 0 is now another word, and index 2 is gone.
+        let now = Words::from_words(vec![w(0.5, " y"), w(1.0, " no"), w(2.0, " lo")]);
+        assert_eq!(named(&now, 0, 0, [1000, 1000]), Err(FIELD_MOVED.into()));
+        assert_eq!(named(&now, 1, 2, [2000, 3000]), Err(FIELD_MOVED.into()));
+        assert_eq!(named(&now, 2, 3, [2000, 3000]), Err(FIELD_MOVED.into()));
     }
 
     use super::*;

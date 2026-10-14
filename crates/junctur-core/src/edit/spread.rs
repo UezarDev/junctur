@@ -344,6 +344,82 @@ pub fn keep_heard(fixes: &mut [Fix], added: &[Fix], heard: &[String]) -> usize {
     n
 }
 
+/// A fix of the list where the transcript has it (5ae: the list the user takes wrong fixes out of):
+/// its first and last words' places in the transcript, and what those words were heard as.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Placed {
+    pub fix: Fix,
+    /// Its first and last words' places in the transcript; `None` when it is on no word of it now
+    /// (5h: such a fix stays in the list and shows on nothing).
+    pub words: Option<(usize, usize)>,
+    /// Its words as heard, joined by spaces; empty when it is on no word.
+    pub heard: String,
+}
+
+impl Placed {
+    /// A fix of the heard text itself: "Undo those", a removal or Looks right (5o) made it, and the
+    /// words read as heard.
+    pub fn as_heard(&self) -> bool {
+        !self.heard.is_empty() && check_span(&self.heard).ok() == check_span(&self.fix.text).ok()
+    }
+}
+
+/// Every fix of `fixes` with the words of `words` (the transcript, in [`Fixes`]' order) it is on, in
+/// the list's order.
+pub fn placed(fixes: &[Fix], words: &[(usize, &Word)]) -> Vec<Placed> {
+    let heard = read(words);
+    let tracks = by_track(&heard);
+    fixes
+        .iter()
+        .map(|f| {
+            let at = words_of(f, &heard, &tracks);
+            Placed {
+                fix: f.clone(),
+                words: at.first().zip(at.last()).map(|(&a, &b)| (a, b)),
+                heard: at
+                    .iter()
+                    .map(|&i| heard[i].text)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            }
+        })
+        .collect()
+}
+
+/// Takes the fixes of `gone` still in `fixes` as they were listed back to what their words of `words`
+/// were heard as (5ae), as "Undo those" does: kept as heard rather than dropped, so a later spread
+/// (Correct's, or a fix of a word heard alike) does not give them the wrong text again. One on no word
+/// now is dropped. One changed since is the user's newer fix and stays. How many were taken back.
+pub fn remove(fixes: &mut Vec<Fix>, gone: &[Fix], words: &[(usize, &Word)]) -> usize {
+    let ours: Vec<Fix> = fixes
+        .iter()
+        .filter(|f| gone.iter().any(|g| same(f, g)))
+        .cloned()
+        .collect();
+    if ours.is_empty() {
+        return 0;
+    }
+    let mut n = 0;
+    for p in placed(&ours, words) {
+        let text = if p.fix.is_span() {
+            check_span(&p.heard)
+        } else {
+            check_fix(&p.heard)
+        };
+        let Some(i) = fixes.iter().position(|f| same(f, &p.fix)) else {
+            continue;
+        };
+        match text {
+            Ok(t) if !t.is_empty() => fixes[i].text = t,
+            _ => {
+                fixes.remove(i);
+            }
+        }
+        n += 1;
+    }
+    n
+}
+
 /// A fix of the heard text itself ([`keep_heard`]): the words are right as heard.
 fn as_heard(c: &Carried) -> bool {
     check_span(&c.heard.join(" ")).ok() == check_span(&c.fix.text).ok()
@@ -1274,5 +1350,71 @@ mod tests {
         ];
         let r = carry(&mut f, &carried, &refs(&right));
         assert_eq!((r.right, f.len()), (1, 0));
+    }
+
+    #[test]
+    fn the_fixes_are_listed_on_their_words_and_a_removed_one_reads_as_heard_for_good() {
+        // 5ae: a sentence typed over one "no" spread to every "no"; the list names each place with
+        // its words, and taking them away keeps them as heard so no spread brings the text back.
+        let ws = vec![
+            (0, word(1.0, " no")),
+            (0, word(2.0, " lo")),
+            (0, word(3.0, " sé")),
+            (0, word(4.0, " no,")),
+        ];
+        let sentence = "que tiene de bueno la energia nuclear.";
+        let mut f = vec![fix(0, 1.0, sentence)];
+        let s = spread(
+            &mut f,
+            &refs(&ws),
+            Which::Words {
+                track: 0,
+                first: at(1.0, 0),
+                last: at(1.0, 0),
+            },
+        );
+        assert_eq!(s.added.len(), 1);
+        f.push(Fix {
+            through: Some(at(3.0, 0)),
+            ..fix(0, 2.0, "lo se")
+        });
+        f.push(fix(0, 9.0, "gone"));
+        super::super::fixes::sort(&mut f);
+        let p = placed(&f, &refs(&ws));
+        let got: Vec<_> = p
+            .iter()
+            .map(|p| (p.fix.text.as_str(), p.words, p.heard.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (sentence, Some((0, 0)), "no"),
+                ("lo se", Some((1, 2)), "lo sé"),
+                (sentence, Some((3, 3)), "no,"),
+                ("gone", None, ""),
+            ]
+        );
+        assert!(!p[0].as_heard());
+        // Both sentence copies and the fix on no word go; the span stays. One listed but changed
+        // since is not touched.
+        let mut listed = vec![p[0].fix.clone(), p[2].fix.clone(), p[3].fix.clone()];
+        listed.push(Fix {
+            text: "changed since".into(),
+            ..p[1].fix.clone()
+        });
+        assert_eq!(remove(&mut f, &listed, &refs(&ws)), 3);
+        assert_eq!(shown(&f, &ws), ["no", "lo se", "no,"]);
+        assert_eq!(f.len(), 3, "{f:?}");
+        assert!(placed(&f, &refs(&ws))
+            .iter()
+            .filter(|p| p.fix.text != "lo se")
+            .all(Placed::as_heard));
+        // A later spread of every fix (Correct's) does not give them the sentence again.
+        f.push(fix(0, 1.0, sentence));
+        f.remove(0);
+        super::super::fixes::sort(&mut f);
+        let again = spread(&mut f, &refs(&ws), Which::All);
+        assert!(again.added.is_empty(), "{again:?}");
+        assert_eq!(remove(&mut f, &listed[1..], &refs(&ws)), 0, "already gone");
     }
 }

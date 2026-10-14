@@ -22,7 +22,7 @@
   // core decides, `words.sure`).
   // F2 (5ac) opens the field a double-click would on the word under the pointer, else Fix text for a
   // selection of words; never while a field is being typed in or a dialog is open.
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { SvelteSet } from "svelte/reactivity";
   import * as api from "./api";
   import * as sel from "./selection";
@@ -40,6 +40,7 @@
     type Token,
     type Words,
   } from "./transcript";
+  import FixesList from "./FixesList.svelte";
   import WordBar from "./WordBar.svelte";
 
   let {
@@ -217,6 +218,13 @@
   // decides). The new text comes back through the edit state's fixes key (App.svelte).
   let fixing = $state<number | null>(null);
   let fixDraft = $state("");
+  // What the open field showed when it opened, and its word's heard start (5ae). Leaving saves only
+  // what was typed, never "changed" against the word as it is by then: a field left alone while its
+  // word changed under it (a fix spreading onto it, a re-transcription's words) wrote its old text
+  // back onto that index on a click away, and 5aa then gave it to every word heard alike. The heard
+  // start goes with the save, which the engine refuses when that index names another word now.
+  let fixFrom = "";
+  let fixAt_ = 0;
   // `fixing` as a plain variable, for the field's own teardown and blur (5t repair): Svelte gives an
   // effect's teardown the state from before the change that tore it down, so there `fixing` still
   // named the field just closed. Its teardown then finished it a second time: Escape's draft was
@@ -286,7 +294,8 @@
     // word's text, when this word's draft replaced it before its field went away).
     if (fixing != null) finishFix(true);
     fixing = fixOpen = i;
-    fixDraft = words.text[i];
+    fixDraft = fixFrom = words.text[i];
+    fixAt_ = words.heard[i];
   }
   // The field's row can scroll out of the rendered window (the list is virtual) and take the field
   // with it, without a blur: what was typed is saved then, as leaving the field does, so `fixing`
@@ -303,9 +312,10 @@
   function finishFix(save: boolean) {
     const i = fixing;
     fixing = fixOpen = null;
-    if (!save || i == null || !words || fixDraft.trim() === words.text[i]) return;
+    if (!save || i == null || fixDraft.trim() === fixFrom.trim()) return;
     const text = fixDraft;
-    call(async () => tellFixed(await api.fixWord(i, text)));
+    const at = fixAt_;
+    call(async () => tellFixed(await api.fixWord(i, at, text)));
   }
 
   // A fix whose spelling joined the word list (5h's `settings::learn`) says so for a moment in the
@@ -454,6 +464,17 @@
       pausedUntil = performance.now() + FOLLOW_PAUSE_MS;
     }
   }
+  // The list of the recording's fixes (5ae), shown in place of the words while open; its jump
+  // closes it and goes to the place as the flagged words' steps do.
+  let listing = $state(false);
+  async function jumpTo(first: number, last: number) {
+    if (!words) return;
+    listing = false;
+    await tick();
+    goTo(first);
+    if (last > first) onSelect(sel.words(first, last));
+  }
+
   // Confirms the selected flagged word (it keeps what Whisper heard) and goes on to the next. With
   // none after it the header says so and the selection goes (5v: the word stayed selected, now
   // unflagged, and nothing showed the end had been reached).
@@ -522,12 +543,33 @@
     if (i >= 0) {
       e.preventDefault();
       fixAt(i, selection);
-    } else if (selection?.kind === "words" && edit?.editable && !reviewing && sel.pairs(selection).length === 1) {
+    } else if (
+      selection?.kind === "words" &&
+      edit?.editable &&
+      !reviewing &&
+      sel.pairs(selection).length === 1 &&
+      inSight(sel.runs(selection)[0])
+    ) {
       // The word bar is shown (its conditions below) with its actions and Fix text enabled (a
-      // selection of one stretch; with none the bar holds only its hint, 5v).
+      // selection of one stretch; with none the bar holds only its hint, 5v). Only a selection in
+      // sight (5ae): a click on no word (between words, a row's end, the picture) leaves the
+      // selection where it was, and F2 opened Fix text holding a sentence fixed long before, for
+      // words out of view.
       e.preventDefault();
       retyping = true;
     }
+  }
+
+  /** Whether a word of `r` is in a row on screen (5ae). */
+  function inSight(r: sel.Run): boolean {
+    if (!laid) return false;
+    const from = Math.floor(top / ROW);
+    const to = Math.ceil((top + height) / ROW) - 1;
+    for (let i = r.first; i <= r.last && i < laid.rowOf.length; i++) {
+      const row = laid.rowOf[i];
+      if (row >= from && row <= to) return true;
+    }
+    return false;
   }
 
   async function call(f: () => Promise<unknown>) {
@@ -684,7 +726,26 @@
     {:else if words}
       <span class="muted">{words.text.length.toLocaleString()} words</span>
     {/if}
+    {#if words && edit?.editable && !reviewing}
+      <button
+        class="list-fixes"
+        class:on={listing}
+        onclick={() => {
+          // A field open goes as leaving it does (what was typed is saved), not back with the words.
+          if (!listing) {
+            retyping = false;
+            if (fixing != null) finishFix(true);
+          }
+          listing = !listing;
+        }}
+        title={listing ? "Back to the transcript" : "Every fix of this recording, by text: go to one, or take wrong ones back"}
+        >Fixes</button
+      >
+    {/if}
   </header>
+  {#if listing && words && edit?.editable && !reviewing}
+    <FixesList {edit} onJump={(a, b) => void jumpTo(a, b)} onClose={() => (listing = false)} {onError} />
+  {/if}
   {#if setAside.length}
     <div class="spread" role="status">
       <span class="grow"
@@ -711,6 +772,7 @@
   <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
   <div
     class="scroll"
+    class:away={listing && words && edit?.editable && !reviewing}
     bind:this={scroller}
     onscroll={onScroll}
     onwheel={() => (pausedUntil = performance.now() + FOLLOW_PAUSE_MS)}
@@ -843,7 +905,7 @@
   </div>
   <!-- Kept while nothing is selected (5v): a bar that came with the selection shrank the scroller
        between a double-click's two presses. -->
-  {#if words && edit?.editable && !reviewing}
+  {#if words && edit?.editable && !reviewing && !listing}
     <WordBar
       {edit}
       {words}
@@ -907,6 +969,20 @@
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
+  }
+  .scroll.away {
+    display: none;
+  }
+  .list-fixes {
+    margin-left: 8px;
+    padding: 0 8px;
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 18px;
+  }
+  .list-fixes.on {
+    color: var(--on-accent);
+    background: var(--accent);
   }
   .note {
     margin: 16px 12px;

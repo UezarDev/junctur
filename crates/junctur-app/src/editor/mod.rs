@@ -473,6 +473,19 @@ impl Editor {
         Ok((self.set_fixes(list, fixes, Spread::default())?, n))
     }
 
+    /// Takes the fixes of `gone` back to what their words of `words` were heard as (5ae: the list of
+    /// fixes' Remove), those still as listed ([`edit::remove`]). Saved; not an undo step. How many.
+    pub fn remove_fixes(
+        &mut self,
+        list: &EditList,
+        gone: &[Fix],
+        words: &Words,
+    ) -> Result<(Option<Edited>, usize), String> {
+        let mut fixes = list.fixes.clone();
+        let n = edit::remove(&mut fixes, gone, &words.in_order());
+        Ok((self.set_fixes(list, fixes, Spread::default())?, n))
+    }
+
     /// [`edit::spread`] over the transcript the editor has (none yet: nothing to spread over).
     fn spread(&self, fixes: &mut Vec<Fix>, which: Which) -> Spread {
         match &self.words {

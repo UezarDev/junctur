@@ -105,12 +105,15 @@
   // as 5t's one-word field does on leaving: another selection (a Shift+click extending it), the
   // selection cleared, the bar gone (5x repair: the draft was dropped), the Fix text button pressed
   // again to close it. Escape, and the field's own
-  // ×, leave the text as it was, as 5t's Escape does.
+  // ×, leave the text as it was, as 5t's Escape does. Only what was typed: a field left as it opened
+  // saves nothing (`shown`), and every save, Enter's too, goes to the stretch it opened on with
+  // that stretch's heard starts, which the engine checks still name those words (5ae).
   let draft = $state("");
   let shown = "";
   let openFor: string | null = null;
   // The stretch the open field is for (plain: read by the teardown, after the props have moved on).
   let openRun: { first: number; last: number } | null = null;
+  let openAt: [number, number] = [0, 0];
   let saving = $state(false);
   const one = $derived(runs.length === 1 ? { first: runs[0][0], last: runs[0][1] } : null);
   $effect(() => {
@@ -121,6 +124,7 @@
     } else if (openFor == null && at) {
       openFor = at;
       openRun = one;
+      openAt = [words.heard[one!.first], words.heard[one!.last]];
       shown = shownText(words, one!);
       draft = shown;
     } else if (openFor !== at || !at) {
@@ -136,19 +140,20 @@
     openFor = null;
     if (!run || draft.trim() === shown.trim()) return;
     const text = draft;
-    api.fixWords(run.first, run.last, text).then(onFixed, (e) => onError(String(e)));
+    api.fixWords(run.first, run.last, openAt, text).then(onFixed, (e) => onError(String(e)));
   }
   onDestroy(leave);
 
   async function saveText() {
-    if (!one || saving) return;
+    const run = openRun;
+    if (!run || saving) return;
     if (draft.trim() === shown.trim()) {
       retyping = false;
       return;
     }
     saving = true;
     try {
-      onFixed(await api.fixWords(one.first, one.last, draft));
+      onFixed(await api.fixWords(run.first, run.last, openAt, draft));
       openRun = null;
       retyping = false;
     } catch (e) {

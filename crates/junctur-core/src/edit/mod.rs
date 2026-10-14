@@ -41,8 +41,8 @@ pub use speakers::{
 };
 pub use splice::{cut_span, keep_span};
 pub use spread::{
-    carry, carry_times, keep_heard, likeness, snapshot, snapshot_times, spread, Carried,
-    CarriedTime, CarryReport, Spread, TimesReport, Which,
+    carry, carry_times, keep_heard, likeness, placed, remove, snapshot, snapshot_times, spread,
+    Carried, CarriedTime, CarryReport, Placed, Spread, TimesReport, Which,
 };
 pub use times::{set_time, to_ms, Retime, Times};
 
