@@ -191,8 +191,16 @@ export interface Sent {
 
 /** A Whisper model the Settings dialog offers (src/settings.rs). */
 export interface ModelChoice {
+  /** What the config file holds. */
   key: string;
-  label: string;
+  /** The readable name ("Fast"). */
+  name: string;
+  /** The line under it in the picker (2v). */
+  summary: string;
+  /** Which icon the picker draws. */
+  family: "auto" | "turbo" | "large";
+  /** The Whisper model it loads ("large-v3-turbo"). */
+  model: string;
   note: string;
 }
 
@@ -374,6 +382,9 @@ export const seek = (seconds: number, exact: boolean) =>
  * the speed to 1x and Skip cuts back; opening or closing a recording ends it too. `pauseReview`
  * stops the loop and pauses, still in review. */
 export const playBetween = (start: number, end: number) => invoke<void>("play_between", { start, end });
+/** 2s: plays from source second `at`, unpaused (after a cut's edge is dragged, from just before it).
+ * Refused in review. */
+export const playFrom = (at: number) => invoke<void>("play_from", { at });
 export const pauseReview = () => invoke<void>("pause_review");
 export const endReview = () => invoke<void>("end_review");
 /** Playback speed, 0.25 to 4 (2o). */
@@ -445,8 +456,6 @@ export const translationStatus = () => invoke<TranslationStatus>("translation_st
 let languages: Promise<Language[]> | null = null;
 /** The languages captions can be translated into, by name; asked once. */
 export const translationLanguages = () => (languages ??= invoke<Language[]>("translation_languages"));
-/** Installs the Junctur script into Resolve's Scripts folder; resolves to its path. */
-export const installResolveScript = () => invoke<string>("install_resolve_script");
 export const voices = () => invoke<Voice[]>("voices");
 /** Remembers `name`'s voice from every run of words (`[first, last]` each, 2p: one enrolment) and
  * relabels the speakers; resolves to a line for the user. */

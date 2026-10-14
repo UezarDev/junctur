@@ -4,8 +4,10 @@
   // censored words and find-and-replace pairs, which apply to the translated words. A component of
   // its own because the two lists are edited as text, one entry per line, with their own parsing. They change only what the captions show (the SRT, Send to
   // Resolve, the preview), never the transcript. A list commits when the box loses focus; a line
-  // the engine would refuse (core edit/caption_text.rs) is reported and the box snaps back.
+  // the engine would refuse (core edit/caption_text.rs) is reported and the box snaps back. Laid
+  // out as `Field`s, their explanations behind (i)s (2t).
   import { translationLanguages, type CaptionCase, type Captions, type CensorStyle, type Language } from "./api";
+  import Field from "./Field.svelte";
 
   let {
     value,
@@ -31,7 +33,7 @@
     { key: "title", label: "Title Case" },
   ];
   const STYLES: { key: CensorStyle; label: string }[] = [
-    { key: "middle", label: "Middle masked (f**k)" },
+    { key: "middle", label: "Middle (f**k)" },
     { key: "whole", label: "Whole word (****)" },
   ];
 
@@ -77,88 +79,77 @@
     pairs.map((p) => `${p.from} > ${p.to}`).join("\n");
 </script>
 
-<label class="field" title="Captions in another language, translated on this machine; the transcript stays as spoken">
-  <span>Translate to</span>
-  <select
-    value={value.translate}
-    {disabled}
-    onchange={(e) => onChange({ ...value, translate: (e.currentTarget as HTMLSelectElement).value })}
-  >
-    <option value="">As spoken (no translation)</option>
-    {#if value.translate && !languages.some((l) => l.code === value.translate)}
-      <option value={value.translate}>{value.translate}</option>
-    {/if}
-    {#each languages as l (l.code)}<option value={l.code}>{l.name}</option>{/each}
-  </select>
-</label>
-<label class="field">
-  <span>Case</span>
-  <select
-    value={value.case}
-    {disabled}
-    onchange={(e) => onChange({ ...value, case: (e.currentTarget as HTMLSelectElement).value as CaptionCase })}
-  >
-    {#each CASES as c (c.key)}<option value={c.key}>{c.label}</option>{/each}
-  </select>
-</label>
-<label class="check" title="Shows captions without punctuation; apostrophes and hyphens inside words stay">
-  <input
-    type="checkbox"
-    checked={!value.punctuation}
-    {disabled}
-    onchange={(e) => onChange({ ...value, punctuation: !(e.currentTarget as HTMLInputElement).checked })}
-  />
-  Remove punctuation
-</label>
-<label class="list" title="Whole words or phrases, one per line, case aside">
-  <span>Censored words (one per line)</span>
-  <textarea rows="3" value={value.censor.join("\n")} {disabled} onchange={censor}></textarea>
-</label>
-<label class="field">
-  <span>Censor as</span>
-  <select
-    value={value.censorStyle}
-    {disabled}
-    onchange={(e) =>
-      onChange({ ...value, censorStyle: (e.currentTarget as HTMLSelectElement).value as CensorStyle })}
-  >
-    {#each STYLES as s (s.key)}<option value={s.key}>{s.label}</option>{/each}
-  </select>
-</label>
-<label
-  class="list"
-  title="One per line: words to find > what to show. Whole words or phrases, case aside, before case and censoring; nothing after > removes them"
+<Field label="Translate to" info="Shows the captions in another language, translated on this machine a sentence at a time; Off shows them as spoken. The transcript always stays as spoken.">
+  {#snippet children(id)}
+    <select
+      {id}
+      value={value.translate}
+      {disabled}
+      onchange={(e) => onChange({ ...value, translate: (e.currentTarget as HTMLSelectElement).value })}
+    >
+      <option value="">Off (as spoken)</option>
+      {#if value.translate && !languages.some((l) => l.code === value.translate)}
+        <option value={value.translate}>{value.translate}</option>
+      {/if}
+      {#each languages as l (l.code)}<option value={l.code}>{l.name}</option>{/each}
+    </select>
+  {/snippet}
+</Field>
+<Field label="Case">
+  {#snippet children(id)}
+    <select
+      {id}
+      value={value.case}
+      {disabled}
+      onchange={(e) => onChange({ ...value, case: (e.currentTarget as HTMLSelectElement).value as CaptionCase })}
+    >
+      {#each CASES as c (c.key)}<option value={c.key}>{c.label}</option>{/each}
+    </select>
+  {/snippet}
+</Field>
+<Field kind="check" label="Remove punctuation" info="Apostrophes and hyphens inside words stay.">
+  {#snippet children(id)}
+    <input
+      {id}
+      type="checkbox"
+      checked={!value.punctuation}
+      {disabled}
+      onchange={(e) => onChange({ ...value, punctuation: !(e.currentTarget as HTMLInputElement).checked })}
+    />
+  {/snippet}
+</Field>
+<Field kind="stack" label="Censored words" info="Whole words or phrases, one per line, any case.">
+  {#snippet children(id)}
+    <textarea {id} rows="3" spellcheck="false" value={value.censor.join("\n")} {disabled} onchange={censor}></textarea>
+  {/snippet}
+</Field>
+<Field label="Censor as">
+  {#snippet children(id)}
+    <select
+      {id}
+      value={value.censorStyle}
+      {disabled}
+      onchange={(e) =>
+        onChange({ ...value, censorStyle: (e.currentTarget as HTMLSelectElement).value as CensorStyle })}
+    >
+      {#each STYLES as s (s.key)}<option value={s.key}>{s.label}</option>{/each}
+    </select>
+  {/snippet}
+</Field>
+<Field
+  kind="stack"
+  label="Find and replace"
+  info="One per line: words to find > what to show. Whole words or phrases, any case, applied before case and censoring; nothing after > removes them."
 >
-  <span>Find and replace (find &gt; show)</span>
-  <textarea rows="3" placeholder="gonna > going to" value={shown(value.replace)} {disabled} onchange={replace}></textarea>
-</label>
-
-<style>
-  .check {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    margin: 6px 0;
-  }
-  .field {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 8px;
-    margin: 6px 0;
-  }
-  .field select {
-    width: 150px;
-    min-width: 0;
-  }
-  .list {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    margin: 6px 0;
-  }
-  .list textarea {
-    resize: vertical;
-    font: inherit;
-  }
-</style>
+  {#snippet children(id)}
+    <textarea
+      {id}
+      rows="3"
+      spellcheck="false"
+      placeholder="gonna > going to"
+      value={shown(value.replace)}
+      {disabled}
+      onchange={replace}
+    ></textarea>
+  {/snippet}
+</Field>

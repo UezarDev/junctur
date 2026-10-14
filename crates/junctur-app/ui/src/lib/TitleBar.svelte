@@ -1,6 +1,7 @@
 <script lang="ts">
   // Junctur's own title bar (2i): the window is frameless, so this is the whole caption. The app
-  // icon, File and View as icon buttons with dropdowns (menus.ts), the Settings gear, a drag area
+  // icon, File and View as icon buttons with dropdowns (menus.ts), the Settings gear, the back arrow
+  // (2u: File > Back to recordings, out where it can be seen, while a recording is open), a drag area
   // (Tauri's `data-tauri-drag-region`: a press drags through Windows' own move loop, so snapping to
   // an edge works; a double press maximises), then minimise, maximise and close. It is opaque and
   // mpv keeps the picture below it (App.svelte's top margin).
@@ -135,6 +136,29 @@
       /></svg
     >
   </button>
+  <!-- The way back to the start window (2u): Uezar did not find it in the File dropdown, so it is out
+       here too, beside the gear, doing what File > Back to recordings does. Only while there is a
+       recording to go back from (open or opening, the entry's own rule). Not a drag region. -->
+  {#if menu.closable}
+    <button
+      class="tool"
+      title="Back to recordings (Ctrl+W)"
+      aria-label="Back to recordings"
+      disabled={menu.locked}
+      onclick={() => choose("close")}
+    >
+      <svg viewBox="0 0 16 16" aria-hidden="true"
+        ><path
+          d="M13.5 8h-11 M7 3.5L2.5 8 7 12.5"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        /></svg
+      >
+    </button>
+  {/if}
   <div class="title" data-tauri-drag-region>Junctur</div>
   <div class="controls">
     <button class="win" aria-label="Minimise" onclick={() => void win.minimize()}>

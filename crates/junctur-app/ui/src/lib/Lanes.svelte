@@ -12,8 +12,9 @@
   //
   // A click on a lane seeks, a drag selects a stretch to cut or keep (whole frames, as the
   // timeline's shift-drag does), a drag on the ruler scrubs, the wheel pans and Ctrl+wheel zooms
-  // around the pointer.
-  import { onMount } from "svelte";
+  // around the pointer. A drag that starts on a cut's edge moves the edge instead (2s, nudge.ts
+  // `edgeNear`): the edit is made once, on release, and the preview then plays from just before it.
+  import { onMount, untrack } from "svelte";
   import * as api from "./api";
   import Avatars from "./Avatars.svelte";
   import MuteSolo from "./MuteSolo.svelte";
@@ -21,7 +22,8 @@
   import { meter } from "./meters";
   import type { Selection } from "./selection";
   import type { Talk } from "./talking";
-  import { clock, toFrame } from "./time";
+  import { clampEdge, dragged, edgeNear, type Edge } from "./nudge";
+  import { clock, timecode, toFrame, toSeconds } from "./time";
   import * as tr from "./tracks";
 
   let {
@@ -37,6 +39,7 @@
     thin,
     wavesVersion,
     spans,
+    edges = true,
     onView,
     onSelect,
     onError,
@@ -57,6 +60,8 @@
     wavesVersion: number;
     /** The selection, a span per stretch (2p). */
     spans: { start: number; end: number }[];
+    /** Cut edges can be dragged (not while reviewing: review moves its clip's edges itself). */
+    edges?: boolean;
     onView: (start: number, len: number) => void;
     onSelect: (s: Selection | null) => void;
     onError: (message: string) => void;
@@ -290,20 +295,141 @@
     const [p, q] = [toFrame(clampT(Math.min(a, b)), fps, Math.round), toFrame(clampT(Math.max(a, b)), fps, Math.round)];
     onSelect(q > p ? { kind: "frames", start: p, end: q } : null);
   }
+  // Cut edges (2s): within GRAB px of one over a lane (not the ruler) the cursor and a handle show
+  // it, and a press there drags it, in whole frames, inside its room (nudge.ts `Edge`). The edit
+  // waits for the release, so a drag is one undo step and one reload of the ranges, not one per
+  // frame passed; then the preview plays from PREROLL before where the edge landed, so the fix is
+  // heard (with Skip cuts on, a range's start is reached through the cut and lands on it).
+  const GRAB = 5;
+  const PREROLL = 1.5;
+  let hover = $state.raw<Edge | null>(null);
+  let drag = $state.raw<{ edge: Edge; to: number } | null>(null);
+  // Where the pointer last was during a drag, so a zoom or pan under it moves the edge with it.
+  let dragX = 0;
+  // A drag's edit sent and its new list not yet here (2s repair): no edge is offered until it is,
+  // since one grabbed from the old list would be placed by frames that have moved. Cleared by the
+  // next edit list, by a failure, or after WAIT ms if no list comes (the edit changed nothing).
+  let waiting = false;
+  let waitTimer = 0;
+  const WAIT = 2000;
+  function stopWaiting() {
+    waiting = false;
+    clearTimeout(waitTimer);
+  }
+  function edgeAt(clientX: number, clientY: number): Edge | null {
+    const fps = edit?.fps;
+    if (waiting || !edges || !fps || !edit?.editable || !edit.ranges.length || width <= 0) return null;
+    // One read of the box per pointer move.
+    const r = body.getBoundingClientRect();
+    if (clientY - r.top < RULER) return null;
+    const perSecond = fps.num / fps.den;
+    const t = view.start + ((clientX - r.left) / Math.max(1, r.width)) * view.len;
+    return edgeNear(edit, t * perSecond, (GRAB * view.len * perSecond) / width);
+  }
+  const sameEdge = (a: Edge | null, b: Edge | null) => a === b || (!!a && !!b && a.at === b.at && a.frame === b.frame);
+  function setHover(g: Edge | null) {
+    if (!sameEdge(g, hover)) hover = g;
+  }
+  // The dragged edge under `clientX`, assigned only when it lands on another frame.
+  function dragTo(clientX: number) {
+    const fps = edit?.fps;
+    if (!drag || !fps) return;
+    dragX = clientX;
+    const to = clampEdge(drag.edge, (timeAt(clientX) * fps.num) / fps.den);
+    if (to !== drag.to) drag = { edge: drag.edge, to };
+  }
+  // A handle shown for an edit list or a window that has since changed would be in the wrong place.
+  $effect(() => {
+    void edit;
+    void view.start;
+    void view.len;
+    void edges;
+    hover = null;
+  });
+  // A new edit list ends the wait for a drag's edit.
+  $effect(() => {
+    void edit;
+    untrack(stopWaiting);
+  });
+  // The wheel zooms and pans while dragging too: the edge follows the pointer in the new window.
+  $effect(() => {
+    void view.start;
+    void view.len;
+    void width;
+    untrack(() => {
+      if (drag) dragTo(dragX);
+    });
+  });
+  function release(d: { edge: Edge; to: number }, clientX: number) {
+    const fps = edit?.fps;
+    if (!edit || !fps) return;
+    if (d.to === d.edge.frame) {
+      // Let go where it started: a click, which seeks.
+      void call(() => api.seek(clampT(timeAt(clientX)), true));
+      onSelect(null);
+      return;
+    }
+    // The same edge with the same room: a list that changed elsewhere (an undo, an outside edit)
+    // would make the frames dragged over mean something else.
+    const live = edgeNear(edit, d.edge.frame, 0);
+    if (!live || live.at !== d.edge.at || live.lo !== d.edge.lo || live.hi !== d.edge.hi) {
+      onError("The cuts changed while the edge was being dragged; nothing was moved. Drag it again.");
+      return;
+    }
+    const step = dragged(edit, d.edge, d.to);
+    if (step) {
+      const at = toSeconds(clampEdge(d.edge, d.to), fps);
+      waiting = true;
+      clearTimeout(waitTimer);
+      waitTimer = window.setTimeout(stopWaiting, WAIT);
+      void (async () => {
+        try {
+          await api.editFrames(step.start, step.end, step.keep);
+        } catch (e) {
+          stopWaiting();
+          onError(String(e));
+          return;
+        }
+        await call(() => api.playFrom(Math.max(0, at - PREROLL)));
+      })();
+    }
+  }
+
   function pointerDown(e: PointerEvent) {
     if (e.button !== 0 || !player?.path) return;
     body.setPointerCapture(e.pointerId);
+    const g = edgeAt(e.clientX, e.clientY);
+    if (g) {
+      drag = { edge: g, to: g.frame };
+      dragX = e.clientX;
+      hover = null;
+      return;
+    }
     const r = body.getBoundingClientRect();
     down = { x: e.clientX, t: timeAt(e.clientX), ruler: e.clientY - r.top < RULER, moved: false };
   }
   function pointerMove(e: PointerEvent) {
-    if (!down) return;
+    if (drag) {
+      dragTo(e.clientX);
+      return;
+    }
+    if (!down) {
+      setHover(edgeAt(e.clientX, e.clientY));
+      return;
+    }
     if (Math.abs(e.clientX - down.x) > 3) down.moved = true;
     if (!down.moved) return;
     if (down.ruler) scrub(clampT(timeAt(e.clientX)));
     else select(down.t, timeAt(e.clientX));
   }
   function pointerUp(e: PointerEvent) {
+    if (drag) {
+      const d = drag;
+      drag = null;
+      release(d, e.clientX);
+      setHover(edgeAt(e.clientX, e.clientY));
+      return;
+    }
     if (!down) return;
     const d = down;
     down = null;
@@ -332,6 +458,15 @@
 
   const position = $derived(player?.position ?? null);
   const headX = $derived(position == null ? null : x(position));
+  // The handle (hovered) or the edge being dragged, with its timecode.
+  const grab = $derived.by(() => {
+    const fps = edit?.fps;
+    if (!fps) return null;
+    const f = drag ? drag.to : hover?.frame;
+    if (f == null) return null;
+    const px = x(toSeconds(f, fps));
+    return px >= 0 && px <= width ? { px, label: drag ? timecode(f, fps) : null } : null;
+  });
   const sel = $derived(
     spans.map((s) => ({ a: Math.max(0, x(s.start)), b: Math.min(width, x(s.end)) })).filter((s) => s.b > s.a),
   );
@@ -383,11 +518,18 @@
     onpointerdown={pointerDown}
     onpointermove={pointerMove}
     onpointerup={pointerUp}
-    onpointercancel={() => (down = null)}
+    onpointercancel={() => {
+      down = null;
+      drag = null;
+    }}
+    onpointerleave={() => {
+      if (!drag) hover = null;
+    }}
     onwheel={wheel}
+    class:grabbing={!!grab}
     role="slider"
     tabindex="-1"
-    aria-label="Track lanes: click to seek, drag to select"
+    aria-label="Track lanes: click to seek, drag to select, drag a cut's edge to move it"
     aria-valuemin={0}
     aria-valuemax={duration}
     aria-valuenow={position ?? 0}
@@ -396,6 +538,11 @@
     {#each sel as s, k (k)}
       <div class="sel" style:left="{s.a}px" style:width="{s.b - s.a}px"></div>
     {/each}
+    {#if grab}
+      <div class="edge" class:on={!!drag} style:top="{RULER}px" style:transform="translateX({grab.px}px)">
+        {#if grab.label}<span class="when mono" class:flip={grab.px > width - 96}>{grab.label}</span>{/if}
+      </div>
+    {/if}
     {#if headX != null && headX >= 0 && headX <= width}
       <div class="head" style:transform="translateX({headX}px)"></div>
     {/if}
@@ -502,6 +649,37 @@
     inset: 0;
     width: 100%;
     height: 100%;
+  }
+  .body.grabbing {
+    cursor: ew-resize;
+  }
+  /* A cut's edge under the pointer, or being dragged (2s). */
+  .edge {
+    position: absolute;
+    bottom: 0;
+    left: -2px;
+    width: 4px;
+    border-radius: 2px;
+    background: rgba(255, 220, 140, 0.55);
+    pointer-events: none;
+  }
+  .edge.on {
+    background: rgba(255, 220, 140, 0.95);
+  }
+  .when {
+    position: absolute;
+    top: 4px;
+    left: 8px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: rgba(16, 17, 20, 0.92);
+    color: #fff;
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .when.flip {
+    left: auto;
+    right: 8px;
   }
   .sel {
     position: absolute;

@@ -184,6 +184,16 @@ fn notice(e: &Edited) -> Option<String> {
     }
 }
 
+/// Whether `play_from` can start at source second `at` (2s): a time mpv can seek to, never NaN, an
+/// infinity or before the start, which would reach mpv as text it refuses or reads otherwise.
+fn playable(at: f64) -> Result<(), String> {
+    if at.is_finite() && at >= 0.0 {
+        Ok(())
+    } else {
+        Err(format!("cannot play from {at}"))
+    }
+}
+
 fn same_form(a: &Form, b: &Form) -> bool {
     match (a, b) {
         (Form::Source, Form::Source) => true,
@@ -1117,6 +1127,31 @@ impl Core {
         self.mpv.set_string("pause", "no")
     }
 
+    /// Plays from source second `at` (2s: after a cut's edge is dragged, from just before it, so
+    /// the move is heard). With the whole file playing it is an exact seek; with only the kept
+    /// ranges playing they are loaded again from there, because the edit that moved the edge has
+    /// just sent a load of the new ranges and a seek sent while a load begins is lost (see
+    /// `play_between`). Refused in review, whose loop is its own (the lanes offer no edges then).
+    pub fn play_from(&self, at: f64) -> Result<(), String> {
+        playable(at)?;
+        let mut c = lock(&self.ctl);
+        if c.file.is_none() {
+            return Err("no file is open".into());
+        }
+        if c.review.is_some() {
+            return Err("reviewing: the clip under review plays".into());
+        }
+        if same_form(&Form::Source, &c.requested) {
+            self.mpv
+                .command(&["seek", &format!("{at:.6}"), "absolute+exact"])?;
+            lock(&self.state).expect(at);
+            self.mpv.set_string("pause", "no")
+        } else {
+            let form = c.requested.clone();
+            self.load(&mut c, form, Some(at), false)
+        }
+    }
+
     /// Stops `play_between`'s loop and pauses, staying in review (2o: past the last clip).
     pub fn pause_review(&self) -> Result<(), String> {
         clear_loop(&self.mpv)?;
@@ -1541,6 +1576,15 @@ fn event_loop(events: &mut Events, shared: &Shared) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plays_from_a_real_time_only() {
+        assert!(playable(0.0).is_ok());
+        assert!(playable(12.5).is_ok());
+        for bad in [-0.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(playable(bad).is_err(), "{bad} accepted");
+        }
+    }
 
     #[test]
     fn speeds_outside_a_quarter_to_four_times_are_refused() {

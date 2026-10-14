@@ -62,3 +62,39 @@ export function now(edit: EditState, c: Clip): "kept" | "cut" | "partly" {
   }
   return kept === 0 ? "cut" : kept >= c.end - c.start ? "kept" : "partly";
 }
+
+/**
+ * Moves an edge of clip `i` by `by` frames (2s: review's steppers), with the matching edge of the
+ * clip beside it, since the two share it: the new frozen list (the clips moved are new objects,
+ * the rest kept) and the frame edit that makes it so in the live list, or null for none. Null
+ * altogether when nothing moves: the first clip's start and the last one's end are the file's, and
+ * an edge stays one frame inside both clips. The frames passed over take the kind of the clip that
+ * grows: what it is now in the live list when it is wholly one (a Removed range grows as a cut),
+ * else what review proposed. No edit when those frames already are that kind (both clips were kept,
+ * say), so the undo history holds only real changes; the clips still move, which is what plays.
+ */
+export function moveEdge(
+  list: Clip[],
+  i: number,
+  edge: "start" | "end",
+  by: number,
+  edit: EditState,
+): { list: Clip[]; frames: { start: number; end: number; keep: boolean } | null } | null {
+  const c = list[i];
+  const j = edge === "start" ? i - 1 : i + 1;
+  const n = list[j];
+  if (!c || !n) return null;
+  const from = edge === "start" ? c.start : c.end;
+  const lo = (edge === "start" ? n.start : c.start) + 1;
+  const hi = (edge === "start" ? c.end : n.end) - 1;
+  const to = Math.min(hi, Math.max(lo, from + by));
+  if (to === from) return null;
+  const grows = (edge === "start" ? to < from : to > from) ? c : n;
+  const is = now(edit, grows);
+  const keep = is === "partly" ? grows.kept : is === "kept";
+  const span = { start: Math.min(from, to), end: Math.max(from, to), kept: false, index: 0 };
+  const out = list.slice();
+  out[i] = edge === "start" ? { ...c, start: to } : { ...c, end: to };
+  out[j] = edge === "start" ? { ...n, end: to } : { ...n, start: to };
+  return { list: out, frames: now(edit, span) === (keep ? "kept" : "cut") ? null : { start: span.start, end: span.end, keep } };
+}
