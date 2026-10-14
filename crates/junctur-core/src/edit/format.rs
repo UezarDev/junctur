@@ -574,9 +574,66 @@ mod tests {
             "fix 1 soon Ana\n",
             "fix -1 2.000 Ana\n",
             "fix 1 2.000 Ana\nfix 1 2.0001 Bo\n",
+            "fix 1 2.000+ Ana\n",
+            "fix 1 2.000+x Ana\n",
+            "fix 1 2.000+-1 Ana\n",
+            "fix 1 2.000+1 Ana\nfix 1 2.000+1 Bo\n",
         ] {
             assert!(parse(&format!("{head}{bad}")).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_later_word_of_one_millisecond_is_written_with_its_place_as_version_4() {
+        // 5w: "en" and "él" both start at 54.944; each word its own fix.
+        let e = EditList {
+            fixes: vec![
+                Fix {
+                    track: 0,
+                    start: 54.944,
+                    nth: 1,
+                    text: "miel".into(),
+                },
+                Fix {
+                    track: 0,
+                    start: 54.944,
+                    nth: 0,
+                    text: "de".into(),
+                },
+            ],
+            ..sample()
+        };
+        let text = e.to_text();
+        assert!(text.starts_with("junctur-edit 4\n"), "{text}");
+        assert!(
+            text.contains("fix 0 54.944 de\nfix 0 54.944+1 miel\n"),
+            "{text}"
+        );
+        let back = parse(&text).unwrap();
+        assert_eq!(back.fixes, [e.fixes[1].clone(), e.fixes[0].clone()]);
+        assert!(!back.fixes[0].same_word(&back.fixes[1]));
+        assert_eq!(back.to_text(), text);
+        // A 5h list's bare line names the first word of its millisecond and is written back byte
+        // for byte, still version 3.
+        let old = EditList {
+            fixes: vec![Fix {
+                track: 0,
+                start: 54.944,
+                nth: 0,
+                text: "mel".into(),
+            }],
+            ..sample()
+        }
+        .to_text();
+        assert!(old.starts_with("junctur-edit 3\n"), "{old}");
+        assert!(old.contains("\nfix 0 54.944 mel\n"), "{old}");
+        let back = parse(&old).unwrap();
+        assert_eq!(back.fixes[0].nth, 0);
+        assert_eq!(back.to_text(), old);
+        // An exponent's sign is the start's, not a place.
+        let e = parse("junctur-edit 4\nsource x.mp4\nfix 0 1e+1 Ana\nfix 0 1E+1+2 Bo\n").unwrap();
+        assert_eq!((e.fixes[0].start, e.fixes[0].nth), (10.0, 0));
+        assert_eq!((e.fixes[1].start, e.fixes[1].nth), (10.0, 2));
     }
 
     #[test]

@@ -289,4 +289,39 @@ mod tests {
         assert_eq!(by.text(0, &ws[2]), "miel");
         assert!(same_millisecond(54.944, 54.9444) && !same_millisecond(54.944, 54.945));
     }
+
+    #[test]
+    fn two_tracks_interleaved_in_one_millisecond_are_counted_each_on_its_own() {
+        // 5w: `Fixes` counts each track's words of a millisecond as they come, whatever the other
+        // track's words between them, and starts again at the next millisecond.
+        let fix = |track, start, nth, text: &str| Fix {
+            track,
+            start,
+            nth,
+            text: text.into(),
+        };
+        let f = vec![
+            fix(0, 7.0, 1, "zero-1"),
+            fix(1, 7.0, 0, "one-0"),
+            fix(1, 7.0, 2, "one-2"),
+            fix(0, 7.0, 2, "zero-2"),
+            fix(1, 7.5, 0, "next"),
+        ];
+        let stream = [
+            (1, word(7.0, "a")),
+            (0, word(7.0, "b")),
+            (0, word(7.0004, "c")),
+            (1, word(7.0, "d")),
+            (0, word(7.0, "e")),
+            (1, word(7.0003, "f")),
+            (1, word(7.5, "g")),
+            (0, word(7.5, "h")),
+        ];
+        let mut by = Fixes::new(&f);
+        let got: Vec<&str> = stream.iter().map(|(t, w)| by.text(*t, w)).collect();
+        assert_eq!(
+            got,
+            ["one-0", "b", "zero-1", "d", "zero-2", "one-2", "next", "h"]
+        );
+    }
 }
