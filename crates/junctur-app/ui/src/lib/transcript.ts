@@ -36,7 +36,8 @@ export function words(v: TranscriptView): Words {
   };
 }
 
-/** A word that is never flagged (5o): no confidence to go by, or the user fixed or confirmed it. */
+/** A word that is never flagged (5o): no confidence to go by, or the user fixed or confirmed it. The
+ * core's `NOT_FLAGGED` (src/editor/words.rs), which sends it. */
 export const NOT_FLAGGED = 255;
 
 /** The view's confidences, every word unflagged when it has none (an app from before 5o). */

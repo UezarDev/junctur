@@ -233,11 +233,10 @@
   const checking = $derived(chosen && chosen.first === chosen.last && doubt(chosen.first) ? chosen.first : -1);
 
   // Next or previous flagged word from the selection, else from the word under the playhead: it is
-  // selected, played from and scrolled to (even while the list does not follow the playhead).
-  function step(back: boolean) {
-    const from = chosen ? (back ? chosen.first : chosen.last) : current;
-    goTo(stepFrom(toCheck, from, back));
-  }
+  // selected, played from and scrolled to (even while the list does not follow the playhead). Each
+  // button is greyed when there is none that way (no wrapping: the end of the list stays an end).
+  const before = $derived(stepFrom(toCheck, chosen ? chosen.first : current, true));
+  const after = $derived(stepFrom(toCheck, chosen ? chosen.last : current, false));
   function goTo(i: number) {
     if (i < 0 || !words) return;
     anchor = i;
@@ -372,9 +371,9 @@
     <span>Transcript</span>
     {#if toCheck.length}
       <span class="check" title="Words Whisper was less sure of than {flagBelow} % (Settings)">
-        <button onclick={() => step(true)} aria-label="Previous word to check">‹</button>
+        <button onclick={() => goTo(before)} disabled={before < 0} aria-label="Previous word to check">‹</button>
         <span>{toCheck.length.toLocaleString()} to check</span>
-        <button onclick={() => step(false)} aria-label="Next word to check">›</button>
+        <button onclick={() => goTo(after)} disabled={after < 0} aria-label="Next word to check">›</button>
         <button
           disabled={checking < 0}
           onclick={looksRight}

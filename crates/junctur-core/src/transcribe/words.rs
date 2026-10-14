@@ -44,8 +44,7 @@ pub fn group(tokens: &[Token]) -> Vec<Word> {
                     end: t.end,
                     sum: 0.0,
                     n: 0,
-                    low_text: f32::INFINITY,
-                    low: f32::INFINITY,
+                    tokens: Vec::new(),
                 };
                 w.add(t);
                 cur = Some(w);
@@ -66,27 +65,18 @@ struct Piece {
     /// Summed and counted token probability, for the mean.
     sum: f32,
     n: u32,
-    /// The lowest probability of a token holding part of a letter or digit (5o), and of any token.
-    /// Whisper is often unsure whether a comma or a full stop follows a word it heard plainly
-    /// ("hola" sure, its "," not); flagging the word for that would bury the misheard ones.
-    low_text: f32,
-    low: f32,
+    /// Each token's bytes in [`Self::bytes`] (from, to) and its probability, for [`lowest`].
+    tokens: Vec<(usize, usize, f32)>,
 }
 
 impl Piece {
     fn add(&mut self, t: &Token) {
+        let from = self.bytes.len();
         self.bytes.extend(&t.bytes);
+        self.tokens.push((from, self.bytes.len(), t.p));
         self.end = self.end.max(t.end);
         self.sum += t.p;
         self.n += 1;
-        self.low = self.low.min(t.p);
-        // A byte past ASCII is part of a letter (one accented letter can span two tokens).
-        if t.bytes
-            .iter()
-            .any(|b| !b.is_ascii() || b.is_ascii_alphanumeric())
-        {
-            self.low_text = self.low_text.min(t.p);
-        }
     }
 
     fn push_to(self, words: &mut Vec<Word>) {
@@ -94,11 +84,7 @@ impl Piece {
         if text.is_empty() {
             return;
         }
-        let low = if self.low_text.is_finite() {
-            self.low_text
-        } else {
-            self.low
-        };
+        let low = lowest(&self.bytes, &self.tokens);
         words.push(Word {
             start: self.start,
             end: self.end.max(self.start),
@@ -106,6 +92,49 @@ impl Piece {
             p: self.sum / self.n as f32,
             p_min: Some(low),
         });
+    }
+}
+
+/// A word's confidence (5o): the lowest probability among its tokens that hold part of a letter or
+/// digit, else (a word of punctuation alone) among all of them. Whisper is often unsure whether a
+/// comma, a `¿` or a `…` goes with a word it heard plainly; flagging the word for that would bury the
+/// misheard ones. Letters are told from the decoded characters, not the bytes (`¿`, `—`, `…` and
+/// curly quotes are past ASCII too), and a character split across tokens belongs to each of them.
+fn lowest(bytes: &[u8], tokens: &[(usize, usize, f32)]) -> f32 {
+    // Per byte: part of a letter or digit. Bytes that do not decode are not.
+    let mut letter = vec![false; bytes.len()];
+    let mut i = 0;
+    while i < bytes.len() {
+        let width = match bytes[i] {
+            0xF0..=0xF7 => 4,
+            0xE0..=0xEF => 3,
+            0xC0..=0xDF => 2,
+            _ => 1,
+        };
+        let char_at = bytes
+            .get(i..i + width)
+            .and_then(|b| std::str::from_utf8(b).ok())
+            .and_then(|s| s.chars().next());
+        match char_at {
+            Some(c) => {
+                letter[i..i + width].fill(c.is_alphanumeric());
+                i += width;
+            }
+            None => i += 1,
+        }
+    }
+    let low = |text_only: bool| {
+        tokens
+            .iter()
+            .filter(|&&(a, b, _)| !text_only || letter[a..b].iter().any(|&l| l))
+            .map(|t| t.2)
+            .fold(f32::INFINITY, f32::min)
+    };
+    let text = low(true);
+    if text.is_finite() {
+        text
+    } else {
+        low(false)
     }
 }
 
@@ -168,9 +197,47 @@ mod tests {
         ]);
         assert_eq!(w[0].p_min, Some(0.9));
         assert_eq!(w[1].p_min, Some(0.3));
-        // A letter split across tokens counts as a letter.
-        let w = group(&[tp(b" canci", 0.0, 0.3, 0.9), tp(&[0xC3], 0.3, 0.35, 0.4)]);
+        // A letter split across tokens counts as a letter in each ("ó" is C3 B3).
+        let w = group(&[
+            tp(b" canci", 0.0, 0.3, 0.9),
+            tp(&[0xC3], 0.3, 0.35, 0.4),
+            tp(&[0xB3, b'n'], 0.35, 0.5, 0.8),
+        ]);
+        assert_eq!(w[0].text, "canción");
         assert_eq!(w[0].p_min, Some(0.4));
+        let w = group(&[
+            tp(b" canci", 0.0, 0.3, 0.9),
+            tp(&[0xC3, 0xB3], 0.3, 0.35, 0.8),
+            tp(b"n", 0.35, 0.5, 0.3),
+        ]);
+        assert_eq!(w[0].p_min, Some(0.3));
+    }
+
+    /// Repair: punctuation past ASCII (common in Spanish) is not a letter either, whole or split.
+    #[test]
+    fn unsure_spanish_punctuation_does_not_flag_its_word() {
+        let open_q = "¿".as_bytes(); // C2 BF
+        let dash = "—".as_bytes(); // E2 80 94
+        let dots = "…".as_bytes(); // E2 80 A6
+        let quote = "”".as_bytes(); // E2 80 9D
+        let w = group(&[
+            tp(&[b' ', open_q[0], open_q[1]], 0.0, 0.1, 0.05),
+            tp(b"por", 0.1, 0.3, 0.9),
+            tp(dash, 0.3, 0.35, 0.1),
+            tp(b" bien", 0.4, 0.6, 0.8),
+            tp(dots, 0.6, 0.65, 0.02),
+            tp(b" dijo", 0.7, 0.9, 0.95),
+            tp(&quote[..2], 0.9, 0.92, 0.1),
+            tp(&quote[2..], 0.92, 0.95, 0.1),
+        ]);
+        assert_eq!(w[0].text, "¿por—");
+        assert_eq!(w[0].p_min, Some(0.9));
+        assert_eq!(w[1].p_min, Some(0.8));
+        assert_eq!(w[2].text, "dijo”");
+        assert_eq!(w[2].p_min, Some(0.95));
+        // A dash alone is its own confidence.
+        let w = group(&[tp(&[b' ', dash[0], dash[1], dash[2]], 0.0, 0.1, 0.2)]);
+        assert_eq!(w[0].p_min, Some(0.2));
     }
 
     /// A transcript from before 5o reads with no confidence, and one without it writes as before.

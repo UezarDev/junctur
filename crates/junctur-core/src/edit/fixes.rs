@@ -106,7 +106,9 @@ pub fn set_fix(
 /// the heard text, so every fix line means "the user vouched for this word" and the transcript panel
 /// flags none of them. Not a line kind of its own: an older build reads it as a fix that changes
 /// nothing, where a new kind would need a format version it refuses. A word with a fix already is
-/// left as it is. Whether anything changed.
+/// left as it is. Whether anything changed. Being a fix line, it goes the way of one: the heard text
+/// (or nothing) typed into the fix field takes it away ([`set_fix`]) and the word is flagged again,
+/// on purpose, so there is one rule for what that field does whatever the line was made by.
 pub fn confirm_fix(
     fixes: &mut Vec<Fix>,
     track: usize,

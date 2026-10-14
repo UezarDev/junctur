@@ -121,7 +121,7 @@ fn to_config(s: &Settings) -> Result<Config, String> {
         whisper_model: (model != ModelPref::Auto).then_some(model),
         captions: (captions != Captions::default()).then_some(captions),
         words: wordlist::normalize(&s.words),
-        flag_below: (s.flag_below != config::FLAG_BELOW).then_some(s.flag_below),
+        flag_below: (s.flag_below != config::FLAG_BELOW).then_some(u64::from(s.flag_below)),
     })
 }
 

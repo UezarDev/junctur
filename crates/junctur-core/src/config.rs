@@ -34,11 +34,14 @@ pub struct Config {
     pub words: Vec<String>,
     /// The transcript panel flags a word for review (5o) when Whisper's lowest token probability in
     /// it is under this many percent; 0 flags none. Unset: [`FLAG_BELOW`]. Only the app reads it.
+    /// Read as any whole number, so a hand-typed 300 reads as 100 rather than making the whole file
+    /// an error and taking every other setting with it.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub flag_below: Option<u8>,
+    pub flag_below: Option<u64>,
 }
 
-/// The default of [`Config::flag_below`], in percent. Measured on 4 min 40 s of the sample recording
+/// The default of [`Config::flag_below`], in percent; the page's own fallback before it reads the
+/// settings is 0 (`App.svelte`), not this. Measured on 4 min 40 s of the sample recording
 /// (large-v3-turbo, 628 words, 5o): under 25 % fall 4.6 % of the words, about one in twenty, and
 /// among them nearly every word that reads as a misheard name or a made-up one (`WDuel?` at 6 %,
 /// `Waystuff`, `fuoco`, `flasho`, `Arokeret` from 16 to 24 %); 30 % would add a `Wen` (Gwen?) at
@@ -48,7 +51,7 @@ pub const FLAG_BELOW: u8 = 25;
 impl Config {
     /// [`Self::flag_below`], or its default; at most 100 (every word with a confidence).
     pub fn flag_below(&self) -> u8 {
-        self.flag_below.unwrap_or(FLAG_BELOW).min(100)
+        self.flag_below.map_or(FLAG_BELOW, |p| p.min(100) as u8)
     }
 }
 
@@ -346,6 +349,9 @@ mod tests {
         assert_eq!((c.flag_below, c.flag_below()), (Some(25), 25));
         assert_eq!(parse(br#"{"flag_below":0}"#).unwrap().flag_below(), 0);
         assert_eq!(parse(br#"{"flag_below":250}"#).unwrap().flag_below(), 100);
+        // Past a byte too (repair): the rest of the file still reads.
+        let c = parse(br#"{"flag_below":300,"words":["Uezar"]}"#).unwrap();
+        assert_eq!((c.flag_below(), c.words.len()), (100, 1));
         assert!(parse(br#"{"flag_below":-1}"#).is_err());
         assert!(parse(br#"{"flag_below":"40"}"#).is_err());
         assert!(!serde_json::to_string(&Config::default())

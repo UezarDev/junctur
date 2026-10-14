@@ -74,6 +74,7 @@
   let windowHeight = $state(window.innerHeight);
   let settingsOpen = $state(false);
   // The transcript flags words Whisper was less sure of than this (5o, Settings); none until read.
+  // The default (25) is the core's `config::FLAG_BELOW`, sent with the settings; not repeated here.
   let flagBelow = $state(0);
   // Each open counts one up, and so does a close (2i): an open's answers that arrive after a close,
   // or after a newer open, are dropped. `closedAt` is the count a close left, so an open that lost

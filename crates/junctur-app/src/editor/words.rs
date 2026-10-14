@@ -138,12 +138,15 @@ pub struct TranscriptView {
     pub sure: Vec<u8>,
 }
 
-/// [`TranscriptView::sure`] of a word that is never flagged, above every percentage.
+/// [`TranscriptView::sure`] of a word that is never flagged, above every percentage. The page has
+/// the same number as `NOT_FLAGGED` (`ui/src/lib/transcript.ts`).
 pub const NOT_FLAGGED: u8 = u8::MAX;
 
-/// `p` (0..1) in whole percent, rounded down, so a word at 39.9 % is under a threshold of 40.
+/// `p` (0..1) in whole percent, rounded down, so a word at 39.9 % is under a threshold of 40. In
+/// f64 with a hair added (repair): `0.35_f32` is 0.34999999 and must read as 35, not 34, while a real
+/// 34.99 % stays 34.
 fn percent(p: f32) -> u8 {
-    (p.clamp(0.0, 1.0) * 100.0).floor() as u8
+    (f64::from(p.clamp(0.0, 1.0)) * 100.0 + 1e-4).floor() as u8
 }
 
 impl TranscriptView {
@@ -313,6 +316,18 @@ mod tests {
         let v = TranscriptView::new(&w, &none, &[fix(11.5, "Tsunheto"), fix(12.0, "bien")]);
         assert_eq!(v.sure, vec![39, 100, NOT_FLAGGED, NOT_FLAGGED, NOT_FLAGGED]);
         assert_eq!(v.text[3..], ["Tsunheto", "bien"]);
+    }
+
+    /// Repair: a probability of exactly k % reads as k, so it is not under a threshold of k.
+    #[test]
+    fn a_whole_percentage_is_not_read_one_lower() {
+        for k in 0..=100u8 {
+            assert_eq!(percent(k as f32 / 100.0), k, "{k} %");
+        }
+        assert_eq!(percent(0.35), 35);
+        assert_eq!(percent(0.3499), 34);
+        assert_eq!(percent(0.2499), 24);
+        assert_eq!((percent(-0.1), percent(1.5)), (0, 100));
     }
 
     #[test]
