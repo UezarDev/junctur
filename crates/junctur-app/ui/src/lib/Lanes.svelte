@@ -14,7 +14,7 @@
   // timeline's shift-drag does), a drag on the ruler scrubs, the wheel pans and Ctrl+wheel zooms
   // around the pointer. A drag that starts on a cut's edge moves the edge instead (2s, nudge.ts
   // `edgeNear`): the edit is made once, on release, and the preview then plays from just before it.
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import * as api from "./api";
   import Avatars from "./Avatars.svelte";
   import MuteSolo from "./MuteSolo.svelte";
@@ -304,12 +304,39 @@
   const PREROLL = 1.5;
   let hover = $state.raw<Edge | null>(null);
   let drag = $state.raw<{ edge: Edge; to: number } | null>(null);
+  // Where the pointer last was during a drag, so a zoom or pan under it moves the edge with it.
+  let dragX = 0;
+  // A drag's edit sent and its new list not yet here (2s repair): no edge is offered until it is,
+  // since one grabbed from the old list would be placed by frames that have moved. Cleared by the
+  // next edit list, by a failure, or after WAIT ms if no list comes (the edit changed nothing).
+  let waiting = false;
+  let waitTimer = 0;
+  const WAIT = 2000;
+  function stopWaiting() {
+    waiting = false;
+    clearTimeout(waitTimer);
+  }
   function edgeAt(clientX: number, clientY: number): Edge | null {
     const fps = edit?.fps;
-    if (!edges || !fps || !edit?.editable || !edit.ranges.length || width <= 0) return null;
-    if (clientY - body.getBoundingClientRect().top < RULER) return null;
+    if (waiting || !edges || !fps || !edit?.editable || !edit.ranges.length || width <= 0) return null;
+    // One read of the box per pointer move.
+    const r = body.getBoundingClientRect();
+    if (clientY - r.top < RULER) return null;
     const perSecond = fps.num / fps.den;
-    return edgeNear(edit, timeAt(clientX) * perSecond, (GRAB * view.len * perSecond) / width);
+    const t = view.start + ((clientX - r.left) / Math.max(1, r.width)) * view.len;
+    return edgeNear(edit, t * perSecond, (GRAB * view.len * perSecond) / width);
+  }
+  const sameEdge = (a: Edge | null, b: Edge | null) => a === b || (!!a && !!b && a.at === b.at && a.frame === b.frame);
+  function setHover(g: Edge | null) {
+    if (!sameEdge(g, hover)) hover = g;
+  }
+  // The dragged edge under `clientX`, assigned only when it lands on another frame.
+  function dragTo(clientX: number) {
+    const fps = edit?.fps;
+    if (!drag || !fps) return;
+    dragX = clientX;
+    const to = clampEdge(drag.edge, (timeAt(clientX) * fps.num) / fps.den);
+    if (to !== drag.to) drag = { edge: drag.edge, to };
   }
   // A handle shown for an edit list or a window that has since changed would be in the wrong place.
   $effect(() => {
@@ -319,19 +346,52 @@
     void edges;
     hover = null;
   });
+  // A new edit list ends the wait for a drag's edit.
+  $effect(() => {
+    void edit;
+    untrack(stopWaiting);
+  });
+  // The wheel zooms and pans while dragging too: the edge follows the pointer in the new window.
+  $effect(() => {
+    void view.start;
+    void view.len;
+    void width;
+    untrack(() => {
+      if (drag) dragTo(dragX);
+    });
+  });
   function release(d: { edge: Edge; to: number }, clientX: number) {
     const fps = edit?.fps;
-    const step = edit && fps ? dragged(edit, d.edge, d.to) : null;
-    if (step && fps) {
-      const at = toSeconds(clampEdge(d.edge, d.to), fps);
-      void call(async () => {
-        await api.editFrames(step.start, step.end, step.keep);
-        await api.playFrom(Math.max(0, at - PREROLL));
-      });
-    } else if (d.to === d.edge.frame) {
+    if (!edit || !fps) return;
+    if (d.to === d.edge.frame) {
       // Let go where it started: a click, which seeks.
       void call(() => api.seek(clampT(timeAt(clientX)), true));
       onSelect(null);
+      return;
+    }
+    // The same edge with the same room: a list that changed elsewhere (an undo, an outside edit)
+    // would make the frames dragged over mean something else.
+    const live = edgeNear(edit, d.edge.frame, 0);
+    if (!live || live.at !== d.edge.at || live.lo !== d.edge.lo || live.hi !== d.edge.hi) {
+      onError("The cuts changed while the edge was being dragged; nothing was moved. Drag it again.");
+      return;
+    }
+    const step = dragged(edit, d.edge, d.to);
+    if (step) {
+      const at = toSeconds(clampEdge(d.edge, d.to), fps);
+      waiting = true;
+      clearTimeout(waitTimer);
+      waitTimer = window.setTimeout(stopWaiting, WAIT);
+      void (async () => {
+        try {
+          await api.editFrames(step.start, step.end, step.keep);
+        } catch (e) {
+          stopWaiting();
+          onError(String(e));
+          return;
+        }
+        await call(() => api.playFrom(Math.max(0, at - PREROLL)));
+      })();
     }
   }
 
@@ -341,6 +401,7 @@
     const g = edgeAt(e.clientX, e.clientY);
     if (g) {
       drag = { edge: g, to: g.frame };
+      dragX = e.clientX;
       hover = null;
       return;
     }
@@ -349,12 +410,11 @@
   }
   function pointerMove(e: PointerEvent) {
     if (drag) {
-      const fps = edit?.fps;
-      if (fps) drag = { edge: drag.edge, to: clampEdge(drag.edge, (timeAt(e.clientX) * fps.num) / fps.den) };
+      dragTo(e.clientX);
       return;
     }
     if (!down) {
-      hover = edgeAt(e.clientX, e.clientY);
+      setHover(edgeAt(e.clientX, e.clientY));
       return;
     }
     if (Math.abs(e.clientX - down.x) > 3) down.moved = true;
@@ -367,7 +427,7 @@
       const d = drag;
       drag = null;
       release(d, e.clientX);
-      hover = edgeAt(e.clientX, e.clientY);
+      setHover(edgeAt(e.clientX, e.clientY));
       return;
     }
     if (!down) return;

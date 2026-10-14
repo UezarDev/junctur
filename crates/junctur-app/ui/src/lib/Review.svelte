@@ -112,8 +112,10 @@
       step(async () => {
         const m = moveEdge(list, index, edge, by, await api.editState());
         if (!m) return;
-        list = m.list;
+        // The clips move only once the edit is made: one refused leaves review's list and the
+        // live one agreeing, so a later Keep or Remove acts on frames that are really there.
         if (m.frames) await api.editFrames(m.frames.start, m.frames.end, m.frames.keep);
+        list = m.list;
         await play(list[index]);
       }),
     );
