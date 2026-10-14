@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::caption_text::{self, Case, CensorStyle, Replace};
+use super::worded::worded;
 
 // `default`: settings saved before a field existed still load; `deny_unknown_fields`: a misspelt
 // field is an error rather than silently the default.
@@ -83,108 +84,49 @@ pub struct Captions {
     pub animation_length: f64,
 }
 
-/// A caption's in and out animation: auto-subs' animated caption's three, one at a time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Animation {
-    #[default]
-    None,
-    Fade,
-    /// Grows in from smaller, fading.
-    Pop,
-    /// Rises in from lower, fading.
-    Slide,
-}
-
-impl Animation {
-    /// The word on the edit list's `captions` line, the same as in the config file.
-    pub fn word(self) -> &'static str {
-        match self {
-            Animation::None => "none",
-            Animation::Fade => "fade",
-            Animation::Pop => "pop",
-            Animation::Slide => "slide",
-        }
-    }
-
-    pub fn from_word(w: &str) -> Option<Self> {
-        [
-            Animation::None,
-            Animation::Fade,
-            Animation::Pop,
-            Animation::Slide,
-        ]
-        .into_iter()
-        .find(|a| a.word() == w)
+worded! {
+    /// A caption's in and out animation: auto-subs' animated caption's three, one at a time.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+    pub enum Animation {
+        #[default]
+        None = "none",
+        Fade = "fade",
+        /// Grows in from smaller, fading.
+        Pop = "pop",
+        /// Rises in from lower, fading.
+        Slide = "slide",
     }
 }
 
-/// What a send to Resolve does with clips Junctur did not place (no tag of its own) that sit where
-/// its new captions go on the tracks it places on (as auto-subs' replace / skip / new track).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ExistingClips {
-    /// Change nothing and ask the user, with the count found.
-    #[default]
-    Ask,
-    /// Delete those clips (only the ones a caption overlaps), then place.
-    Replace,
-    /// Leave them; the captions they overlap are not placed.
-    Skip,
-    /// Place that speaker's new captions on a track of their own beside it (`<track> (2)`).
-    NewTrack,
-}
-
-impl ExistingClips {
-    /// The word on the edit list's `captions` line, in the config file and in the request.
-    pub fn word(self) -> &'static str {
-        match self {
-            ExistingClips::Ask => "ask",
-            ExistingClips::Replace => "replace",
-            ExistingClips::Skip => "skip",
-            ExistingClips::NewTrack => "newTrack",
-        }
-    }
-
-    pub fn from_word(w: &str) -> Option<Self> {
-        [
-            ExistingClips::Ask,
-            ExistingClips::Replace,
-            ExistingClips::Skip,
-            ExistingClips::NewTrack,
-        ]
-        .into_iter()
-        .find(|e| e.word() == w)
+worded! {
+    /// What a send to Resolve does with clips Junctur did not place (no tag of its own) that sit
+    /// where its new captions go on the tracks it places on (as auto-subs' replace / skip / new
+    /// track). Its word is also the request's.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+    pub enum ExistingClips {
+        /// Change nothing and ask the user, with the count found.
+        #[default]
+        Ask = "ask",
+        /// Delete those clips (only the ones a caption overlaps), then place.
+        Replace = "replace",
+        /// Leave them; the captions they overlap are not placed.
+        Skip = "skip",
+        /// Place that speaker's new captions on a track of their own beside it (`<track> (2)`).
+        NewTrack = "newTrack",
     }
 }
 
-/// Where the captions of people talking at once go.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Layout {
-    /// Each later speaker above the one before.
-    #[default]
-    Stacked,
-    /// Side by side across the picture.
-    Side,
-    /// One at the bottom, the next at the top of the picture.
-    TopBottom,
-}
-
-impl Layout {
-    /// The word on the edit list's `captions` line, the same as in the config file.
-    pub fn word(self) -> &'static str {
-        match self {
-            Layout::Stacked => "stacked",
-            Layout::Side => "side",
-            Layout::TopBottom => "topBottom",
-        }
-    }
-
-    pub fn from_word(w: &str) -> Option<Self> {
-        [Layout::Stacked, Layout::Side, Layout::TopBottom]
-            .into_iter()
-            .find(|l| l.word() == w)
+worded! {
+    /// Where the captions of people talking at once go.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+    pub enum Layout {
+        /// Each later speaker above the one before.
+        #[default]
+        Stacked = "stacked",
+        /// Side by side across the picture.
+        Side = "side",
+        /// One at the bottom, the next at the top of the picture.
+        TopBottom = "topBottom",
     }
 }
 
@@ -248,7 +190,33 @@ pub const OUTLINE_WIDTH: std::ops::RangeInclusive<u32> = 1..=10;
 /// Seconds: shorter is a jump, longer eats into a short caption's time on screen.
 pub const ANIMATION_LENGTH: std::ops::RangeInclusive<f64> = 0.05..=1.0;
 
+/// Every caption's bold, italic and underline, as the SRT and the Resolve send each read them.
+/// Kept as three fields of [`Captions`], which are the config file's and the page's shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextStyle {
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+}
+
+impl TextStyle {
+    /// The SRT tags that are on, outermost first, in the order Resolve's own export writes them.
+    pub fn tags(self) -> impl DoubleEndedIterator<Item = &'static str> {
+        [("b", self.bold), ("i", self.italic), ("u", self.underline)]
+            .into_iter()
+            .filter_map(|(t, on)| on.then_some(t))
+    }
+}
+
 impl Captions {
+    pub fn style(&self) -> TextStyle {
+        TextStyle {
+            bold: self.bold,
+            italic: self.italic,
+            underline: self.underline,
+        }
+    }
+
     /// Why these settings cannot make sensible cues, if they cannot.
     pub fn check(&self) -> Result<(), String> {
         if !CHARS.contains(&self.chars) {

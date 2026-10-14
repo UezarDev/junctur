@@ -23,12 +23,9 @@ pub(super) fn stamp(s: f64) -> String {
 /// (it would end the cue). Bold, italic and underline wrap each line outside its colour, in the
 /// order Resolve's own export writes; the rest of a subtitle's look is Resolve's Track Style.
 pub fn write(cues: &[Cue], edit: &EditList, c: &Captions) -> String {
-    let tags: Vec<&str> = [("b", c.bold), ("i", c.italic), ("u", c.underline)]
-        .into_iter()
-        .filter_map(|(t, on)| on.then_some(t))
-        .collect();
-    let open: String = tags.iter().map(|t| format!("<{t}>")).collect();
-    let close: String = tags.iter().rev().map(|t| format!("</{t}>")).collect();
+    let style = c.style();
+    let open: String = style.tags().map(|t| format!("<{t}>")).collect();
+    let close: String = style.tags().rev().map(|t| format!("</{t}>")).collect();
     let mut out = String::new();
     for (n, c) in cues.iter().enumerate() {
         let _ = write!(

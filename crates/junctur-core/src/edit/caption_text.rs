@@ -4,59 +4,30 @@
 
 use serde::{Deserialize, Serialize};
 
-/// How caption letters are cased.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Case {
-    #[default]
-    AsSpoken,
-    Upper,
-    Lower,
-    /// The first letter of each word upper, the rest as spoken.
-    Title,
-}
+use super::worded::worded;
 
-impl Case {
-    /// The word on the edit list's `captions` line, the same as in the config file.
-    pub fn word(self) -> &'static str {
-        match self {
-            Case::AsSpoken => "asSpoken",
-            Case::Upper => "upper",
-            Case::Lower => "lower",
-            Case::Title => "title",
-        }
-    }
-
-    pub fn from_word(w: &str) -> Option<Self> {
-        [Case::AsSpoken, Case::Upper, Case::Lower, Case::Title]
-            .into_iter()
-            .find(|c| c.word() == w)
+worded! {
+    /// How caption letters are cased.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+    pub enum Case {
+        #[default]
+        AsSpoken = "asSpoken",
+        Upper = "upper",
+        Lower = "lower",
+        /// The first letter of each word upper, the rest as spoken.
+        Title = "title",
     }
 }
 
-/// How a censored word is hidden.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum CensorStyle {
-    /// First and last letter kept: `f**k`.
-    #[default]
-    Middle,
-    /// Every letter masked: `****`.
-    Whole,
-}
-
-impl CensorStyle {
-    pub fn word(self) -> &'static str {
-        match self {
-            CensorStyle::Middle => "middle",
-            CensorStyle::Whole => "whole",
-        }
-    }
-
-    pub fn from_word(w: &str) -> Option<Self> {
-        [CensorStyle::Middle, CensorStyle::Whole]
-            .into_iter()
-            .find(|c| c.word() == w)
+worded! {
+    /// How a censored word is hidden.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+    pub enum CensorStyle {
+        /// First and last letter kept: `f**k`.
+        #[default]
+        Middle = "middle",
+        /// Every letter masked: `****`.
+        Whole = "whole",
     }
 }
 

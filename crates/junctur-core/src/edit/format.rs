@@ -30,28 +30,39 @@ use super::{
     EditList, Fix, Range, Retime, SpeakerName, Speakers, Turn, Window, WordAt,
 };
 
-/// The newest version this build writes; it reads 1 to this. A list is written at the lowest
-/// version that holds what it uses, so older builds still read it: 6 with a `time` line, 5 with a
-/// `span`, 4 with a `+<n>` word, 3 with a `fix`, 2 with speakers or captions, else 1.
-pub const FORMAT_VERSION: u32 = 6;
+/// The version each kind of line came in. A list is written at the lowest version that holds
+/// what it uses, so older builds still read it.
+const SPEAKERS_OR_CAPTIONS: u32 = 2;
+const FIXES: u32 = 3;
+/// A `+<n>` word.
+const NTH_WORD: u32 = 4;
+const SPANS: u32 = 5;
+const TIMES: u32 = 6;
+
+/// The newest version this build writes; it reads 1 to this.
+pub const FORMAT_VERSION: u32 = TIMES;
+
+/// The lowest version that holds what `e` uses: 1, or the newest of its kinds of line.
+fn version(e: &EditList) -> u32 {
+    [
+        (
+            SPEAKERS_OR_CAPTIONS,
+            !e.speakers.is_empty() || e.captions.is_some(),
+        ),
+        (FIXES, !e.fixes.is_empty()),
+        (NTH_WORD, e.fixes.iter().any(|f| f.nth > 0)),
+        (SPANS, e.fixes.iter().any(Fix::is_span)),
+        (TIMES, !e.times.is_empty()),
+    ]
+    .into_iter()
+    .filter(|&(_, used)| used)
+    .fold(1, |v, (since, _)| v.max(since))
+}
 
 pub fn write(e: &EditList) -> String {
     let s = &e.settings;
     let mut out = String::new();
-    let version = if !e.times.is_empty() {
-        FORMAT_VERSION
-    } else if e.fixes.iter().any(Fix::is_span) {
-        5
-    } else if e.fixes.iter().any(|f| f.nth > 0) {
-        4
-    } else if !e.fixes.is_empty() {
-        3
-    } else if e.speakers.is_empty() && e.captions.is_none() {
-        1
-    } else {
-        2
-    };
-    let _ = writeln!(out, "junctur-edit {version}");
+    let _ = writeln!(out, "junctur-edit {}", version(e));
     let _ = writeln!(out, "source {}", e.source.display());
     let _ = writeln!(out, "duration {:.3}", e.duration);
     let _ = writeln!(
@@ -76,7 +87,7 @@ pub fn write(e: &EditList) -> String {
         let _ = writeln!(out, "keep {:.3} {:.3}", r.start, r.end);
     }
     if let Some(c) = &e.captions {
-        let _ = writeln!(out, "{}", captions_line::HELP);
+        let _ = writeln!(out, "{}", captions_line::help());
         let _ = writeln!(out, "{}", captions_line::write(c));
     }
     let sp = &e.speakers;
@@ -358,7 +369,7 @@ fn parse_span(rest: &str, fixes: &mut Vec<Fix>) -> Result<(), String> {
 fn parse_time(rest: &str, version: u32, times: &mut Vec<Retime>) -> Result<(), String> {
     // Written only into a version 6 list: one under an older header is not a list
     // Junctur wrote, and the build that wrote that version refused the line.
-    if version < 6 {
+    if version < TIMES {
         return Err("a `time` line needs a `junctur-edit 6` list".into());
     }
     let expected = "expected `time <track> <start>[+<n>] <new start> <new end>`";

@@ -16,6 +16,7 @@ mod speakers;
 mod splice;
 mod spread;
 mod times;
+mod worded;
 
 use std::path::PathBuf;
 
@@ -23,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 pub use caption_text::{Case, CensorStyle, Replace};
 pub use captions::{
-    default_color, parse_color, title_name, Animation, Captions, ExistingClips, Layout,
+    default_color, parse_color, title_name, Animation, Captions, ExistingClips, Layout, TextStyle,
 };
 pub use carry::{
     carry, carry_times, snapshot, snapshot_times, Carried, CarriedTime, CarryReport, TimesReport,

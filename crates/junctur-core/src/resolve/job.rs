@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use super::lua::Value;
 use super::reply::Timeline;
-use crate::edit::{parse_color, title_name, Captions, EditList, ExistingClips};
+use crate::edit::{parse_color, title_name, Captions, EditList, ExistingClips, TextStyle};
 use crate::export::layout::{Placed, WordSpan};
 
 /// Text+ outline thickness per step of `outline_width`: the bundled template's is 0.05, so the
@@ -211,7 +211,7 @@ pub fn build(placed: &[Placed], edit: &EditList, c: &Captions, timeline: &Timeli
         existing: c.existing_clips,
         look: Look {
             font: c.font.trim().to_string(),
-            style: style(c.bold, c.italic).to_string(),
+            style: font_style(c.style()).to_string(),
             size: size(c, timeline),
             outline: c
                 .outline
@@ -280,8 +280,8 @@ pub fn size(c: &Captions, t: &Timeline) -> f64 {
 }
 
 /// The style names most fonts use for these (Open Sans, Arial, Noto among them).
-fn style(bold: bool, italic: bool) -> &'static str {
-    match (bold, italic) {
+fn font_style(s: TextStyle) -> &'static str {
+    match (s.bold, s.italic) {
         (false, false) => "Regular",
         (true, false) => "Bold",
         (false, true) => "Italic",

@@ -565,3 +565,132 @@ fn every_line_kind_says_its_line_number_what_is_wrong_and_the_line() {
         "line 3: a `time` line needs a `junctur-edit 6` list: time 0 1 1 2"
     );
 }
+
+/// A list using every caption key off its default and every line kind, written whole: the text
+/// is the file format, so it is pinned byte for byte.
+fn everything() -> EditList {
+    let captions = Captions {
+        on: true,
+        preview: true,
+        chars: 30,
+        lines: 3,
+        words: 4,
+        seconds: 4.5,
+        bold: true,
+        italic: true,
+        underline: true,
+        font: "Noto Sans".into(),
+        size: 6.0,
+        position: 10.5,
+        outline: false,
+        outline_width: 3,
+        outline_color: "#112233".into(),
+        layout: crate::edit::Layout::Side,
+        protagonist: "Lucía de la Cruz".into(),
+        template: "Junctur Title".into(),
+        keep_look: true,
+        existing_clips: crate::edit::ExistingClips::NewTrack,
+        case: crate::edit::Case::Title,
+        punctuation: false,
+        censor: vec!["darn".into(), "two words".into()],
+        censor_style: crate::edit::CensorStyle::Whole,
+        replace: vec![
+            crate::edit::Replace {
+                from: "gonna".into(),
+                to: "going to".into(),
+            },
+            crate::edit::Replace {
+                from: "um".into(),
+                to: String::new(),
+            },
+        ],
+        translate: "es".into(),
+        highlight: true,
+        highlight_color: "#FFD400".into(),
+        animation: crate::edit::Animation::Pop,
+        animation_length: 0.35,
+    };
+    EditList {
+        captions: Some(captions),
+        fixes: vec![
+            Fix {
+                track: 0,
+                start: 2.5,
+                nth: 0,
+                through: None,
+                text: "Ana".into(),
+            },
+            Fix {
+                track: 1,
+                start: 3.25,
+                nth: 2,
+                through: None,
+                text: "Bo".into(),
+            },
+            Fix {
+                track: 0,
+                start: 5.0,
+                nth: 1,
+                through: Some(WordAt { start: 6.0, nth: 0 }),
+                text: "went home".into(),
+            },
+        ],
+        times: vec![Retime {
+            track: 1,
+            start: 7.0,
+            nth: 0,
+            from: 7.05,
+            to: 7.4,
+        }],
+        ..with_speakers()
+    }
+}
+
+#[test]
+fn the_whole_text_of_a_list_using_everything_is_pinned() {
+    let text = everything().to_text();
+    let expected = "junctur-edit 6\n\
+source C:\\Videos\\my stream.mp4\n\
+duration 100.000\n\
+settings pad_before=0.25 pad_after=0.35 merge_gap=1 snap=0.15 crossfade=0.03 window=5\n\
+# kept 4.8 s of 100.0 s (5%) in 2 ranges\n\
+# keep <start> <end>\n\
+keep 1.500 4.250\n\
+keep 10.000 12.000\n\
+# captions <on|off> chars=<per line> lines=<per speaker> seconds=<longest> [preview=on] [bold=on] [italic=on] [underline=on] [font=\"..\"] [size=<% of height>] [position=<% from bottom>] [outline=off] [outline_width=<1-10>] [outline_color=#RRGGBB] [layout=stacked|side|topBottom] [protagonist=\"<speaker>\"] [template=\"<Resolve title>\"] [keep_look=on] [existing_clips=replace|skip|newTrack] [words=<per speaker>] [case=upper|lower|title] [punctuation=off] [censor=\"word|..\"] [censor_style=whole] [replace=\"from>to|..\"] [translate=<language code>] [highlight=on] [highlight_color=#RRGGBB] [animation=fade|pop|slide] [animation_length=<seconds>]\n\
+captions on chars=30 lines=3 seconds=4.5 words=4 preview=on bold=on italic=on underline=on font=\"Noto Sans\" size=6 position=10.5 outline=off outline_width=3 outline_color=#112233 layout=side protagonist=\"Lucía de la Cruz\" template=\"Junctur Title\" keep_look=on existing_clips=newTrack case=title punctuation=off censor=\"darn|two words\" censor_style=whole replace=\"gonna>going to|um>\" translate=es highlight=on highlight_color=#FFD400 animation=pop animation_length=0.35\n\
+# speaker <id> [track=<n>] color=<#RRGGBB> <name>: rename or recolour by editing\n\
+speaker 1 color=#F2B33D Speaker 1\n\
+speaker 2 track=1 color=#123ABC Lucía de la Cruz\n\
+# turn <start> <end> <speaker id>\n\
+turn 1.500 3.000 1\n\
+turn 2.500 4.000 2\n\
+# fix <track> <start>[+<n>] <text>: a word's spelling, fixed by hand (+n: the n-th later word starting in that millisecond)\n\
+# span <track> <first start>[+<n>] <last start>[+<n>] <text>: the words from first to last, shown as one text\n\
+fix 0 2.500 Ana\n\
+fix 1 3.250+2 Bo\n\
+span 0 5.000+1 6.000 went home\n\
+# time <track> <start>[+<n>] <new start> <new end>: a word retimed by moving a cut's edge (start as heard)\n\
+time 1 7.000 7.050 7.400\n\
+# window <start> <score> <speech share> <words>\n\
+window 0 0.500 0.500 7\n";
+    assert_eq!(text, expected, "\n{text}");
+    assert_eq!(parse(&text).unwrap().to_text(), text);
+    let plain = EditList {
+        captions: Some(Captions::default()),
+        ..sample()
+    }
+    .to_text();
+    assert_eq!(plain, "junctur-edit 2\n\
+source C:\\Videos\\my stream.mp4\n\
+duration 100.000\n\
+settings pad_before=0.25 pad_after=0.35 merge_gap=1 snap=0.15 crossfade=0.03 window=5\n\
+# kept 4.8 s of 100.0 s (5%) in 2 ranges\n\
+# keep <start> <end>\n\
+keep 1.500 4.250\n\
+keep 10.000 12.000\n\
+# captions <on|off> chars=<per line> lines=<per speaker> seconds=<longest> [preview=on] [bold=on] [italic=on] [underline=on] [font=\"..\"] [size=<% of height>] [position=<% from bottom>] [outline=off] [outline_width=<1-10>] [outline_color=#RRGGBB] [layout=stacked|side|topBottom] [protagonist=\"<speaker>\"] [template=\"<Resolve title>\"] [keep_look=on] [existing_clips=replace|skip|newTrack] [words=<per speaker>] [case=upper|lower|title] [punctuation=off] [censor=\"word|..\"] [censor_style=whole] [replace=\"from>to|..\"] [translate=<language code>] [highlight=on] [highlight_color=#RRGGBB] [animation=fade|pop|slide] [animation_length=<seconds>]\n\
+captions off chars=42 lines=2 seconds=6\n\
+# window <start> <score> <speech share> <words>\n\
+window 0 0.500 0.500 7\n", "\n{plain}");
+}
