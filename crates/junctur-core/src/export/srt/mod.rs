@@ -162,7 +162,7 @@ fn cut(
         });
     }
     out.extend(open.map(Open::close));
-    let floor = if c.words == 0 { READABLE_S } else { 0.0 };
+    let floor = (c.words == 0).then_some(READABLE_S);
     settle(&mut out, c.seconds, floor, tl.total());
     out
 }

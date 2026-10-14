@@ -27,7 +27,7 @@ fn a_run_reports_until_it_ends_and_is_not_started_twice() {
     let again = a.start(&file, notify.clone()).unwrap();
     assert_eq!(again.phase, Phase::Queued);
     assert!(
-        a.reanalyse(&file, false, false, notify).is_err(),
+        a.reanalyse(&file, Again::KeepList, notify).is_err(),
         "already running"
     );
     drop(held);
@@ -478,22 +478,22 @@ fn reanalyse_keeps_the_users_list_and_a_fresh_cut_asks_first() {
     let quiet = || -> Notify { Arc::new(|_: &Progress, _| {}) };
     std::fs::write(p.edit_path(), "junctur-edit 1\nkeep x\n").unwrap();
     // Re-analyse on a list the user edited starts at once and keeps it.
-    let r = a.reanalyse(&file, false, false, quiet()).unwrap();
+    let r = a.reanalyse(&file, Again::KeepList, quiet()).unwrap();
     assert!(!r.hand_edited && r.progress.is_some());
     ended(&a);
     assert_eq!(*lock(&KEPT), [KeepList::Whole]);
     // A fresh cut over it is asked first: nothing started.
-    let r = a.reanalyse(&file, true, false, quiet()).unwrap();
+    let r = a.reanalyse(&file, Again::Recut, quiet()).unwrap();
     assert!(r.hand_edited && r.progress.is_none());
     assert!(!a.busy(&file));
     // Told to replace it: re-cut.
-    let r = a.reanalyse(&file, true, true, quiet()).unwrap();
+    let r = a.reanalyse(&file, Again::RecutOverEdits, quiet()).unwrap();
     assert!(!r.hand_edited && r.progress.is_some());
     ended(&a);
     assert_eq!(*lock(&KEPT), [KeepList::Whole, KeepList::No]);
     // Nothing of the user's to lose: a fresh cut starts without asking.
     std::fs::remove_file(p.edit_path()).unwrap();
-    let r = a.reanalyse(&file, true, false, quiet()).unwrap();
+    let r = a.reanalyse(&file, Again::Recut, quiet()).unwrap();
     assert!(!r.hand_edited && r.progress.is_some());
     ended(&a);
     assert_eq!(*lock(&KEPT), [KeepList::Whole, KeepList::No, KeepList::No]);
@@ -536,7 +536,7 @@ fn correct_hears_the_speakers_and_the_words_again_keeping_the_list() {
     HOLD.store(false, std::sync::atomic::Ordering::SeqCst);
     wait_for("the run ends", || !a.busy(&file));
     // A plain Re-analyse hears nothing again that answers the settings.
-    a.reanalyse(&file, false, false, quiet()).unwrap();
+    a.reanalyse(&file, Again::KeepList, quiet()).unwrap();
     wait_for("the run ends", || !a.busy(&file));
     assert_eq!(
         *lock(&ASKED),

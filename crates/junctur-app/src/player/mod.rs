@@ -71,10 +71,7 @@ struct Ctl {
     /// Probed once per file, when an edit list first needs it.
     fps: Option<Fps>,
     edit: Edit,
-    /// The user's toggle; on by default.
-    skip: bool,
-    /// In review: the toggle as it was before review set it off.
-    review: Option<bool>,
+    skipping: Skipping,
     /// The form of the last load asked for: what plays once in-flight loads land.
     requested: Form,
     watch: Option<watch::Watch>,
@@ -83,9 +80,28 @@ struct Ctl {
     status: EditorStatus,
 }
 
+/// Whether only the kept ranges play: the user's toggle, or a review holding it off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Skipping {
+    /// The user's toggle; on by default.
+    Toggle(bool),
+    /// In review: off, with the toggle as it was before.
+    Review { toggle: bool },
+}
+
+impl Skipping {
+    fn on(self) -> bool {
+        self == Skipping::Toggle(true)
+    }
+
+    fn reviewing(self) -> bool {
+        matches!(self, Skipping::Review { .. })
+    }
+}
+
 impl Ctl {
     fn wanted(&self) -> Form {
-        match (&self.edit.timeline, self.skip) {
+        match (&self.edit.timeline, self.skipping.on()) {
             (Some(t), true) => Form::Cuts(t.clone()),
             _ => Form::Source,
         }
@@ -205,8 +221,7 @@ impl Player {
                 edit_path: None,
                 fps: None,
                 edit: Edit::default(),
-                skip: true,
-                review: None,
+                skipping: Skipping::Toggle(true),
                 requested: Form::Source,
                 watch: None,
                 status: EditorStatus::default(),
@@ -436,7 +451,7 @@ impl Core {
         let defaults = lock(&self.caption_defaults).clone();
         let _ = self.app.emit(
             EDIT_EVENT,
-            EditState::new(&c.edit, c.skip, c.fps, &c.status, &defaults),
+            EditState::new(&c.edit, c.skipping.on(), c.fps, &c.status, &defaults),
         );
     }
 }

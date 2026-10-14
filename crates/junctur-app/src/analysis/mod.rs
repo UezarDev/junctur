@@ -39,6 +39,28 @@ struct How {
     correct: bool,
 }
 
+/// What a re-analysis does with the user's edit list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Again {
+    /// Kept; only this run's speakers go into it.
+    KeepList,
+    /// Re-cut, unless it holds the user's edits: then nothing starts and the page asks first.
+    Recut,
+    /// Re-cut even over the user's edits (the page asked).
+    RecutOverEdits,
+}
+
+impl Again {
+    /// The page's `fresh` (re-cut) and `replace` (over the user's edits) flags.
+    pub fn from_flags(fresh: bool, replace: bool) -> Self {
+        match (fresh, replace) {
+            (false, _) => Again::KeepList,
+            (true, false) => Again::Recut,
+            (true, true) => Again::RecutOverEdits,
+        }
+    }
+}
+
 /// What a request to analyse again did.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -225,20 +247,17 @@ impl Analysis {
         Ok(first)
     }
 
-    /// Analyses `file` again with the settings now. Not `fresh`: the user's edit list is kept and
-    /// only this run's speakers go into it. `fresh`: the list is re-cut, so with the user's edits
-    /// in it nothing starts unless `replace`, and the page asks first.
+    /// Analyses `file` again with the settings now ([`Again`]).
     pub fn reanalyse(
         &self,
         file: &Path,
-        fresh: bool,
-        replace: bool,
+        again: Again,
         notify: Notify,
     ) -> Result<Reanalysed, String> {
         if self.busy(file) {
             return Err("this recording is already being analysed".into());
         }
-        if fresh && !replace {
+        if again == Again::Recut {
             let p = Project::open(file, self.cache_dir.clone(), None).map_err(|e| e.to_string())?;
             if pipeline::hand_edited(&p).map_err(|e| e.to_string())? {
                 return Ok(Reanalysed {
@@ -252,7 +271,10 @@ impl Analysis {
                 file,
                 notify,
                 How {
-                    keep_list: if fresh { KeepList::No } else { KeepList::Whole },
+                    keep_list: match again {
+                        Again::KeepList => KeepList::Whole,
+                        Again::Recut | Again::RecutOverEdits => KeepList::No,
+                    },
                     correct: false,
                 },
             )?),

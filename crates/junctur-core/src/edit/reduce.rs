@@ -33,25 +33,26 @@ impl Envelope {
     }
 }
 
+/// Which side of a boundary in a gap is kept speech.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kept {
+    Before,
+    After,
+}
+
 /// Where a hand-made boundary goes in the pause `gap` between speech (where the speech before ends,
 /// where the speech after starts), placed as [`keep_ranges`] places its own: `pad_after` past the
 /// speech when the side before is kept (`kept_before`), else `pad_before` ahead of the speech
 /// after, then the quietest step within `snap`. Never outside the gap, so it clips neither side.
 /// `None` when there is no pause (the two overlap, e.g. on two tracks).
-pub fn snap_boundary(
-    env: &Envelope,
-    gap: (f64, f64),
-    kept_before: bool,
-    s: &CutSettings,
-) -> Option<f64> {
+pub fn snap_boundary(env: &Envelope, gap: (f64, f64), kept: Kept, s: &CutSettings) -> Option<f64> {
     let (a, b) = gap;
     if b <= a {
         return None;
     }
-    let target = if kept_before {
-        a + s.pad_after
-    } else {
-        b - s.pad_before
+    let target = match kept {
+        Kept::Before => a + s.pad_after,
+        Kept::After => b - s.pad_before,
     }
     .clamp(a, b);
     Some(env.quietest((target - s.snap).max(a), (target + s.snap).min(b), target))
@@ -73,9 +74,14 @@ pub fn word_span(
     let pads = s.pad_before + s.pad_after;
     let before = before.unwrap_or((run.0 - pads).max(0.0));
     let after = after.unwrap_or((run.1 + pads).min(duration));
-    // A cut ends kept speech before the run; a keep starts kept speech at it.
-    let start = snap_boundary(env, (before, run.0), !keep, s).unwrap_or(run.0);
-    let end = snap_boundary(env, (run.1, after), keep, s).unwrap_or(run.1);
+    // A cut ends kept speech before the run and starts it after; a keep the other way round.
+    let (into, out_of) = if keep {
+        (Kept::After, Kept::Before)
+    } else {
+        (Kept::Before, Kept::After)
+    };
+    let start = snap_boundary(env, (before, run.0), into, s).unwrap_or(run.0);
+    let end = snap_boundary(env, (run.1, after), out_of, s).unwrap_or(run.1);
     (start, end.max(start))
 }
 

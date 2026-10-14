@@ -9,7 +9,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use super::{blocking, notifier, App};
-use crate::analysis::{self, Progress, Reanalysed, Transcription};
+use crate::analysis::{self, Again, Progress, Reanalysed, Transcription};
 use crate::project::{self, ProjectStatus, RecordingInfo};
 use crate::recent::{self, Recent};
 use crate::waves::{self, WavesState};
@@ -206,7 +206,14 @@ pub async fn reanalyse(
     // Off the async runtime: asking whether the list holds user edits reads the track analysis
     // and the transcript.
     let analysis = app.analysis.clone();
-    blocking(move || analysis.reanalyse(Path::new(&path), fresh, replace, notifier(handle))).await
+    blocking(move || {
+        analysis.reanalyse(
+            Path::new(&path),
+            Again::from_flags(fresh, replace),
+            notifier(handle),
+        )
+    })
+    .await
 }
 
 /// A recent recording's length and where its analysis stands (the start window). Off the

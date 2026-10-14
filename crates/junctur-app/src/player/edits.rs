@@ -295,6 +295,6 @@ impl Core {
     pub fn edit_state(&self) -> EditState {
         let c = lock(&self.ctl);
         let defaults = lock(&self.caption_defaults).clone();
-        EditState::new(&c.edit, c.skip, c.fps, &c.status, &defaults)
+        EditState::new(&c.edit, c.skipping.on(), c.fps, &c.status, &defaults)
     }
 }

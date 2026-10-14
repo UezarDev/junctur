@@ -228,9 +228,11 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
         let file = with_player(app, |p| p.file())?.ok_or("no file is open")?;
         let state = app.try_state::<App>().ok_or("app not set up")?;
         let notify = crate::commands::notifier(app.clone());
-        let r = state
-            .analysis
-            .reanalyse(std::path::Path::new(&file), fresh, fresh, notify)?;
+        let r = state.analysis.reanalyse(
+            std::path::Path::new(&file),
+            crate::analysis::Again::from_flags(fresh, fresh),
+            notify,
+        )?;
         eprintln!(
             "junctur-app test: reanalyse started: {}",
             r.progress.is_some()

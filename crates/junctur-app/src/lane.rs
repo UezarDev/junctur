@@ -12,10 +12,18 @@ struct State {
     /// has its own number, so a recording queued twice still waits its own turn.
     queue: VecDeque<(u64, PathBuf)>,
     next: u64,
-    paused: bool,
-    /// The head is held at a chunk boundary by the pause (it may still be finishing a chunk while
-    /// `paused` and not `stopped`).
-    stopped: bool,
+    hold: Hold,
+}
+
+/// Whether the lane is paused, and whether its head has stopped for it yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Hold {
+    #[default]
+    Running,
+    /// Paused; the head may still be finishing a chunk.
+    Pausing,
+    /// Paused, and the head is held at a chunk boundary.
+    Stopped,
 }
 
 /// Who is on the lane and whether it is paused, for the page.
@@ -47,10 +55,10 @@ impl Drop for Turn<'_> {
         // A pause is for the jobs it was given on: one left on an empty lane would start the next
         // recording paused, possibly much later and with no panel open to say so.
         if s.queue.is_empty() {
-            s.paused = false;
-        }
-        if head {
-            s.stopped = false;
+            s.hold = Hold::Running;
+        } else if head && s.hold == Hold::Stopped {
+            // The next head has not reached a chunk boundary yet.
+            s.hold = Hold::Pausing;
         }
         self.lane.moved.notify_all();
     }
@@ -90,12 +98,12 @@ impl Lane {
 
     /// Called by the head between chunks: returns at once unless paused, else blocks until
     /// resumed, calling `on_stop` (outside the lock) each time it is held anew: once, unless a
-    /// resume and a pause both came before it woke, which leaves it held but not `stopped`.
+    /// resume and a pause both came before it woke, which leaves it pausing, not stopped.
     pub fn hold(&self, mut on_stop: impl FnMut()) {
         let mut s = self.state();
-        while s.paused {
-            if !s.stopped {
-                s.stopped = true;
+        while s.hold != Hold::Running {
+            if s.hold == Hold::Pausing {
+                s.hold = Hold::Stopped;
                 drop(s);
                 on_stop();
                 s = self.state();
@@ -110,11 +118,10 @@ impl Lane {
     pub fn pause(&self, paused: bool) -> bool {
         let mut s = self.state();
         let paused = paused && !s.queue.is_empty();
-        if s.paused == paused {
+        if (s.hold != Hold::Running) == paused {
             return false;
         }
-        s.paused = paused;
-        s.stopped = false;
+        s.hold = if paused { Hold::Pausing } else { Hold::Running };
         self.moved.notify_all();
         true
     }
@@ -122,8 +129,8 @@ impl Lane {
     pub fn view(&self) -> View {
         let s = self.state();
         View {
-            paused: s.paused,
-            stopped: s.stopped,
+            paused: s.hold != Hold::Running,
+            stopped: s.hold == Hold::Stopped,
             queue: s.queue.iter().map(|e| e.1.clone()).collect(),
         }
     }

@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 
-use super::{same_form, Core, Ctl};
+use super::{same_form, Core, Ctl, Skipping};
 use crate::cuts::{edl, Form, Load};
 use crate::lock::lock;
 use crate::mpv::Mpv;
@@ -101,10 +101,10 @@ impl Core {
 
     pub fn set_skip(&self, on: bool) -> Result<(), String> {
         let mut c = lock(&self.ctl);
-        if c.review.is_some() {
+        if c.skipping.reviewing() {
             return Err("Skip cuts stays off while reviewing".into());
         }
-        c.skip = on;
+        c.skipping = Skipping::Toggle(on);
         let want = c.wanted();
         let r = if c.file.is_some() && !same_form(&want, &c.requested) {
             self.reload(&mut c, want)
@@ -130,9 +130,8 @@ impl Core {
         if c.file.is_none() {
             return Err("no file is open".into());
         }
-        if c.review.is_none() {
-            c.review = Some(c.skip);
-            c.skip = false;
+        if let Skipping::Toggle(toggle) = c.skipping {
+            c.skipping = Skipping::Review { toggle };
             self.emit_edit(&c);
         }
         if same_form(&Form::Source, &c.requested) {
@@ -157,7 +156,7 @@ impl Core {
         if c.file.is_none() {
             return Err("no file is open".into());
         }
-        if c.review.is_some() {
+        if c.skipping.reviewing() {
             return Err("reviewing: the clip under review plays".into());
         }
         if same_form(&Form::Source, &c.requested) {
@@ -194,8 +193,8 @@ impl Core {
 
     /// Ends a review in `c`, if one is on, without reloading: the caller loads what it wants next.
     pub(super) fn leave_review(&self, c: &mut Ctl) -> Result<(), String> {
-        if let Some(skip) = c.review.take() {
-            c.skip = skip;
+        if let Skipping::Review { toggle } = c.skipping {
+            c.skipping = Skipping::Toggle(toggle);
             clear_loop(&self.mpv)?;
             self.mpv.set_string("speed", "1")?;
         }

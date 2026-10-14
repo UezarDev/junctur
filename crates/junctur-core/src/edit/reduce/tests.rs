@@ -61,25 +61,25 @@ fn hand_boundaries_pad_snap_and_stay_in_the_gap() {
     let s = CutSettings::default();
     // Flat: just the pad. After kept speech ending at 10.0, 0.35 s later; before speech at
     // 12.0, 0.25 s earlier.
-    let snap = |env: &Envelope, gap, kept_before| snap_boundary(env, gap, kept_before, &s).unwrap();
-    let b = snap(&flat(), (10.0, 12.0), true);
+    let snap = |env: &Envelope, gap, kept| snap_boundary(env, gap, kept, &s).unwrap();
+    let b = snap(&flat(), (10.0, 12.0), Kept::Before);
     assert!((b - 10.35).abs() < 1e-9, "{b}");
-    let b = snap(&flat(), (10.0, 12.0), false);
+    let b = snap(&flat(), (10.0, 12.0), Kept::After);
     assert!((b - 11.75).abs() < 1e-9, "{b}");
     // A pause shorter than the pad: the far edge of the gap, never into the next word.
-    let b = snap(&flat(), (10.0, 10.1), true);
+    let b = snap(&flat(), (10.0, 10.1), Kept::Before);
     assert!((b - 10.1).abs() < 1e-9, "{b}");
     // A quiet step within `snap` wins, but not one past the next word's start.
     let mut e = vec![1.0f32; 2000];
     e[1040] = 0.0;
     e[1060] = 0.0;
-    let b = snap(&Envelope(e.clone()), (10.0, 10.5), true);
+    let b = snap(&Envelope(e.clone()), (10.0, 10.5), Kept::Before);
     assert!((b - 10.40).abs() < 1e-6, "{b}");
     // Before speech at 10.45: the target is 10.20, and 10.40 is beyond `snap` of it.
-    let b = snap(&Envelope(e), (10.0, 10.45), false);
+    let b = snap(&Envelope(e), (10.0, 10.45), Kept::After);
     assert!((b - 10.20).abs() < 1e-6, "{b}");
     // Overlapping speech (two tracks): no pause to place it in.
-    assert_eq!(snap_boundary(&flat(), (5.0, 4.0), true, &s), None);
+    assert_eq!(snap_boundary(&flat(), (5.0, 4.0), Kept::Before, &s), None);
 }
 
 #[test]

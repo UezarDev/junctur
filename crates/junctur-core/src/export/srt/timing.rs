@@ -5,13 +5,14 @@ use super::{Cue, Part, MIN_S};
 /// Cues in order and never overlapping (a Resolve subtitle track holds one at a time), all within
 /// the edited timeline's `total` seconds. Each cue lasts at least `floor`, then ends by the next
 /// one's start, held to [`MIN_S`] where there is room, never past `longest`. A cue pushed past the
-/// end joins the one before. Under a word limit nothing is pushed, and cues said at one instant
-/// share it ([`share_instants`]).
-pub(super) fn settle(cues: &mut Vec<Cue>, longest: f64, floor: f64, total: f64) {
+/// end joins the one before. Under a word limit (`floor` `None`) nothing is pushed, and cues said
+/// at one instant share it ([`share_instants`]).
+pub(super) fn settle(cues: &mut Vec<Cue>, longest: f64, floor: Option<f64>, total: f64) {
     cues.sort_by(|a, b| a.start.total_cmp(&b.start));
-    if floor == 0.0 {
+    if floor.is_none() {
         share_instants(cues, total);
     }
+    let floor = floor.unwrap_or(0.0);
     for i in 0..cues.len() {
         let floor = cues[i].start + floor;
         if let Some(n) = cues.get_mut(i + 1) {

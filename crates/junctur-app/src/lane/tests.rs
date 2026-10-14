@@ -136,10 +136,9 @@ fn resumed_and_paused_again_before_waking_is_still_stopped() {
     {
         // Resume, then pause, with the head unable to take the lock in between.
         let mut s = lane.state();
-        s.paused = false;
-        s.stopped = false;
+        s.hold = Hold::Running;
         lane.moved.notify_all();
-        s.paused = true;
+        s.hold = Hold::Pausing;
     }
     wait_for("stopped again", || lane.view().stopped);
     assert_eq!(
