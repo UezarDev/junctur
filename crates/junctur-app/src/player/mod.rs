@@ -34,7 +34,7 @@ use crate::editor::{Editor, Words};
 use crate::lock::lock;
 use crate::mixer::Mixer;
 use crate::mpv::{self, Mpv};
-use crate::state::{PlayerState, OBSERVED};
+use crate::state::{Clock, PlayerState, OBSERVED};
 use crate::trace::Trace;
 
 /// The list in play, its caption settings, its words if transcribed, and the frame rate.
@@ -134,7 +134,7 @@ impl Deref for Player {
 pub struct Core {
     mpv: Arc<Mpv>,
     app: AppHandle,
-    state: Arc<Mutex<PlayerState>>,
+    state: Arc<Mutex<Clock>>,
     loads: Arc<Mutex<Loads>>,
     /// Also serialises edits: one is applied, saved and handed to playback before the next.
     editor: Mutex<Editor>,
@@ -187,7 +187,7 @@ impl Player {
             let _ = window;
             return Err("embedded video is only implemented on Windows so far".into());
         }
-        let state = Arc::new(Mutex::new(PlayerState::default()));
+        let state = Arc::new(Mutex::new(Clock::default()));
         let loads = Arc::new(Mutex::new(Loads::default()));
         let mixer = Arc::new(Mutex::new(Mixer::default()));
         let events = {
@@ -348,7 +348,7 @@ pub const OPENED_MEANWHILE: &str = "another recording was opened meanwhile: noth
 
 impl Core {
     pub fn state(&self) -> PlayerState {
-        lock(&self.state).clone()
+        lock(&self.state).shown()
     }
 
     /// The open recording's path, as it was opened.
@@ -438,7 +438,7 @@ impl Core {
     }
 
     fn emit_state(&self) {
-        let snapshot = lock(&self.state).clone();
+        let snapshot = lock(&self.state).shown();
         let _ = self.app.emit(STATE_EVENT, snapshot);
     }
 

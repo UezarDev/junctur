@@ -32,7 +32,7 @@ fn timeline() -> Arc<Timeline> {
 
 #[test]
 fn folds_properties() {
-    let mut s = PlayerState::default();
+    let mut s = Clock::default();
     s.start(source("C:/a.mp4"));
     assert_eq!(s.apply(&prop(DURATION, Value::Double(12.5))), Change::Other);
     assert_eq!(s.apply(&prop(PAUSE, Value::Flag(true))), Change::Other);
@@ -69,7 +69,7 @@ fn folds_properties() {
 
 #[test]
 fn closing_leaves_nothing_playing() {
-    let mut s = PlayerState::default();
+    let mut s = Clock::default();
     s.start(source("C:/a.mp4"));
     s.apply(&prop(TIME_POS, Value::Double(3.0)));
     s.apply(&prop(DURATION, Value::Double(12.5)));
@@ -82,13 +82,13 @@ fn closing_leaves_nothing_playing() {
     assert_eq!(s.hwdec.as_deref(), Some("nvdec"));
     // mpv's own events after `stop` keep it empty.
     s.apply(&prop(TIME_POS, Value::None));
-    assert_eq!((s.path, s.position), (None, None));
+    assert_eq!((s.path.as_deref(), s.position), (None, None));
 }
 
 #[test]
 fn unavailable_properties_clear() {
     // mpv reports a property with no value (MPV_FORMAT_NONE) when no file is loaded.
-    let mut s = PlayerState::default();
+    let mut s = Clock::default();
     s.start(source("x"));
     s.apply(&prop(TIME_POS, Value::Double(1.0)));
     s.apply(&prop(DURATION, Value::Double(2.0)));
@@ -100,7 +100,7 @@ fn unavailable_properties_clear() {
 
 #[test]
 fn errors_last_until_a_file_loads() {
-    let mut s = PlayerState::default();
+    let mut s = Clock::default();
     s.start(source("bad.mp4"));
     // A replaced load's failure is not this one's.
     s.apply(&Event::EndFile {
@@ -132,7 +132,7 @@ fn errors_last_until_a_file_loads() {
 
 #[test]
 fn whole_file_maps_to_output_time() {
-    let mut s = PlayerState::default();
+    let mut s = Clock::default();
     s.start(source("a.mp4"));
     s.set_reference(Some(timeline()));
     s.apply(&prop(TIME_POS, Value::Double(5.5)));
@@ -151,7 +151,7 @@ fn whole_file_maps_to_output_time() {
 
 #[test]
 fn a_requested_position_stands_in_until_mpv_reaches_it() {
-    let mut s = PlayerState::default();
+    let mut s = Clock::default();
     s.start(source("a.mp4"));
     s.apply(&prop(TIME_POS, Value::Double(1.0)));
     assert_eq!(s.resume_from(), Some(1.0));
@@ -170,7 +170,7 @@ fn a_requested_position_stands_in_until_mpv_reaches_it() {
 
 #[test]
 fn kept_ranges_map_to_source_time() {
-    let mut s = PlayerState::default();
+    let mut s = Clock::default();
     s.start(Load {
         entry: 1,
         file: "a.mp4".into(),
@@ -194,4 +194,38 @@ fn kept_ranges_map_to_source_time() {
 fn observed_ids_are_distinct() {
     let ids: std::collections::HashSet<u64> = OBSERVED.iter().map(|o| o.0).collect();
     assert_eq!(ids.len(), OBSERVED.len());
+}
+
+/// What the page reads: the payload's keys, the clock's own state never among them.
+#[test]
+fn the_page_is_sent_the_payload_only() {
+    let json = serde_json::to_value(Clock::default().shown()).unwrap();
+    let keys: Vec<&str> = json
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let mut want = [
+        "path",
+        "position",
+        "duration",
+        "paused",
+        "audioTracks",
+        "hwdec",
+        "error",
+        "cuts",
+        "output",
+        "outputDuration",
+        "frame",
+        "outputFrame",
+        "inCut",
+        "width",
+        "height",
+        "aspect",
+    ];
+    want.sort();
+    let mut keys = keys;
+    keys.sort();
+    assert_eq!(keys, want);
 }

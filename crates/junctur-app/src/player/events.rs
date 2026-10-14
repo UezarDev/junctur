@@ -12,7 +12,7 @@ use super::{LEVELS_EVENT, STATE_EVENT};
 use crate::lock::lock;
 use crate::mixer::Mixer;
 use crate::mpv::{Event, Events, Mpv};
-use crate::state::{Change, PlayerState};
+use crate::state::{Change, Clock};
 use crate::trace::Trace;
 
 /// Position updates arrive every frame; the frontend needs a few a second.
@@ -20,7 +20,7 @@ const POSITION_EVERY: Duration = Duration::from_millis(100);
 
 /// What the event thread shares with the player.
 pub(super) struct Shared {
-    pub(super) state: Arc<Mutex<PlayerState>>,
+    pub(super) state: Arc<Mutex<Clock>>,
     pub(super) loads: Arc<Mutex<Loads>>,
     pub(super) mixer: Arc<Mutex<Mixer>>,
     pub(super) mpv: Arc<Mpv>,
@@ -86,7 +86,7 @@ pub(super) fn event_loop(events: &mut Events, shared: &Shared) {
     let mut meters = Meters::new();
     let send = |pacer: &mut Pacer| {
         pacer.sent(Instant::now());
-        let snapshot = lock(state).clone();
+        let snapshot = lock(state).shown();
         let _ = shared.app.emit(STATE_EVENT, snapshot);
     };
     loop {

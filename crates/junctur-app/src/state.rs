@@ -64,23 +64,32 @@ pub struct PlayerState {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub aspect: Option<f64>,
-    #[serde(skip)]
+}
+
+/// mpv's events folded into the [`PlayerState`] the page is sent, with what that takes and the
+/// page never sees: mpv's own clocks, the form and timeline playing, a pending seek. Read as its
+/// `PlayerState`.
+#[derive(Debug, Clone, Default)]
+pub struct Clock {
+    shown: PlayerState,
     video: (Option<f64>, Option<f64>, f64),
-    #[serde(skip)]
     mpv_pos: Option<f64>,
-    #[serde(skip)]
     mpv_duration: Option<f64>,
-    #[serde(skip)]
     form: Form,
     /// The current edit list's timeline, for output time while the whole file plays.
-    #[serde(skip)]
     reference: Option<Arc<Timeline>>,
     /// Where a load or seek just asked to go (source time), until mpv's position gets there.
-    #[serde(skip)]
     pending: Option<(f64, Instant)>,
     /// mpv's playlist entry of the playing load.
-    #[serde(skip)]
     entry: i64,
+}
+
+impl std::ops::Deref for Clock {
+    type Target = PlayerState;
+
+    fn deref(&self) -> &PlayerState {
+        &self.shown
+    }
 }
 
 /// How long a requested position stands in for mpv's before it is taken as having landed elsewhere.
@@ -95,11 +104,16 @@ pub enum Change {
     Other,
 }
 
-impl PlayerState {
+impl Clock {
+    /// What the page is sent.
+    pub fn shown(&self) -> PlayerState {
+        self.shown.clone()
+    }
+
     /// mpv began `load` (its `start-file`).
     pub fn start(&mut self, load: Load) {
         self.entry = load.entry;
-        self.path = Some(load.file);
+        self.shown.path = Some(load.file);
         self.form = load.form;
         self.mpv_pos = None;
         self.mpv_duration = None;
@@ -110,8 +124,11 @@ impl PlayerState {
     /// playlist entry stay what mpv last said; mpv's events after its `stop` clear the rest anyway.
     pub fn close(&mut self) {
         *self = Self {
-            hwdec: self.hwdec.take(),
-            paused: self.paused,
+            shown: PlayerState {
+                hwdec: self.shown.hwdec.take(),
+                paused: self.shown.paused,
+                ..PlayerState::default()
+            },
             entry: self.entry,
             ..Self::default()
         };
@@ -128,7 +145,7 @@ impl PlayerState {
     pub fn resume_from(&self) -> Option<f64> {
         match self.pending {
             Some((s, at)) if at.elapsed() < PENDING_FOR => Some(s),
-            _ => self.position,
+            _ => self.shown.position,
         }
     }
 
@@ -141,7 +158,7 @@ impl PlayerState {
     pub fn apply(&mut self, e: &Event) -> Change {
         match e {
             Event::FileLoaded => {
-                self.error = None;
+                self.shown.error = None;
                 Change::Other
             }
             // Only the playing entry's failure: a load replaced while it opened is not an error.
@@ -150,8 +167,8 @@ impl PlayerState {
                 reason: EndReason::Error,
                 error,
             } if *entry == self.entry => {
-                self.error = Some(error.clone().unwrap_or_else(|| "playback failed".into()));
-                self.path = None;
+                self.shown.error = Some(error.clone().unwrap_or_else(|| "playback failed".into()));
+                self.shown.path = None;
                 self.form = Form::Source;
                 self.derive();
                 Change::Other
@@ -176,7 +193,7 @@ impl PlayerState {
                 self.derive();
                 return Change::Position;
             }
-            HWDEC => self.hwdec = text(value),
+            HWDEC => self.shown.hwdec = text(value),
             VIDEO_W => self.picture(|v| v.0 = num(value)),
             VIDEO_H => self.picture(|v| v.1 = num(value)),
             ROTATE => self.picture(|v| v.2 = num(value).unwrap_or(0.0)),
@@ -184,9 +201,9 @@ impl PlayerState {
                 self.mpv_duration = num(value);
                 self.derive();
             }
-            PAUSE => self.paused = matches!(value, Value::Flag(true)),
+            PAUSE => self.shown.paused = matches!(value, Value::Flag(true)),
             TRACK_LIST => {
-                self.audio_tracks = match value {
+                self.shown.audio_tracks = match value {
                     Value::Str(json) => audio_tracks(json).unwrap_or_else(|e| {
                         eprintln!("junctur-app: {e}");
                         Vec::new()
@@ -207,40 +224,40 @@ impl PlayerState {
         let size = w.zip(h).filter(|&(w, h)| w >= 1.0 && h >= 1.0);
         let turned = (rotate.round() as i64).rem_euclid(180) == 90;
         let size = size.map(|(w, h)| if turned { (h, w) } else { (w, h) });
-        self.width = size.map(|s| s.0.round() as u32);
-        self.height = size.map(|s| s.1.round() as u32);
-        self.aspect = size.map(|(w, h)| w / h);
+        self.shown.width = size.map(|s| s.0.round() as u32);
+        self.shown.height = size.map(|s| s.1.round() as u32);
+        self.shown.aspect = size.map(|(w, h)| w / h);
     }
 
     /// The two clocks from mpv's raw position and the timeline in play.
     fn derive(&mut self) {
         let t = match &self.form {
             Form::Cuts(t) => {
-                self.cuts = true;
-                self.in_cut = false;
-                self.output = self.mpv_pos;
-                self.position = self.mpv_pos.map(|o| t.to_source(o));
+                self.shown.cuts = true;
+                self.shown.in_cut = false;
+                self.shown.output = self.mpv_pos;
+                self.shown.position = self.mpv_pos.map(|o| t.to_source(o));
                 Some(t.clone())
             }
             Form::Source => {
-                self.cuts = false;
-                self.position = self.mpv_pos;
+                self.shown.cuts = false;
+                self.shown.position = self.mpv_pos;
                 let t = self.reference.clone();
                 let mapped = t.as_deref().zip(self.mpv_pos).map(|(t, s)| t.to_output(s));
-                self.output = mapped.map(|m| m.0);
-                self.in_cut = mapped.is_some_and(|m| m.1);
+                self.shown.output = mapped.map(|m| m.0);
+                self.shown.in_cut = mapped.is_some_and(|m| m.1);
                 t
             }
         };
-        self.duration = t
+        self.shown.duration = t
             .as_deref()
             .map(Timeline::source_duration)
             .or(self.mpv_duration);
-        self.output_duration = t.as_deref().map(Timeline::output_duration);
-        let at = t.as_deref().zip(self.position);
-        self.frame = at.map(|(t, s)| t.fps.frame_at(s));
-        self.output_frame = at.map(|(t, s)| t.output_frame(s));
-        if let (Some((want, _)), Some(pos)) = (self.pending, self.position) {
+        self.shown.output_duration = t.as_deref().map(Timeline::output_duration);
+        let at = t.as_deref().zip(self.shown.position);
+        self.shown.frame = at.map(|(t, s)| t.fps.frame_at(s));
+        self.shown.output_frame = at.map(|(t, s)| t.output_frame(s));
+        if let (Some((want, _)), Some(pos)) = (self.pending, self.shown.position) {
             if (pos - want).abs() < 0.5 {
                 self.pending = None;
             }
