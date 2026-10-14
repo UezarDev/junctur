@@ -478,7 +478,11 @@ impl Core {
         }
         // The history holds the ranges and the retimed words (2w): an outside change to either
         // would be undone over.
-        let undone = |l: &EditList| (l.keep.clone(), l.times.clone());
+        // Compared as the file writes them, so a list read back equals the one saved.
+        let undone = |l: &EditList| {
+            let times: Vec<_> = l.times.iter().map(edit_key).collect();
+            (l.keep.clone(), times)
+        };
         if new_list.is_some() && new_list.map(undone) != in_play.map(undone) {
             ed.changed_elsewhere();
             // A first list (the app's own analysis just wrote it, 2d) had no history to clear.
@@ -787,7 +791,12 @@ impl Core {
             .map(|l| l.speakers.clone())
             .unwrap_or_default();
         let fixed = junctur_core::edit::check_span(text)?;
-        let run = words.retyped(first, last, &fixed, &speakers)?;
+        let times = lock(&self.ctl)
+            .edit
+            .list
+            .as_ref()
+            .map_or_else(Vec::new, |l| l.times.clone());
+        let run = words.retyped(first, last, &fixed, &speakers, &times)?;
         self.change(file, |ed, list, _| ed.fix_words(list, &run, &fixed))?;
         Ok((run.heard, fixed))
     }
@@ -1613,6 +1622,14 @@ fn event_loop(events: &mut Events, shared: &Shared) {
             held = true;
         }
     }
+}
+
+/// A retimed word as the edit list writes it (2w repair): track, heard start, nth, new start and
+/// end, all to the millisecond, so the history's comparison with the file is not thrown by a last
+/// bit.
+fn edit_key(t: &junctur_core::edit::Retime) -> (usize, i64, usize, i64, i64) {
+    let ms = |s: f64| (s * 1000.0).round() as i64;
+    (t.track, ms(t.start), t.nth, ms(t.from), ms(t.to))
 }
 
 #[cfg(test)]

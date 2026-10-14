@@ -178,14 +178,16 @@ pub fn parse(text: &str) -> Result<EditList, String> {
         l.strip_prefix("junctur-edit ")
             .and_then(|v| v.parse::<u32>().ok())
     };
-    match lines.next() {
-        Some((_, l)) if version(l).is_some_and(|v| (1..=FORMAT_VERSION).contains(&v)) => {}
+    let read_version = match lines.next() {
+        Some((_, l)) if version(l).is_some_and(|v| (1..=FORMAT_VERSION).contains(&v)) => {
+            version(l).unwrap_or(FORMAT_VERSION)
+        }
         _ => {
             return Err(format!(
                 "not a junctur-edit file this build reads (versions 1 to {FORMAT_VERSION})"
             ))
         }
-    }
+    };
     let mut e = EditList {
         source: PathBuf::new(),
         duration: 0.0,
@@ -324,6 +326,11 @@ pub fn parse(text: &str) -> Result<EditList, String> {
                 add_fix(&mut e.fixes, fix).map_err(bad)?;
             }
             "time" => {
+                // Written only into a version 6 list (2w repair): one under an older header is not
+                // a list Junctur wrote, and the build that wrote that version refused the line.
+                if read_version < 6 {
+                    return Err(bad("a `time` line needs a `junctur-edit 6` list"));
+                }
                 let expected = "expected `time <track> <start>[+<n>] <new start> <new end>`";
                 let parts: Vec<&str> = rest.split_whitespace().collect();
                 let [track, at, from, to] = parts[..] else {
@@ -829,19 +836,9 @@ mod tests {
             ..sample()
         };
         let text = e.to_text();
+        assert!(text.starts_with("junctur-edit 6\n"), "{text}");
         assert!(
-            text.starts_with(
-                "junctur-edit 6
-"
-            ),
-            "{text}"
-        );
-        assert!(
-            text.contains(
-                "time 0 2.500 2.500 2.900
-time 1 54.944+1 54.950 55.300
-"
-            ),
+            text.contains("time 0 2.500 2.500 2.900\ntime 1 54.944+1 54.950 55.300\n"),
             "{text}"
         );
         let back = parse(&text).unwrap();
@@ -869,38 +866,36 @@ time 1 54.944+1 54.950 55.300
             assert_eq!(back.to_text(), text);
         }
         // Refused: a second line for one word, an end not after its start, a missing number.
-        let head = "junctur-edit 6
-source x.mp4
-";
+        let head = "junctur-edit 6\nsource x.mp4\n";
         for bad in [
-            "time 0 2.000 2.100 2.000
-",
-            "time 0 2.000 2.100
-",
-            "time 0 2.000 2.100 x
-",
-            "time x 2.000 2.100 2.300
-",
-            "time 0 2.000 2.1 2.3
-time 0 2.0004 2.0 2.4
-",
+            "time 0 2.000 2.100 2.000\n",
+            "time 0 2.000 2.100\n",
+            "time 0 2.000 2.100 x\n",
+            "time x 2.000 2.100 2.300\n",
+            "time 0 2.000 2.1 2.3\ntime 0 2.0004 2.0 2.4\n",
         ] {
             assert!(parse(&format!("{head}{bad}")).is_err(), "{bad}");
         }
         let ok = parse(&format!(
-            "{head}time 0 2.000 2.1 2.3
-time 0 2.000+1 2.3 2.4
-"
+            "{head}time 0 2.000 2.1 2.3\ntime 0 2.000+1 2.3 2.4\n"
         ))
         .unwrap();
         assert_eq!(ok.times.len(), 2);
-        // An older build's reader refuses a version 6 list instead of failing on its first new line.
-        assert!(parse(
-            "junctur-edit 7
-source x.mp4
-"
-        )
-        .is_err());
+        // Two tracks' words of one millisecond keep their order through a round trip (2w repair).
+        let one_ms = EditList {
+            times: vec![t(1, 5.0001, 0, 5.0, 5.2), t(0, 5.0004, 0, 5.0, 5.3)],
+            ..sample()
+        };
+        let text = one_ms.to_text();
+        assert!(
+            text.contains("time 0 5.000 5.000 5.300\ntime 1 5.000 5.000 5.200\n"),
+            "{text}"
+        );
+        assert_eq!(parse(&text).unwrap().to_text(), text);
+        // A `time` line under an older header is refused (2w repair), and so is a version this
+        // build does not know (as a 5x build refuses this version 6).
+        assert!(parse("junctur-edit 5\nsource x.mp4\ntime 0 2.000 2.1 2.3\n").is_err());
+        assert!(parse("junctur-edit 7\nsource x.mp4\n").is_err());
     }
 
     #[test]

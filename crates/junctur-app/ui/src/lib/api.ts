@@ -258,6 +258,9 @@ export interface TranscriptView {
   span: number[];
   /** Each span's text. */
   spans: string[];
+  /** 2w repair: each word's start as heard, in ms, sent only when some word is retimed (else
+   * `start` is it): words starting together (5w) are grouped by it, as fixes name them. */
+  heard?: number[];
 }
 
 export type StageState = "pending" | "running" | "done" | "failed";

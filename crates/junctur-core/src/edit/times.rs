@@ -53,7 +53,8 @@ pub fn to_ms(s: f64) -> f64 {
 }
 
 /// Sets the time of the word heard on `track` at `start` (the `nth` of that millisecond), heard
-/// from `heard.0` to `heard.1`, to `from..to` (each rounded to the millisecond). Its time as heard
+/// from `heard.0` to `heard.1`, to `from..to`, all rounded to the millisecond as the list writes
+/// them, so the list in play equals the one read back (2w repair). Its time as heard
 /// again takes the override away. Kept in time order. Whether anything changed. Refused for a span
 /// that does not run forwards: a word's middle is what places it, and a word with none has no place.
 pub fn set_time(
@@ -70,7 +71,7 @@ pub fn set_time(
     }
     let new = Retime {
         track,
-        start,
+        start: to_ms(start),
         nth,
         from,
         to,
@@ -82,8 +83,6 @@ pub fn set_time(
         (Some(i), true) => {
             times.remove(i);
         }
-        // The override already there keeps its own start (a re-read word's start may differ from
-        // the list's in the last bits).
         (Some(i), false) => {
             times[i].from = from;
             times[i].to = to;
@@ -97,14 +96,11 @@ pub fn set_time(
     Ok(*times != before)
 }
 
-/// The list's order: by heard start, then track, then which word of the millisecond.
+/// The list's order: by heard start to the millisecond (as written), then track, then which word
+/// of the millisecond: the same order before writing and after reading (2w repair: by the start's
+/// last bits, two tracks' words of one millisecond swapped places on every round trip).
 pub(super) fn sort(times: &mut [Retime]) {
-    times.sort_by(|a, b| {
-        a.start
-            .total_cmp(&b.start)
-            .then(a.track.cmp(&b.track))
-            .then(a.nth.cmp(&b.nth))
-    });
+    times.sort_by_key(|t| (millis(t.start), t.track, t.nth));
 }
 
 /// A `time` line's text after `time `.
@@ -123,10 +119,10 @@ pub(super) fn line(t: &Retime) -> String {
     )
 }
 
-/// A list's overrides by word: every word's time as the user left it. Two ways to read it, as the
-/// words come: [`Self::of`] counts each word's `nth` itself, so it is given every word of the
-/// transcript in heard order (as [`super::Fixes`] is: a stable sort by start of the segments'
-/// words, cut words included); [`Self::at`] is told the `nth` by a caller that knows it.
+/// A list's overrides by word: every word's time as the user left it, read as the words come
+/// ([`Self::of`] counts each word's `nth` itself, so it is given every word of the transcript in
+/// heard order, as [`super::Fixes`] is: a stable sort by start of the segments' words, cut words
+/// included).
 pub struct Times {
     by_word: HashMap<Key, (f64, f64)>,
     /// Per track, the millisecond of the latest word read and how many of its words were read.
@@ -164,14 +160,6 @@ impl Times {
             .copied()
             .unwrap_or((w.start, w.end))
     }
-
-    /// Where word `w`, heard on `track` and the `nth` of its millisecond there, starts and ends.
-    pub fn at(&self, track: usize, w: &Word, nth: usize) -> (f64, f64) {
-        self.by_word
-            .get(&(track, millis(w.start), nth))
-            .copied()
-            .unwrap_or((w.start, w.end))
-    }
 }
 
 #[cfg(test)]
@@ -202,6 +190,32 @@ mod tests {
         assert!(t.is_empty());
         assert!(set_time(&mut t, 0, 2.0, 0, (2.0, 2.4), (2.5, 2.5)).is_err());
         assert!(set_time(&mut t, 0, 2.0, 0, (2.0, 2.4), (2.0, 2.4)).is_ok_and(|c| !c));
+        // A start off in its last bits is kept as the list writes it, so what is read back equals it.
+        set_time(&mut t, 0, 300.0 + 12.34, 0, (312.34, 312.6), (312.3, 312.6)).unwrap();
+        assert_eq!(t[0].start, 312.34);
+    }
+
+    #[test]
+    fn two_tracks_of_one_millisecond_keep_their_order_through_the_list() {
+        // 2w repair: sorted by the start's last bits, these swapped places on each round trip.
+        let mut t = vec![
+            Retime {
+                track: 1,
+                start: 5.0001,
+                nth: 0,
+                from: 5.0,
+                to: 5.2,
+            },
+            Retime {
+                track: 0,
+                start: 5.0004,
+                nth: 0,
+                from: 5.0,
+                to: 5.3,
+            },
+        ];
+        sort(&mut t);
+        assert_eq!(t.iter().map(|t| t.track).collect::<Vec<_>>(), [0, 1]);
     }
 
     #[test]
@@ -221,9 +235,6 @@ mod tests {
         assert_eq!(times.of(0, &en), (54.944, 54.944));
         assert_eq!(times.of(1, &yes), (54.944, 55.2));
         assert_eq!(times.of(0, &el), (54.95, 55.3));
-        let times = Times::new(&t);
-        assert_eq!(times.at(0, &el, 1), (54.95, 55.3));
-        assert_eq!(times.at(0, &el, 0), (54.9441, 55.0));
         assert!(Times::new(&[]).is_empty());
     }
 }

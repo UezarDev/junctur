@@ -196,20 +196,24 @@ impl Editor {
         let ranges = frame_ranges(&list.keep, fps.num, fps.den, total);
         // The kept range whose edge `from` is, and which edge: one the edit moves (keeping frames
         // past a range's end or before its start, or cutting frames inside it from that edge).
+        // With the far end of the cut beside the edge: the next range's start, the previous one's
+        // end, or the file's.
         let moved = to.and_then(|to| {
-            ranges.iter().find_map(|&(a, b)| {
+            ranges.iter().enumerate().find_map(|(k, &(a, b))| {
                 if b == from && b < total && keep == (to > from) {
-                    Some(((a, b), Side::End, to))
+                    let beyond = ranges.get(k + 1).map_or(total, |r| r.0);
+                    Some(((a, b), Side::End, to, beyond))
                 } else if a == from && a > 0 && keep == (to < from) {
-                    Some(((a, b), Side::Start, to))
+                    let beyond = k.checked_sub(1).map_or(0, |k| ranges[k].1);
+                    Some(((a, b), Side::Start, to, beyond))
                 } else {
                     None
                 }
             })
         });
         let times = match (moved, self.words.as_deref()) {
-            (Some((range, side, to)), Some(words)) => {
-                words.moved_edge(&list.times, range, side, to, fps)
+            (Some((range, side, to, beyond)), Some(words)) => {
+                words.moved_edge(&list.times, range, side, to, beyond, fps)
             }
             _ => list.times.clone(),
         };
@@ -941,7 +945,7 @@ mod tests {
             .unwrap()
             .list;
         let run = words
-            .retyped(0, 2, "Uezar left.", &Default::default())
+            .retyped(0, 2, "Uezar left.", &Default::default(), &[])
             .unwrap();
         let l2 = e
             .fix_words(&l1, &run, "Uezar left.")
@@ -1093,5 +1097,58 @@ mod tests {
             .list;
         let t: Vec<_> = l2.times.iter().map(|t| (t.start, t.from, t.to)).collect();
         assert_eq!(t, [(10.0, 10.0, 10.9)]);
+    }
+
+    #[test]
+    fn an_edge_moved_across_a_cut_into_the_next_range_trims_none_of_its_words() {
+        // 2w repair: kept 10.0-11.0 and 11.5-20.0 at 30 fps (frames 300..330, 345..600); the
+        // toolbar steps the first range's end to 11.7 (frame 351), joining the two. "y", kept in the
+        // second range, keeps its head, and "dos" follows the edge only to where that range starts.
+        let d = scratch("edge-join");
+        let mut e = Editor::default();
+        e.reset(Some(d.join("edit.junctur")));
+        let w = |start, end| Word {
+            start,
+            end,
+            text: "w".into(),
+            p: 1.0,
+        };
+        e.words = Some(Arc::new(Words::from_words(vec![
+            w(10.2, 10.8),
+            w(11.6, 11.9),
+        ])));
+        let l = list(vec![r(10.0, 11.0), r(11.5, 20.0)]);
+        let l1 = e
+            .move_edge(&l, (330, 351, true), 330, FPS)
+            .unwrap()
+            .unwrap()
+            .list;
+        let t: Vec<_> = l1.times.iter().map(|t| (t.start, t.from, t.to)).collect();
+        assert_eq!(t, [(10.2, 10.2, 11.5)]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_word_left_with_under_a_frame_kept_is_cut_whole() {
+        // 2w repair: kept 10.0-11.0; the end moved in to 10.7 (frame 321) leaves "z" (10.69-10.9,
+        // kept by its middle) under a frame on the kept side: it is cut, its head clipped to the edge.
+        let d = scratch("edge-straddle");
+        let mut e = Editor::default();
+        e.reset(Some(d.join("edit.junctur")));
+        e.words = Some(Arc::new(Words::from_words(vec![Word {
+            start: 10.69,
+            end: 10.9,
+            text: "z".into(),
+            p: 1.0,
+        }])));
+        let l = list(vec![r(10.0, 11.0)]);
+        let l1 = e
+            .move_edge(&l, (321, 330, false), 330, FPS)
+            .unwrap()
+            .unwrap()
+            .list;
+        let t: Vec<_> = l1.times.iter().map(|t| (t.start, t.from, t.to)).collect();
+        assert_eq!(t, [(10.69, 10.7, 10.9)]);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
