@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use junctur_core::edit::{Captions, EditList, Speakers};
+use junctur_core::edit::{Captions, EditList, ExistingClips, Speakers};
 use junctur_core::export::layout::{self, Placed};
 use junctur_core::export::srt;
 use junctur_core::export::{self, CaptionFiles};
@@ -768,6 +768,21 @@ impl Core {
         Ok((word.text.clone(), fixed))
     }
 
+    /// Marks transcript word `index` as checked (5o) in the edit list and saves it, so it is no longer
+    /// flagged. Not an undo step, like a fix.
+    pub fn confirm_word(&self, file: Option<&str>, index: usize) -> Result<(), String> {
+        self.prepare();
+        let words = lock(&self.editor)
+            .words
+            .clone()
+            .ok_or("this recording has no transcript")?;
+        let (Some(word), Some(&track)) = (words.list.get(index), words.tracks.get(index)) else {
+            return Err("no such word in the transcript".into());
+        };
+        let nth = words.nth(index);
+        self.change(file, |ed, list, _| ed.confirm_word(list, track, word, nth))
+    }
+
     /// Fixes transcript words `first..=last` as one text (5x) in the edit list and saves it; returns
     /// the heard text and the fixed one, for the word list. Refused, saying why, for a run across two
     /// tracks, or a new text over two people's words ([`Words::retyped`]; clearing never is). One word is [`Self::fix_word`]'s fix. Not an undo
@@ -829,7 +844,7 @@ impl Core {
     /// shows what Resolve will, cue for cue. Translated captions (5k) show what is translated so
     /// far, the rest as said.
     pub fn caption_cues(&self, aspect: f64) -> Result<Vec<Placed>, String> {
-        let (list, captions, cues) = self.cut_captions()?;
+        let (list, captions, cues) = self.cut_captions(false, |_| Ok(()))?;
         Ok(layout::place(&cues, &list, &captions, aspect))
     }
 
@@ -837,48 +852,77 @@ impl Core {
     /// recording, every audio track, cut as the list says) with its captions on it as Text+ clips
     /// (5g), laid out for that timeline's shape, through the Junctur script running there. When the
     /// project already has the timeline and `answer` does not say what to do, nothing is changed
-    /// and the outcome says so. Blocks until Resolve answers (minutes for a long recording), so the
+    /// and the outcome says so; answered Update (5ab), only the captions on that timeline are
+    /// updated. Blocks until Resolve answers (minutes for a long recording), so the
     /// command runs it off the async runtime. Refused, like the export, while translated captions
-    /// are not all translated (5k); a recording with no transcript sends its timeline alone.
+    /// are not all translated (5k); a recording with no transcript sends its timeline alone. The
+    /// captions are cut as the preview and the SRT cut them (5q). `existing`: what to do this once
+    /// with clips Junctur did not place in the captions' way (5n), the user's answer when the send
+    /// before asked; else the recording's remembered choice, or asking (on the fresh timeline 5z
+    /// makes, its caption tracks are new, so nothing is in their way).
     pub fn send_to_resolve(
         &self,
         answer: Option<resolve::Answer>,
+        existing: Option<ExistingClips>,
     ) -> Result<resolve::Outcome, String> {
-        let (list, captions, words, fps) = self.edit_source()?;
+        let (list, mut captions, words, fps) = self.edit_source()?;
+        if let Some(e) = existing {
+            captions.existing_clips = e;
+        }
         captions.check()?;
         let cues = match words {
-            Some(words) => {
-                let tracked: Vec<_> = words
-                    .tracks
-                    .iter()
-                    .copied()
-                    .zip(words.list.iter())
-                    .collect();
-                let tr = self.translations();
-                export::untranslated(&list, &captions, &tracked, fps.num, fps.den, &tr)
-                    .map_err(|e| e.to_string())?;
-                srt::cues(
-                    &list,
-                    &captions,
-                    tracked.iter().copied(),
-                    fps.num,
-                    fps.den,
-                    Some(&*tr),
-                )
-            }
+            Some(words) => self.cut(&list, &captions, &words, fps, true)?,
             None => Vec::new(),
         };
         resolve::send(&cues, &list, &captions, answer)
     }
 
-    /// The list in play, its caption settings and its cues as the SRT export cuts them, with what
-    /// is translated so far (5k): what the preview lays out.
-    fn cut_captions(&self) -> Result<(Arc<EditList>, Captions, Vec<srt::Cue>), String> {
-        let (list, captions, words, fps) = self.caption_source()?;
-        let tracked = words.tracks.iter().copied().zip(words.list.iter());
-        let tr = self.translations();
-        let cues = srt::cues(&list, &captions, tracked, fps.num, fps.den, Some(&*tr));
+    /// The list in play, its caption settings and its cues as the SRT export cuts them: the one
+    /// cut the preview and the send share, so the preview shows what Resolve gets (5q; the send
+    /// had a copy of its own that could drift). `finished`: the send's cut, refused while the
+    /// translation is not all made (`export::finished_cues`, as the SRT); else with what is
+    /// translated so far (5k), what the preview lays out. `adjust` sets or checks the settings
+    /// before cutting.
+    fn cut_captions(
+        &self,
+        finished: bool,
+        adjust: impl FnOnce(&mut Captions) -> Result<(), String>,
+    ) -> Result<(Arc<EditList>, Captions, Vec<srt::Cue>), String> {
+        let (list, mut captions, words, fps) = self.caption_source()?;
+        adjust(&mut captions)?;
+        let cues = self.cut(&list, &captions, &words, fps, finished)?;
         Ok((list, captions, cues))
+    }
+
+    /// [`Self::cut_captions`]' cut of `words`, apart so a send without a transcript (5z) shares it.
+    fn cut(
+        &self,
+        list: &EditList,
+        captions: &Captions,
+        words: &Words,
+        fps: Fps,
+        finished: bool,
+    ) -> Result<Vec<srt::Cue>, String> {
+        let tracked: Vec<_> = words
+            .tracks
+            .iter()
+            .copied()
+            .zip(words.list.iter())
+            .collect();
+        let tr = self.translations();
+        Ok(if finished {
+            export::finished_cues(list, captions, &tracked, fps.num, fps.den, &tr)
+                .map_err(|e| e.to_string())?
+        } else {
+            srt::cues(
+                list,
+                captions,
+                tracked.iter().copied(),
+                fps.num,
+                fps.den,
+                Some(&*tr),
+            )
+        })
     }
 
     /// The open recording's translations (5k), from its project folder: the background run writes

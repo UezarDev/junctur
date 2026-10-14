@@ -2,7 +2,7 @@
 // the Captions panel and Settings' caption defaults show them, so the two screens cannot drift.
 // The panel puts its own sections (Speakers, Export, Remembered voices) between these.
 
-export type CaptionPart = "switches" | "style" | "overlap" | "text" | "cut" | "resolve";
+export type CaptionPart = "switches" | "style" | "motion" | "overlap" | "text" | "cut" | "resolve";
 
 export const CAPTION_SECTIONS: { part: CaptionPart; title: string; info?: string }[] = [
   { part: "switches", title: "Export and preview" },
@@ -10,6 +10,11 @@ export const CAPTION_SECTIONS: { part: CaptionPart; title: string; info?: string
     part: "style",
     title: "Style",
     info: "The preview and Send to Resolve use all of these. An SRT carries only the colour, bold, italic and underline: in Resolve the rest is the subtitle track's style (Inspector > Track). If a Track Style change misses bold or italic SRT captions, turn those off.",
+  },
+  {
+    part: "motion",
+    title: "Highlight and animation",
+    info: "Resolve and the preview only; the SRT ignores them. Each caption then becomes an animated caption, a heavier Fusion clip than a plain Text+: thousands of them on an hour-long recording can slow Resolve down, so both are off by default. They need Junctur's own template.",
   },
   {
     part: "overlap",
@@ -25,7 +30,7 @@ export const CAPTION_SECTIONS: { part: CaptionPart; title: string; info?: string
   {
     part: "resolve",
     title: "Send to Resolve",
-    info: "Sends the whole edit to the project open in Resolve: a new timeline named after the recording, cut as here with every audio track, and every caption on it as a Text+ clip, a video track per speaker. If the project already has that timeline, Junctur asks whether to make a new one beside it or replace it. Once per Resolve session run Workspace > Scripts > Junctur and leave it running.",
+    info: "Sends the whole edit to the project open in Resolve: a new timeline named after the recording, cut as here with every audio track, and every caption on it as a Text+ clip, a video track per speaker. If the project already has that timeline, Junctur asks whether to make a new one beside it, update only the captions on it (its cuts and your changes in Resolve left alone) or replace it. Once per Resolve session run Workspace > Scripts > Junctur and leave it running.",
   },
 ];
 

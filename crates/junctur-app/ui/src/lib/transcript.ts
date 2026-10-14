@@ -32,6 +32,8 @@ export interface Words {
   speaker: Uint32Array;
   /** A second speaker saying the word at the same time (5b), 0 for none. */
   also: Uint32Array;
+  /** How sure Whisper was of each word, whole percent; 255 for never flagged (5o). */
+  sure: Uint8Array;
   /** The audio track each word was heard on (5x). */
   track: Uint32Array;
   /** The span fixed as one text each word is in, 1-based, 0 for none (5x). */
@@ -66,6 +68,7 @@ export function words(v: TranscriptView): Words {
     byStart,
     speaker: Uint32Array.from(v.speaker ?? []),
     also: Uint32Array.from(v.also ?? []),
+    sure: sureOf(v),
     track: Uint32Array.from(v.track ?? []),
     span,
     spans,
@@ -73,6 +76,40 @@ export function words(v: TranscriptView): Words {
     spanFirst,
     spanLast,
   };
+}
+
+/** A word that is never flagged (5o): no confidence to go by, or the user fixed or confirmed it. The
+ * core's `NOT_FLAGGED` (src/editor/words.rs), which sends it. */
+export const NOT_FLAGGED = 255;
+
+/** The view's confidences, every word unflagged when it has none (an app from before 5o). */
+export function sureOf(v: TranscriptView): Uint8Array {
+  return v.sure?.length === v.text.length ? Uint8Array.from(v.sure) : new Uint8Array(v.text.length).fill(NOT_FLAGGED);
+}
+
+/**
+ * The kept words to check (5o), in order: those Whisper was less sure of than `below` percent. Cut
+ * words are left out: they are in no caption. One pass over the tokens.
+ */
+export function flagged(t: Tokens, sure: Uint8Array, below: number): number[] {
+  const out: number[] = [];
+  if (below <= 0) return out;
+  for (const tok of t.list) if (tok.kind === "word" && sure[tok.i] < below) out.push(tok.i);
+  return out;
+}
+
+/** The first of `list` (ascending) after `from`, or before it with `back`; -1 for none. */
+export function stepFrom(list: number[], from: number, back: boolean): number {
+  let lo = 0;
+  let hi = list.length;
+  // `lo` ends at how many entries come before `from` (going back), or at or before it (forward).
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (back ? list[mid] < from : list[mid] <= from) lo = mid + 1;
+    else hi = mid;
+  }
+  if (back) return lo > 0 ? list[lo - 1] : -1;
+  return lo < list.length ? list[lo] : -1;
 }
 
 /** `r` reaching over the whole of any span it starts or ends in (5x): a span is selected whole. */

@@ -390,6 +390,22 @@ impl Editor {
         })
     }
 
+    /// Marks `word`, heard on `track`, the `nth` of that track's words starting in its millisecond
+    /// (5w), as checked by the user (5o: a fix line with the heard text, so the transcript panel no
+    /// longer flags it) and saves; a word fixed already is left as it is. Like a fix, not an undo
+    /// step.
+    pub fn confirm_word(
+        &mut self,
+        list: &EditList,
+        track: usize,
+        word: &Word,
+        nth: usize,
+    ) -> Result<Option<Edited>, String> {
+        self.restyle(list, |l| {
+            edit::confirm_fix(&mut l.fixes, track, word.start, nth, &word.text).map(|_| ())
+        })
+    }
+
     /// Sets the text of the run `r` names (5x, [`super::Words::retyped`]) as one fix, and saves;
     /// the fixes of words inside it, and a span overlapping it, go. Empty text or the heard text again
     /// takes them all away. Like [`Self::fix_word`], not an undo step.
@@ -662,18 +678,21 @@ mod tests {
                 end: 12.5,
                 text: "uno".into(),
                 p: 1.0,
+                p_min: None,
             },
             Word {
                 start: 12.51,
                 end: 12.52,
                 text: "y".into(),
                 p: 1.0,
+                p_min: None,
             },
             Word {
                 start: 12.53,
                 end: 13.0,
                 text: "dos".into(),
                 p: 1.0,
+                p_min: None,
             },
         ])));
         let words = |first, last| Op::Words {
@@ -775,6 +794,7 @@ mod tests {
             end,
             text: text.into(),
             p: 1.0,
+            p_min: None,
         };
         e.words = Some(Arc::new(Words::from_words(vec![
             w(10.0, 10.4, "uno"),
@@ -888,6 +908,7 @@ mod tests {
             end: 12.8,
             text: " Wezar,".into(),
             p: 0.6,
+            p_min: None,
         };
         let l0 = list(vec![r(1.0, 30.0)]);
         let l1 = e
@@ -916,6 +937,12 @@ mod tests {
             .unwrap()
             .list;
         assert!(l3.fixes.is_empty());
+        // 5o: confirmed, the word keeps its heard text in a fix line, saved at once.
+        let l4 = e.confirm_word(&l3, 1, &heard, 0).unwrap().unwrap().list;
+        assert_eq!(l4.fixes[0].text, "Wezar,");
+        assert_eq!(reread(&path), l4);
+        assert!(!e.can_undo(), "not an undo step");
+        assert!(e.confirm_word(&l4, 1, &heard, 0).unwrap().is_none(), "once");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -932,6 +959,7 @@ mod tests {
             end: start + 0.3,
             text: format!(" {text}"),
             p: 1.0,
+            p_min: None,
         };
         let words = Words::from_tracked(vec![
             (0, w(2.0, "the")),

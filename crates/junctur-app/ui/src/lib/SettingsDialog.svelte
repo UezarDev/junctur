@@ -1,7 +1,8 @@
 <script lang="ts">
   // Settings (2i): a dialog over the editor or the start window, opened from the title bar's gear
   // (or File > Settings…, Ctrl+,). What it edits is junctur/config.json, the file `junctur analyze`
-  // reads too (src/settings.rs): the Whisper model, the word list Whisper is told (5h) and the
+  // reads too (src/settings.rs): the Whisper model, the word list Whisper is told (5h), which words
+  // the transcript flags for checking (5o) and the
   // caption defaults a recording without its own starts from. Saving never analyses anything; App.svelte asks again whether the open
   // recording is out of date, and 2d's notice in Properties offers the re-analysis.
   // Laid out as the Captions panel is (2t): the same sections, explanations behind (i)s.
@@ -48,7 +49,9 @@
     saving = true;
     error = null;
     try {
-      onSaved(await api.saveSettings({ ...$state.snapshot(draft), words: wordsText.split("\n") }));
+      // An emptied or fractional number field: whole percent, within 0 to 100.
+      const flagBelow = Math.min(100, Math.max(0, Math.round(Number(draft.flagBelow) || 0)));
+      onSaved(await api.saveSettings({ ...$state.snapshot(draft), words: wordsText.split("\n"), flagBelow }));
       onClose();
     } catch (e) {
       error = String(e);
@@ -96,6 +99,21 @@
         >
           {#snippet children(id)}
             <textarea {id} rows="5" spellcheck="false" bind:value={wordsText} placeholder="Uezar&#10;Tsunheto"></textarea>
+          {/snippet}
+        </Field>
+        <Field
+          label="Flag words below (%)"
+          info="Words Whisper was less sure of than this are underlined in the transcript to check: fix one by double-clicking it, or mark it right. 0 flags none. Only recordings transcribed since this came in have it."
+        >
+          {#snippet children(id)}
+            <input
+              {id}
+              type="number"
+              min="0"
+              max="100"
+              step="1"
+              bind:value={() => draft?.flagBelow ?? 0, (v) => draft && (draft.flagBelow = v)}
+            />
           {/snippet}
         </Field>
       </Section>

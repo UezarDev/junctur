@@ -149,6 +149,11 @@ export interface Captions {
   protagonist: string;
   /** A Fusion Title's clip name in Resolve's media pool; empty for Junctur's own Text+. */
   template: string;
+  /** 5m: with a template of the user's, keep its own look; Junctur sets only text, timing and colour. */
+  keepLook: boolean;
+  /** 5n: what a send does with clips Junctur did not place in its captions' way; "ask" unless this
+   * recording remembered a choice. Never a default (Settings saves it as "ask"). */
+  existingClips: ExistingClips;
   /** 5j's text options: what every caption output shows, never the transcript. */
   case: CaptionCase;
   /** Punctuation kept (true) or removed. */
@@ -160,10 +165,24 @@ export interface Captions {
   replace: { from: string; to: string }[];
   /** The language captions are shown in (5k), a code of `translationLanguages`; empty for as spoken. */
   translate: string;
+  /** 5l, Resolve and the preview only: the word being said lit up, word by word. */
+  highlight: boolean;
+  /** `#RRGGBB`; empty for the speaker's own colour (the caption then white). */
+  highlightColor: string;
+  /** How a caption comes in and goes out. */
+  animation: CaptionAnimation;
+  /** Seconds, 0.05 to 1. */
+  animationLength: number;
 }
+
+export type CaptionAnimation = "none" | "fade" | "pop" | "slide";
 
 export type CaptionCase = "asSpoken" | "upper" | "lower" | "title";
 export type CensorStyle = "middle" | "whole";
+
+/** 5n: clips Junctur did not place where its captions go in Resolve: ask, delete them, leave
+ * those captions out, or put the speaker's new captions on a track beside. */
+export type ExistingClips = "ask" | "replace" | "skip" | "newTrack";
 
 export type CaptionLayout = "stacked" | "side" | "topBottom";
 
@@ -174,7 +193,19 @@ export type CaptionLayout = "stacked" | "side" | "topBottom";
 export interface Cue {
   start: number;
   end: number;
-  parts: { speaker: number; lines: string[]; x: number; y: number }[];
+  parts: { speaker: number; lines: string[]; x: number; y: number; words: WordSpan[] }[];
+}
+
+/** Where a word of a caption sits on its lines and when it is lit (5l, export/layout.rs), only with
+ * the highlight on: `from..to` in characters (code points) of line `line`, a word as the animated
+ * caption counts them (a phrase made one by find and replace is a word each, sharing its time). */
+export interface WordSpan {
+  word: number;
+  line: number;
+  from: number;
+  to: number;
+  start: number;
+  end: number;
 }
 
 /** What a send to Resolve did (junctur-core resolve/reply.rs). */
@@ -188,9 +219,21 @@ export interface Sent {
   unstyled: string[];
   /** The timeline the send made (5z). */
   timeline: string;
+  /** 5n: clips Junctur did not place where new captions go; when not 0 no caption was placed and
+   * the user is asked. `blocked`: the captions they are in the way of. A send's captions go on the
+   * timeline it has just made (5z), whose caption tracks are new, so a send does not meet these. */
+  inTheWay: number;
+  blocked: number;
+  /** 5n: what the choice did: clips deleted, captions left out, speakers put on a track beside. */
+  replacedClips: number;
+  skipped: number;
+  newTracks: number;
   /** Whether it replaced one of that name. */
   replaced: boolean;
-  /** What went wrong making it without stopping the send (an old timeline not deleted). */
+  /** Whether only the captions were updated on the timeline already there (5ab). */
+  updated: boolean;
+  /** What went wrong making it without stopping the send (an old timeline not deleted), or on an
+   * update a cut that no longer matches the edit's. */
   note: string | null;
 }
 
@@ -216,6 +259,8 @@ export interface Settings {
   captions: Captions;
   /** The word list Whisper is told (5h), first entries first. */
   words: string[];
+  /** The transcript flags words Whisper was less sure of than this many percent (5o); 0 for none. */
+  flagBelow: number;
 }
 
 export interface SettingsView {
@@ -251,6 +296,9 @@ export interface TranscriptView {
   speaker: number[];
   /** Someone else saying the word too (two people at once), 0 for none. */
   also: number[];
+  /** How sure Whisper was of each word (5o), whole percent; 255 when it is never flagged (an older
+   * transcript, or a word the user fixed or confirmed). */
+  sure: number[];
   /** The audio track each word was heard on (5x). */
   track: number[];
   /** The span fixed as one text each word is in (5x), 1-based into `spans`, 0 for none; such a
@@ -425,6 +473,9 @@ export const renameSpeaker = (id: number, name: string) =>
 /** Fixes the spelling of word `index` (5h; empty or the heard text again removes the fix); resolves
  * to the entry it added to the word list, if any. Saved at once, not an undo step. */
 export const fixWord = (index: number, text: string) => invoke<string | null>("fix_word", { index, text });
+/** Marks word `index` as checked (5o): it keeps what Whisper heard and is no longer flagged. Saved at
+ * once, not an undo step. */
+export const confirmWord = (index: number) => invoke<void>("confirm_word", { index });
 /** Fixes words `first..=last` as one text (5x; empty or the heard words again clears their fixes);
  * resolves to the entries it added to the word list. Refused, saying why, across two voice tracks or
  * two people. Saved at once, not an undo step. */
@@ -439,16 +490,17 @@ export const exportCaptions = (path: string) => invoke<Exported>("export_caption
 /** The captions as the export cuts them, for the preview over the picture (5d), placed on a
  * picture `aspect` (height over width) in shape (5g). */
 export const captionCues = (aspect: number) => invoke<Cue[]>("caption_cues", { aspect });
-/** What to do when Resolve already has the timeline a send makes (5z): make another beside it, or
- * replace it. */
-export type TimelineAnswer = "new" | "replace";
+/** What to do when Resolve already has the timeline a send makes (5z): make another beside it,
+ * update only the captions on it (5ab), or replace it. */
+export type TimelineAnswer = "new" | "update" | "replace";
 /** What a send came to (junctur-core resolve/mod.rs): sent, or held back because Resolve already
  * has a timeline called `name` (nothing changed; send again with an answer). */
 export type SendOutcome = { kind: "exists"; name: string } | ({ kind: "sent" } & Sent);
 /** Sends the edit into DaVinci Resolve as a timeline of its own, captions on it as Text+ clips,
- * through the Junctur script there (5z, 5g). */
-export const sendToResolve = (answer: TimelineAnswer | null = null) =>
-  invoke<SendOutcome>("send_to_resolve", { answer });
+ * through the Junctur script there (5z, 5g). `existing` (5n) answers, for this send, a send that
+ * found clips Junctur did not place in the captions' way. */
+export const sendToResolve = (answer: TimelineAnswer | null = null, existing?: ExistingClips) =>
+  invoke<SendOutcome>("send_to_resolve", { answer, existing: existing ?? null });
 /** A caption translation run in the background (5k, src/translation.rs). */
 export interface TranslationRun {
   /** The recording, as opened. */
@@ -480,6 +532,8 @@ export const translationStatus = () => invoke<TranslationStatus>("translation_st
 let languages: Promise<Language[]> | null = null;
 /** The languages captions can be translated into, by name; asked once. */
 export const translationLanguages = () => (languages ??= invoke<Language[]>("translation_languages"));
+/** The Fusion Titles in the open Resolve project's media pool by clip name (5m), Junctur's own left out. */
+export const resolveTemplates = () => invoke<string[]>("resolve_templates");
 export const voices = () => invoke<Voice[]>("voices");
 /** Remembers `name`'s voice from every run of words (`[first, last]` each, 2p: one enrolment) and
  * relabels the speakers; resolves to a line for the user. */

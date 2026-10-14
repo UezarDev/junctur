@@ -32,6 +32,27 @@ pub struct Config {
     /// to spell the user's way. Read when a transcription starts, so a change applies to the next.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub words: Vec<String>,
+    /// The transcript panel flags a word for review (5o) when Whisper's lowest token probability in
+    /// it is under this many percent; 0 flags none. Unset: [`FLAG_BELOW`]. Only the app reads it.
+    /// Read as any whole number, so a hand-typed 300 reads as 100 rather than making the whole file
+    /// an error and taking every other setting with it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flag_below: Option<u64>,
+}
+
+/// The default of [`Config::flag_below`], in percent; the page's own fallback before it reads the
+/// settings is 0 (`App.svelte`), not this. Measured on 4 min 40 s of the sample recording
+/// (large-v3-turbo, 628 words, 5o): under 25 % fall 4.6 % of the words, about one in twenty, and
+/// among them nearly every word that reads as a misheard name or a made-up one (`WDuel?` at 6 %,
+/// `Waystuff`, `fuoco`, `flasho`, `Arokeret` from 16 to 24 %); 30 % would add a `Wen` (Gwen?) at
+/// 28 % and flag 6.8 %. The mean under 25 % flags 1.6 % and none of those (their means are 40 to 74 %).
+pub const FLAG_BELOW: u8 = 25;
+
+impl Config {
+    /// [`Self::flag_below`], or its default; at most 100 (every word with a confidence).
+    pub fn flag_below(&self) -> u8 {
+        self.flag_below.map_or(FLAG_BELOW, |p| p.min(100) as u8)
+    }
 }
 
 /// The user's Junctur folder in the OS config folder (`%APPDATA%\junctur`), where the config file,
@@ -313,10 +334,29 @@ mod tests {
                 ..Default::default()
             }),
             words: vec!["Uezar".into(), "Tsunheto".into()],
+            flag_below: Some(0),
         };
         save_to(&path, &c).unwrap();
         assert_eq!(load_from(&path, true).unwrap(), c);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 5o: the flag threshold is read, defaults when unset, and is not written unset.
+    #[test]
+    fn the_flag_threshold_reads_and_defaults() {
+        assert_eq!(parse(b"{}").unwrap().flag_below(), FLAG_BELOW);
+        let c = parse(br#"{"flag_below":25}"#).unwrap();
+        assert_eq!((c.flag_below, c.flag_below()), (Some(25), 25));
+        assert_eq!(parse(br#"{"flag_below":0}"#).unwrap().flag_below(), 0);
+        assert_eq!(parse(br#"{"flag_below":250}"#).unwrap().flag_below(), 100);
+        // Past a byte too (repair): the rest of the file still reads.
+        let c = parse(br#"{"flag_below":300,"words":["Uezar"]}"#).unwrap();
+        assert_eq!((c.flag_below(), c.words.len()), (100, 1));
+        assert!(parse(br#"{"flag_below":-1}"#).is_err());
+        assert!(parse(br#"{"flag_below":"40"}"#).is_err());
+        assert!(!serde_json::to_string(&Config::default())
+            .unwrap()
+            .contains("flag_below"));
     }
 
     #[test]

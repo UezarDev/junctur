@@ -123,17 +123,23 @@ The app's Captions panel can also send the whole edit straight into DaVinci Reso
 Resolve"): a new timeline in the open project, named `<recording> (Junctur)` and made from the same
 FCPXML as `junctur export --fcpxml` (the recording, every audio track, cut as the edit list says), with
 the captions on it as Fusion Text+ clips. If the project already has that timeline, Junctur asks whether
-to create a new one beside it (`<recording> (Junctur) 2`) or replace it; it never replaces one without
-asking. Text+ reaches what an SRT cannot: font, size, height, outline, and where people
+to create a new one beside it (`<recording> (Junctur) 2`), update only the captions on it (its cuts and
+anything changed in Resolve left alone; the result says when its cut no longer matches the edit's) or
+replace it; it never replaces one without asking. Text+ reaches what an SRT cannot: font, size, height, outline, and where people
 talking at once go (stacked, side by side, or one at the top; a protagonist keeps the normal spot).
 Each speaker gets their own video track in their colour.
 Junctur installs a script into Resolve's Scripts folder; start it once per Resolve session with
 Workspace > Scripts > Junctur and leave it running (it works on the free Resolve). The bundled Text+
 template is auto-subs' `caption-bin.drb` (MIT, see `crates/junctur-core/src/resolve/LICENSE-auto-subs`);
-a Text+ title of your own in the media pool can be named instead. These settings are on the `captions`
+a Text+ title of your own can be picked instead from a list of the Fusion Titles in the open project's
+media pool, and with "Keep the template's look" Junctur sets only each caption's text, timing and
+speaker colour on it. When clips Junctur did not place sit where new captions go on its tracks, a send
+changes nothing and asks: put that speaker's new captions on a track beside (`… (2)`), replace only the
+clips a caption overlaps, or skip those captions; the answer can be remembered for the recording. These
+settings are on the `captions`
 line too (`font="…"`, `size=`, `position=`, `outline=`, `outline_width=`, `outline_color=`, `layout=`,
-`protagonist="…"`, `template="…"`, each written only when not the default) and drive the preview; the
-SRT ignores them.
+`protagonist="…"`, `template="…"`, `keep_look=on`, `existing_clips=`, each written only when not the
+default) and drive the preview; the SRT ignores them.
 
 `render` writes scratch pieces in a `<out>.junctur-parts` folder beside the output and deletes them;
 `--full` re-encodes everything, `--force` replaces an existing output (never the source). The source's
@@ -171,6 +177,9 @@ above the timeline (shift-drag on the timeline selects a stretch). Boundaries sn
 and a list the app did not write itself is first kept as `edit.junctur.bak` (then `.bak2`, ...).
 Double-click a misheard word to fix its spelling: the fix is a `fix` line in `edit.junctur`, shown in the
 transcript, the caption preview and the SRT, and the spelling joins the word list (below).
+Words Whisper was unsure of (the lowest probability of their letters' tokens under 25 %, `flag_below`
+below) are underlined; the panel's header steps through them, and "Looks right" keeps one as heard and
+stops flagging it (a `fix` line with the heard text). Transcripts made before this have no flags.
 
 Setup, once (Node.js 20+ for the frontend):
 
@@ -221,6 +230,9 @@ stretch it hears, so they come out spelled that way. It applies to the next tran
 is not redone or called out of date. A list too long for Whisper's prompt (about 220 tokens) is cut from
 the end, and the log says what was left out. The app edits it in Settings and adds every word you fix at
 the top of the list, so a newly fixed word is always told to Whisper.
+
+`flag_below` (default 25, 0 for none) is the percentage under which the app's transcript flags a word to
+check; only the app reads it.
 
 `captions` holds the caption defaults: what a recording whose edit list has no `captions` line of its own
 cuts its captions with (`on`, `chars` per line, `lines` per speaker, `words` per speaker with 0 for no
