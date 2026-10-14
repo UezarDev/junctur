@@ -2,6 +2,7 @@
  * Range-level edits from the playhead: the stretch under it (a kept range, or the cut between two)
  * and what moving one of its ends by some frames means as an edit. Moving a boundary turns the
  * frames it passes over into whatever the growing side is, so every nudge is one exact frame edit.
+ * The lanes' edge drags (2s) find their edge here and end in the same edit.
  */
 import type { EditState } from "./api";
 import type { Stretch } from "./transcript";
@@ -45,4 +46,58 @@ export function nudge(
   if (to === from) return null;
   const grows = edge === "start" ? to < from : to > from;
   return { start: Math.min(from, to), end: Math.max(from, to), keep: grows === s.kept };
+}
+
+/**
+ * A cut's edge on the lanes (2s): a boundary of the kept ranges, by its place in `edit.ranges`
+ * (even: a range's start, odd: its end) and its frame, with the frames it may be dragged between:
+ * one inside the boundaries either side (or the file's ends), so no stretch vanishes and no edge
+ * passes its neighbour. The file's own start and end are not edges.
+ */
+export interface Edge {
+  at: number;
+  frame: number;
+  lo: number;
+  hi: number;
+}
+
+/** The edge nearest source frame `frame`, if one is within `slack` frames: a binary search, as it
+ * runs on every pointer move over the lanes. */
+export function edgeNear(edit: EditState, frame: number, slack: number): Edge | null {
+  const r = edit.ranges;
+  const total = edit.totalFrames;
+  // The first boundary at or after `frame`; the nearest is it or the one before.
+  let lo = 0;
+  let hi = r.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (r[mid] < frame) lo = mid + 1;
+    else hi = mid;
+  }
+  let best: number | null = null;
+  for (const j of [lo - 1, lo]) {
+    if (j < 0 || j >= r.length || r[j] <= 0 || r[j] >= total) continue;
+    const d = Math.abs(r[j] - frame);
+    if (d <= slack && (best == null || d < Math.abs(r[best] - frame))) best = j;
+  }
+  if (best == null) return null;
+  return {
+    at: best,
+    frame: r[best],
+    lo: (best > 0 ? r[best - 1] : 0) + 1,
+    hi: (best + 1 < r.length ? r[best + 1] : total) - 1,
+  };
+}
+
+/** Where edge `e` lands when dragged to frame `to`: clamped to its room. */
+export const clampEdge = (e: Edge, to: number) => Math.min(e.hi, Math.max(e.lo, Math.round(to)));
+
+/** The frame edit that moves edge `e` to frame `to`, or null when it stays (or the list changed
+ * under the drag): the same edit the toolbar's steppers make for the range it belongs to. */
+export function dragged(edit: EditState, e: Edge, to: number): { start: number; end: number; keep: boolean } | null {
+  const r = edit.ranges;
+  if (r[e.at] !== e.frame) return null;
+  const k = e.at >> 1;
+  const range: Under = { start: r[2 * k], end: r[2 * k + 1], kept: true, index: k + 1 };
+  return nudge(range, e.at % 2 === 0 ? "start" : "end", clampEdge(e, to) - e.frame, edit.totalFrames);
 }

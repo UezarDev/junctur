@@ -354,6 +354,12 @@ pub async fn play_between(app: State<'_, App>, start: f64, end: f64) -> Result<(
     app.with(|p| p.play_between(start, end))
 }
 
+/// Plays from source second `at` (2s: from just before a dragged cut edge, so the move is heard).
+#[tauri::command]
+pub async fn play_from(app: State<'_, App>, at: f64) -> Result<(), String> {
+    app.with(|p| p.play_from(at))
+}
+
 /// Stops the loop and pauses, still in review (past the last clip).
 #[tauri::command]
 pub async fn pause_review(app: State<'_, App>) -> Result<(), String> {
@@ -562,12 +568,6 @@ pub async fn translation_languages() -> Vec<Language> {
         .collect();
     l.sort_by_key(|l| l.name);
     l
-}
-
-/// Puts the Junctur script into Resolve's Scripts folder (5g) and says where.
-#[tauri::command]
-pub async fn install_resolve_script() -> Result<String, String> {
-    junctur_core::resolve::install().map(|i| i.script.display().to_string())
 }
 
 /// The voices Junctur remembers (5b).
