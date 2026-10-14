@@ -120,6 +120,7 @@ fn main() {
             commands::toggle_pause,
             commands::seek,
             commands::play_between,
+            commands::play_from,
             commands::pause_review,
             commands::end_review,
             commands::set_speed,

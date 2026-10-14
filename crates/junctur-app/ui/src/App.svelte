@@ -630,6 +630,7 @@
           thin={L.portrait}
           {wavesVersion}
           {spans}
+          edges={!reviewing}
           onView={setView}
           onSelect={(s) => (selection = s)}
           onError={(e) => (failure = e)}

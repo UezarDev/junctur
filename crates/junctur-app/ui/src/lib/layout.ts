@@ -136,7 +136,9 @@ export function layout(i: Input): Layout {
  * every state, so no label, timecode or button text moves anything (2g to 2o sized them by their
  * contents); the components draw themselves at exactly these, so `floatAt` and the box agree. */
 export const TOOLS = { w: 344, h: 84 };
-export const REVIEW = { w: 440, h: 128 };
+// Review is four rows since 2s (the clip's edges and their steppers got one): 156 = 2 x 10 padding,
+// 2 border, rows of 20, 26, 36 and 28, three 8px gaps.
+export const REVIEW = { w: 440, h: 156 };
 /** The bars' inset from the picture's bottom-right corner, their gap from a caption block, and the
  * least room kept to the video area's edges. */
 const INSET = 12;

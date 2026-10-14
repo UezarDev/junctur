@@ -9,10 +9,12 @@
   // over the lanes, sized by its contents and wrapping). A cut clip is what is being judged, so
   // review plays the whole file: the player (`play_between`) turns Skip cuts off for it and
   // `end_review` puts it back as it was and the speed back to 1x (there is no other speed control).
-  // App hands it the keys first.
+  // App hands it the keys first. Since 2s the clip's two edges have steppers (◀ ▶ a frame, shift
+  // ten), the cut that split a word moved where it sits: the frozen clips move with them (review.ts
+  // `moveEdge`) and the loop plays the moved clip again from its start.
   import { onMount, untrack } from "svelte";
   import * as api from "./api";
-  import { clips, holding, now, SPEEDS, type Clip } from "./review";
+  import { clips, holding, moveEdge, now, SPEEDS, type Clip } from "./review";
   import { clock, timecode, toFrame, toSeconds } from "./time";
   import { REVIEW } from "./layout";
 
@@ -35,10 +37,12 @@
   // the last one.
   const start = untrack(() => edit);
   const fps = start?.fps ?? null;
-  const list: Clip[] = start && fps ? clips(start) : [];
+  // Replaced (never changed in place) when an edge moves (2s).
+  const first: Clip[] = start && fps ? clips(start) : [];
+  let list = $state.raw(first);
   const total = start?.totalFrames ?? 0;
   const from = untrack(() => player?.frame ?? (fps && player?.position != null ? toFrame(player.position, fps) : 0));
-  let index = $state(holding(list, from));
+  let index = $state(holding(first, from));
   let speed = $state(1);
   // An edit or a move on its way: a second click waits for it, so two decisions never cross.
   let busy = $state(false);
@@ -98,6 +102,21 @@
       if (is !== (keep ? "kept" : "cut")) await api.editFrames(c.start, c.end, keep);
       await go(list.indexOf(c) + 1);
     });
+  }
+  // Moves the clip's `edge` a frame (shift: ten) earlier (-1) or later (2s), in the frozen list and,
+  // when it changes anything, in the live one, then plays the clip again: the loop restarts from
+  // its start and runs to its new end. Read against the engine's list, as `decide` is.
+  function move(edge: "start" | "end", dir: number, e: MouseEvent) {
+    const by = dir * (e.shiftKey ? 10 : 1);
+    press(e, () =>
+      step(async () => {
+        const m = moveEdge(list, index, edge, by, await api.editState());
+        if (!m) return;
+        list = m.list;
+        if (m.frames) await api.editFrames(m.frames.start, m.frames.end, m.frames.keep);
+        await play(list[index]);
+      }),
+    );
   }
   const back = () => step(() => go(index - 1));
   const skip = () => step(() => go(index + 1));
@@ -196,10 +215,20 @@
     {#if clip && fps}
       <span class="where mono" title="Clip {index + 1} of {list.length}">{index + 1} of {list.length}</span>
       <span class="kind" class:cut={!clip.kept}>{clip.kept ? `Range ${clip.index}` : "Cut"}</span>
-      <span class="times mono">{timecode(clip.start, fps)} – {timecode(clip.end, fps)}</span>
       <span class="len mono" title={length(clip)}>{length(clip)}</span>
     {:else}
       <span class="all">{list.length ? `All ${list.length} clips reviewed` : "No clips to review"}</span>
+    {/if}
+  </div>
+  <div class="row edges">
+    {#if clip && fps}
+      <button class="n" disabled={busy || index === 0} onclick={(e) => move("start", -1, e)} title="Start one frame earlier (shift: 10)" aria-label="Start one frame earlier">◀</button>
+      <span class="tc mono">{timecode(clip.start, fps)}</span>
+      <button class="n" disabled={busy || index === 0} onclick={(e) => move("start", 1, e)} title="Start one frame later (shift: 10)" aria-label="Start one frame later">▶</button>
+      <span class="dash">–</span>
+      <button class="n" disabled={busy || index === list.length - 1} onclick={(e) => move("end", -1, e)} title="End one frame earlier (shift: 10)" aria-label="End one frame earlier">◀</button>
+      <span class="tc mono">{timecode(clip.end, fps)}</span>
+      <button class="n" disabled={busy || index === list.length - 1} onclick={(e) => move("end", 1, e)} title="End one frame later (shift: 10)" aria-label="End one frame later">▶</button>
     {/if}
   </div>
   <div class="row decide">
@@ -258,9 +287,29 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .kind,
-  .times {
+  .kind {
     flex-shrink: 0;
+  }
+  /* The clip's edges and their steppers (2s), centred; as the range toolbar's. */
+  .edges {
+    height: 26px;
+    justify-content: center;
+    gap: 6px;
+  }
+  .n {
+    width: 28px;
+    height: 24px;
+    padding: 0;
+    font-size: 11px;
+  }
+  .dash {
+    color: var(--muted);
+  }
+  /* 11 figures: room for 10:00:00:00, so the hours never move the steppers. */
+  .tc {
+    width: 11ch;
+    text-align: center;
+    font-size: 13px;
   }
   .decide {
     height: 36px;
@@ -283,9 +332,6 @@
   }
   .kind.cut {
     color: var(--bad);
-  }
-  .times {
-    font-size: 12px;
   }
   .len {
     flex: 1 1 0;

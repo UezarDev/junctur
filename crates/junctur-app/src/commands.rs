@@ -354,6 +354,12 @@ pub async fn play_between(app: State<'_, App>, start: f64, end: f64) -> Result<(
     app.with(|p| p.play_between(start, end))
 }
 
+/// Plays from source second `at` (2s: from just before a dragged cut edge, so the move is heard).
+#[tauri::command]
+pub async fn play_from(app: State<'_, App>, at: f64) -> Result<(), String> {
+    app.with(|p| p.play_from(at))
+}
+
 /// Stops the loop and pauses, still in review (past the last clip).
 #[tauri::command]
 pub async fn pause_review(app: State<'_, App>) -> Result<(), String> {
