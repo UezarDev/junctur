@@ -102,9 +102,7 @@ fn write_request(
     fields.insert(0, ("kind", kind.into()));
     fields.insert(0, ("id", id.into()));
     // Written beside and renamed over, so the script never loads half a file.
-    let tmp = file.with_extension("lua.tmp");
-    std::fs::write(&tmp, lua::chunk(&Value::Table(fields)))
-        .and_then(|()| std::fs::rename(&tmp, file))
+    crate::output::write_replacing(file, lua::chunk(&Value::Table(fields)))
         .map_err(|e| format!("{}: {e}", file.display()))
 }
 
@@ -205,15 +203,19 @@ mod tests {
 
     #[test]
     fn the_request_file_is_a_lua_chunk_with_its_id_and_kind_first() {
-        let d = std::env::temp_dir().join(format!("junctur-resolve-bridge-{}", std::process::id()));
-        std::fs::create_dir_all(&d).unwrap();
+        let d = crate::test_support::scratch("resolve-bridge", "request");
         let f = d.join("request.lua");
         write_request(&f, "12", "info", vec![("template", "".into())]).unwrap();
         assert_eq!(
             std::fs::read_to_string(&f).unwrap(),
             "return {[\"id\"] = \"12\", [\"kind\"] = \"info\", [\"template\"] = \"\"}\n"
         );
-        assert!(!f.with_extension("lua.tmp").exists());
+        let names: Vec<_> = std::fs::read_dir(&d)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(names, ["request.lua"], "no temporary file is left");
         let _ = std::fs::remove_dir_all(&d);
         assert_ne!(next_id(), next_id());
     }

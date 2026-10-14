@@ -166,7 +166,9 @@ fn save_now(path: &Path, list: &EditList) -> std::io::Result<Saved> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e),
     };
-    let tmp = path.with_extension("junctur.tmp");
+    // Not `write_replacing`: the backup goes between writing the new text and the rename, so a
+    // failure to keep it leaves the list as it was.
+    let tmp = crate::output::temp_beside(path);
     std::fs::write(&tmp, &text)?;
     let result = replace(path, &tmp, old, &text);
     if result.is_err() {

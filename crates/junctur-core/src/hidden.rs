@@ -48,6 +48,8 @@ impl Lookup {
                 if !cfg!(windows) {
                     return None;
                 }
+                // Both variables as Windows sets them, never the XDG or HOME fallbacks of `paths`:
+                // hidden copies exist only under those two folders.
                 let local = std::env::var_os("LOCALAPPDATA")?;
                 let roaming = std::env::var_os("APPDATA");
                 Some(Lookup::new(

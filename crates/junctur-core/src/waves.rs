@@ -199,25 +199,20 @@ pub fn load(dir: &Path, tracks: usize) -> Option<Waves> {
     Some(w)
 }
 
-/// Writes `w` as [`FILE`] in `dir`, atomically (a reader never sees half of it): to a file of its
-/// own beside it, then renamed over it. Streamed, not gathered into one buffer first: 30 h of peaks
-/// is tens of megabytes the caller already holds once.
+/// Writes `w` as [`FILE`] in `dir`, atomically ([`output::write_replacing_with`]). Streamed, not
+/// gathered into one buffer first: 30 h of peaks is tens of megabytes the caller already holds once.
 pub fn save(dir: &Path, w: &Waves) -> Result<()> {
-    let path = dir.join(FILE);
-    let tmp = dir.join(format!("{FILE}.{}.tmp", std::process::id()));
-    let written = (|| -> std::io::Result<()> {
-        let mut f = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+    output::write_replacing_with(&dir.join(FILE), |file| {
+        let mut f = std::io::BufWriter::new(&mut *file);
         f.write_all(MAGIC)?;
         f.write_all(&(w.tracks as u32).to_le_bytes())?;
         f.write_all(&RATE.to_le_bytes())?;
         f.write_all(&w.data)?;
-        f.into_inner().map_err(|e| e.into_error())?.sync_all()?;
-        output::rename_over(&tmp, &path)
-    })();
-    if written.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    Ok(written?)
+        f.flush()?;
+        drop(f);
+        file.sync_all()
+    })?;
+    Ok(())
 }
 
 /// Reads the peaks of tracks `0..tracks` of `file` to `duration` seconds (a short track is padded

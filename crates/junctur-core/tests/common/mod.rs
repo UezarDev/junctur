@@ -4,9 +4,10 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-/// `junctur-<kind>-<pid>-<name>` in the temp folder, made if missing.
+/// A fresh, empty `junctur-<kind>-<name>-<pid>` in the temp folder, as the unit tests' `scratch`.
 pub fn workdir(kind: &str, name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("junctur-{kind}-{}-{name}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("junctur-{kind}-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
 }

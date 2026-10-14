@@ -97,6 +97,7 @@ pub fn regions(probs: &[f32], offset: f64) -> Vec<Region> {
         raw.push(span(s, probs.len(), offset));
     }
     // The raw spans come from one forward scan, so a joined one's end is the later span's.
+    debug_assert!(raw.windows(2).all(|w| w[0].end <= w[1].start));
     let mut merged = crate::spans::joined(raw, crate::spans::Join::Within(MIN_GAP_S));
     merged.retain(|r| r.end - r.start >= MIN_SPEECH_S);
     merged

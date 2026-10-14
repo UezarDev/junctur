@@ -41,7 +41,14 @@ fn backs_up_only_what_someone_else_wrote() {
     let fourth = save(&path, &list(4.0)).unwrap();
     assert_eq!(read("edit.junctur.bak2").as_deref(), Some("hand edit 2"));
     assert!(fourth.replaced_unreadable);
-    assert_eq!(read("edit.junctur.tmp"), None, "renamed away");
+    let names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names.iter().all(|n| !n.ends_with(".tmp")),
+        "renamed away: {names:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

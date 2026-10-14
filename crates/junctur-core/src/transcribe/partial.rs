@@ -187,8 +187,6 @@ pub(super) fn open_partial(
         body.push('\n');
     }
     // Through a temp file, so a kill now still leaves the old partial to resume from.
-    let tmp = path.with_extension("jsonl.tmp");
-    std::fs::write(&tmp, body)?;
-    crate::output::rename_over(&tmp, path)?;
+    crate::output::write_replacing(path, body)?;
     Ok(std::fs::OpenOptions::new().append(true).open(path)?)
 }
