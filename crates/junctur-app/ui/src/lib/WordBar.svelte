@@ -85,7 +85,8 @@
 
   // Fix text (5x). The field is for the stretch it was opened on. Leaving it saves what was typed,
   // as 5t's one-word field does on leaving: another selection (a Shift+click extending it), the
-  // selection cleared, the bar gone (5x repair: the draft was dropped). Escape, and the field's own
+  // selection cleared, the bar gone (5x repair: the draft was dropped), the Fix text button pressed
+  // again to close it. Escape, and the field's own
   // ×, leave the text as it was, as 5t's Escape does.
   let draft = $state("");
   let shown = "";
@@ -194,7 +195,11 @@
     <button onclick={() => call(() => sel.apply(selection, true))} title="Keep every selected stretch (K)">Keep</button>
     <button
       disabled={!one}
-      onclick={() => (retyping = !retyping)}
+      onclick={() => {
+        // Closing the field by its button saves what was typed, as leaving it does.
+        if (retyping) leave();
+        retyping = !retyping;
+      }}
       title={one
         ? "Retype these words as one text: shown in the transcript and the captions in their place (double-click a selection does this too)"
         : "Select one stretch of words to fix its text: one text cannot go in several places"}>Fix text</button

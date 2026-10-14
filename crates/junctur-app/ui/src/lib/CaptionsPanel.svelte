@@ -179,6 +179,8 @@
         choice = "newTrack";
         remember = false;
         inTheWay = { clips: r.inTheWay, captions: r.blocked };
+        // On Replace, the timeline made beside the old one, which is kept until captions land.
+        sentLines = r.note ? [r.note] : null;
         return false;
       }
       const n = (k: number, what: string) => `${k.toLocaleString()} ${what}`;

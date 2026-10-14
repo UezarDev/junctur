@@ -3,6 +3,8 @@
 //! `place` (its captions) and, for Replace, `finish` (the old timeline deleted, the new one given
 //! its name). The old timeline goes last, once the new one has its captions, so a send that fails
 //! part way never costs it; and once a timeline has been made, every error says what is in Resolve.
+//! Replace does not finish either when captions were asked for and none landed on the new one
+//! (every one refused), or when 5n's `place` stopped to ask about clips in the way.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -93,6 +95,29 @@ pub fn run(
         })?;
         reply::sent(&done, made)
     };
+    if replace && !cues.is_empty() {
+        // 5n asking first placed nothing and waits for the user's answer: the old timeline stays
+        // until a send has its captions on the new one.
+        if sent.in_the_way > 0 {
+            sent.note = Some(format!(
+                "Timeline \"{made}\" was made in Resolve beside \"{name}\", which is untouched: \
+                 nothing was replaced"
+            ));
+            return Ok(Outcome::Sent(sent));
+        }
+        // Every caption refused (a template with no Text+, every append refused): replacing would
+        // swap the old timeline for one with no captions at all.
+        if sent.placed + sent.restyled == 0 {
+            let why = sent
+                .first_error
+                .as_deref()
+                .unwrap_or("Resolve placed none of them");
+            return Err(format!(
+                "Timeline \"{made}\" was made in Resolve beside \"{name}\", which is untouched, \
+                 but none of its captions were placed, so nothing was replaced: {why}"
+            ));
+        }
+    }
     if replace {
         let done = link
             .request(
@@ -381,6 +406,80 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("is still there"), "{e}");
+    }
+
+    #[test]
+    fn replace_keeps_the_old_timeline_when_no_caption_landed() {
+        // Every caption refused: the old one is kept, the made one named, finish never asked.
+        let mut f = Fake::new(&["rec (Junctur)"]).built("rec (Junctur) (new)");
+        f.answers.insert(
+            "place",
+            Ok(vec![
+                ("placed", "0".into()),
+                ("failed", "1".into()),
+                ("firstError", "the template has no Text+".into()),
+            ]),
+        );
+        let e = run(
+            &mut f,
+            &cues(),
+            &edit(),
+            &Captions::default(),
+            Some(Answer::Replace),
+        )
+        .unwrap_err();
+        assert_eq!(f.kinds(), ["check", "build", "place"]);
+        assert!(
+            e.contains("\"rec (Junctur) (new)\" was made")
+                && e.contains("\"rec (Junctur)\", which is untouched")
+                && e.contains("nothing was replaced")
+                && e.contains("no Text+"),
+            "{e}"
+        );
+        // 5n asking (clips in the way): nothing placed, the user to answer; no finish either.
+        let mut f = Fake::new(&["rec (Junctur)"]).built("rec (Junctur) (new)");
+        f.answers.insert(
+            "place",
+            Ok(vec![("inTheWay", "2".into()), ("blocked", "3".into())]),
+        );
+        let s = sent(
+            run(
+                &mut f,
+                &cues(),
+                &edit(),
+                &Captions::default(),
+                Some(Answer::Replace),
+            )
+            .unwrap(),
+        );
+        assert_eq!(f.kinds(), ["check", "build", "place"]);
+        assert_eq!((s.in_the_way, s.replaced), (2, false));
+        assert!(s.note.unwrap().contains("which is untouched"));
+        // Some captions placed and some failed: Replace finishes, as 5z decided.
+        let mut f = Fake::new(&["rec (Junctur)"]).built("rec (Junctur) (new)");
+        f.answers.insert(
+            "place",
+            Ok(vec![("placed", "1".into()), ("failed", "1".into())]),
+        );
+        f.answers.insert(
+            "finish",
+            Ok(vec![
+                ("replaced", "true".into()),
+                ("name", "rec (Junctur)".into()),
+            ]),
+        );
+        let s = sent(
+            run(
+                &mut f,
+                &cues(),
+                &edit(),
+                &Captions::default(),
+                Some(Answer::Replace),
+            )
+            .unwrap(),
+        );
+        assert_eq!(f.kinds(), ["check", "build", "place", "finish"]);
+        assert!(s.replaced);
     }
 
     #[test]
