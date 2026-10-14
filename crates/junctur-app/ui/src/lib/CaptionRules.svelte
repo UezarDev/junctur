@@ -5,13 +5,15 @@
   // 5d, underline, 5f; `look`: font, size, position, outline, 5g; `overlap`: layout and
   // protagonist, 5g; `resolve`: the Text+ template, 5g; `cut`: how cues are cut, 5a, and the word
   // limit, 5i; `text`: case, punctuation, censoring and replacements, 5j, in `CaptionText`)
-  // and Settings shows together (`all`); a field added to `Captions` goes into one part
-  // and shows in both. Number fields commit on change, inside the engine's limits (core
+  // and Settings places under the same headings (2t; `all` shows every part at once); a field
+  // added to `Captions` goes into one part and shows in both. Each is a `Field`, its explanation
+  // behind an (i) rather than in a `title` (2t). Number fields commit on change, inside the engine's limits (core
   // edit/captions.rs); anything else snaps back to `value`. `names` (the recording's
   // speakers, in the panel) are offered as protagonists; any name can be
   // typed, so Settings' default can name a remembered voice.
   import type { CaptionLayout, Captions } from "./api";
   import CaptionText from "./CaptionText.svelte";
+  import Field from "./Field.svelte";
 
   type Part = "switches" | "style" | "look" | "overlap" | "resolve" | "cut" | "text" | "all";
 
@@ -49,20 +51,20 @@
   const WHOLE = new Set(["chars", "lines", "words", "outlineWidth"]);
 
   const LAYOUTS: { key: CaptionLayout; label: string }[] = [
-    { key: "stacked", label: "Stacked, the later one above" },
+    { key: "stacked", label: "Stacked" },
     { key: "side", label: "Side by side" },
-    { key: "topBottom", label: "One at the bottom, one at the top" },
+    { key: "topBottom", label: "Top and bottom" },
   ];
 
   type Flag = "on" | "preview" | "bold" | "italic" | "underline" | "outline";
-  const SWITCHES: { key: Flag; label: string; title: string }[] = [
-    { key: "on", label: "Export captions", title: "On: rendering also writes the captions (.srt) beside the video" },
-    { key: "preview", label: "Preview captions", title: "Shows the captions over the video as it plays, as the export cuts them" },
+  const SWITCHES: { key: Flag; label: string; info: string }[] = [
+    { key: "on", label: "Export captions", info: "Rendering also writes the captions (.srt) beside the video." },
+    { key: "preview", label: "Preview captions", info: "Shows the captions over the video as it plays, cut as the export cuts them." },
   ];
-  const STYLE: { key: Flag; label: string; title: string }[] = [
-    { key: "bold", label: "Bold", title: "Every caption bold, in the SRT and in Resolve's Text+" },
-    { key: "italic", label: "Italic", title: "Every caption italic, in the SRT and in Resolve's Text+" },
-    { key: "underline", label: "Underline", title: "Every caption underlined, in the SRT and in Resolve's Text+" },
+  const STYLE: { key: Flag; label: string }[] = [
+    { key: "bold", label: "Bold" },
+    { key: "italic", label: "Italic" },
+    { key: "underline", label: "Underline" },
   ];
 
   function flag(e: Event, key: Flag) {
@@ -94,150 +96,108 @@
   }
 </script>
 
-{#snippet checks(list: { key: Flag; label: string; title: string }[])}
-  {#each list as s (s.key)}
-    <label class="check" title={s.title}>
-      <input type="checkbox" checked={value[s.key]} {disabled} onchange={(e) => flag(e, s.key)} />
-      {s.label}
-    </label>
-  {/each}
+{#snippet check(key: Flag, label: string, info?: string)}
+  <Field kind="check" {label} {info}>
+    {#snippet children(id)}
+      <input {id} type="checkbox" checked={value[key]} {disabled} onchange={(e) => flag(e, key)} />
+    {/snippet}
+  </Field>
 {/snippet}
 
-{#snippet num(key: "size" | "position" | "outlineWidth", step: number, unit: string)}
-  <label class="field">
-    <span>{LIMITS[key].name}{unit}</span>
-    <input
-      type="number"
-      min={LIMITS[key].min}
-      max={LIMITS[key].max}
-      {step}
-      value={value[key]}
-      {disabled}
-      onchange={(e) => number(e, key)}
-    />
-  </label>
-{/snippet}
-
-{#if shows("switches")}{@render checks(SWITCHES)}{/if}
-{#if shows("style")}{@render checks(STYLE)}{/if}
-{#if shows("look")}
-  <label class="field">
-    <span>Font</span>
-    <input class="name" value={value.font} {disabled} onchange={(e) => text(e, "font", true)} />
-  </label>
-  {@render num("size", 0.5, " (% of height)")}
-  {@render num("position", 1, " (%)")}
-  <label class="check" title="An outline round the letters of the Text+ captions and the preview">
-    <input type="checkbox" checked={value.outline} {disabled} onchange={(e) => flag(e, "outline")} />
-    Outline
-  </label>
-  {#if value.outline}
-    {@render num("outlineWidth", 1, "")}
-    <label class="field">
-      <span>Outline colour</span>
+{#snippet num(key: keyof typeof LIMITS, label: string, step: number, info?: string)}
+  <Field {label} {info}>
+    {#snippet children(id)}
       <input
-        type="color"
-        value={value.outlineColor}
+        {id}
+        type="number"
+        min={LIMITS[key].min}
+        max={LIMITS[key].max}
+        {step}
+        value={value[key]}
         {disabled}
-        onchange={(e) => onChange({ ...value, outlineColor: (e.currentTarget as HTMLInputElement).value.toUpperCase() })}
+        onchange={(e) => number(e, key)}
       />
-    </label>
+    {/snippet}
+  </Field>
+{/snippet}
+
+{#if shows("switches")}
+  {#each SWITCHES as s (s.key)}{@render check(s.key, s.label, s.info)}{/each}
+{/if}
+{#if shows("style")}
+  <div class="inline">{#each STYLE as s (s.key)}{@render check(s.key, s.label)}{/each}</div>
+{/if}
+{#if shows("look")}
+  <Field label="Font">
+    {#snippet children(id)}
+      <input {id} value={value.font} {disabled} onchange={(e) => text(e, "font", true)} />
+    {/snippet}
+  </Field>
+  {@render num("size", "Size (%)", 0.5, "Line height, as a share of the picture's height.")}
+  {@render num("position", "Height from the bottom (%)", 1, "Where the captions' bottom edge sits, as a share of the picture's height.")}
+  {@render check("outline", "Outline", "An outline round the letters, in the preview and in Resolve's Text+.")}
+  {#if value.outline}
+    {@render num("outlineWidth", LIMITS.outlineWidth.name, 1)}
+    <Field label="Outline colour">
+      {#snippet children(id)}
+        <input
+          {id}
+          type="color"
+          value={value.outlineColor}
+          {disabled}
+          onchange={(e) => onChange({ ...value, outlineColor: (e.currentTarget as HTMLInputElement).value.toUpperCase() })}
+        />
+      {/snippet}
+    </Field>
   {/if}
 {/if}
 {#if shows("overlap")}
-  <label class="field">
-    <span>People talking at once</span>
-    <select
-      value={value.layout}
-      {disabled}
-      onchange={(e) => onChange({ ...value, layout: (e.currentTarget as HTMLSelectElement).value as CaptionLayout })}
-    >
-      {#each LAYOUTS as l (l.key)}<option value={l.key}>{l.label}</option>{/each}
-    </select>
-  </label>
-  <label class="field" title="This speaker's caption always stays at the normal spot; the others move round it">
-    <span>Protagonist</span>
-    <input
-      class="name"
-      list={listId}
-      placeholder="None"
-      value={value.protagonist}
-      {disabled}
-      onchange={(e) => text(e, "protagonist", false)}
-    />
-    <datalist id={listId}>{#each names as n (n)}<option value={n}></option>{/each}</datalist>
-  </label>
+  <Field label="Layout" info="Stacked puts the later speaker above; top and bottom puts one at the bottom, one at the top.">
+    {#snippet children(id)}
+      <select
+        {id}
+        value={value.layout}
+        {disabled}
+        onchange={(e) => onChange({ ...value, layout: (e.currentTarget as HTMLSelectElement).value as CaptionLayout })}
+      >
+        {#each LAYOUTS as l (l.key)}<option value={l.key}>{l.label}</option>{/each}
+      </select>
+    {/snippet}
+  </Field>
+  <Field label="Protagonist" info="This speaker's caption keeps the normal spot; the others move round it.">
+    {#snippet children(id)}
+      <input {id} list={listId} placeholder="None" value={value.protagonist} {disabled} onchange={(e) => text(e, "protagonist", false)} />
+    {/snippet}
+  </Field>
+  <datalist id={listId}>{#each names as n (n)}<option value={n}></option>{/each}</datalist>
 {/if}
 {#if shows("resolve")}
-  <label class="field" title="The name of a Text+ title in Resolve's media pool to copy for every caption; empty for Junctur's own">
-    <span>Resolve template</span>
-    <input
-      class="name"
-      placeholder="Junctur's Text+"
-      value={value.template}
-      {disabled}
-      onchange={(e) => text(e, "template", false)}
-    />
-  </label>
+  <Field
+    label="Resolve template"
+    info="A Text+ title in Resolve's media pool to copy for every caption; empty for Junctur's own. Yours keeps its shadow and background."
+  >
+    {#snippet children(id)}
+      <input {id} placeholder="Junctur's Text+" value={value.template} {disabled} onchange={(e) => text(e, "template", false)} />
+    {/snippet}
+  </Field>
 {/if}
 {#if shows("cut")}
-  <label class="field">
-    <span>{LIMITS.chars.name}</span>
-    <input type="number" min="10" max="80" value={value.chars} {disabled} onchange={(e) => number(e, "chars")} />
-  </label>
-  <label class="field">
-    <span>{LIMITS.lines.name}</span>
-    <input type="number" min="1" max="3" value={value.lines} {disabled} onchange={(e) => number(e, "lines")} />
-  </label>
-  <label
-    class="field"
-    title="Most words a caption holds, for each speaker when people talk at once; 1 shows one word at a time, 0 has no limit"
-  >
-    <span>{LIMITS.words.name} (0: no limit)</span>
-    <input type="number" min="0" max="20" value={value.words} {disabled} onchange={(e) => number(e, "words")} />
-  </label>
-  <label class="field">
-    <span>{LIMITS.seconds.name} (s)</span>
-    <input
-      type="number"
-      min="1"
-      max="15"
-      step="0.5"
-      value={value.seconds}
-      {disabled}
-      onchange={(e) => number(e, "seconds")}
-    />
-  </label>
+  {@render num("chars", LIMITS.chars.name, 1)}
+  {@render num("lines", LIMITS.lines.name, 1)}
+  {@render num(
+    "words",
+    LIMITS.words.name,
+    1,
+    "Most words a caption holds, per speaker when people talk at once. 1 shows one word at a time; 0 is no limit.",
+  )}
+  {@render num("seconds", "Longest caption (s)", 0.5)}
 {/if}
 {#if shows("text")}<CaptionText {value} {disabled} {onChange} {onError} />{/if}
 
 <style>
-  .check {
+  .inline {
     display: flex;
-    gap: 8px;
-    align-items: center;
-    margin: 6px 0;
-  }
-  .field {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin: 6px 0;
-  }
-  .field {
-    gap: 8px;
-  }
-  .field input[type="number"] {
-    width: 72px;
-  }
-  .field input.name,
-  .field select {
-    width: 150px;
-    min-width: 0;
-  }
-  .field input[type="color"] {
-    width: 40px;
-    height: 24px;
-    padding: 0;
+    flex-wrap: wrap;
+    gap: 0 20px;
   }
 </style>
