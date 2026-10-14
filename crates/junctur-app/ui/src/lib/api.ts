@@ -367,6 +367,9 @@ export const seek = (seconds: number, exact: boolean) =>
  * the speed to 1x and Skip cuts back; opening or closing a recording ends it too. `pauseReview`
  * stops the loop and pauses, still in review. */
 export const playBetween = (start: number, end: number) => invoke<void>("play_between", { start, end });
+/** 2s: plays from source second `at`, unpaused (after a cut's edge is dragged, from just before it).
+ * Refused in review. */
+export const playFrom = (at: number) => invoke<void>("play_from", { at });
 export const pauseReview = () => invoke<void>("pause_review");
 export const endReview = () => invoke<void>("end_review");
 /** Playback speed, 0.25 to 4 (2o). */

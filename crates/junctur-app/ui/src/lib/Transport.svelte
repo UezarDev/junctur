@@ -3,7 +3,7 @@
   // lanes. Play, the skip toggle, the clocks, the whole recording as an overview (outlining the
   // window the lanes show) and, at the right end, the lanes' zoom. The track controls that were
   // here (2a's track select, 2e's strips) live on the lanes and the portrait strips; editing
-  // sits over the lanes (ActionBar). Review (2o) goes through the clips one at a time; while it
+  // sits on the picture (ActionBar, 2r). Review (2o) goes through the clips one at a time; while it
   // runs, Skip cuts stays off (review plays the cuts it judges).
   import * as api from "./api";
   import Timeline from "./Timeline.svelte";

@@ -24,7 +24,7 @@
   import * as steps from "./lib/steps";
   import TitleBar from "./lib/TitleBar.svelte";
   import SettingsDialog from "./lib/SettingsDialog.svelte";
-  import { layout, TITLE } from "./lib/layout";
+  import { floatAt, layout, REVIEW, TITLE, TOOLS } from "./lib/layout";
   import type { MenuId } from "./lib/menus";
   import { Talk, same } from "./lib/talking";
   import * as sel from "./lib/selection";
@@ -64,7 +64,7 @@
   let words = $state.raw<Words | null>(null);
   let wordsLoading = $state(false);
   let selection = $state<sel.Selection | null>(null);
-  // Review mode (2o): one clip at a time in the range toolbar's place; it takes the keys first.
+  // Review mode (2o): one clip at a time in the range toolbar's corner; it takes the keys first.
   let reviewing = $state(false);
   let reviewer = $state<Review | null>(null);
   let panelOpen = $state(true);
@@ -442,7 +442,11 @@
     if (settingsOpen) return;
     // A field keeps every key, the title bar's shortcuts too (2i): Ctrl+W from a caption number
     // not yet committed would close the recording before its change is saved.
-    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+    // A textarea or anything editable keeps them too (2r: Backspace in the Captions panel's lists
+    // cut the lanes selection, and in review would have removed the clip).
+    const t = e.target;
+    if (t instanceof HTMLInputElement || t instanceof HTMLSelectElement || t instanceof HTMLTextAreaElement) return;
+    if (t instanceof HTMLElement && t.isContentEditable) return;
     if (reviewing && reviewer?.key(e)) {
       e.preventDefault();
       return;
@@ -499,14 +503,13 @@
     }
   }
 
-  // Where the edit actions go (and review's bar, 2o): one fixed place, centred over the lanes' tracks just above their
-  // bottom edge, with or without a selection. 2g put them at the selection, else at the playhead,
-  // so the bar slid along while playing or scrubbing and was never where the hand left it (2n).
-  const actionsAt = $derived.by(() => {
-    const left = L.lanes.x + L.head + 1;
-    const w = Math.max(1, L.lanes.w - L.head - 1);
-    return { x: left + w / 2, min: left + 4, max: L.lanes.x + L.lanes.w - 4, bottom: windowHeight - TITLE - (L.lanes.y + L.lanes.h) + 8 };
-  });
+  // Where the edit actions go, and review's bar (2o): the picture's bottom-right corner, risen
+  // above the caption block when the captions preview would sit under them (2r, layout.ts
+  // `floatAt`). 2n had them centred over the lanes, where they hid the cuts; 2g at the selection or
+  // the playhead, so they slid along while playing.
+  const band = $derived(edit?.editable && edit.captions?.preview ? { ...edit.captions, speakers: edit.speakers.length } : null);
+  const toolsAt = $derived(floatAt(L.picture, L.video, TOOLS, band));
+  const reviewAt = $derived(floatAt(L.picture, L.video, REVIEW, band));
 
   onMount(() => {
     // A transcription started before the page (a reload) has sent no event yet; one that has wins.
@@ -627,6 +630,7 @@
           thin={L.portrait}
           {wavesVersion}
           {spans}
+          edges={!reviewing}
           onView={setView}
           onSelect={(s) => (selection = s)}
           onError={(e) => (failure = e)}
@@ -634,14 +638,14 @@
       </div>
     {/if}
     {#if reviewing}
-      <Review bind:this={reviewer} {player} {edit} at={actionsAt} onDone={() => (reviewing = false)} onError={(e) => (failure = e)} />
+      <Review bind:this={reviewer} {player} {edit} at={reviewAt} onDone={() => (reviewing = false)} onError={(e) => (failure = e)} />
     {:else}
       <ActionBar
         {player}
         {edit}
         {selection}
         wordsShown={panelWidth > 0 && tab === "transcript"}
-        at={actionsAt} onSelect={(s) => (selection = s)} onError={(e) => (failure = e)} />
+        at={toolsAt} onSelect={(s) => (selection = s)} onError={(e) => (failure = e)} />
     {/if}
   {/if}
 
