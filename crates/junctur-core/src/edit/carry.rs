@@ -103,141 +103,163 @@ pub fn carry(fixes: &mut Vec<Fix>, carried: &[Carried], words: &[(usize, &Word)]
             let b = on.partition_point(|&i| heard[i].start <= c.to + NEAR);
             &on[a..b.max(a)]
         };
-        if !c.fix.is_span() {
-            let likes: HashSet<String> = [
-                likeness(c.heard.first().map_or("", String::as_str)),
-                likeness(&c.fix.text),
-            ]
-            .into_iter()
-            .filter(|l| !l.is_empty())
-            .collect();
-            let best = near
-                .iter()
-                .copied()
-                .filter(|&i| {
-                    let h = &heard[i];
-                    !taken[i]
-                        && h.end >= c.from - NEAR
-                        && h.start <= c.to + NEAR
-                        && likes.contains(h.like)
-                })
-                .min_by(|&a, &b| {
-                    (heard[a].start - c.from)
-                        .abs()
-                        .total_cmp(&(heard[b].start - c.from).abs())
-                });
-            let Some(i) = best else {
-                gone(&mut report);
-                continue;
-            };
-            let h = &heard[i];
-            let kept = as_heard(c);
-            // As a spread writes it: a fix that kept the punctuation it was heard with
-            // takes the new word's own ("Vayne," onto a "Bane." heard now).
-            let text = if kept {
-                // As heard now, which a fix may not always hold (a word over `MAX_FIX`).
-                match check_fix(h.text) {
-                    Ok(t) if !t.is_empty() => t,
-                    _ => {
-                        gone(&mut report);
-                        continue;
-                    }
-                }
-            } else {
-                let was = c.heard.first().map_or("", String::as_str);
-                match check_fix(&Text::of(was, &c.fix.text).on(h.text)) {
-                    Ok(t) if !t.is_empty() => t,
-                    _ => c.fix.text.clone(),
-                }
-            };
-            let new = Fix {
-                track: h.track,
-                start: h.at.start,
-                nth: h.at.nth,
-                through: None,
-                text,
-            };
-            if fixes.iter().any(|f| f.overlaps(&new)) {
-                gone(&mut report);
-                continue;
-            }
-            taken[i] = true;
-            if h.text == new.text && !kept {
-                report.right += 1;
-                continue;
-            }
-            fixes.push(new);
-            report.kept += 1;
+        let landed = if c.fix.is_span() {
+            carry_span(c, near, &heard, &mut taken, fixes)
         } else {
-            // The same words heard again near where they were, else whatever is said in its time.
-            let inside = again(c, near, &heard, &taken).unwrap_or_else(|| {
-                near.iter()
-                    .copied()
-                    .filter(|&i| {
-                        let mid = (heard[i].start + heard[i].end) / 2.0;
-                        mid >= c.from && mid <= c.to
-                    })
-                    .collect()
-            });
-            if inside.is_empty() || inside.iter().any(|&i| taken[i]) {
-                gone(&mut report);
-                continue;
+            carry_word(c, near, &heard, &mut taken, fixes)
+        };
+        match landed {
+            Landed::Gone => gone(&mut report),
+            Landed::Right => report.right += 1,
+            Landed::Kept(new) => {
+                fixes.push(new);
+                report.kept += 1;
             }
-            let said: Vec<&str> = inside.iter().map(|&i| heard[i].text).collect();
-            let kept = as_heard(c);
-            if check_span(&said.join(" ")).ok() == check_span(&c.fix.text).ok() && !kept {
-                for &i in &inside {
-                    taken[i] = true;
-                }
-                report.right += 1;
-                continue;
-            }
-            // Kept as heard: the new words as said, which can be longer than a span's text may be
-            // (past `MAX_SPAN` the list would not read back). Set aside then.
-            let text = if kept {
-                match check_span(&said.join(" ")) {
-                    Ok(t) if !t.is_empty() => t,
-                    _ => {
-                        gone(&mut report);
-                        continue;
-                    }
-                }
-            } else {
-                c.fix.text.clone()
-            };
-            let (a, b) = (
-                &heard[inside[0]],
-                &heard[*inside.last().expect("not empty")],
-            );
-            let through = (inside.len() > 1).then_some(b.at);
-            // A sentence now heard as one word is not made a one-word fix of several words: a
-            // spread would put that sentence on every word heard like it. Set aside.
-            if through.is_none()
-                && (text.split_whitespace().count() > 1 || check_fix(&text).is_err())
-            {
-                gone(&mut report);
-                continue;
-            }
-            let new = Fix {
-                track: a.track,
-                start: a.at.start,
-                nth: a.at.nth,
-                through,
-                text,
-            };
-            if fixes.iter().any(|f| f.overlaps(&new)) {
-                gone(&mut report);
-                continue;
-            }
-            for &i in &inside {
-                taken[i] = true;
-            }
-            fixes.push(new);
-            report.kept += 1;
         }
     }
     fixes::sort(fixes);
     report
+}
+
+/// Where one carried fix lands ([`carry_word`], [`carry_span`]).
+enum Landed {
+    /// No word to go to as it was: set aside.
+    Gone,
+    /// The new words are heard as the fix says: not needed.
+    Right,
+    /// The fix on the new words.
+    Kept(Fix),
+}
+
+/// [`carry`] of the word fix `c` onto the nearest new word `near` holds that reads as heard or as
+/// the fix; the word is marked `taken`.
+fn carry_word(
+    c: &Carried,
+    near: &[usize],
+    heard: &[Heard],
+    taken: &mut [bool],
+    fixes: &[Fix],
+) -> Landed {
+    let likes: HashSet<String> = [
+        likeness(c.heard.first().map_or("", String::as_str)),
+        likeness(&c.fix.text),
+    ]
+    .into_iter()
+    .filter(|l| !l.is_empty())
+    .collect();
+    let best = near
+        .iter()
+        .copied()
+        .filter(|&i| {
+            let h = &heard[i];
+            !taken[i] && h.end >= c.from - NEAR && h.start <= c.to + NEAR && likes.contains(h.like)
+        })
+        .min_by(|&a, &b| {
+            (heard[a].start - c.from)
+                .abs()
+                .total_cmp(&(heard[b].start - c.from).abs())
+        });
+    let Some(i) = best else {
+        return Landed::Gone;
+    };
+    let h = &heard[i];
+    let kept = as_heard(c);
+    // As a spread writes it: a fix that kept the punctuation it was heard with
+    // takes the new word's own ("Vayne," onto a "Bane." heard now).
+    let text = if kept {
+        // As heard now, which a fix may not always hold (a word over `MAX_FIX`).
+        match check_fix(h.text) {
+            Ok(t) if !t.is_empty() => t,
+            _ => return Landed::Gone,
+        }
+    } else {
+        let was = c.heard.first().map_or("", String::as_str);
+        match check_fix(&Text::of(was, &c.fix.text).on(h.text)) {
+            Ok(t) if !t.is_empty() => t,
+            _ => c.fix.text.clone(),
+        }
+    };
+    let new = Fix {
+        track: h.track,
+        start: h.at.start,
+        nth: h.at.nth,
+        through: None,
+        text,
+    };
+    if fixes.iter().any(|f| f.overlaps(&new)) {
+        return Landed::Gone;
+    }
+    taken[i] = true;
+    if h.text == new.text && !kept {
+        return Landed::Right;
+    }
+    Landed::Kept(new)
+}
+
+/// [`carry`] of the span `c` onto the same words heard again near where they were, else whatever
+/// `near` has said in its time; those words are marked `taken`.
+fn carry_span(
+    c: &Carried,
+    near: &[usize],
+    heard: &[Heard],
+    taken: &mut [bool],
+    fixes: &[Fix],
+) -> Landed {
+    // The same words heard again near where they were, else whatever is said in its time.
+    let inside = again(c, near, heard, taken).unwrap_or_else(|| {
+        near.iter()
+            .copied()
+            .filter(|&i| {
+                let mid = (heard[i].start + heard[i].end) / 2.0;
+                mid >= c.from && mid <= c.to
+            })
+            .collect()
+    });
+    if inside.is_empty() || inside.iter().any(|&i| taken[i]) {
+        return Landed::Gone;
+    }
+    let said: Vec<&str> = inside.iter().map(|&i| heard[i].text).collect();
+    let kept = as_heard(c);
+    if check_span(&said.join(" ")).ok() == check_span(&c.fix.text).ok() && !kept {
+        for &i in &inside {
+            taken[i] = true;
+        }
+        return Landed::Right;
+    }
+    // Kept as heard: the new words as said, which can be longer than a span's text may be
+    // (past `MAX_SPAN` the list would not read back). Set aside then.
+    let text = if kept {
+        match check_span(&said.join(" ")) {
+            Ok(t) if !t.is_empty() => t,
+            _ => return Landed::Gone,
+        }
+    } else {
+        c.fix.text.clone()
+    };
+    let (a, b) = (
+        &heard[inside[0]],
+        &heard[*inside.last().expect("not empty")],
+    );
+    let through = (inside.len() > 1).then_some(b.at);
+    // A sentence now heard as one word is not made a one-word fix of several words: a
+    // spread would put that sentence on every word heard like it. Set aside.
+    if through.is_none() && (text.split_whitespace().count() > 1 || check_fix(&text).is_err()) {
+        return Landed::Gone;
+    }
+    let new = Fix {
+        track: a.track,
+        start: a.at.start,
+        nth: a.at.nth,
+        through,
+        text,
+    };
+    if fixes.iter().any(|f| f.overlaps(&new)) {
+        return Landed::Gone;
+    }
+    for &i in &inside {
+        taken[i] = true;
+    }
+    Landed::Kept(new)
 }
 
 /// A retimed word as the transcript about to be replaced has it: what [`carry_times`]

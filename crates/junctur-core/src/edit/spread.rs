@@ -252,7 +252,62 @@ pub fn spread_with(
     let heard = read(words, &index.likes);
     let tracks = &index.tracks;
     let mut taken = covered(fixes, words);
-    let sources: Vec<&Fix> = match which {
+    let rules = rules(&sources(fixes, which), &heard, tracks);
+    let (starts, place) = (&index.starts, &index.place);
+    for (like, text) in &rules {
+        let Some(text) = text else {
+            out.unclear.push(like.join(" "));
+            continue;
+        };
+        let Some(firsts) = starts.get(like[0].as_str()) else {
+            continue;
+        };
+        for &i in firsts {
+            let on = &tracks[&heard[i].track];
+            let run = &on[place[i]..];
+            if run.len() < like.len() {
+                continue;
+            }
+            let run = &run[..like.len()];
+            if run.iter().any(|&j| taken[j])
+                || run.iter().zip(like).any(|(&j, l)| heard[j].like != *l)
+            {
+                continue;
+            }
+            let Some(fix) = fix_on(run, text, &heard) else {
+                continue;
+            };
+            // A fix whose words the transcript no longer has (left in the list, shown on no word)
+            // can still lie inside this run's keys; the list would not read back with both.
+            if fixes
+                .iter()
+                .chain(added.iter().map(|(f, _)| f))
+                .any(|f| f.overlaps(&fix))
+            {
+                continue;
+            }
+            for &j in run {
+                taken[j] = true;
+            }
+            let said: Vec<&str> = run.iter().map(|&j| heard[j].text).collect();
+            added.push((fix, said.join(" ")));
+        }
+    }
+    added.sort_by(|a, b| {
+        a.0.start
+            .total_cmp(&b.0.start)
+            .then(a.0.track.cmp(&b.0.track))
+            .then(a.0.nth.cmp(&b.0.nth))
+    });
+    (out.added, out.heard) = added.into_iter().unzip();
+    fixes.extend(out.added.iter().cloned());
+    fixes::sort(fixes);
+    out
+}
+
+/// The fixes [`spread_with`] spreads from: every one, or the one `which` names.
+fn sources(fixes: &[Fix], which: Which) -> Vec<&Fix> {
+    match which {
         Which::All => fixes.iter().collect(),
         Which::Words { track, first, last } => {
             let ends = (
@@ -264,11 +319,18 @@ pub fn spread_with(
                 .filter(|f| f.track == track && f.ends() == ends)
                 .collect()
         }
-    };
-    // Each heard run (its words' likenesses) and what it becomes; `None` once two fixes disagree.
-    let mut rules: Vec<(Vec<String>, Option<Text>)> = Vec::new();
-    for f in sources {
-        let at = words_of(f, &heard, tracks);
+    }
+}
+
+/// Each heard run (its words' likenesses) and what it becomes; `None` once two fixes disagree.
+type Rules = Vec<(Vec<String>, Option<Text>)>;
+
+/// The rules `sources` give on the words `heard`: a fix whose words are gone, or that only changes
+/// the punctuation around what was heard, gives none.
+fn rules(sources: &[&Fix], heard: &[Heard], tracks: &HashMap<usize, Vec<usize>>) -> Rules {
+    let mut rules: Rules = Vec::new();
+    for &f in sources {
+        let at = words_of(f, heard, tracks);
         if at.is_empty() {
             continue;
         }
@@ -300,80 +362,35 @@ pub fn spread_with(
             None => rules.push((like, Some(text))),
         }
     }
-    let (starts, place) = (&index.starts, &index.place);
-    for (like, text) in &rules {
-        let Some(text) = text else {
-            out.unclear.push(like.join(" "));
-            continue;
-        };
-        let Some(firsts) = starts.get(like[0].as_str()) else {
-            continue;
-        };
-        for &i in firsts {
-            let on = &tracks[&heard[i].track];
-            let run = &on[place[i]..];
-            if run.len() < like.len() {
-                continue;
-            }
-            let run = &run[..like.len()];
-            if run.iter().any(|&j| taken[j])
-                || run.iter().zip(like).any(|(&j, l)| heard[j].like != *l)
-            {
-                continue;
-            }
-            let (a, b) = (&heard[run[0]], &heard[*run.last().expect("not empty")]);
-            let fix = if run.len() == 1 {
-                let Ok(t) = check_fix(&text.on(a.text)) else {
-                    continue;
-                };
-                if t.is_empty() || t == check_fix(a.text).unwrap_or_default() {
-                    continue;
-                }
-                Fix {
-                    track: a.track,
-                    start: a.at.start,
-                    nth: a.at.nth,
-                    through: None,
-                    text: t,
-                }
-            } else {
-                let Ok(t) = check_span(&text.on(a.text)) else {
-                    continue;
-                };
-                Fix {
-                    track: a.track,
-                    start: a.at.start,
-                    nth: a.at.nth,
-                    through: Some(b.at),
-                    text: t,
-                }
-            };
-            // A fix whose words the transcript no longer has (left in the list, shown on no word)
-            // can still lie inside this run's keys; the list would not read back with both.
-            if fixes
-                .iter()
-                .chain(added.iter().map(|(f, _)| f))
-                .any(|f| f.overlaps(&fix))
-            {
-                continue;
-            }
-            for &j in run {
-                taken[j] = true;
-            }
-            let said: Vec<&str> = run.iter().map(|&j| heard[j].text).collect();
-            added.push((fix, said.join(" ")));
+    rules
+}
+
+/// `text` as a fix on the words `run` (one word, or a span of them); `None` when it would not be
+/// a fix there (one a word cannot hold, or a word already saying it).
+fn fix_on(run: &[usize], text: &Text, heard: &[Heard]) -> Option<Fix> {
+    let (a, b) = (&heard[run[0]], &heard[*run.last().expect("not empty")]);
+    if run.len() == 1 {
+        let t = check_fix(&text.on(a.text)).ok()?;
+        if t.is_empty() || t == check_fix(a.text).unwrap_or_default() {
+            return None;
         }
+        Some(Fix {
+            track: a.track,
+            start: a.at.start,
+            nth: a.at.nth,
+            through: None,
+            text: t,
+        })
+    } else {
+        let t = check_span(&text.on(a.text)).ok()?;
+        Some(Fix {
+            track: a.track,
+            start: a.at.start,
+            nth: a.at.nth,
+            through: Some(b.at),
+            text: t,
+        })
     }
-    added.sort_by(|a, b| {
-        a.0.start
-            .total_cmp(&b.0.start)
-            .then(a.0.track.cmp(&b.0.track))
-            .then(a.0.nth.cmp(&b.0.nth))
-    });
-    (out.added, out.heard) = added.into_iter().unzip();
-    fixes.extend(out.added.iter().cloned());
-    fixes::sort(fixes);
-    out
 }
 
 /// "Undo those": each fix of `added` (a [`spread`]'s, `heard` beside it) still as it was in
@@ -400,11 +417,11 @@ pub fn keep_heard(fixes: &mut [Fix], added: &[Fix], heard: &[String]) -> usize {
     n
 }
 
-#[cfg(test)]
-mod tests;
-
 /// Both name the same words with the same text (a fix read back from the list may differ from the one
 /// it was written from in the last bits of its start).
 pub(super) fn same(a: &Fix, b: &Fix) -> bool {
     a.track == b.track && a.ends() == b.ends() && a.text == b.text
 }
+
+#[cfg(test)]
+mod tests;
