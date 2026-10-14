@@ -2,7 +2,7 @@
 // the Captions panel and Settings' caption defaults show them, so the two screens cannot drift.
 // The panel puts its own sections (Speakers, Export, Remembered voices) between these.
 
-export type CaptionPart = "switches" | "style" | "overlap" | "text" | "cut" | "resolve";
+export type CaptionPart = "switches" | "style" | "motion" | "overlap" | "text" | "cut" | "resolve";
 
 export const CAPTION_SECTIONS: { part: CaptionPart; title: string; info?: string }[] = [
   { part: "switches", title: "Export and preview" },
@@ -10,6 +10,11 @@ export const CAPTION_SECTIONS: { part: CaptionPart; title: string; info?: string
     part: "style",
     title: "Style",
     info: "The preview and Send to Resolve use all of these. An SRT carries only the colour, bold, italic and underline: in Resolve the rest is the subtitle track's style (Inspector > Track). If a Track Style change misses bold or italic SRT captions, turn those off.",
+  },
+  {
+    part: "motion",
+    title: "Highlight and animation",
+    info: "Resolve and the preview only; the SRT ignores them. Each caption then becomes an animated caption, a heavier Fusion clip than a plain Text+: thousands of them on an hour-long recording can slow Resolve down, so both are off by default. They need Junctur's own template.",
   },
   {
     part: "overlap",

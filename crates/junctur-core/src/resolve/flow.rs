@@ -3,8 +3,12 @@
 //! `place` (its captions) and, for Replace, `finish` (the old timeline deleted, the new one given
 //! its name). The old timeline goes last, once the new one has its captions, so a send that fails
 //! part way never costs it; and once a timeline has been made, every error says what is in Resolve.
+//! Replace does not finish either when captions were asked for and none landed on the new one
+//! (every one refused), or when 5n's `place` stopped to ask about clips in the way.
 //! "Update captions only" (5ab) is `check`, `open` (the timeline there made current, nothing
 //! changed) and `place`: 5g's tagged captions restyled, removed or placed, nothing else touched.
+//! That is where 5n's clips in the way can be met: the user's own clips on Junctur's tracks of a
+//! timeline already there; `place` then asks, and the answer is sent again as an update.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -27,7 +31,10 @@ pub trait Link {
     fn write_timeline(&mut self, edit: &EditList) -> Result<PathBuf, String>;
 }
 
-/// A 5g script still running in Resolve after Junctur installed a newer one answers `check` so.
+/// What a send says when the script running in Resolve is older than this Junctur: a 5g script
+/// answers `check` as unknown, and one that knows `check` but is older than
+/// [`reply::SCRIPT`] would ignore what `place` asks of it now (5l's highlight, 5m's kept look,
+/// 5n's question before placing over the user's clips).
 pub const OLD_SCRIPT: &str = "The Junctur script running in Resolve is from an older Junctur: in \
      Resolve choose Workspace > Scripts > Junctur again, then send again";
 
@@ -57,6 +64,10 @@ pub fn run(
         return Err(NO_CAPTIONS.into());
     }
     let names = link.request("check", vec![]).map_err(older)?;
+    // Before anything is written or made: the version 5n checked in `info`, now in `check`.
+    if !reply::script_is_current(&names) {
+        return Err(OLD_SCRIPT.into());
+    }
     let wanted = timeline::name(edit);
     let (name, replace) = match timeline::decide(&reply::timeline_names(&names), &wanted, answer)? {
         timeline::Decision::Ask => return Ok(Outcome::Exists { name: wanted }),
@@ -73,6 +84,8 @@ pub fn run(
             ("source", edit.source.to_string_lossy().into_owned().into()),
             ("captions", (!cues.is_empty()).into()),
             ("template", job::template(c).into()),
+            // The animated caption (5l) when the highlight or an animation is on.
+            ("animated", c.animated().into()),
         ],
     )?;
     let timeline = reply::timeline(&built)?;
@@ -92,6 +105,29 @@ pub fn run(
         })?;
         reply::sent(&done, made)
     };
+    if replace && !cues.is_empty() {
+        // 5n asking first placed nothing and waits for the user's answer: the old timeline stays
+        // until a send has its captions on the new one.
+        if sent.in_the_way > 0 {
+            sent.note = Some(format!(
+                "Timeline \"{made}\" was made in Resolve beside \"{name}\", which is untouched: \
+                 nothing was replaced"
+            ));
+            return Ok(Outcome::Sent(sent));
+        }
+        // Every caption refused (a template with no Text+, every append refused): replacing would
+        // swap the old timeline for one with no captions at all.
+        if sent.placed + sent.restyled == 0 {
+            let why = sent
+                .first_error
+                .as_deref()
+                .unwrap_or("Resolve placed none of them");
+            return Err(format!(
+                "Timeline \"{made}\" was made in Resolve beside \"{name}\", which is untouched, \
+                 but none of its captions were placed, so nothing was replaced: {why}"
+            ));
+        }
+    }
     if replace {
         let done = link
             .request(
@@ -144,7 +180,12 @@ fn update(
     let opened = link
         .request(
             "open",
-            vec![("name", name.into()), ("template", job::template(c).into())],
+            vec![
+                ("name", name.into()),
+                ("template", job::template(c).into()),
+                // The animated caption (5l), looked up as `build` looks it up.
+                ("animated", c.animated().into()),
+            ],
         )
         .map_err(older)?;
     // `open` may have switched Resolve to the timeline before its answer went wrong.
@@ -208,7 +249,10 @@ mod tests {
 
     impl Fake {
         fn new(timelines: &[&str]) -> Self {
-            let mut check = vec![("timelines", timelines.len().to_string())];
+            let mut check = vec![
+                ("timelines", timelines.len().to_string()),
+                ("script", reply::SCRIPT.to_string()),
+            ];
             let keys = ["timeline1", "timeline2", "timeline3"];
             for (k, t) in timelines.iter().enumerate() {
                 check.push((keys[k], t.to_string()));
@@ -309,6 +353,7 @@ mod tests {
             parts: vec![Part {
                 speaker: 1,
                 lines: vec!["hola".into()],
+                words: Vec::new(),
             }],
         }]
     }
@@ -351,6 +396,8 @@ mod tests {
         assert_eq!(f.field("build", "name"), Some("rec (Junctur) 2"));
         assert_eq!(f.field("build", "replace"), Some("false"));
         assert_eq!(f.field("build", "file"), Some(r"C:\J\timeline.fcpxml"));
+        // 5l's animated caption is asked for only with the highlight or an animation on.
+        assert_eq!(f.field("build", "animated"), Some("false"));
         assert_eq!(f.field("place", "timeline"), Some("T-9"));
         assert_eq!(
             (s.placed, s.replaced, s.timeline.as_str()),
@@ -459,6 +506,80 @@ mod tests {
     }
 
     #[test]
+    fn replace_keeps_the_old_timeline_when_no_caption_landed() {
+        // Every caption refused: the old one is kept, the made one named, finish never asked.
+        let mut f = Fake::new(&["rec (Junctur)"]).built("rec (Junctur) (new)");
+        f.answers.insert(
+            "place",
+            Ok(vec![
+                ("placed", "0".into()),
+                ("failed", "1".into()),
+                ("firstError", "the template has no Text+".into()),
+            ]),
+        );
+        let e = run(
+            &mut f,
+            &cues(),
+            &edit(),
+            &Captions::default(),
+            Some(Answer::Replace),
+        )
+        .unwrap_err();
+        assert_eq!(f.kinds(), ["check", "build", "place"]);
+        assert!(
+            e.contains("\"rec (Junctur) (new)\" was made")
+                && e.contains("\"rec (Junctur)\", which is untouched")
+                && e.contains("nothing was replaced")
+                && e.contains("no Text+"),
+            "{e}"
+        );
+        // 5n asking (clips in the way): nothing placed, the user to answer; no finish either.
+        let mut f = Fake::new(&["rec (Junctur)"]).built("rec (Junctur) (new)");
+        f.answers.insert(
+            "place",
+            Ok(vec![("inTheWay", "2".into()), ("blocked", "3".into())]),
+        );
+        let s = sent(
+            run(
+                &mut f,
+                &cues(),
+                &edit(),
+                &Captions::default(),
+                Some(Answer::Replace),
+            )
+            .unwrap(),
+        );
+        assert_eq!(f.kinds(), ["check", "build", "place"]);
+        assert_eq!((s.in_the_way, s.replaced), (2, false));
+        assert!(s.note.unwrap().contains("which is untouched"));
+        // Some captions placed and some failed: Replace finishes, as 5z decided.
+        let mut f = Fake::new(&["rec (Junctur)"]).built("rec (Junctur) (new)");
+        f.answers.insert(
+            "place",
+            Ok(vec![("placed", "1".into()), ("failed", "1".into())]),
+        );
+        f.answers.insert(
+            "finish",
+            Ok(vec![
+                ("replaced", "true".into()),
+                ("name", "rec (Junctur)".into()),
+            ]),
+        );
+        let s = sent(
+            run(
+                &mut f,
+                &cues(),
+                &edit(),
+                &Captions::default(),
+                Some(Answer::Replace),
+            )
+            .unwrap(),
+        );
+        assert_eq!(f.kinds(), ["check", "build", "place", "finish"]);
+        assert!(s.replaced);
+    }
+
+    #[test]
     fn no_captions_build_the_timeline_alone() {
         let mut f = Fake::new(&[]).built("rec (Junctur)");
         let s = sent(run(&mut f, &[], &edit(), &Captions::default(), None).unwrap());
@@ -472,6 +593,20 @@ mod tests {
         let mut f = Fake::default();
         let e = run(&mut f, &cues(), &edit(), &Captions::default(), None).unwrap_err();
         assert_eq!(e, OLD_SCRIPT);
+        // A script that knows `check` but is older than this Junctur (a 5z one from before the
+        // caption rounds met it, or none said): refused before anything is written or made.
+        for old in [None, Some("5n")] {
+            let mut f = Fake::new(&[]).built("rec (Junctur)");
+            if let Some(Ok(check)) = f.answers.get_mut("check") {
+                check.retain(|(k, _)| *k != "script");
+                if let Some(v) = old {
+                    check.push(("script", v.to_string()));
+                }
+            }
+            let e = run(&mut f, &cues(), &edit(), &Captions::default(), None).unwrap_err();
+            assert_eq!(e, OLD_SCRIPT);
+            assert_eq!((f.kinds(), f.written), (vec!["check"], 0));
+        }
         let mut f = Fake::new(&["rec (Junctur)", "REC (Junctur)"]).built("x");
         let e = run(
             &mut f,
@@ -487,6 +622,35 @@ mod tests {
 
     fn update(f: &mut Fake, cues: &[Cue]) -> Result<Outcome, String> {
         run(f, cues, &edit(), &Captions::default(), Some(Answer::Update))
+    }
+
+    #[test]
+    fn an_update_meeting_clips_in_the_way_asks_and_the_answer_is_an_update_again() {
+        // 5n on 5ab's update: the timeline there has the user's clips on Junctur's tracks, so
+        // `place` (asking) places nothing and counts them; nothing is built or finished.
+        let mut f = Fake::new(&["rec (Junctur)"]).opened("rec (Junctur)", "120");
+        f.answers.insert(
+            "place",
+            Ok(vec![("inTheWay", "2".into()), ("blocked", "3".into())]),
+        );
+        let s = sent(update(&mut f, &cues()).unwrap());
+        assert_eq!(f.kinds(), ["check", "open", "place"]);
+        assert_eq!(f.field("place", "existing"), Some("ask"));
+        assert_eq!(f.field("open", "animated"), Some("false"));
+        assert_eq!(
+            (s.in_the_way, s.blocked, s.updated, f.written),
+            (2, 3, true, 0)
+        );
+        // The user's answer goes with the same Update: on the same timeline, never a new one.
+        let mut f = Fake::new(&["rec (Junctur)"]).opened("rec (Junctur)", "120");
+        let c = Captions {
+            existing_clips: crate::edit::ExistingClips::Replace,
+            ..Default::default()
+        };
+        let s = sent(run(&mut f, &cues(), &edit(), &c, Some(Answer::Update)).unwrap());
+        assert_eq!(f.kinds(), ["check", "open", "place"]);
+        assert_eq!(f.field("place", "existing"), Some("replace"));
+        assert!(s.updated && s.placed == 1);
     }
 
     #[test]

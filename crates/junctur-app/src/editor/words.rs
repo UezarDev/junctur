@@ -217,6 +217,12 @@ pub struct TranscriptView {
     pub speaker: Vec<u32>,
     /// Someone else who says the word too (5b: two people talking at once), 0 for none.
     pub also: Vec<u32>,
+    /// How sure Whisper was of the word (5o): its lowest token probability in whole percent, rounded
+    /// down, which the panel flags under the user's threshold. [`NOT_FLAGGED`] when there is nothing
+    /// to flag it by: a transcript from before 5o, or a word the user fixed or confirmed (5h's fix
+    /// lines), or one inside a span the user retyped (5x). The threshold is the page's to apply,
+    /// so changing it needs no new words.
+    pub sure: Vec<u8>,
     /// The audio track each word was heard on (5x: words starting together on one track open as one
     /// field).
     pub track: Vec<u32>,
@@ -225,6 +231,17 @@ pub struct TranscriptView {
     pub span: Vec<u32>,
     /// Each span's text, in the order their first words come.
     pub spans: Vec<String>,
+}
+
+/// [`TranscriptView::sure`] of a word that is never flagged, above every percentage. The page has
+/// the same number as `NOT_FLAGGED` (`ui/src/lib/transcript.ts`).
+pub const NOT_FLAGGED: u8 = u8::MAX;
+
+/// `p` (0..1) in whole percent, rounded down, so a word at 39.9 % is under a threshold of 40. In
+/// f64 with a hair added (repair): `0.35_f32` is 0.34999999 and must read as 35, not 34, while a real
+/// 34.99 % stays 34.
+fn percent(p: f32) -> u8 {
+    (f64::from(p.clamp(0.0, 1.0)) * 100.0 + 1e-4).floor() as u8
 }
 
 impl TranscriptView {
@@ -244,13 +261,23 @@ impl TranscriptView {
                 )
             })
             .unzip();
+        // One pass, each word read once: `Fixes` counts the words of a millisecond as they are read
+        // (5w), so a word read twice, or one skipped, would give the next one another's fix.
         let mut text = Vec::with_capacity(w.len());
+        let mut sure = Vec::with_capacity(w.len());
         let mut span = Vec::with_capacity(w.len());
         // Each span's id here (1-based), by its place in `fixes`.
         let mut ids: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
         let mut spans: Vec<String> = Vec::new();
         for (w, &t) in w.iter().zip(&words.tracks) {
-            let (shown, id) = match fixed.of(t, w) {
+            let fix = fixed.of(t, w);
+            // A word the user fixed or confirmed (5o), or one in a span they retyped (5x), is
+            // vouched for: never flagged.
+            sure.push(match (w.p_min, fix) {
+                (Some(p), None) => percent(p),
+                _ => NOT_FLAGGED,
+            });
+            let (shown, id) = match fix {
                 Some(Fixed::Word(fix)) => (fix, 0),
                 Some(Fixed::Span { index, text }) => {
                     let id = *ids.entry(index).or_insert_with(|| {
@@ -270,6 +297,7 @@ impl TranscriptView {
             end: w.iter().map(|w| ms(w.end)).collect(),
             speaker,
             also,
+            sure,
             track: words.tracks.iter().map(|&t| t as u32).collect(),
             span,
             spans,
@@ -287,6 +315,7 @@ mod tests {
             end,
             text: text.into(),
             p: 1.0,
+            p_min: None,
         }
     }
 
@@ -378,6 +407,62 @@ mod tests {
         assert_eq!(v.text, vec!["uno", "Uezar", "tres"]);
     }
 
+    /// 5o: each word's confidence in percent, none for a word from an older transcript or one the
+    /// user fixed or confirmed (a fix line with the heard text).
+    #[test]
+    fn a_word_is_sure_as_its_weakest_piece_until_the_user_checks_it() {
+        let sure = |p: Option<f32>, start: f64, text: &str| Word {
+            p_min: p,
+            ..word(start, start + 0.4, text)
+        };
+        let w = Words::from_words(vec![
+            sure(Some(0.399), 10.0, "uno"),
+            sure(Some(1.0), 10.5, "Wezar"),
+            sure(None, 11.0, "viejo"),
+            sure(Some(0.05), 11.5, "Tsunejo"),
+            sure(Some(0.2), 12.0, "bien"),
+        ]);
+        let none = Speakers::default();
+        let v = TranscriptView::new(&w, &none, &[]);
+        assert_eq!(v.sure, vec![39, 100, NOT_FLAGGED, 5, 20]);
+        let fix = |start: f64, text: &str| Fix {
+            track: 0,
+            start,
+            nth: 0,
+            through: None,
+            text: text.into(),
+        };
+        // "Tsunejo" fixed, "bien" confirmed (its own text): neither is flagged any more.
+        let v = TranscriptView::new(&w, &none, &[fix(11.5, "Tsunheto"), fix(12.0, "bien")]);
+        assert_eq!(v.sure, vec![39, 100, NOT_FLAGGED, NOT_FLAGGED, NOT_FLAGGED]);
+        assert_eq!(v.text[3..], ["Tsunheto", "bien"]);
+        // 5x: a span retyped over "uno" to "viejo" vouches for every word in it; the words after it
+        // are still read once each, in order, and flagged as before.
+        let span = Fix {
+            through: Some(junctur_core::edit::WordAt {
+                start: 11.0,
+                nth: 0,
+            }),
+            ..fix(10.0, "one old")
+        };
+        let v = TranscriptView::new(&w, &none, &[span]);
+        assert_eq!(v.sure, vec![NOT_FLAGGED, NOT_FLAGGED, NOT_FLAGGED, 5, 20]);
+        assert_eq!(v.span, vec![1, 1, 1, 0, 0]);
+        assert_eq!(v.spans, ["one old"]);
+    }
+
+    /// Repair: a probability of exactly k % reads as k, so it is not under a threshold of k.
+    #[test]
+    fn a_whole_percentage_is_not_read_one_lower() {
+        for k in 0..=100u8 {
+            assert_eq!(percent(k as f32 / 100.0), k, "{k} %");
+        }
+        assert_eq!(percent(0.35), 35);
+        assert_eq!(percent(0.3499), 34);
+        assert_eq!(percent(0.2499), 24);
+        assert_eq!((percent(-0.1), percent(1.5)), (0, 100));
+    }
+
     #[test]
     fn a_fix_shows_on_its_own_word_of_those_starting_together() {
         // 5w: "en" and "él" start at one millisecond (the 2026-06-15 recording); a fix on "él"
@@ -402,6 +487,33 @@ mod tests {
         };
         let v = TranscriptView::new(&w, &Speakers::default(), &[fix]);
         assert_eq!(v.text, ["manada", "en", "yes", "miel", "y"]);
+    }
+
+    /// 5o with 5w: a confirmation (a fix line with the heard text) of one of the words starting in one
+    /// millisecond unflags that word alone, whatever words before it carry no probability, and the
+    /// words after it read their own text.
+    #[test]
+    fn a_confirmed_word_of_those_starting_together_is_the_only_one_unflagged() {
+        let at = |start: f64, p: Option<f32>, text: &str| Word {
+            p_min: p,
+            ..word(start, start + 0.2, text)
+        };
+        let w = Words::from_words(vec![
+            at(54.944, None, "en"),
+            at(54.944, Some(0.2), "él"),
+            at(54.944, Some(0.3), "la"),
+            at(55.5, Some(0.1), "y"),
+        ]);
+        let confirm = Fix {
+            track: 0,
+            start: 54.944,
+            nth: w.nth(1),
+            through: None,
+            text: "él".into(),
+        };
+        let v = TranscriptView::new(&w, &Speakers::default(), &[confirm]);
+        assert_eq!(v.sure, vec![NOT_FLAGGED, NOT_FLAGGED, 30, 10]);
+        assert_eq!(v.text, ["en", "él", "la", "y"]);
     }
 
     #[test]

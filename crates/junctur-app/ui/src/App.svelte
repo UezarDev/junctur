@@ -80,6 +80,9 @@
   let windowWidth = $state(window.innerWidth);
   let windowHeight = $state(window.innerHeight);
   let settingsOpen = $state(false);
+  // The transcript flags words Whisper was less sure of than this (5o, Settings); none until read.
+  // The default (25) is the core's `config::FLAG_BELOW`, sent with the settings; not repeated here.
+  let flagBelow = $state(0);
   // Each open counts one up, and so does a close (2i): an open's answers that arrive after a close,
   // or after a newer open, are dropped. `closedAt` is the count a close left, so an open that lost
   // to a close (nothing opened since) closes again what the player opened meanwhile.
@@ -436,7 +439,8 @@
   }
 
   // A model change surfaces as 2d's out-of-date notice for the open recording; nothing re-runs.
-  function settingsSaved() {
+  function settingsSaved(v: api.SettingsView) {
+    flagBelow = v.settings.flagBelow;
     const o = opened;
     if (!o) return;
     api.outdated(o.file).then(
@@ -541,6 +545,10 @@
   onMount(() => {
     // A transcription started before the page (a reload) has sent no event yet; one that has wins.
     api.transcription().then((t) => (lane ??= t), () => {});
+    api.settings().then(
+      (v) => (flagBelow = v.settings.flagBelow),
+      () => {},
+    );
     api.playerState().then(
       async (s) => {
         player = s;
@@ -710,6 +718,7 @@
           {player}
           {edit}
           {selection}
+          {flagBelow}
           {reviewing}
           onSelect={(s) => (selection = s)}
           onError={(e) => (failure = e)}
