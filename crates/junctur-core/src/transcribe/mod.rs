@@ -78,6 +78,10 @@ pub struct TranscribeOptions {
     pub device: DevicePref,
     pub languages: Languages,
     pub force: bool,
+    /// Hear the recording again (5aa: the Correct button): an interrupted run is not resumed and the
+    /// finished transcript not reused, but it stays until the new one replaces it, unlike `force`,
+    /// which deletes it first: a run stopped early still leaves the words it had.
+    pub again: bool,
     /// The user's word list (5h), told to Whisper before every chunk. Neither in the partial's
     /// header nor in [`answers`]: a changed list applies to the next run and never restarts or
     /// outdates one.
@@ -157,6 +161,12 @@ fn partial_path(project: &Path) -> std::path::PathBuf {
     project.join("transcript.partial.jsonl")
 }
 
+/// A run of `project`'s transcription was started and has not finished: its partial file is there,
+/// and the next run resumes it.
+pub fn interrupted(project: &Path) -> bool {
+    partial_path(project).is_file()
+}
+
 /// Seconds of the recording heard as one piece (2j): Uezar's "5 minutes at a time". Every track's
 /// chunks that start in a piece are transcribed before any chunk of the next one, so the first
 /// piece is whole minutes in, not once track 1 is done hours later.
@@ -222,6 +232,8 @@ pub fn transcribe(
     if opts.force {
         let _ = std::fs::remove_file(&partial);
         let _ = std::fs::remove_file(path(project));
+    } else if opts.again {
+        let _ = std::fs::remove_file(&partial);
     } else if partial.is_file() {
         // A newer run was interrupted after this transcript was written: resume that run below
         // rather than hand back what it was replacing.
@@ -727,6 +739,18 @@ impl Transcript {
     pub fn words(&self) -> impl Iterator<Item = &Word> {
         self.segments.iter().flat_map(|s| &s.words)
     }
+
+    /// Every word with its track in time order, ties in transcript order (a stable sort by start):
+    /// the order the editor's words are in and `edit::Fixes` reads words in (5w).
+    pub fn in_order(&self) -> Vec<(usize, &Word)> {
+        let mut out: Vec<(usize, &Word)> = self
+            .segments
+            .iter()
+            .flat_map(|s| s.words.iter().map(move |w| (s.track, w)))
+            .collect();
+        out.sort_by(|a, b| a.1.start.total_cmp(&b.1.start));
+        out
+    }
 }
 
 #[cfg(test)]
@@ -1012,5 +1036,57 @@ mod tests {
         let mut other = t("large-v3-turbo");
         other.languages = vec!["en".into()];
         assert!(!reusable(&other, &opts(ModelPref::Auto)));
+    }
+
+    #[test]
+    fn again_drops_a_partial_and_never_reuses_the_finished_transcript() {
+        // 5aa: the Correct button hears the recording again. With nothing to hear (no sources) the
+        // run is a finish without Whisper, which shows what it starts from.
+        let dir = std::env::temp_dir().join(format!("junctur-again-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = Transcript {
+            choice: Choice {
+                model: "large-v3-turbo".into(),
+                device: Device::Cpu,
+                note: None,
+            },
+            languages: Languages::default().allowed,
+            segments: vec![],
+            audio_s: 42.0,
+            elapsed_s: 0.0,
+            resumed_chunks: 0,
+        };
+        std::fs::write(path(&dir), serde_json::to_vec(&old).unwrap()).unwrap();
+        let run = |opts: &TranscribeOptions| {
+            transcribe(
+                &dir.join("rec.mp4"),
+                &[],
+                10.0,
+                &dir,
+                &dir,
+                opts,
+                &mut |_| {},
+                Reports {
+                    reach: &mut |_, _| {},
+                    transcribed: &mut |_| {},
+                    between: &mut || {},
+                },
+            )
+            .unwrap()
+        };
+        // Without it the finished transcript answers.
+        assert_eq!(run(&TranscribeOptions::default()).audio_s, 42.0);
+        // With it a partial of an older run is not resumed and the transcript is made anew.
+        std::fs::write(partial_path(&dir), "torn").unwrap();
+        assert!(interrupted(&dir));
+        let opts = TranscribeOptions {
+            again: true,
+            ..Default::default()
+        };
+        assert_eq!(run(&opts).audio_s, 0.0);
+        assert!(!interrupted(&dir));
+        assert_eq!(load(&dir).unwrap().audio_s, 0.0);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

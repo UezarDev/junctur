@@ -115,6 +115,12 @@ impl Words {
         }
     }
 
+    /// Every word with its track, in the list's order: the order `edit::Fixes` and `edit::spread`
+    /// read a transcript in (5w, 5aa).
+    pub fn in_order(&self) -> Vec<(usize, &Word)> {
+        self.tracks.iter().copied().zip(self.list.iter()).collect()
+    }
+
     /// The words' times with `times` (the list's retimed words, 2w) in place; `None` when no word
     /// is retimed and the heard times are the ones. Read in list order, the order the fixes and the
     /// captions read the words in (a stable sort by heard start), which counts each word's `nth`.

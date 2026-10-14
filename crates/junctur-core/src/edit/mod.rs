@@ -16,6 +16,7 @@ mod save;
 mod scores;
 mod speakers;
 mod splice;
+mod spread;
 mod times;
 
 use std::path::PathBuf;
@@ -27,8 +28,8 @@ pub use captions::{
     default_color, parse_color, title_name, Animation, Captions, ExistingClips, Layout,
 };
 pub use fixes::{
-    check_fix, check_span, confirm_fix, same_millisecond, set_fix, set_span, Fix, Fixed, Fixes,
-    WordAt, MAX_FIX, MAX_SPAN,
+    check_fix, check_span, clash, confirm_fix, same_millisecond, set_fix, set_span, Fix, Fixed,
+    Fixes, WordAt, MAX_FIX, MAX_SPAN,
 };
 pub use format::{parse, FORMAT_VERSION};
 pub use frames::{frame_ranges, frame_span, frames_ceil, frames_floor};
@@ -39,6 +40,9 @@ pub use speakers::{
     check_name, default_name, Labeller, Person, SpeakerName, Speakers, Turn, MAX_NAME,
 };
 pub use splice::{cut_span, keep_span};
+pub use spread::{
+    carry, keep_heard, likeness, snapshot, spread, Carried, CarryReport, Spread, Which,
+};
 pub use times::{set_time, to_ms, Retime, Times};
 
 /// A kept stretch of the source, in seconds.

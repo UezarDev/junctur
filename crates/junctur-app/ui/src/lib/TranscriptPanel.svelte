@@ -12,6 +12,9 @@
   // it. Several words fixed as one text (5x: a sentence retyped) show as that text, selected and lit
   // whole; a double-click inside a selection of several words, on such a text, or on a word starting
   // in the same millisecond as its neighbours (5w) opens the word bar's field for all of them.
+  // A fix lands on every other word heard the same way too (5aa); a line under the header says how
+  // many, with Undo those. The word bar's Correct does that for every fix, then hears the speakers and
+  // the words again (App asks first and starts the run).
   // Words Whisper was unsure of are underlined (5o) and stepped through from the header; "Looks
   // right", which confirms the one flagged word selected, is among the word actions at the bottom
   // (2p's place for them). A fixed or confirmed word, or one in a retyped text, is not flagged (the
@@ -51,6 +54,7 @@
     reviewing = false,
     onSelect,
     onError,
+    correct,
   }: {
     words: Words | null;
     loading: boolean;
@@ -73,6 +77,8 @@
     reviewing?: boolean;
     onSelect: (s: sel.Selection | null) => void;
     onError: (message: string) => void;
+    /** The Correct button (5aa): asks, starts the run; its answer, or null when not started. */
+    correct: () => Promise<api.Corrected | null>;
   } = $props();
 
   const ROW = 24;
@@ -283,10 +289,7 @@
     fixing = fixOpen = null;
     if (!save || i == null || !words || fixDraft.trim() === words.text[i]) return;
     const text = fixDraft;
-    call(async () => {
-      const added = await api.fixWord(i, text);
-      if (added) tellLearned(added);
-    });
+    call(async () => tellFixed(await api.fixWord(i, text)));
   }
 
   // A fix whose spelling joined the word list (5h's `settings::learn`) says so for a moment in the
@@ -298,12 +301,74 @@
   // Cleared when the panel goes: `fixWord` can answer after that (5t repair), and a timer set then
   // would outlive the panel.
   let mounted = false;
-  function tellLearned(entries: string | string[]) {
-    const all = typeof entries === "string" ? [entries] : entries;
+  function tellLearned(all: string[]) {
     if (!mounted || !all.length) return;
     learned = all.map((e) => `"${e}"`).join(", ");
     clearTimeout(learnedTimer);
     learnedTimer = window.setTimeout(() => (learned = null), LEARNED_MS);
+  }
+
+  // What a fix also did elsewhere (5aa), under the header for a while: "Also fixed 2 other places"
+  // with Undo those (the engine takes back only those still as it made them), or what Correct
+  // started. A newer fix's line replaces it.
+  // Correct's line stays until dismissed: its run goes on for a while, and its Undo with it.
+  const NOTE_MS = 20000;
+  let note = $state<{ text: string; others: api.Fix[]; heard: string[] } | null>(null);
+  let noteTimer = 0;
+  function tell(text: string, others: api.Fix[] = [], heard: string[] = [], stay = false) {
+    if (!mounted) return;
+    note = { text, others, heard };
+    clearTimeout(noteTimer);
+    if (!stay) noteTimer = window.setTimeout(() => (note = null), NOTE_MS);
+  }
+  function places(n: number): string {
+    return `${n.toLocaleString()} other place${n === 1 ? "" : "s"}`;
+  }
+  function tellFixed(r: api.Fixed) {
+    tellLearned(r.learned);
+    if (r.others.length) tell(`Also fixed ${places(r.others.length)} heard the same way.`, r.others, r.heard);
+  }
+  // Kept as heard rather than taken away (5aa): a later Correct, or the spread after its
+  // transcription, would otherwise give those words the fix again.
+  async function undoOthers() {
+    const n = note;
+    note = null;
+    if (!n?.others.length) return;
+    await call(async () => {
+      if ((await api.keepHeard(n.others, n.heard)) === 0) {
+        tell("Nothing to undo: those fixes have moved onto the new transcript, or were changed since.");
+      }
+    });
+  }
+
+  // Fixes a re-transcription could not put on any word (5aa repair): listed once it ends, and on
+  // opening, until dismissed, so a fix is never lost without the user seeing it.
+  let setAside = $state<api.SetAside[]>([]);
+  $effect(() => {
+    if (analysing) return;
+    void edit?.fixesKey;
+    api.fixesSetAside().then(
+      (s) => (setAside = s),
+      () => (setAside = []),
+    );
+  });
+  async function forgetSetAside() {
+    setAside = [];
+    await call(() => api.forgetFixesSetAside());
+  }
+  async function correctAll() {
+    const r = await correct();
+    if (!r) return;
+    const unclear = r.unclear.length
+      ? ` Fixed two ways, left as heard: ${r.unclear.map((u) => `"${u}"`).join(", ")}.`
+      : "";
+    const n = r.others.length;
+    tell(
+      `Correcting: ${n ? `fixed ${places(n)} heard the same way; ` : ""}hearing the speakers and the words again (Properties shows how far).${unclear}`,
+      r.others,
+      r.heard,
+      true,
+    );
   }
 
   const first = $derived(Math.max(0, Math.floor(top / ROW) - OVERSCAN));
@@ -505,6 +570,7 @@
       clearTimeout(timer);
       mounted = false;
       clearTimeout(learnedTimer);
+      clearTimeout(noteTimer);
       ro.disconnect();
     };
   });
@@ -526,6 +592,31 @@
       <span class="muted">{words.text.length.toLocaleString()} words</span>
     {/if}
   </header>
+  {#if setAside.length}
+    <div class="spread" role="status">
+      <span class="grow"
+        >Set aside, heard otherwise now: {setAside
+          .map((s) => `"${s.text}" (was "${s.heard}", ${stamp(s.at * 1000)})`)
+          .join(", ")}. Fix those words again where they are now.</span
+      >
+      <button class="x" onclick={() => void forgetSetAside()} aria-label="Dismiss" title="Seen: stop listing them">×</button>
+    </div>
+  {/if}
+  {#if note}
+    <div class="spread" role="status">
+      <span class="grow">{note.text}</span>
+      {#if note.others.length}
+        <button
+          disabled={analysing && !listed}
+          onclick={() => void undoOthers()}
+          title={analysing && !listed
+            ? "Once the speakers are heard again (the edit list is busy until then)"
+            : "Leave the other places as they were heard; the one you typed stays fixed"}>Undo those</button
+        >
+      {/if}
+      <button class="x" onclick={() => (note = null)} aria-label="Dismiss">×</button>
+    </div>
+  {/if}
   <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
   <div
     class="scroll"
@@ -667,7 +758,8 @@
       {onSelect}
       {onError}
       bind:retyping
-      onLearned={tellLearned}
+      onFixed={tellFixed}
+      onCorrect={correctAll}
       onLooksRight={checking >= 0 ? looksRight : null}
     />
   {/if}
@@ -698,6 +790,23 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .spread {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 12px;
+    font-size: 12px;
+    color: var(--muted);
+    border-bottom: 1px solid var(--line);
+  }
+  .spread .grow {
+    flex: 1;
+    min-width: 0;
+  }
+  .spread button {
+    padding: 2px 8px;
+    font-size: 12px;
   }
   .scroll {
     position: relative;

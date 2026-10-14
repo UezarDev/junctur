@@ -421,6 +421,27 @@
     }
   }
 
+  // The word bar's Correct (5aa): every fix given to the words heard the same way, then a run that
+  // hears the speakers and the words again, the edit list kept. It re-transcribes the recording,
+  // which takes about as long as its first transcription did, so ask first.
+  async function correct(): Promise<api.Corrected | null> {
+    if (!opened) return null;
+    const file = opened.file;
+    const yes = await ask(
+      "Every word heard the same way as one you fixed gets the same fix. Then the speakers are heard again against the remembered voices and the whole recording is transcribed again with your word list, about as long as its first transcription took; the words come back five minutes at a time. Your cuts, names and caption settings stay; your fixes move onto the new words, and any whose word is heard otherwise now are listed above the transcript for you to redo.",
+      { title: "Correct this recording?", kind: "info", okLabel: "Correct", cancelLabel: "Not now" },
+    );
+    if (!yes || opened?.file !== file) return null;
+    try {
+      const r = await api.correct();
+      if (opened?.file === file) analysis = r.progress;
+      return r;
+    } catch (e) {
+      failure = String(e);
+      return null;
+    }
+  }
+
   // Back to the start window (2i). The player stops and forgets the recording; what the page held
   // for it goes too. Edits were saved as they were made; an analysis of it goes on in the background.
   async function closeRecording() {
@@ -727,6 +748,7 @@
           {reviewing}
           onSelect={(s) => (selection = s)}
           onError={(e) => (failure = e)}
+          {correct}
         />
       </div>
       {#if tab === "captions"}

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use junctur_core::edit::{Captions, ExistingClips};
+use junctur_core::edit::{Captions, ExistingClips, Fix};
 use junctur_core::export::layout::Placed;
 use junctur_core::resolve::{Answer, Outcome};
 use serde::Serialize;
@@ -18,7 +18,7 @@ use crate::cuts::EditState;
 use crate::editor::{Op, Step, TranscriptView};
 use crate::lock::lock;
 use crate::mixer::MixerState;
-use crate::player::{Core, Player, TurnsView};
+use crate::player::{Core, FixDone, Player, TurnsView};
 use crate::project::{self, ProjectStatus, RecordingInfo};
 use crate::recent::{self, Recent};
 use crate::settings::{self, Settings, SettingsView};
@@ -26,7 +26,7 @@ use crate::state::PlayerState;
 use crate::translation::{Run, Translation};
 use crate::voices::VoiceView;
 use crate::waves::{self, WavesState};
-use junctur_core::pipeline::StageState;
+use junctur_core::pipeline::{self, Project, SetAside, StageState};
 use junctur_core::transcribe;
 
 /// The player, or why it could not start (libmpv missing, no GL): the window still opens and
@@ -506,24 +506,39 @@ pub async fn rename_speaker(app: State<'_, App>, id: u32, name: String) -> Resul
     e.rename_speaker(e.file(), id, &name)
 }
 
-/// Fixes the spelling of transcript word `index` (5h) and adds the fixed spelling to the word list
-/// (no prompt, never twice); resolves to the entry added, if one was. A word list that cannot be
+/// What a fix did besides itself (5h, 5aa), for the page: the entries the word list gained, and the
+/// fixes also made on the words heard like it with what those were heard as (the note's Undo hands
+/// both back to [`keep_heard`]).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Fixed {
+    pub learned: Vec<String>,
+    pub others: Vec<Fix>,
+    pub heard: Vec<String>,
+}
+
+/// Saves what `done` teaches to the word list (no prompt, never twice). A word list that cannot be
 /// saved does not undo the fix: it is logged.
-#[tauri::command]
-pub async fn fix_word(
-    app: State<'_, App>,
-    index: usize,
-    text: String,
-) -> Result<Option<String>, String> {
-    let e = app.editable()?;
-    let (heard, fixed) = e.fix_word(e.file(), index, &text)?;
-    match settings::learn(&heard, &fixed) {
-        Ok(added) => Ok(added),
-        Err(err) => {
-            eprintln!("junctur-app: adding {fixed:?} to the word list: {err}");
-            Ok(None)
-        }
+fn learned(done: FixDone, fixed: &str) -> Fixed {
+    let learned = settings::learn(&done.learn).unwrap_or_else(|err| {
+        eprintln!("junctur-app: adding {fixed:?}'s words to the word list: {err}");
+        Vec::new()
+    });
+    Fixed {
+        learned,
+        others: done.others,
+        heard: done.heard,
     }
+}
+
+/// Fixes the spelling of transcript word `index` (5h: empty, or the heard text again, removes the
+/// fix), and every other word heard like it (5aa); its spelling joins the word list when the
+/// recording never heard it (or only changed its case).
+#[tauri::command]
+pub async fn fix_word(app: State<'_, App>, index: usize, text: String) -> Result<Fixed, String> {
+    let e = app.editable()?;
+    let done = e.fix_word(e.file(), index, &text)?;
+    Ok(learned(done, &text))
 }
 
 /// Marks transcript word `index` as checked (5o): it keeps what Whisper heard and is no longer
@@ -535,30 +550,90 @@ pub async fn confirm_word(app: State<'_, App>, index: usize) -> Result<(), Strin
 }
 
 /// Fixes transcript words `first..=last` as one text (5x: a sentence retyped; empty or the heard
-/// words again clears their fixes) and adds its new words to the word list (no prompt, never twice);
-/// resolves to the entries added. One word is learned as [`fix_word`] learns it. A word list that
-/// cannot be saved does not undo the fix: it is logged.
+/// words again clears their fixes), and the same words heard elsewhere (5aa); its words the recording
+/// never heard join the word list. One word is learned as [`fix_word`] learns it.
 #[tauri::command]
 pub async fn fix_words(
     app: State<'_, App>,
     first: usize,
     last: usize,
     text: String,
-) -> Result<Vec<String>, String> {
+) -> Result<Fixed, String> {
     let e = app.editable()?;
-    let (heard, fixed) = e.fix_words(e.file(), first, last, &text)?;
-    let learned = if first == last {
-        settings::learn(&heard, &fixed).map(|a| a.into_iter().collect())
-    } else {
-        settings::learn_all(&heard, &fixed)
+    let done = e.fix_words(e.file(), first, last, &text)?;
+    Ok(learned(done, &text))
+}
+
+/// Takes back fixes a fix made on other words (5aa: "Undo those"), where they are still as made:
+/// those words keep what they were heard as (`heard`, beside each), and no later spread reaches them.
+/// How many were still as made (none once a re-transcription moved them).
+#[tauri::command]
+pub async fn keep_heard(
+    app: State<'_, App>,
+    others: Vec<Fix>,
+    heard: Vec<String>,
+) -> Result<usize, String> {
+    let e = app.editable()?;
+    e.keep_heard(e.file(), &others, &heard)
+}
+
+/// The fixes a re-transcription of the open recording could not put on any word (5aa), until
+/// [`forget_fixes_set_aside`].
+#[tauri::command]
+pub async fn fixes_set_aside(app: State<'_, App>) -> Result<Vec<SetAside>, String> {
+    let Some(file) = app.core()?.file() else {
+        return Ok(Vec::new());
     };
-    match learned {
-        Ok(added) => Ok(added),
-        Err(err) => {
-            eprintln!("junctur-app: adding {fixed:?}'s words to the word list: {err}");
-            Ok(Vec::new())
-        }
-    }
+    let p = Project::open(Path::new(&file), None, None).map_err(|e| e.to_string())?;
+    Ok(pipeline::fixes_set_aside(&p))
+}
+
+/// The user has seen the fixes set aside for the open recording.
+#[tauri::command]
+pub async fn forget_fixes_set_aside(app: State<'_, App>) -> Result<(), String> {
+    let Some(file) = app.core()?.file() else {
+        return Ok(());
+    };
+    let p = Project::open(Path::new(&file), None, None).map_err(|e| e.to_string())?;
+    pipeline::forget_fixes_set_aside(&p).map_err(|e| e.to_string())
+}
+
+/// What the Correct button started (5aa).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Corrected {
+    /// The run hearing the speakers and the words again.
+    pub progress: Progress,
+    /// The fixes its first step made on words heard like a fixed one, and what those were heard as
+    /// (the note's Undo, as for a fix).
+    pub others: Vec<Fix>,
+    pub heard: Vec<String>,
+    /// Heard texts fixed two ways, left as heard.
+    pub unclear: Vec<String>,
+}
+
+/// The Correct button (5aa): every fix given to the words heard like it (saved at once), then a run
+/// that hears the speakers again against the remembered voices and transcribes the recording again
+/// with the word list, keeping the user's edit list (`Analysis::correct`). For the open recording;
+/// refused while it is analysed.
+#[tauri::command]
+pub async fn correct(handle: AppHandle, app: State<'_, App>) -> Result<Corrected, String> {
+    let e = app.editable()?;
+    let path = e.file().ok_or("no recording is open")?.to_string();
+    // The run first, while this edit's mark is held (5aa repair): refused, nothing has changed; started,
+    // it waits for the mark before it reads anything, so the spread below is in the list it keeps.
+    let progress = app.analysis.correct(Path::new(&path), notifier(handle))?;
+    let s = e.spread_fixes(e.file()).unwrap_or_else(|err| {
+        eprintln!("junctur-app: Correct's spread: {err}");
+        Default::default()
+    });
+    drop(e);
+    Ok(Corrected {
+        progress,
+        others: s.added,
+        heard: s.heard,
+        unclear: s.unclear,
+    })
 }
 
 /// Sets speaker `id`'s caption colour (`#RRGGBB`).

@@ -14,6 +14,11 @@
   // the bar rather than in the transcript row: a sentence needs the room, and a row is one fixed
   // height in a virtual list. One stretch only: one text typed for several places has nowhere to go.
   //
+  // Correct (5aa), at the end of the people row as Uezar asked ("next to the speaker selection"),
+  // is for the whole recording, not the selection: every fix given to the words heard the same way,
+  // then the speakers heard again and the recording transcribed again with the word list, the cuts
+  // and edits kept. The panel asks first and says what it started.
+  //
   // A component of its own rather than more of TranscriptPanel: the panel is the virtual word list
   // and its pointer handling; this is the actions on what it selected, with its own fetch of the
   // remembered voices and its own busy state while an enrolment runs.
@@ -30,7 +35,8 @@
     onError,
     onLooksRight = null,
     retyping = $bindable(false),
-    onLearned,
+    onFixed,
+    onCorrect,
   }: {
     edit: api.EditState | null;
     words: Words;
@@ -42,8 +48,10 @@
     onLooksRight?: (() => void) | null;
     /** The Fix text field is open (the panel opens it on a double-click, 5x). */
     retyping?: boolean;
-    /** The entries a fix added to the word list. */
-    onLearned: (entries: string[]) => void;
+    /** What a fix did besides itself: the word list's new entries, the other places fixed (5aa). */
+    onFixed: (r: api.Fixed) => void;
+    /** The Correct button (5aa). */
+    onCorrect: () => Promise<void>;
   } = $props();
 
   // A speaker the analysis named "Speaker 3" has no name set yet: remembering a voice under that
@@ -54,6 +62,7 @@
   let busy = $state(false);
   let said = $state<string | null>(null);
   let naming = $state(false);
+  let correcting = $state(false);
   let name = $state("");
 
   async function loadVoices() {
@@ -118,7 +127,7 @@
     openFor = null;
     if (!run || draft.trim() === shown.trim()) return;
     const text = draft;
-    api.fixWords(run.first, run.last, text).then(onLearned, (e) => onError(String(e)));
+    api.fixWords(run.first, run.last, text).then(onFixed, (e) => onError(String(e)));
   }
   onDestroy(leave);
 
@@ -130,7 +139,7 @@
     }
     saving = true;
     try {
-      onLearned(await api.fixWords(one.first, one.last, draft));
+      onFixed(await api.fixWords(one.first, one.last, draft));
       openRun = null;
       retyping = false;
     } catch (e) {
@@ -281,6 +290,20 @@
         title="Someone not listed yet: name whoever says these words (only one person, the more the better)">New name…</button
       >
     {/if}
+    <button
+      class="correct"
+      disabled={busy || correcting}
+      onclick={async () => {
+        correcting = true;
+        try {
+          await onCorrect();
+        } finally {
+          correcting = false;
+        }
+      }}
+      title="Fix every word heard the same way as one you fixed, hear the speakers again, then transcribe the whole recording again with your word list (your cuts and edits stay)"
+      >{correcting ? "Correcting…" : "Correct"}</button
+    >
   </div>
 </div>
 
@@ -321,9 +344,15 @@
   .person:hover:not(:disabled) {
     background: color-mix(in srgb, var(--c) 24%, transparent);
   }
-  .new {
+  .new,
+  .correct {
     padding: 2px 9px;
     font-size: 12px;
+  }
+  .correct {
+    /* At the row's end, or the next line's end when the panel is narrow. */
+    margin-left: auto;
+    font-weight: 600;
   }
   .naming {
     display: inline-flex;
