@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 
 use junctur_core::config;
-use junctur_core::pipeline::{self, PipelineOptions, Project, Step, Steps};
+use junctur_core::pipeline::{self, KeepList, PipelineOptions, Project, Step, Steps};
 use serde::Serialize;
 
 use crate::lane::Lane;
@@ -129,7 +129,8 @@ fn shape(t: &Transcription) -> Shape {
 pub struct Reanalysed {
     /// The run, when one started.
     pub progress: Option<Progress>,
-    /// Nothing started because the edit list holds the user's edits: the page asks first.
+    /// A fresh cut was asked for and nothing started, because the edit list holds the user's
+    /// edits: the page asks first.
     pub hand_edited: bool,
 }
 
@@ -308,9 +309,9 @@ impl Analysis {
 
     /// The options a run of `p` uses: the user's, device auto, and the cut settings of the list on
     /// disk, so a re-analysis keeps settings `junctur cut` set. Never `force`: stages whose results
-    /// still answer the options are reused. `keep_list`: a list with the user's edits is kept
-    /// (every run but an explicit re-analysis, 2j).
-    fn options(&self, p: &Project, keep_list: bool) -> Result<PipelineOptions, String> {
+    /// still answer the options are reused. `keep_list`: what becomes of a list with the user's
+    /// edits ([`KeepList`]: kept on every run but a fresh cut, 2j and 5s).
+    fn options(&self, p: &Project, keep_list: KeepList) -> Result<PipelineOptions, String> {
         let mut o = (self.user)()?;
         if let Ok(e) = p.edit() {
             o.cut = e.settings;
@@ -396,10 +397,15 @@ impl Analysis {
     /// after they edited while it transcribed, 2j); a run already waiting or running is returned as
     /// it is.
     pub fn start(&self, file: &Path, notify: Notify) -> Result<Progress, String> {
-        self.start_with(file, notify, true)
+        self.start_with(file, notify, KeepList::Edits)
     }
 
-    fn start_with(&self, file: &Path, notify: Notify, keep_list: bool) -> Result<Progress, String> {
+    fn start_with(
+        &self,
+        file: &Path,
+        notify: Notify,
+        keep_list: KeepList,
+    ) -> Result<Progress, String> {
         // Before opening the project: a run going on is the answer even when the folder cannot be
         // opened just now (2k repair; the check under the lock below closes the race).
         if let Some(r) = self.progress(file).filter(|r| r.phase.busy()) {
@@ -441,18 +447,26 @@ impl Analysis {
         Ok(first)
     }
 
-    /// Analyses `file` again with the settings now. With the user's edits in the edit list it
-    /// starts nothing unless `replace` (the edits are then kept as a backup by the pipeline).
+    /// Analyses `file` again with the settings now (5s). Stages whose inputs or settings changed
+    /// run again, and the speakers are matched against the remembered voices again.
+    ///
+    /// Not `fresh` (the Re-analyse button): the edit list the user made is kept, cut, names, word
+    /// fixes and caption settings, and only this run's speakers are put into it
+    /// ([`KeepList::Whole`]: one that does not parse is left as it is too, the run failing and
+    /// saying so); nothing to ask. `fresh` ("Start over with a fresh cut"): the
+    /// list is re-cut as before 5s, so with the user's edits in it nothing starts unless
+    /// `replace`, and the page asks first (the pipeline then keeps their list as a backup).
     pub fn reanalyse(
         &self,
         file: &Path,
+        fresh: bool,
         replace: bool,
         notify: Notify,
     ) -> Result<Reanalysed, String> {
         if self.busy(file) {
             return Err("this recording is already being analysed".into());
         }
-        if !replace {
+        if fresh && !replace {
             let p = Project::open(file, self.cache_dir.clone(), None).map_err(|e| e.to_string())?;
             if pipeline::hand_edited(&p).map_err(|e| e.to_string())? {
                 return Ok(Reanalysed {
@@ -462,8 +476,13 @@ impl Analysis {
             }
         }
         Ok(Reanalysed {
-            // Asked (or nothing of the user's to lose): the list is re-cut.
-            progress: Some(self.start_with(file, notify, false)?),
+            // A fresh cut asked for (or nothing of the user's to lose) re-cuts the list; else it
+            // is kept.
+            progress: Some(self.start_with(
+                file,
+                notify,
+                if fresh { KeepList::No } else { KeepList::Whole },
+            )?),
             hand_edited: false,
         })
     }
@@ -523,7 +542,7 @@ impl Analysis {
         f()
     }
 
-    fn run(&self, p: &Project, notify: &Notify, keep_list: bool) {
+    fn run(&self, p: &Project, notify: &Notify, keep_list: KeepList) {
         let k = p.file.clone();
         // A panic is a failure like any other (2m): unwound past the update below, it left the run
         // busy for good, its recording refusing edits and re-analysis until a restart. What it
@@ -560,7 +579,7 @@ impl Analysis {
 
     /// The pipeline's first half on the `first` lane, then its transcription on the
     /// `transcription` lane, telling the page when the list is written and as pieces land.
-    fn halves(&self, p: &Project, notify: &Notify, keep_list: bool) -> Result<(), String> {
+    fn halves(&self, p: &Project, notify: &Notify, keep_list: KeepList) -> Result<(), String> {
         let k = p.file.clone();
         let notify = notify.as_ref();
         let name = k.file_name().map(|n| n.to_string_lossy().into_owned());
@@ -693,7 +712,10 @@ mod tests {
         assert!(a.busy(&file));
         let again = a.start(&file, notify.clone()).unwrap();
         assert_eq!(again.phase, Phase::Queued);
-        assert!(a.reanalyse(&file, true, notify).is_err(), "already running");
+        assert!(
+            a.reanalyse(&file, false, false, notify).is_err(),
+            "already running"
+        );
         drop(held);
         let mut phases = Vec::new();
         loop {
@@ -1114,33 +1136,53 @@ mod tests {
         }
     }
 
+    /// What each run of the test below was told about the user's list.
+    static KEPT: Mutex<Vec<KeepList>> = Mutex::new(Vec::new());
+
+    /// A pipeline that only notes whether the run keeps the user's list.
+    fn noting_halves<'a>(
+        _: &'a Project,
+        o: &'a PipelineOptions,
+        _: &mut dyn FnMut(&str),
+        _: Steps,
+    ) -> Result<Second<'a>, String> {
+        lock(&KEPT).push(o.keep_list);
+        Ok(Box::new(|_, _, _, _| Ok(())))
+    }
+
     #[test]
-    fn nothing_to_lose_without_an_edit_list() {
+    fn reanalyse_keeps_the_users_list_and_a_fresh_cut_asks_first() {
         let d = std::env::temp_dir().join(format!("junctur-app-reanalyse-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let file = d.join("rec.mp4");
         std::fs::write(&file, b"not a video").unwrap();
-        let a = Analysis::with_cache(d.join("cache"));
+        let mut a = Analysis::with_cache(d.join("cache"));
+        a.halves = noting_halves;
         let p = Project::open(&file, Some(d.join("cache")), None).unwrap();
-        // A hand edit: asked first, nothing started.
+        let ended = |a: &Analysis| wait_for("the run ends", || !a.busy(&file));
+        let quiet = || -> Notify { Arc::new(|_: &Progress, _| {}) };
         std::fs::write(p.edit_path(), "junctur-edit 1\nkeep x\n").unwrap();
-        let r = a
-            .reanalyse(&file, false, Arc::new(|_: &Progress, _| {}))
-            .unwrap();
+        // 5s: Re-analyse on a list the user edited starts at once and keeps it.
+        let r = a.reanalyse(&file, false, false, quiet()).unwrap();
+        assert!(!r.hand_edited && r.progress.is_some());
+        ended(&a);
+        assert_eq!(*lock(&KEPT), [KeepList::Whole]);
+        // A fresh cut over it is asked first: nothing started.
+        let r = a.reanalyse(&file, true, false, quiet()).unwrap();
         assert!(r.hand_edited && r.progress.is_none());
         assert!(!a.busy(&file));
-        // Told to replace it: started.
-        let r = a
-            .reanalyse(&file, true, Arc::new(|_: &Progress, _| {}))
-            .unwrap();
+        // Told to replace it: re-cut.
+        let r = a.reanalyse(&file, true, true, quiet()).unwrap();
         assert!(!r.hand_edited && r.progress.is_some());
-        // Wait for it to end before removing its folder.
-        let deadline = std::time::Instant::now() + Duration::from_secs(60);
-        while a.busy(&file) {
-            assert!(std::time::Instant::now() < deadline, "the run never ended");
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        ended(&a);
+        assert_eq!(*lock(&KEPT), [KeepList::Whole, KeepList::No]);
+        // Nothing of the user's to lose: a fresh cut starts without asking.
+        std::fs::remove_file(p.edit_path()).unwrap();
+        let r = a.reanalyse(&file, true, false, quiet()).unwrap();
+        assert!(!r.hand_edited && r.progress.is_some());
+        ended(&a);
+        assert_eq!(*lock(&KEPT), [KeepList::Whole, KeepList::No, KeepList::No]);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

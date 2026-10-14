@@ -362,20 +362,23 @@
   const chip = $derived(steps.label(analysis, steps.paused(lane, analysis?.file)));
   const chipSteps = $derived(steps.current(analysis));
 
-  // Re-analyse: the pipeline with the settings now, in the background. When the edit list holds
-  // the user's edits, ask before they are replaced (they are kept as a backup).
-  async function reanalyse() {
+  // Re-analyse: the pipeline with the settings now, in the background (5s). The user's edit list is
+  // kept, with the speakers matched again against the remembered voices: nothing to ask. A fresh
+  // cut (`fresh`) replaces their cut, so when the list holds their edits, ask first (it is kept as
+  // a backup).
+  async function reanalyse(fresh: boolean) {
     if (!opened) return;
     const file = opened.file;
     try {
-      let r = await api.reanalyse(file, false);
-      if (r.handEdited) {
+      let r = await api.reanalyse(file, fresh, false);
+      // Only a fresh cut is ever held back to ask; a plain Re-analyse never replaces the cut.
+      if (fresh && r.handEdited) {
         const yes = await ask(
-          "The edit list has your own edits. Re-analysing replaces it with a fresh cut; your version is kept beside it as edit.junctur.bak (or .bak2, …).",
-          { title: "Re-analyse this recording?", kind: "warning", okLabel: "Re-analyse", cancelLabel: "Keep my edits" },
+          "Your cut is replaced by a fresh one from the analysis; speaker names, fixed words and caption settings stay. Your version is kept beside it as edit.junctur.bak (or .bak2, …).",
+          { title: "Start over with a fresh cut?", kind: "warning", okLabel: "Start over", cancelLabel: "Keep my cut" },
         );
         if (!yes) return;
-        r = await api.reanalyse(file, true);
+        r = await api.reanalyse(file, true, true);
       }
       if (r.progress && opened?.file === file) analysis = r.progress;
     } catch (e) {
@@ -695,7 +698,8 @@
             {lane}
             outdated={opened.outdated}
             {waves}
-            onReanalyse={reanalyse}
+            onReanalyse={() => reanalyse(false)}
+            onFreshCut={() => reanalyse(true)}
             onError={(e) => (failure = e)}
           />
         </div>

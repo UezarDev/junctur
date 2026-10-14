@@ -2,7 +2,8 @@
   // The Properties tab (2g, mock L): what was 2a-2d's project panel floating over the picture, now
   // beside Transcript and Captions. The recording, the analysis steps in the order they run with
   // their state and, under the running one, each track's progress (2h), the out-of-date notice and
-  // Re-analyse, the speakers, the waveforms' read, and the project folder with a button that opens it.
+  // Re-analyse (5s: keeps the user's edits; a fresh cut is the smaller choice under it), the speakers,
+  // the waveforms' read, and the project folder with a button that opens it.
   // Above the analysis, the transcription job running in the background, whichever recording it is,
   // with its pause (2k).
   import * as api from "./api";
@@ -23,6 +24,7 @@
     outdated,
     waves,
     onReanalyse,
+    onFreshCut,
     onError,
   }: {
     player: api.PlayerState | null;
@@ -36,7 +38,10 @@
     lane: api.Transcription | null;
     outdated: string[];
     waves: api.WavesState | null;
+    /** Analyse again keeping the user's edits, speakers matched again (5s). */
     onReanalyse: () => void;
+    /** Analyse again and replace the cut with a fresh one (asks first when it is the user's). */
+    onFreshCut: () => void;
     onError: (message: string) => void;
   } = $props();
 
@@ -154,7 +159,19 @@
           {#each outdated as why (why)}<p>{why}</p>{/each}
         </div>
       {/if}
-      <button class="again" class:wanted={outdated.length > 0} disabled={busy} onclick={onReanalyse}>Re-analyse</button>
+      <button
+        class="again"
+        class:wanted={outdated.length > 0}
+        disabled={busy}
+        title="Runs what the settings changed and matches the speakers against the remembered voices again; your cut, names, fixed words and caption settings stay"
+        onclick={onReanalyse}>Re-analyse</button
+      >
+      <button
+        class="fresh"
+        disabled={busy}
+        title="Re-analyses and replaces your cut with a fresh one; your version is kept as a backup"
+        onclick={onFreshCut}>Start over with a fresh cut</button
+      >
     {/if}
   </section>
 
@@ -332,6 +349,12 @@
   .again.wanted {
     border-color: var(--accent);
     color: var(--accent);
+  }
+  .fresh {
+    margin-top: 4px;
+    width: 100%;
+    font-size: 12px;
+    color: var(--muted);
   }
   .people li {
     display: flex;

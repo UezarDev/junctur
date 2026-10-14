@@ -309,21 +309,23 @@ pub async fn pause_transcription(
         .ok_or_else(|| "the transcription lane was not read".to_string())
 }
 
-/// Analyses `path` again with the settings now. Without `replace`, an edit list holding the user's
-/// edits starts nothing and says so, for the page to ask; with it, the edits are kept as a backup
-/// and replaced by a fresh cut.
+/// Analyses `path` again with the settings now ([`Analysis::reanalyse`], 5s): the user's edit list
+/// is kept, with the speakers matched again. With `fresh` the list is re-cut instead; then, without
+/// `replace`, a list holding the user's edits starts nothing and says so, for the page to ask, and
+/// with it the edits are kept as a backup and replaced by the fresh cut.
 #[tauri::command]
 pub async fn reanalyse(
     handle: AppHandle,
     app: State<'_, App>,
     path: String,
+    fresh: bool,
     replace: bool,
 ) -> Result<Reanalysed, String> {
     // Off the async runtime: asking whether the list holds user edits reads the track analysis
     // and the transcript.
     let analysis = app.analysis.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        analysis.reanalyse(Path::new(&path), replace, notifier(handle))
+        analysis.reanalyse(Path::new(&path), fresh, replace, notifier(handle))
     })
     .await
     .map_err(|e| e.to_string())?
