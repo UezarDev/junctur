@@ -10,7 +10,7 @@
   import CaptionRules from "./CaptionRules.svelte";
   import Field from "./Field.svelte";
   import InfoTip from "./InfoTip.svelte";
-  import ModelPicker from "./ModelPicker.svelte";
+  import ModelPicker, { chosenModel } from "./ModelPicker.svelte";
   import Section from "./Section.svelte";
   import { CAPTION_SECTIONS } from "./captionSections";
   import { slot } from "./floating.svelte";
@@ -24,7 +24,8 @@
   // The word list as the text box holds it, one entry per line; the core trims it and drops blank
   // lines and repeats when it saves.
   let wordsText = $state("");
-  const model = $derived(view?.models.find((m) => m.key === draft?.whisperModel) ?? null);
+  // Resolved as the picker resolves it, so the (i) explains the model the picker shows.
+  const model = $derived(view ? chosenModel(view.models, draft?.whisperModel ?? "") : undefined);
 
   onMount(() => {
     api.settings().then(

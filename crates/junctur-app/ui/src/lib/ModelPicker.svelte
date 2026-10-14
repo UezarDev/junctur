@@ -1,3 +1,13 @@
+<script lang="ts" module>
+  import type { ModelChoice } from "./api";
+
+  /** The model `value` names, or the first (the default) for an empty or unknown key: the picker
+   * shows it and Settings' (i) explains it, so both must resolve a key the same way. */
+  export function chosenModel(models: ModelChoice[], value: string): ModelChoice | undefined {
+    return models.find((m) => m.key === value) ?? models[0];
+  }
+</script>
+
 <script lang="ts">
   // The Whisper model picker in Settings (2v). It was a native select listing the names the app
   // sends ("large-v3 q5_0"); a native select can show neither an icon nor a second line, so this is
@@ -8,12 +18,12 @@
   //
   // Focus stays on the button while the list is open (`aria-activedescendant` names the highlighted
   // option), as a native select does, so Tab leaves from where it entered. Keys: Down, Up, Enter,
-  // Space or Alt+Down open it; in it Up/Down/Home/End move, a letter jumps to the next name starting
+  // Space or Alt+Down open it, while Home, End or a letter change the model without opening it, as a
+  // native select's do; in it Up/Down/Home/End move, a letter jumps to the next name starting
   // with it, Enter or Space picks and closes, Tab picks and moves on (as the pattern says), Escape
   // closes the list and never the dialog round it. The list lives in `<body>` and takes the shared
   // popup slot (floating.svelte.ts): the dialog scrolls and would clip it, and opening it closes any
   // (i) tip, as an (i) opening closes it.
-  import type { ModelChoice } from "./api";
   import { place, portal, release, slot } from "./floating.svelte";
 
   let {
@@ -34,16 +44,15 @@
   /** The highlighted option while open (an index into `models`). */
   let active = $state(0);
   const open = $derived(slot.open === slotId);
-  const chosen = $derived(models.find((m) => m.key === value) ?? models[0]);
+  const chosen = $derived(chosenModel(models, value));
 
   function show() {
-    active = Math.max(
-      0,
-      models.findIndex((m) => m.key === value),
-    );
+    active = Math.max(0, chosen ? models.indexOf(chosen) : 0);
     slot.open = slotId;
   }
   function hide() {
+    // Focus that did reach the list goes back to the button rather than to <body> with it.
+    if (list && document.activeElement && list.contains(document.activeElement)) button?.focus();
     release(slotId);
   }
   function pick(i: number) {
@@ -52,23 +61,42 @@
     hide();
   }
 
-  /** The next model after the highlighted one whose name starts with `letter`, wrapping. */
-  function jump(letter: string) {
+  /** The next model after `from` whose name starts with `letter`, wrapping; `from` if none. */
+  function jump(from: number, letter: string): number {
     const l = letter.toLowerCase();
     for (let n = 1; n <= models.length; n++) {
-      const i = (active + n) % models.length;
-      if (models[i].name.toLowerCase().startsWith(l)) return (active = i);
+      const i = (from + n) % models.length;
+      if (models[i].name.toLowerCase().startsWith(l)) return i;
     }
+    return from;
+  }
+
+  const isLetter = (e: KeyboardEvent) => e.key.length === 1 && /\p{L}/u.test(e.key);
+
+  /** The option under a pointer event on the list, by its index. */
+  function optionAt(e: Event): number | null {
+    const o = e.target instanceof Element ? e.target.closest<HTMLElement>("[data-index]") : null;
+    return o ? Number(o.dataset.index) : null;
+  }
+
+  /** Closed, the keys a native select reads as "choose", not "open". */
+  function closedKey(e: KeyboardEvent) {
+    const at = chosen ? models.indexOf(chosen) : 0;
+    let to: number;
+    if (["ArrowDown", "ArrowUp", "Enter", "Space"].includes(e.code)) {
+      e.preventDefault();
+      return show();
+    } else if (e.code === "Home") to = 0;
+    else if (e.code === "End") to = models.length - 1;
+    else if (isLetter(e) && !e.ctrlKey && !e.altKey && !e.metaKey) to = jump(at, e.key);
+    else return;
+    e.preventDefault();
+    const m = models[to];
+    if (m && m.key !== value) onChange(m.key);
   }
 
   function onkeydown(e: KeyboardEvent) {
-    if (!open) {
-      if (["ArrowDown", "ArrowUp", "Enter", "Space"].includes(e.code)) {
-        e.preventDefault();
-        show();
-      }
-      return;
-    }
+    if (!open) return closedKey(e);
     switch (e.code) {
       case "ArrowDown":
         if (e.altKey) break;
@@ -99,7 +127,7 @@
         hide();
         break;
       default:
-        if (e.key.length === 1 && /\p{L}/u.test(e.key)) jump(e.key);
+        if (isLetter(e)) active = jump(active, e.key);
         else return;
     }
     e.preventDefault();
@@ -178,7 +206,10 @@
   aria-activedescendant={open ? `${listId}-${active}` : undefined}
   onclick={() => (open ? hide() : show())}
   {onkeydown}
-  onblur={() => open && hide()}
+  onblur={(e) => {
+    // Focus going into the list (a press the guards below missed) is not leaving the picker.
+    if (open && !(e.relatedTarget instanceof Node && list?.contains(e.relatedTarget))) hide();
+  }}
 >
   {#if chosen}{@render icon(chosen.family)}<span class="chosen">{chosen.name}</span>{/if}
   <svg class="chevron" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
@@ -186,8 +217,11 @@
   </svg>
 </button>
 {#if open}
-  <!-- Pointer presses are kept from taking focus, so it stays on the button (and its blur does not
-       close the list before the click lands). -->
+  <!-- Presses are kept from taking focus, so it stays on the button and its blur does not close the
+       list before the click lands. Both events: Chromium moves focus on mousedown's default action,
+       which cancelling pointerdown alone does not reliably stop. A click or hover is read here by
+       the option's index rather than on each option: focus never goes to an option (the button's keys
+       drive the list), so options carry no tabindex or key handler of their own. -->
   <div
     use:portal
     bind:this={list}
@@ -201,20 +235,25 @@
     style:width="{pos?.width ?? MIN_WIDTH}px"
     style:visibility={pos ? null : "hidden"}
     onpointerdown={(e) => e.preventDefault()}
+    onmousedown={(e) => e.preventDefault()}
+    onpointermove={(e) => {
+      const i = optionAt(e);
+      if (i !== null) active = i;
+    }}
+    onclick={(e) => {
+      const i = optionAt(e);
+      if (i !== null) pick(i);
+    }}
+    onkeydown={onkeydown}
   >
-    <!-- The keys are the button's (focus never leaves it); an option's empty onkeydown is for the
-         a11y check. -->
     {#each models as m, i (m.key)}
       <div
         id="{listId}-{i}"
         role="option"
-        tabindex="-1"
+        data-index={i}
         aria-selected={m.key === value}
         class="option"
         class:active={i === active}
-        onpointermove={() => (active = i)}
-        onclick={() => pick(i)}
-        onkeydown={() => {}}
       >
         {@render icon(m.family)}
         <span class="text">
