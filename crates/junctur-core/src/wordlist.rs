@@ -95,6 +95,57 @@ pub fn learned_all(heard: &str, fixed: &str) -> Vec<String> {
     out
 }
 
+/// The words a recording's transcript heard, as a fix's new words are compared with them (5aa): each
+/// without the punctuation around it, lower-cased ([`crate::edit::likeness`]). A fix teaches the word
+/// list only words the recording never heard: a retyped sentence's common words ("went", "home") would
+/// otherwise push the names out of Whisper's ~223-token prompt ([`prompt`] keeps the first entries).
+#[derive(Debug, Clone, Default)]
+pub struct Heard(std::collections::HashSet<String>);
+
+impl Heard {
+    pub fn new<'a>(words: impl IntoIterator<Item = &'a str>) -> Self {
+        Self(
+            words
+                .into_iter()
+                .map(crate::edit::likeness)
+                .filter(|w| !w.is_empty())
+                .collect(),
+        )
+    }
+
+    /// Every word of `entry` was heard somewhere in the recording.
+    fn has(&self, entry: &str) -> bool {
+        entry
+            .split_whitespace()
+            .map(crate::edit::likeness)
+            .filter(|w| !w.is_empty())
+            .all(|w| self.0.contains(&w))
+    }
+}
+
+/// [`learned`], for a word of a recording that heard `recording`: the spelling only when it has a word
+/// the recording never heard, or when it changes nothing but the heard word's case (5h's name heard in
+/// lower case, `tsunheto` to `Tsunheto`: heard, but not as the user spells it).
+pub fn learned_in(heard: &str, fixed: &str, recording: &Heard) -> Option<String> {
+    let e = learned(heard, fixed)?;
+    let case_only = bare(fixed).to_lowercase() == bare(heard).to_lowercase();
+    (case_only || !recording.has(&e)).then_some(e)
+}
+
+/// [`learned_all`], for a run of words of a recording that heard `recording`: its new words the
+/// recording never heard, and those that only change the case of one of the run's own heard words
+/// (a name, not a sentence's capital, which [`learned_all`] already leaves out).
+pub fn learned_all_in(heard: &str, fixed: &str, recording: &Heard) -> Vec<String> {
+    let own: Vec<String> = heard
+        .split_whitespace()
+        .map(|w| bare(w).to_lowercase())
+        .collect();
+    learned_all(heard, fixed)
+        .into_iter()
+        .filter(|e| own.contains(&e.to_lowercase()) || !recording.has(e))
+        .collect()
+}
+
 /// What Whisper is told: the list's leading entries that fit, and how many were left out.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Prompt {
@@ -175,6 +226,39 @@ mod tests {
         assert_eq!(learned_all("ok. so", "ok so Ok"), ["Ok"]);
         assert!(learned_all("hola amigos", "amigos, hola.").is_empty());
         assert!(learned_all("eh eh", "... !").is_empty());
+    }
+
+    #[test]
+    fn a_fix_teaches_only_words_the_recording_never_heard() {
+        // 5aa: a retyped sentence's common words stay out of the list, names go in.
+        let rec = Heard::new([
+            " the",
+            " Wezar,",
+            " went",
+            " home.",
+            " tsunheto",
+            " del",
+            " ay",
+        ]);
+        assert_eq!(
+            learned_all_in("the wezar went hom", "Uezar went home, Uezar!", &rec),
+            ["Uezar"]
+        );
+        // A name heard in lower case is still learned with its capital, in a sentence or alone.
+        assert_eq!(
+            learned_all_in("so tsunheto", "So, Tsunheto.", &rec),
+            ["Tsunheto"]
+        );
+        assert_eq!(
+            learned_in("tsunheto", "Tsunheto", &rec),
+            Some("Tsunheto".into())
+        );
+        // One word fixed to a word heard elsewhere teaches nothing; to a new one, it does.
+        assert_eq!(learned_in("hom", "home", &rec), None);
+        assert_eq!(learned_in("Bane,", "Vayne,", &rec), Some("Vayne".into()));
+        // A phrase is new when any of its words is.
+        assert_eq!(learned_in("delay", "Del Ay", &rec), None);
+        assert_eq!(learned_in("delay", "Del Rey", &rec), Some("Del Rey".into()));
     }
 
     #[test]

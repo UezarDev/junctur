@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use junctur_core::edit::{Captions, EditList, ExistingClips, Speakers};
+use junctur_core::edit::{Captions, EditList, ExistingClips, Fix, Speakers, Spread};
 use junctur_core::export::layout::{self, Placed};
 use junctur_core::export::srt;
 use junctur_core::export::{self, CaptionFiles};
@@ -32,6 +32,7 @@ use junctur_core::pipeline::{self, Found};
 use junctur_core::resolve;
 use junctur_core::transcribe;
 use junctur_core::translate::Translations;
+use junctur_core::wordlist;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
@@ -219,6 +220,22 @@ impl Deref for Player {
     fn deref(&self) -> &Core {
         &self.core
     }
+}
+
+/// What a word fix did besides itself (5h, 5aa): the entries the word list is to learn (the caller
+/// saves them, `settings::learn`), and the fixes it also made on the words heard like it.
+#[derive(Debug, Default)]
+pub struct FixDone {
+    pub learn: Vec<String>,
+    pub others: Vec<Fix>,
+    /// What each of `others`' words were heard as (what "Undo those" leaves them saying).
+    pub heard: Vec<String>,
+}
+
+/// The words `words` heard, as a fix's new words are compared with them (5aa: the word list learns
+/// only words the recording never heard).
+fn heard(words: &Words) -> wordlist::Heard {
+    wordlist::Heard::new(words.list.iter().map(|w| w.text.as_str()))
 }
 
 pub struct Core {
@@ -431,6 +448,43 @@ impl Drop for Player {
 /// An edit refused because another recording was opened while it was asked for (2m).
 pub const OPENED_MEANWHILE: &str = "another recording was opened meanwhile: nothing was changed";
 
+/// A word edit refused because the words it names changed between reading them and saving (5ad: a
+/// finished re-transcription landing there would have put the fix on the old word's place in a
+/// list whose fixes were just carried onto the new words).
+pub const WORDS_CHANGED: &str =
+    "the transcript changed meanwhile: nothing was changed, try again on the words shown now";
+
+/// The editor's words were let go while a word edit was asked for (a piece of a running
+/// transcription landed, 2j): the edit reads them again and retries ([`Core::retrying`]).
+const WORDS_LET_GO: &str = "the editor's words were read again meanwhile";
+
+/// Whether `now` has `then`'s words `first..=last` as they were: the same track, heard times, text
+/// and place in their millisecond (5ad repair). A piece of a running transcription only adds words
+/// after the ones already there, so it never changes them; a finished re-transcription does.
+fn same_target(now: &Words, then: &Words, first: usize, last: usize) -> bool {
+    (first..=last).all(|i| match (now.list.get(i), then.list.get(i)) {
+        (Some(a), Some(b)) => {
+            a.start == b.start
+                && a.end == b.end
+                && a.text == b.text
+                && now.tracks.get(i) == then.tracks.get(i)
+                && now.nth(i) == then.nth(i)
+        }
+        _ => false,
+    })
+}
+
+/// `ed`'s words still have words `first..=last` of `words`, the ones a word edit read ([`same_target`]).
+/// Not the same words read at all (5ad's first try compared them by pointer, so every piece of a
+/// running transcription landing in between refused the fix Uezar was making while it ran).
+fn same_words(ed: &Editor, words: &Arc<Words>, first: usize, last: usize) -> Result<(), String> {
+    match &ed.words {
+        Some(w) if Arc::ptr_eq(w, words) || same_target(w, words, first, last) => Ok(()),
+        Some(_) => Err(WORDS_CHANGED.into()),
+        None => Err(WORDS_LET_GO.into()),
+    }
+}
+
 impl Core {
     pub fn state(&self) -> PlayerState {
         lock(&self.state).clone()
@@ -476,7 +530,14 @@ impl Core {
         if new_list.is_some() && new_list != in_play {
             eprintln!("junctur-app: edit.junctur changed on disk, taken ({by})");
         }
-        if new_list.is_some() && new_list.map(|l| &l.keep) != in_play.map(|l| &l.keep) {
+        // The history holds the ranges and the retimed words (2w): an outside change to either
+        // would be undone over.
+        // Compared as the file writes them, so a list read back equals the one saved.
+        let undone = |l: &EditList| {
+            let times: Vec<_> = l.times.iter().map(edit_key).collect();
+            (l.keep.clone(), times)
+        };
+        if new_list.is_some() && new_list.map(undone) != in_play.map(undone) {
             ed.changed_elsewhere();
             // A first list (the app's own analysis just wrote it, 2d) had no history to clear.
             let notice =
@@ -523,6 +584,18 @@ impl Core {
             self.prepare();
         }
         self.change(file, |ed, list, fps| ed.edit(list, step, fps))
+    }
+
+    /// Moves a cut's edge (2w): frame edit `frames` (start, end, keep) moving edge `from`, and the
+    /// words beside it with it, as one undo step. See [`Editor::move_edge`].
+    pub fn move_edge(
+        &self,
+        file: Option<&str>,
+        frames: (u64, u64, bool),
+        from: u64,
+    ) -> Result<(), String> {
+        self.prepare();
+        self.change(file, |ed, list, fps| ed.move_edge(list, frames, from, fps))
     }
 
     /// Cuts (`keep` false) or keeps every run of transcript words in `runs` (`first..=last` each)
@@ -585,9 +658,14 @@ impl Core {
         if self.file().as_deref() != Some(file) {
             return Err(OPENED_MEANWHILE.into());
         }
+        let times = lock(&self.ctl)
+            .edit
+            .list
+            .as_ref()
+            .map_or_else(Vec::new, |l| l.times.clone());
         let stretches = runs
             .iter()
-            .map(|&(first, last)| words.stretch(first, last))
+            .map(|&(first, last)| words.stretch(first, last, &times))
             .collect::<Option<Vec<_>>>()
             .ok_or("no such words in the transcript")?;
         let (found, line) = voices::enroll(file, name, &stretches)?;
@@ -720,14 +798,42 @@ impl Core {
         stopped.and(left)
     }
 
-    /// Fixes the spelling of transcript word `index` (5h) in the edit list and saves it; returns the
-    /// heard text and the fixed one, for the word list. Not an undo step, like a rename.
+    /// Fixes the spelling of transcript word `index` (5h) in the edit list and saves it, the words
+    /// heard like it included (5aa); returns what the word list is to learn and the fixes made on
+    /// those other words. Not an undo step, like a rename.
     pub fn fix_word(
         &self,
         file: Option<&str>,
         index: usize,
         text: &str,
-    ) -> Result<(String, String), String> {
+    ) -> Result<FixDone, String> {
+        self.retrying(|| self.fix_word_once(file, index, text))
+    }
+
+    /// A word edit, read again when the editor let its words go meanwhile ([`WORDS_LET_GO`]):
+    /// twice more, then refused as [`WORDS_CHANGED`].
+    fn retrying<T>(&self, mut once: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+        for _ in 0..2 {
+            match once() {
+                Err(e) if e == WORDS_LET_GO => continue,
+                r => return r,
+            }
+        }
+        once().map_err(|e| {
+            if e == WORDS_LET_GO {
+                WORDS_CHANGED.into()
+            } else {
+                e
+            }
+        })
+    }
+
+    fn fix_word_once(
+        &self,
+        file: Option<&str>,
+        index: usize,
+        text: &str,
+    ) -> Result<FixDone, String> {
         self.prepare();
         let words = lock(&self.editor)
             .words
@@ -738,15 +844,28 @@ impl Core {
         };
         let nth = words.nth(index);
         let fixed = junctur_core::edit::check_fix(text)?;
+        let mut done = FixDone::default();
         self.change(file, |ed, list, _| {
-            ed.fix_word(list, track, word, nth, &fixed)
+            same_words(ed, &words, index, index)?;
+            let r = ed.fix_word(list, track, word, nth, &fixed)?;
+            if let Some(e) = &r {
+                (done.others, done.heard) = (e.others.clone(), e.heard.clone());
+            }
+            Ok(r)
         })?;
-        Ok((word.text.clone(), fixed))
+        done.learn = wordlist::learned_in(&word.text, &fixed, &heard(&words))
+            .into_iter()
+            .collect();
+        Ok(done)
     }
 
     /// Marks transcript word `index` as checked (5o) in the edit list and saves it, so it is no longer
     /// flagged. Not an undo step, like a fix.
     pub fn confirm_word(&self, file: Option<&str>, index: usize) -> Result<(), String> {
+        self.retrying(|| self.confirm_word_once(file, index))
+    }
+
+    fn confirm_word_once(&self, file: Option<&str>, index: usize) -> Result<(), String> {
         self.prepare();
         let words = lock(&self.editor)
             .words
@@ -756,20 +875,34 @@ impl Core {
             return Err("no such word in the transcript".into());
         };
         let nth = words.nth(index);
-        self.change(file, |ed, list, _| ed.confirm_word(list, track, word, nth))
+        self.change(file, |ed, list, _| {
+            same_words(ed, &words, index, index)?;
+            ed.confirm_word(list, track, word, nth)
+        })
     }
 
-    /// Fixes transcript words `first..=last` as one text (5x) in the edit list and saves it; returns
-    /// the heard text and the fixed one, for the word list. Refused, saying why, for a run across two
-    /// tracks, or a new text over two people's words ([`Words::retyped`]; clearing never is). One word is [`Self::fix_word`]'s fix. Not an undo
-    /// step.
+    /// Fixes transcript words `first..=last` as one text (5x) in the edit list and saves it, the same
+    /// words heard elsewhere included (5aa); returns what the word list is to learn and the fixes
+    /// made elsewhere. Refused, saying why, for a run across two tracks, or a new text over two
+    /// people's words ([`Words::retyped`]; clearing never is). One word is [`Self::fix_word`]'s fix.
+    /// Not an undo step.
     pub fn fix_words(
         &self,
         file: Option<&str>,
         first: usize,
         last: usize,
         text: &str,
-    ) -> Result<(String, String), String> {
+    ) -> Result<FixDone, String> {
+        self.retrying(|| self.fix_words_once(file, first, last, text))
+    }
+
+    fn fix_words_once(
+        &self,
+        file: Option<&str>,
+        first: usize,
+        last: usize,
+        text: &str,
+    ) -> Result<FixDone, String> {
         self.prepare();
         let words = lock(&self.editor)
             .words
@@ -782,9 +915,60 @@ impl Core {
             .map(|l| l.speakers.clone())
             .unwrap_or_default();
         let fixed = junctur_core::edit::check_span(text)?;
-        let run = words.retyped(first, last, &fixed, &speakers)?;
-        self.change(file, |ed, list, _| ed.fix_words(list, &run, &fixed))?;
-        Ok((run.heard, fixed))
+        let times = lock(&self.ctl)
+            .edit
+            .list
+            .as_ref()
+            .map_or_else(Vec::new, |l| l.times.clone());
+        let run = words.retyped(first, last, &fixed, &speakers, &times)?;
+        let mut done = FixDone::default();
+        self.change(file, |ed, list, _| {
+            same_words(ed, &words, first.min(last), first.max(last))?;
+            let r = ed.fix_words(list, &run, &fixed)?;
+            if let Some(e) = &r {
+                (done.others, done.heard) = (e.others.clone(), e.heard.clone());
+            }
+            Ok(r)
+        })?;
+        let recording = heard(&words);
+        done.learn = if first == last {
+            wordlist::learned_in(&run.heard, &fixed, &recording)
+                .into_iter()
+                .collect()
+        } else {
+            wordlist::learned_all_in(&run.heard, &fixed, &recording)
+        };
+        Ok(done)
+    }
+
+    /// Gives every word heard like a fixed one the same fix and saves (5aa: the Correct button's
+    /// first step); what was added and the heard texts two fixes disagree on.
+    pub fn spread_fixes(&self, file: Option<&str>) -> Result<Spread, String> {
+        self.prepare();
+        let mut out = Spread::default();
+        self.change(file, |ed, list, _| {
+            let (r, s) = ed.spread_all(list)?;
+            out = s;
+            Ok(r)
+        })?;
+        Ok(out)
+    }
+
+    /// Takes back the fixes a fix also made elsewhere, those still as they were (5aa: the note's
+    /// Undo): their words keep what they were heard as, and no later spread reaches them. Saved.
+    pub fn keep_heard(
+        &self,
+        file: Option<&str>,
+        others: &[Fix],
+        heard: &[String],
+    ) -> Result<usize, String> {
+        let mut n = 0;
+        self.change(file, |ed, list, _| {
+            let (r, k) = ed.keep_heard(list, others, heard)?;
+            n = k;
+            Ok(r)
+        })?;
+        Ok(n)
     }
 
     /// Sets the edit list's caption settings and saves them.
@@ -1079,7 +1263,8 @@ impl Core {
         let none = Speakers::default();
         let speakers = list.as_deref().map_or(&none, |l| &l.speakers);
         let fixes = list.as_deref().map_or(&[][..], |l| &l.fixes);
-        Some(TranscriptView::new(&words, speakers, fixes))
+        let times = list.as_deref().map_or(&[][..], |l| &l.times);
+        Some(TranscriptView::new(&words, speakers, fixes, times))
     }
 
     /// Keeps the right-hand `right`, bottom `bottom` and top `top` shares of the window (0..1) free
@@ -1638,8 +1823,49 @@ fn event_loop(events: &mut Events, shared: &Shared) {
     }
 }
 
+/// A retimed word as the edit list writes it (2w repair): track, heard start, nth, new start and
+/// end, all to the millisecond, so the history's comparison with the file is not thrown by a last
+/// bit.
+fn edit_key(t: &junctur_core::edit::Retime) -> (usize, i64, usize, i64, i64) {
+    let ms = |s: f64| (s * 1000.0).round() as i64;
+    (t.track, ms(t.start), t.nth, ms(t.from), ms(t.to))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_word_edit_is_refused_only_when_its_own_words_changed() {
+        // 5ad repair: a piece of a running transcription landing while a word is fixed adds words
+        // after it and must not refuse the fix; a re-transcription that moved the word must.
+        use super::{same_target, Words};
+        use junctur_core::transcribe::Word;
+        let w = |start: f64, text: &str| Word {
+            start,
+            end: start + 0.3,
+            text: text.into(),
+            p: 1.0,
+            p_min: None,
+        };
+        let then = Words::from_words(vec![w(1.0, " Bane"), w(2.0, " is"), w(3.0, " here")]);
+        let more = Words::from_words(vec![
+            w(1.0, " Bane"),
+            w(2.0, " is"),
+            w(3.0, " here"),
+            w(301.0, " later"),
+        ]);
+        assert!(same_target(&more, &then, 0, 2));
+        let moved = Words::from_words(vec![w(1.1, " Bane"), w(2.0, " is"), w(3.0, " here")]);
+        assert!(!same_target(&moved, &then, 0, 0));
+        assert!(same_target(&moved, &then, 1, 2));
+        let heard = Words::from_words(vec![w(1.0, " Vayne"), w(2.0, " is")]);
+        assert!(!same_target(&heard, &then, 0, 0));
+        assert!(!same_target(&heard, &then, 2, 2), "gone");
+        // A word starting in the same millisecond put before it changes its place there.
+        let crowded = Words::from_words(vec![w(1.0, " uh"), w(1.0, " Bane"), w(2.0, " is")]);
+        let first = Words::from_words(vec![w(1.0, " Bane"), w(2.0, " is")]);
+        assert!(!same_target(&crowded, &first, 0, 0));
+    }
+
     use super::*;
 
     #[test]

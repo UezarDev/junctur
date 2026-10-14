@@ -172,8 +172,9 @@ pub struct EditState {
     /// Changes when the list's turns (or speaker tracks) do, so the page asks for the words'
     /// labels again after an outside change; a rename leaves it as it was.
     pub speakers_key: String,
-    /// Changes when the list's fixed words do (5h), so the page asks for the words' text again,
-    /// after a fix of its own or an outside change.
+    /// Changes when the list's fixed words do (5h), or its retimed words (2w: a moved cut edge), so
+    /// the page asks for the words' text and times again, after an edit of its own or an outside
+    /// change.
     pub fixes_key: String,
     /// The caption settings: the list's own, else the user's defaults (also with no list).
     pub captions: edit::Captions,
@@ -243,7 +244,7 @@ impl EditState {
             fixes_key: edit
                 .list
                 .as_ref()
-                .map_or_else(String::new, |l| fixes_key(&l.fixes)),
+                .map_or_else(String::new, |l| fixes_key(&l.fixes, &l.times)),
             captions: own.clone().unwrap_or_else(|| defaults.clone()),
             captions_own: own.is_some(),
         }
@@ -276,18 +277,32 @@ fn speakers_key(s: &edit::Speakers) -> String {
     key(names.chain(turns))
 }
 
-/// Over the fixed words (5h) and spans (5x): what the words' text depends on.
-fn fixes_key(fixes: &[edit::Fix]) -> String {
-    key(fixes.iter().flat_map(|f| {
-        let through = f
-            .through
-            .map_or([u64::MAX, u64::MAX], |t| [t.start.to_bits(), t.nth as u64]);
-        [f.track as u64, f.start.to_bits(), f.nth as u64]
-            .into_iter()
-            .chain(through)
-            .chain(f.text.bytes().map(u64::from))
-            .chain([u64::MAX])
-    }))
+/// Over the fixed words (5h), spans (5x) and retimed words (2w): what the words' text and times
+/// depend on beside the transcript.
+fn fixes_key(fixes: &[edit::Fix], times: &[edit::Retime]) -> String {
+    let times = times.iter().flat_map(|t| {
+        [
+            t.track as u64,
+            t.start.to_bits(),
+            t.nth as u64,
+            t.from.to_bits(),
+            t.to.to_bits(),
+            u64::MAX - 1,
+        ]
+    });
+    key(fixes
+        .iter()
+        .flat_map(|f| {
+            let through = f
+                .through
+                .map_or([u64::MAX, u64::MAX], |t| [t.start.to_bits(), t.nth as u64]);
+            [f.track as u64, f.start.to_bits(), f.nth as u64]
+                .into_iter()
+                .chain(through)
+                .chain(f.text.bytes().map(u64::from))
+                .chain([u64::MAX])
+        })
+        .chain(times))
 }
 
 #[cfg(test)]
@@ -313,6 +328,7 @@ mod tests {
             speakers: Default::default(),
             captions: Default::default(),
             fixes: Vec::new(),
+            times: Vec::new(),
             windows: vec![],
         }
         .to_text()

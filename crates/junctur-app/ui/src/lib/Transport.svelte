@@ -124,7 +124,7 @@
   .skip.on {
     border-color: var(--accent);
     color: var(--accent);
-    background: rgba(242, 179, 61, 0.12);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
   }
   .zoom {
     display: inline-flex;

@@ -306,6 +306,9 @@ export interface TranscriptView {
   span: number[];
   /** Each span's text. */
   spans: string[];
+  /** 2w repair: each word's start as heard, in ms, sent only when some word is retimed (else
+   * `start` is it): words starting together (5w) are grouped by it, as fixes name them. */
+  heard?: number[];
 }
 
 export type StageState = "pending" | "running" | "done" | "failed";
@@ -459,20 +462,74 @@ export const editWords = (runs: [number, number][], keep: boolean) =>
 /** Cuts or keeps source frames `[start, end)` exactly. */
 export const editFrames = (start: number, end: number, keep: boolean) =>
   invoke<void>("edit_frames", { start, end, keep });
+/** 2w: moves a cut's edge, at frame `from` (one end of `[start, end)`), to the other end by that
+ * frame edit, and the words beside the edge with it, as one undo step. An edit that moves no edge
+ * of the list (review's clips are not always its ranges) is the frame edit alone. */
+export const moveEdge = (step: { start: number; end: number; keep: boolean }, from: number) =>
+  invoke<void>("move_edge", { start: step.start, end: step.end, keep: step.keep, from });
 /** Renames speaker `id` in the edit list (saved at once, not an undo step). */
 export const renameSpeaker = (id: number, name: string) =>
   invoke<void>("rename_speaker", { id, name });
-/** Fixes the spelling of word `index` (5h; empty or the heard text again removes the fix); resolves
- * to the entry it added to the word list, if any. Saved at once, not an undo step. */
-export const fixWord = (index: number, text: string) => invoke<string | null>("fix_word", { index, text });
+/** A word fix as the edit list holds it (5h, 5w, 5x): handed back to `keepHeard` as it came. */
+export interface Fix {
+  track: number;
+  start: number;
+  nth: number;
+  through?: { start: number; nth: number };
+  text: string;
+}
+/** What a fix did besides itself (5aa): the entries the word list gained, and the fixes also made on
+ * the words heard like it with what each was heard as ("Also fixed N other places", whose Undo is
+ * `keepHeard(others, heard)`). */
+export interface Fixed {
+  learned: string[];
+  others: Fix[];
+  heard: string[];
+}
+/** Fixes the spelling of word `index` (5h; empty or the heard text again removes the fix), and every
+ * other word heard like it (5aa). Saved at once, not an undo step. */
+export const fixWord = (index: number, text: string) => invoke<Fixed>("fix_word", { index, text });
 /** Marks word `index` as checked (5o): it keeps what Whisper heard and is no longer flagged. Saved at
  * once, not an undo step. */
 export const confirmWord = (index: number) => invoke<void>("confirm_word", { index });
-/** Fixes words `first..=last` as one text (5x; empty or the heard words again clears their fixes);
- * resolves to the entries it added to the word list. Refused, saying why, across two voice tracks or
- * two people. Saved at once, not an undo step. */
+/** Fixes words `first..=last` as one text (5x; empty or the heard words again clears their fixes),
+ * and the same words heard elsewhere (5aa). Refused, saying why, across two voice tracks or two
+ * people. Saved at once, not an undo step. */
 export const fixWords = (first: number, last: number, text: string) =>
-  invoke<string[]>("fix_words", { first, last, text });
+  invoke<Fixed>("fix_words", { first, last, text });
+/** Takes back fixes a fix made on other words (5aa), those still as made: the words keep what they
+ * were heard as, and no later spread or Correct gives them the fix again. */
+export const keepHeard = (others: Fix[], heard: string[]) => invoke<number>("keep_heard", { others, heard });
+/** A fix a re-transcription could not put on any word (5aa): Whisper hears something else there now. */
+export interface SetAside {
+  track: number;
+  /** Source seconds. */
+  at: number;
+  heard: string;
+  text: string;
+  /** A word time set by moving a cut's edge (5ad), not a fix: the start and end it was given. */
+  retimed?: [number, number];
+  /** Its track has no words in the new transcript at all: not heard, rather than heard otherwise. */
+  silent?: boolean;
+  /** Not a fix: what Correct could not do, in a sentence; the other fields are empty. */
+  note?: string;
+}
+/** The open recording's fixes set aside by a re-transcription, until `forgetFixesSetAside`. */
+export const fixesSetAside = () => invoke<SetAside[]>("fixes_set_aside");
+/** Forgets `seen`, as `fixesSetAside` gave them: any set aside since stay listed (5ad). */
+export const forgetFixesSetAside = (seen: SetAside[]) => invoke<void>("forget_fixes_set_aside", { seen });
+/** What the Correct button started (5aa). */
+export interface Corrected {
+  progress: Progress;
+  /** The fixes made on words heard like a fixed one, and what each was heard as. */
+  others: Fix[];
+  heard: string[];
+  /** Heard texts fixed two ways, left as heard. */
+  unclear: string[];
+}
+/** The Correct button (5aa): every fix given to the words heard like it, then the open recording's
+ * speakers heard again and its words transcribed again with the word list, the user's edits kept. */
+export const correct = () => invoke<Corrected>("correct");
 /** Sets speaker `id`'s caption colour (`#RRGGBB`). */
 export const recolorSpeaker = (id: number, color: string) =>
   invoke<void>("recolor_speaker", { id, color });

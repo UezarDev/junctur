@@ -123,6 +123,15 @@ fn shape(t: &Transcription) -> Shape {
     (t.paused, t.stopped, jobs)
 }
 
+/// What a run is asked to do with what is there already.
+#[derive(Debug, Clone, Copy)]
+struct How {
+    /// What becomes of an edit list holding the user's edits.
+    keep_list: KeepList,
+    /// Hear the speakers and the words again (5aa: the Correct button).
+    correct: bool,
+}
+
 /// What a request to analyse again did.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -309,14 +318,17 @@ impl Analysis {
 
     /// The options a run of `p` uses: the user's, device auto, and the cut settings of the list on
     /// disk, so a re-analysis keeps settings `junctur cut` set. Never `force`: stages whose results
-    /// still answer the options are reused. `keep_list`: what becomes of a list with the user's
-    /// edits ([`KeepList`]: kept on every run but a fresh cut, 2j and 5s).
-    fn options(&self, p: &Project, keep_list: KeepList) -> Result<PipelineOptions, String> {
+    /// still answer the options are reused. `how`: what becomes of a list with the user's edits
+    /// ([`KeepList`]: kept on every run but a fresh cut, 2j and 5s), and whether the speakers and the
+    /// words are heard again (5aa: Correct).
+    fn options(&self, p: &Project, how: How) -> Result<PipelineOptions, String> {
         let mut o = (self.user)()?;
         if let Ok(e) = p.edit() {
             o.cut = e.settings;
         }
-        o.keep_list = keep_list;
+        o.keep_list = how.keep_list;
+        o.rehear = how.correct;
+        o.retranscribe = how.correct;
         Ok(o)
     }
 
@@ -397,15 +409,17 @@ impl Analysis {
     /// after they edited while it transcribed, 2j); a run already waiting or running is returned as
     /// it is.
     pub fn start(&self, file: &Path, notify: Notify) -> Result<Progress, String> {
-        self.start_with(file, notify, KeepList::Edits)
+        self.start_with(
+            file,
+            notify,
+            How {
+                keep_list: KeepList::Edits,
+                correct: false,
+            },
+        )
     }
 
-    fn start_with(
-        &self,
-        file: &Path,
-        notify: Notify,
-        keep_list: KeepList,
-    ) -> Result<Progress, String> {
+    fn start_with(&self, file: &Path, notify: Notify, how: How) -> Result<Progress, String> {
         // Before opening the project: a run going on is the answer even when the folder cannot be
         // opened just now (2k repair; the check under the lock below closes the race).
         if let Some(r) = self.progress(file).filter(|r| r.phase.busy()) {
@@ -435,7 +449,7 @@ impl Analysis {
         let me = self.clone();
         let spawned = std::thread::Builder::new()
             .name("analysis".into())
-            .spawn(move || me.run(&p, &notify, keep_list));
+            .spawn(move || me.run(&p, &notify, how));
         if let Err(e) = spawned {
             let e = format!("could not start the analysis: {e}");
             self.update(&k, &|_, _| {}, Change::Run, |r| {
@@ -481,10 +495,33 @@ impl Analysis {
             progress: Some(self.start_with(
                 file,
                 notify,
-                if fresh { KeepList::No } else { KeepList::Whole },
+                How {
+                    keep_list: if fresh { KeepList::No } else { KeepList::Whole },
+                    correct: false,
+                },
             )?),
             hand_edited: false,
         })
+    }
+
+    /// The Correct button's run (5aa): as Re-analyse ([`KeepList::Whole`]: the user's edit list kept,
+    /// only the speakers found put into it), and the speakers heard again from the audio against the
+    /// remembered voices and the recording transcribed again with the word list as it is now, its
+    /// fixes carried onto the new words (`PipelineOptions::rehear`, `retranscribe`). An ordinary run
+    /// otherwise: its transcription waits its turn on the lane, can be paused, and the words come a
+    /// piece at a time, editable as they come. Refused while the recording is being analysed.
+    pub fn correct(&self, file: &Path, notify: Notify) -> Result<Progress, String> {
+        if self.busy(file) {
+            return Err("this recording is already being analysed".into());
+        }
+        self.start_with(
+            file,
+            notify,
+            How {
+                keep_list: KeepList::Whole,
+                correct: true,
+            },
+        )
     }
 
     /// Pauses or resumes the transcription lane (2k): the transcribing recording stops after the
@@ -542,20 +579,19 @@ impl Analysis {
         f()
     }
 
-    fn run(&self, p: &Project, notify: &Notify, keep_list: KeepList) {
+    fn run(&self, p: &Project, notify: &Notify, how: How) {
         let k = p.file.clone();
         // A panic is a failure like any other (2m): unwound past the update below, it left the run
         // busy for good, its recording refusing edits and re-analysis until a restart. What it
         // shares survives the unwind: poison-tolerant locks, the lane's place a `Turn`.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.halves(p, notify, keep_list)
-        }))
-        .unwrap_or_else(|e| {
-            Err(format!(
-                "the analysis stopped on an internal error: {}",
-                panic_message(e.as_ref())
-            ))
-        });
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.halves(p, notify, how)))
+                .unwrap_or_else(|e| {
+                    Err(format!(
+                        "the analysis stopped on an internal error: {}",
+                        panic_message(e.as_ref())
+                    ))
+                });
         if let Err(e) = &result {
             eprintln!("junctur-app analysis failed: {e}");
         }
@@ -579,7 +615,7 @@ impl Analysis {
 
     /// The pipeline's first half on the `first` lane, then its transcription on the
     /// `transcription` lane, telling the page when the list is written and as pieces land.
-    fn halves(&self, p: &Project, notify: &Notify, keep_list: KeepList) -> Result<(), String> {
+    fn halves(&self, p: &Project, notify: &Notify, how: How) -> Result<(), String> {
         let k = p.file.clone();
         let notify = notify.as_ref();
         let name = k.file_name().map(|n| n.to_string_lossy().into_owned());
@@ -594,7 +630,7 @@ impl Analysis {
         // Before anything of the recording is read: an edit begun before this run was queued
         // ends first (2m).
         self.wait_for_edits(&k);
-        let o = self.options(p, keep_list)?;
+        let o = self.options(p, how)?;
         let second = {
             let _turn = lock(&self.first);
             self.update(&k, notify, Change::Run, |r| r.phase = Phase::Running);
@@ -1183,6 +1219,55 @@ mod tests {
         assert!(!r.hand_edited && r.progress.is_some());
         ended(&a);
         assert_eq!(*lock(&KEPT), [KeepList::Whole, KeepList::No, KeepList::No]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    static ASKED: Mutex<Vec<(KeepList, bool, bool)>> = Mutex::new(Vec::new());
+    static HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    /// A first half noting what the run was asked to do, held while `HOLD` is set.
+    fn asked_halves<'a>(
+        _: &'a Project,
+        o: &'a PipelineOptions,
+        _: &mut dyn FnMut(&str),
+        _: Steps,
+    ) -> Result<Second<'a>, String> {
+        lock(&ASKED).push((o.keep_list, o.rehear, o.retranscribe));
+        while HOLD.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(Box::new(|_, _, _, _| Ok(())))
+    }
+
+    #[test]
+    fn correct_hears_the_speakers_and_the_words_again_keeping_the_list() {
+        // 5aa: the Correct button's run is Re-analyse's (the list kept whole) with the speakers
+        // and the transcript heard again; a second one while it runs is refused.
+        let d = std::env::temp_dir().join(format!("junctur-app-correct-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join("rec.mp4");
+        std::fs::write(&file, b"not a video").unwrap();
+        let mut a = Analysis::with_cache(d.join("cache"));
+        a.halves = asked_halves;
+        let quiet = || -> Notify { Arc::new(|_: &Progress, _| {}) };
+        HOLD.store(true, std::sync::atomic::Ordering::SeqCst);
+        let r = a.correct(&file, quiet()).unwrap();
+        assert!(r.phase.busy());
+        wait_for("the run asks", || !lock(&ASKED).is_empty());
+        assert!(a.correct(&file, quiet()).is_err(), "already being analysed");
+        HOLD.store(false, std::sync::atomic::Ordering::SeqCst);
+        wait_for("the run ends", || !a.busy(&file));
+        // A plain Re-analyse hears nothing again that answers the settings.
+        a.reanalyse(&file, false, false, quiet()).unwrap();
+        wait_for("the run ends", || !a.busy(&file));
+        assert_eq!(
+            *lock(&ASKED),
+            [
+                (KeepList::Whole, true, true),
+                (KeepList::Whole, false, false)
+            ]
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 }

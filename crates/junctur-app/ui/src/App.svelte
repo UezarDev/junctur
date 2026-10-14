@@ -258,15 +258,20 @@
     }
   }
 
+  // Each refetch's number: the latest one asked for wins (2w repair: two quick edge moves each ask
+  // again, and taking only a reply onto the words the ask started from dropped the later one).
+  let relabel = 0;
   $effect(() => {
     const key = wordsKey();
     if (!words || wordsLoading || key === labelledWith) return;
     labelledWith = key;
-    const before = words;
+    const ask = ++relabel;
+    const gen = loadGen;
     api.transcript().then(
       (view) => {
-        // Only onto the same transcript (another file may have opened meanwhile).
-        if (view && words === before && view.speaker.length === before.text.length) {
+        // Only the latest ask, onto the same recording's transcript (another file may have opened
+        // meanwhile) and the same words.
+        if (view && ask === relabel && gen === loadGen && words && view.speaker.length === words.text.length) {
           // Text, speakers and the spans fixed as one text (5x) all come from the view.
           words = toWords(view);
         }
@@ -413,6 +418,27 @@
       if (r.progress && opened?.file === file) analysis = r.progress;
     } catch (e) {
       failure = String(e);
+    }
+  }
+
+  // The word bar's Correct (5aa): every fix given to the words heard the same way, then a run that
+  // hears the speakers and the words again, the edit list kept. It re-transcribes the recording,
+  // which takes about as long as its first transcription did, so ask first.
+  async function correct(): Promise<api.Corrected | null> {
+    if (!opened) return null;
+    const file = opened.file;
+    const yes = await ask(
+      "Every word heard the same way as one you fixed gets the same fix. Then the speakers are heard again against the remembered voices and the whole recording is transcribed again with your word list, about as long as its first transcription took; the words come back five minutes at a time. Your cuts, names and caption settings stay; your fixes, and the word times you set by moving a cut's edge, move onto the new words, and any whose word is heard otherwise now are listed above the transcript for you to redo.",
+      { title: "Correct this recording?", kind: "info", okLabel: "Correct", cancelLabel: "Not now" },
+    );
+    if (!yes || opened?.file !== file) return null;
+    try {
+      const r = await api.correct();
+      if (opened?.file === file) analysis = r.progress;
+      return r;
+    } catch (e) {
+      failure = String(e);
+      return null;
     }
   }
 
@@ -722,6 +748,7 @@
           {reviewing}
           onSelect={(s) => (selection = s)}
           onError={(e) => (failure = e)}
+          {correct}
         />
       </div>
       {#if tab === "captions"}

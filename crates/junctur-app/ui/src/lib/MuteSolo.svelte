@@ -56,11 +56,11 @@
   }
   .mute.on {
     color: #fff;
-    background: rgba(239, 111, 94, 0.55);
+    background: color-mix(in srgb, var(--bad) 55%, transparent);
     border-color: var(--bad);
   }
   .solo.on {
-    color: #101114;
+    color: var(--on-accent);
     background: var(--accent);
     border-color: var(--accent);
   }

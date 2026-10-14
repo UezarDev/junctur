@@ -175,8 +175,18 @@ words and press Delete to cut them (K keeps), restore a folded cut, or nudge a r
 above the timeline (shift-drag on the timeline selects a stretch). Boundaries snap into the pauses the way
 `junctur cut` places them, every edit is saved to `edit.junctur` at once, Ctrl+Z / Ctrl+Y undo and redo,
 and a list the app did not write itself is first kept as `edit.junctur.bak` (then `.bak2`, ...).
-Double-click a misheard word to fix its spelling: the fix is a `fix` line in `edit.junctur`, shown in the
-transcript, the caption preview and the SRT, and the spelling joins the word list (below).
+Double-click a misheard word, or point at it and press F2, to fix its spelling (F2 with no word under
+the pointer opens Fix text for the words selected): the fix is a `fix` line in `edit.junctur`, shown in the
+transcript, the caption preview and the SRT, and the spelling joins the word list (below). Every other
+place the transcript has the same misheard word (case and punctuation aside) gets the same fix in the
+same save; a line under the panel's header says how many, with Undo those. **Correct**, at the end of
+the word bar's row of speakers, does it for the whole recording: every fix given to the words heard the
+same way, then the speakers heard again against the remembered voices and the recording transcribed
+again with the word list, your cuts, names, fixes and caption settings kept. It is an analysis like any
+other (on the transcription lane, pausable, the words coming back five minutes at a time); the fixes,
+and the word times set by moving a cut's edge, move onto the new words, one whose word Whisper now
+spells your way is no longer needed, and one whose word is heard otherwise now is set aside and listed
+above the transcript until you dismiss it.
 Words Whisper was unsure of (the lowest probability of their letters' tokens under 25 %, `flag_below`
 below) are underlined; the panel's header steps through them, and "Looks right" keeps one as heard and
 stops flagging it (a `fix` line with the heard text). Transcripts made before this have no flags.
@@ -228,8 +238,10 @@ title bar) writes the same file:
 `words` is the word list: names and terms (speaker names, recurring jargon) Whisper is told before every
 stretch it hears, so they come out spelled that way. It applies to the next transcription; a finished one
 is not redone or called out of date. A list too long for Whisper's prompt (about 220 tokens) is cut from
-the end, and the log says what was left out. The app edits it in Settings and adds every word you fix at
-the top of the list, so a newly fixed word is always told to Whisper.
+the end, and the log says what was left out. The app edits it in Settings and adds a word you fix at
+the top of the list, so a newly fixed word is always told to Whisper: only words the recording never
+heard anywhere (or a name whose case you fixed), so a retyped sentence's common words do not push the
+names out.
 
 `flag_below` (default 25, 0 for none) is the percentage under which the app's transcript flags a word to
 check; only the app reads it.
