@@ -305,6 +305,17 @@ mod tests {
     }
 
     #[test]
+    fn the_script_says_the_version_junctur_needs() {
+        // 5n repair: the version the script answers in `info` and the one Rust asks for are kept
+        // in two languages; bumping one without the other fails here, not in Resolve.
+        let script = include_str!("junctur.lua");
+        assert!(
+            script.contains(&format!("\nlocal SCRIPT = \"{SCRIPT}\"")),
+            "junctur.lua's SCRIPT is not {SCRIPT:?}"
+        );
+    }
+
+    #[test]
     fn the_templates_found_are_read_in_order_and_unusable_names_dropped() {
         let text = format!(
             "JuncturReply = \"7:{}\"",

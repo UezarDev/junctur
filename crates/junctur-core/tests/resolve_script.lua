@@ -862,8 +862,46 @@ end
 -- Resolve refusing the delete: an error, and nothing changed.
 w = crowded({ no_delete = true })
 r = w.m.handlers.place(request(next_send, { existing = "replace" }))
-check(r.error ~= nil and r.error:find("nothing was changed") ~= nil, "refused delete: " .. tostring(r.error))
+check(r.error ~= nil and r.error:find("no caption was placed") ~= nil, "refused delete: " .. tostring(r.error))
 untouched(w, "refused delete")
+-- 5n repair: Resolve refusing a new speaker's track after Replace was chosen: an error, and the
+-- user's clips are still there (they are deleted only once every track is in place).
+local opts = {}
+w = crowded(opts)
+opts.no_tracks = true
+local with_cy = { { track = 3, key = "Junctur 3 Cy|86400|86424", start = 86400, ["end"] = 86424,
+    length = 24, text = "cy", fill = { 1, 0, 0 }, x = 0.5, y = 0.3 } }
+for _, c in ipairs(next_send) do with_cy[#with_cy + 1] = c end
+r = w.m.handlers.place(request(with_cy, { existing = "replace",
+    tracks = { "Junctur 1 Ana", "Junctur 2 Bo", "Junctur 3 Cy" } }))
+check(r.error ~= nil and r.error:find("track") ~= nil, "track refused: " .. tostring(r.error))
+check(has(w.tracks[2].items, w.title) and has(w.tracks[2].items, w.video), "the user's clips kept")
+untouched(w, "track refused after replace")
+
+-- 5n repair: a clip whose end or start cannot be read is counted in the way of every caption it
+-- might meet, and Replace does not delete it: the captions it might meet are left out instead.
+local function unmeasured(start, stop)
+    local it = stub(start or 0, 0)
+    if not start then it.GetStart = function() error("no start") end end
+    if stop then
+        it.GetEnd = function() return stop end
+    else
+        it.GetEnd = function() error("no end") end
+    end
+    return it
+end
+for _, case in ipairs({ { "no end", unmeasured(86410, nil) }, { "no start", unmeasured(nil, 86440) } }) do
+    local name, odd = case[1], case[2]
+    w = world()
+    w.m.handlers.place(request({ clip(1, 86400, "a") }))
+    table.insert(w.tracks[2].items, odd)
+    r = w.m.handlers.place(request({ clip(1, 86400, "a"), clip(1, 86430, "b") }))
+    check(r.inTheWay == 1 and r.blocked == 1, name .. ": asked " .. tostring(r.inTheWay))
+    r = w.m.handlers.place(request({ clip(1, 86400, "a"), clip(1, 86430, "b") }, { existing = "replace" }))
+    check(r.replaced == 0 and r.skipped == 1 and r.placed == 0 and r.restyled == 1,
+        name .. ": replace " .. tostring(r.replaced) .. " " .. tostring(r.skipped))
+    check(has(w.tracks[2].items, odd), name .. ": not deleted")
+end
 
 -- A new track: Ana's new captions on "Junctur 1 Ana (2)", her caption already placed restyled
 -- where it is, Bo's on his own; the user's clips untouched.
@@ -884,6 +922,13 @@ for _, c in ipairs(next_send) do more[#more + 1] = c end
 r = w.m.handlers.place(request(more, { existing = "newTrack" }))
 check(r.placed == 1 and r.newTracks == 1 and #w.tracks == 4 and #w.tracks[4].items == 4,
     "the same track beside: " .. tostring(r.firstError))
+-- 5n repair: the user's clips gone from Ana's track, her new captions still go on the track
+-- beside, which holds hers, rather than splitting back onto her own.
+for _, it in ipairs({ w.title, w.video, w.clear }) do drop(w.tracks[2].items, it) end
+more[#more + 1] = clip(1, 86600, "g")
+r = w.m.handlers.place(request(more, { existing = "newTrack" }))
+check(r.placed == 1 and r.newTracks == 1 and #w.tracks[4].items == 5 and #w.tracks[2].items == 1,
+    "kept beside: " .. tostring(r.firstError))
 
 -- A track "(2)" holding a clip of the user's where Ana's captions go: "(3)" is used.
 w = crowded()

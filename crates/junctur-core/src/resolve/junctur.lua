@@ -469,14 +469,24 @@ local function by_start(timeline, i)
     return out
 end
 
--- An item's first frame and the frame after its last; one whose end cannot be read is taken as
--- one frame long. Nil for one whose start cannot be read (it cannot be placed against).
+-- An item's first frame and the frame after its last (5n). A bound that cannot be read is taken
+-- as unbounded (the start as the timeline's beginning, the end as its end) and the item marked
+-- `unsure`: a clip Junctur cannot measure is counted in the way of every caption it might meet,
+-- never passed over, and never deleted (see Replace in `place`).
 local function span(item)
     local ok, s = pcall(function() return item:GetStart() end)
-    if not ok or type(s) ~= "number" then return nil end
     local got, e = pcall(function() return item:GetEnd() end)
-    if not got or type(e) ~= "number" or e <= s then e = s + 1 end
-    return s, e
+    local unsure = false
+    if not ok or type(s) ~= "number" then s, unsure = -math.huge, true end
+    if not got or type(e) ~= "number" or e <= s then e, unsure = math.huge, true end
+    return s, e, unsure
+end
+
+-- An item's Junctur recording tag, nil for one Junctur did not place.
+local function tag_of(item)
+    local tool = textplus(item)
+    local ok, tag = pcall(function() return tool and tool:GetData("JuncturRecording") end)
+    if ok then return tag end
 end
 
 -- The items on video track `i` that are not `recording`'s, with their frames (5n). With no
@@ -485,15 +495,21 @@ end
 local function others(timeline, i, recording)
     local out = {}
     for _, item in ipairs(list(timeline:GetItemListInTrack("video", i))) do
-        local tool = textplus(item)
-        local ok, tag = pcall(function() return tool and tool:GetData("JuncturRecording") end)
-        if not ok then tag = nil end
+        local tag = tag_of(item)
         if (recording == nil and tag == nil) or (recording ~= nil and tag ~= recording) then
-            local s, e = span(item)
-            if s then out[#out + 1] = { item = item, s = s, e = e } end
+            local s, e, unsure = span(item)
+            out[#out + 1] = { item = item, s = s, e = e, unsure = unsure }
         end
     end
     return out
+end
+
+-- Whether video track `i` holds a clip of `recording` (5n: a track beside already in use).
+local function holds(timeline, i, recording)
+    for _, item in ipairs(list(timeline:GetItemListInTrack("video", i))) do
+        if tag_of(item) == recording then return true end
+    end
+    return false
 end
 
 -- Whether an item's frames (from `others`) meet a caption's, both ends exclusive.
@@ -539,10 +555,11 @@ function handlers.place(req)
     end
 
     -- 5n: clips Junctur did not place where those captions go, on the tracks they go on. Found
-    -- before anything is changed, so asking leaves Resolve as it was.
+    -- before anything is changed, so asking leaves Resolve as it was. `meets[k]`: the clips in
+    -- caption k's way.
     local mode = req.existing
     if mode ~= "replace" and mode ~= "skip" and mode ~= "newTrack" then mode = "ask" end
-    local untagged, hits, blocked, nblocked = {}, {}, {}, 0
+    local untagged, hits, meets, nblocked = {}, {}, {}, 0
     for k, c in ipairs(todo) do
         local i = index[req.tracks[c.track]]
         if i then
@@ -553,10 +570,11 @@ function handlers.place(req)
                         o.hit = true
                         hits[#hits + 1] = o
                     end
-                    if not blocked[k] then
-                        blocked[k] = true
+                    if not meets[k] then
+                        meets[k] = {}
                         nblocked = nblocked + 1
                     end
+                    table.insert(meets[k], o)
                 end
             end
         end
@@ -564,62 +582,89 @@ function handlers.place(req)
     if #hits > 0 and mode == "ask" then
         return { inTheWay = #hits, blocked = nblocked }
     end
+
+    -- Everything that can stop the send is settled before anything changes: the tracks each
+    -- speaker's captions go on, then the tracks added, and only then the user's clips deleted.
     local replaced, skipped, beside = 0, 0, 0
-    local names = {}
-    for k, name in ipairs(req.tracks) do names[k] = name end
-    if #hits > 0 and mode == "replace" then
-        -- Only the clips a caption overlaps, and first: when Resolve refuses, nothing has changed.
-        local items = {}
-        for k, o in ipairs(hits) do items[k] = o.item end
-        local ok, done = pcall(function() return timeline:DeleteClips(items, false) end)
-        if not (ok and done) then
-            return { error = "Resolve did not delete the " .. #items .. " clips in the captions' "
-                .. "way, so nothing was changed: unlock their track, or choose another way" }
-        end
-        replaced = #items
-    elseif #hits > 0 and mode == "skip" then
-        local rest = {}
+    local doomed = {}
+    if mode == "skip" or mode == "replace" then
+        -- Skip leaves out every caption in a clip's way. Replace deletes the clips in the way of
+        -- the rest, but never one Junctur could not measure: the captions such a clip might meet
+        -- are left out instead, as Skip would.
+        local rest, marked = {}, {}
         for k, c in ipairs(todo) do
-            if blocked[k] then skipped = skipped + 1 else rest[#rest + 1] = c end
+            local out = meets[k] and mode == "skip"
+            if meets[k] and not out then
+                for _, o in ipairs(meets[k]) do
+                    if o.unsure then out = true end
+                end
+            end
+            if out then
+                skipped = skipped + 1
+            else
+                rest[#rest + 1] = c
+                for _, o in ipairs(meets[k] or {}) do
+                    if not marked[o] then
+                        marked[o] = true
+                        doomed[#doomed + 1] = o.item
+                    end
+                end
+            end
         end
         todo = rest
-    elseif #hits > 0 then
-        -- A new track: a speaker with a caption in the way has all its new captions placed on
-        -- "<its track> (2)", or the first of (3) to (9) where none of them meets a clip not of
-        -- this recording. Found by name again on the next send, so a remembered choice does not
-        -- add a track every time; its captions already placed stay where they are.
-        local moving = {}
+    end
+    local names = {}
+    for k, name in ipairs(req.tracks) do names[k] = name end
+    if mode == "newTrack" then
+        -- A speaker with a caption in the way has all its new captions placed on "<its track>
+        -- (2)", or the first of (3) to (9) where none of them meets a clip not of this recording.
+        -- A speaker who has such a track holding its captions from an earlier send keeps using it
+        -- while it is clear, even with nothing in the way any more, so its captions are not
+        -- split back onto its own track. Its captions already placed stay where they are.
+        local moving, speaking = {}, {}
         for k, c in ipairs(todo) do
-            if blocked[k] then moving[c.track] = true end
+            speaking[c.track] = true
+            if meets[k] then moving[c.track] = true end
         end
-        for t in pairs(moving) do
+        local function clear(t, i)
+            local theirs = others(timeline, i, req.recording)
+            for _, c in ipairs(todo) do
+                if c.track == t then
+                    for _, o in ipairs(theirs) do
+                        if overlaps(o, c) then return false end
+                    end
+                end
+            end
+            return true
+        end
+        for t in pairs(speaking) do
             local free
             for n = 2, 9 do
                 local name = req.tracks[t] .. " (" .. n .. ")"
                 local i = index[name]
-                if not i then
+                if i and holds(timeline, i, req.recording) and clear(t, i) then
                     free = name
                     break
                 end
-                local theirs, clear = others(timeline, i, req.recording), true
-                for _, c in ipairs(todo) do
-                    if c.track == t then
-                        for _, o in ipairs(theirs) do
-                            if overlaps(o, c) then clear = false end
-                        end
+            end
+            if not free and moving[t] then
+                for n = 2, 9 do
+                    local name = req.tracks[t] .. " (" .. n .. ")"
+                    local i = index[name]
+                    if not i or clear(t, i) then
+                        free = name
+                        break
                     end
                 end
-                if clear then
-                    free = name
-                    break
+                if not free then
+                    return { error = "Tracks \"" .. req.tracks[t] .. " (2)\" to (9) all have clips "
+                        .. "where its captions go, so nothing was changed: choose Replace or Skip" }
                 end
             end
-            if not free then
-                return { error = "Tracks \"" .. req.tracks[t] .. " (2)\" to (9) all have clips "
-                    .. "where its captions go, so nothing was changed: choose Replace or Skip" }
+            if free then
+                names[t] = free
+                beside = beside + 1
             end
-            names[t] = free
-            beside = beside + 1
         end
     end
 
@@ -638,6 +683,18 @@ function handlers.place(req)
             index[name] = count
         end
         track[k] = index[name]
+    end
+
+    -- Replace: the user's clips in the way deleted last of all that can stop the send. Refused,
+    -- no caption is placed or changed (a speaker's track added above stays, empty).
+    if #doomed > 0 then
+        local ok, done = pcall(function() return timeline:DeleteClips(doomed, false) end)
+        if not (ok and done) then
+            return { error = "Resolve did not delete the " .. #doomed .. " clips in the captions' "
+                .. "way, so no caption was placed or changed: unlock their track, or choose "
+                .. "another way" }
+        end
+        replaced = #doomed
     end
 
     local placed, restyled, removed, failed, first = 0, 0, 0, 0, nil

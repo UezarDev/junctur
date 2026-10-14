@@ -122,20 +122,20 @@
     void source;
     inTheWay = null;
   });
-  // The choice made in the question, remembered for this recording first when asked to.
+  // The choice made in the question, sent; remembered for this recording, when asked to, only
+  // once the send it was chosen for has gone through (a failed send leaves the recording asking).
   async function answer() {
+    if (sending) return;
     const picked = choice;
-    if (remember && captions) {
-      try {
-        await api.setCaptions({ ...captions, existingClips: picked });
-      } catch (e) {
-        onError(String(e));
-        return;
-      }
-    }
-    await sendResolve(picked);
+    const keep = remember;
+    if (!(await sendResolve(picked)) || !keep) return;
+    const now = captions;
+    if (now) await call(() => api.setCaptions({ ...now, existingClips: picked }));
   }
-  async function sendResolve(existing?: api.ExistingClips) {
+  // Resolves to whether the send went through (not refused, not stopped to ask). `sending` is set
+  // before the first await, so a second click while one is on its way does nothing.
+  async function sendResolve(existing?: api.ExistingClips): Promise<boolean> {
+    if (sending) return false;
     sending = true;
     sentLines = null;
     inTheWay = null;
@@ -145,7 +145,7 @@
         choice = "newTrack";
         remember = false;
         inTheWay = { clips: r.inTheWay, captions: r.blocked };
-        return;
+        return false;
       }
       const n = (k: number, what: string) => `${k.toLocaleString()} ${what}`;
       // 5l's two are not inputs a template lacks but a kind of template it is not.
@@ -168,8 +168,10 @@
           ? [`No ${motion.join(" or ")}: your template is a plain Text+; only Junctur's own animated caption has them.`]
           : []),
       ];
+      return true;
     } catch (e) {
       onError(String(e));
+      return false;
     } finally {
       sending = false;
     }
