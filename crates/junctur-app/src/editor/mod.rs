@@ -368,10 +368,10 @@ impl Editor {
         list: &EditList,
         others: &[Fix],
         heard: &[String],
-    ) -> Result<Option<Edited>, String> {
+    ) -> Result<(Option<Edited>, usize), String> {
         let mut fixes = list.fixes.clone();
-        edit::keep_heard(&mut fixes, others, heard);
-        self.set_fixes(list, fixes, Spread::default())
+        let n = edit::keep_heard(&mut fixes, others, heard);
+        Ok((self.set_fixes(list, fixes, Spread::default())?, n))
     }
 
     /// [`edit::spread`] over the transcript the editor has (none yet: nothing to spread over).
@@ -389,6 +389,11 @@ impl Editor {
         fixes: Vec<Fix>,
         s: Spread,
     ) -> Result<Option<Edited>, String> {
+        // Never a list the parser would refuse (5aa repair): a spread checks this itself, so this
+        // is the last line, not the rule.
+        if edit::clash(&fixes) {
+            return Err("that would give a word two fixes: nothing was changed".into());
+        }
         let edited = self.restyle(list, |l| {
             l.fixes = fixes;
             Ok(())
@@ -947,11 +952,9 @@ mod tests {
         let (none, s) = e.spread_all(&l1).unwrap();
         assert!(none.is_none() && s.added.is_empty());
         // The note's Undo: the two others say what was heard again, the one typed stays.
-        let l2 = e
-            .keep_heard(&l1, &edited.others, &edited.heard)
-            .unwrap()
-            .expect("a change")
-            .list;
+        let (l2, n) = e.keep_heard(&l1, &edited.others, &edited.heard).unwrap();
+        let l2 = l2.expect("a change").list;
+        assert_eq!(n, 2);
         assert_eq!(
             l2.fixes.iter().map(|f| f.text.as_str()).collect::<Vec<_>>(),
             ["Vayne", "bane,", "Bane"]

@@ -177,7 +177,8 @@ the word bar's row of speakers, does it for the whole recording: every fix given
 same way, then the speakers heard again against the remembered voices and the recording transcribed
 again with the word list, your cuts, names, fixes and caption settings kept. It is an analysis like any
 other (on the transcription lane, pausable, the words coming back five minutes at a time); the fixes
-move onto the new words, and one whose word Whisper now spells your way is no longer needed.
+move onto the new words, one whose word Whisper now spells your way is no longer needed, and one
+whose word is heard otherwise now is set aside and listed above the transcript until you dismiss it.
 
 Setup, once (Node.js 20+ for the frontend):
 

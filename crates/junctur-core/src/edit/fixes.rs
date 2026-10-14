@@ -83,6 +83,12 @@ impl Fix {
         self.track == other.track && a <= d && c <= b
     }
 
+    /// Its first and last words' keys, for a check of a whole list ([`clash`]).
+    fn span_keys(&self) -> (usize, (i64, usize), (i64, usize)) {
+        let (a, b) = self.ends();
+        (self.track, a, b)
+    }
+
     /// A span of words rather than one (5x).
     pub fn is_span(&self) -> bool {
         self.through.is_some()
@@ -211,6 +217,17 @@ pub fn set_span(
         sort(fixes);
     }
     Ok(*fixes != before)
+}
+
+/// Whether two fixes of `fixes` cover a word in common, which the list's parser refuses (a second line
+/// for one word, a span over a fixed word or another span). For the code that adds fixes in bulk (5aa:
+/// a spread, a carry onto a new transcript) to check before anything is written: a list that would not
+/// read back must never be saved.
+pub fn clash(fixes: &[Fix]) -> bool {
+    let mut keys: Vec<_> = fixes.iter().map(Fix::span_keys).collect();
+    keys.sort_by_key(|k| (k.0, k.1));
+    keys.windows(2)
+        .any(|w| w[0].0 == w[1].0 && w[1].1 <= w[0].2)
 }
 
 /// The list's order: by start, then track, then which word of the millisecond.
@@ -362,6 +379,29 @@ mod tests {
         assert!(set_fix(&mut f, 0, 3.0, 0, "a", "Tsun\nheto").unwrap());
         assert_eq!(f[0].text, "Tsun heto");
         assert!(set_fix(&mut f, 0, 3.0, 0, "a", &"x".repeat(MAX_FIX + 1)).is_err());
+    }
+
+    #[test]
+    fn two_fixes_on_one_word_are_found_before_a_list_is_written() {
+        // 5aa repair: the parser refuses such a list, so code adding fixes in bulk checks first.
+        let span = Fix {
+            track: 0,
+            start: 1.0,
+            nth: 0,
+            through: Some(WordAt { start: 3.0, nth: 0 }),
+            text: "a b c".into(),
+        };
+        let word = |track, start: f64| Fix {
+            track,
+            start,
+            nth: 0,
+            through: None,
+            text: "x".into(),
+        };
+        assert!(!clash(&[span.clone(), word(0, 4.0), word(1, 2.0)]));
+        assert!(clash(&[word(0, 4.0), span.clone(), word(0, 2.0)]));
+        assert!(clash(&[word(0, 2.0), word(0, 2.0)]));
+        assert!(!clash(&[]));
     }
 
     #[test]

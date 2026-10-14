@@ -324,7 +324,28 @@
   async function undoOthers() {
     const n = note;
     note = null;
-    if (n?.others.length) await call(() => api.keepHeard(n.others, n.heard));
+    if (!n?.others.length) return;
+    await call(async () => {
+      if ((await api.keepHeard(n.others, n.heard)) === 0) {
+        tell("Nothing to undo: those fixes have moved onto the new transcript, or were changed since.");
+      }
+    });
+  }
+
+  // Fixes a re-transcription could not put on any word (5aa repair): listed once it ends, and on
+  // opening, until dismissed, so a fix is never lost without the user seeing it.
+  let setAside = $state<api.SetAside[]>([]);
+  $effect(() => {
+    if (analysing) return;
+    void edit?.fixesKey;
+    api.fixesSetAside().then(
+      (s) => (setAside = s),
+      () => (setAside = []),
+    );
+  });
+  async function forgetSetAside() {
+    setAside = [];
+    await call(() => api.forgetFixesSetAside());
   }
   async function correctAll() {
     const r = await correct();
@@ -518,6 +539,16 @@
       <span class="muted">{words.text.length.toLocaleString()} words</span>
     {/if}
   </header>
+  {#if setAside.length}
+    <div class="spread" role="status">
+      <span class="grow"
+        >Set aside, heard otherwise now: {setAside
+          .map((s) => `"${s.text}" (was "${s.heard}", ${stamp(s.at * 1000)})`)
+          .join(", ")}. Fix those words again where they are now.</span
+      >
+      <button class="x" onclick={() => void forgetSetAside()} aria-label="Dismiss" title="Seen: stop listing them">×</button>
+    </div>
+  {/if}
   {#if note}
     <div class="spread" role="status">
       <span class="grow">{note.text}</span>

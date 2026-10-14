@@ -440,7 +440,18 @@ export const fixWords = (first: number, last: number, text: string) =>
   invoke<Fixed>("fix_words", { first, last, text });
 /** Takes back fixes a fix made on other words (5aa), those still as made: the words keep what they
  * were heard as, and no later spread or Correct gives them the fix again. */
-export const keepHeard = (others: Fix[], heard: string[]) => invoke<void>("keep_heard", { others, heard });
+export const keepHeard = (others: Fix[], heard: string[]) => invoke<number>("keep_heard", { others, heard });
+/** A fix a re-transcription could not put on any word (5aa): Whisper hears something else there now. */
+export interface SetAside {
+  track: number;
+  /** Source seconds. */
+  at: number;
+  heard: string;
+  text: string;
+}
+/** The open recording's fixes set aside by a re-transcription, until `forgetFixesSetAside`. */
+export const fixesSetAside = () => invoke<SetAside[]>("fixes_set_aside");
+export const forgetFixesSetAside = () => invoke<void>("forget_fixes_set_aside");
 /** What the Correct button started (5aa). */
 export interface Corrected {
   progress: Progress;

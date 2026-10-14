@@ -136,6 +136,8 @@ fn main() {
             commands::fix_word,
             commands::fix_words,
             commands::keep_heard,
+            commands::fixes_set_aside,
+            commands::forget_fixes_set_aside,
             commands::correct,
             commands::recolor_speaker,
             commands::set_captions,

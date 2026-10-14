@@ -121,6 +121,15 @@ enum Text {
 }
 
 impl Text {
+    /// The rule a one-word fix from `heard` to `fixed` follows on another word.
+    fn of(heard: &str, fixed: &str) -> Text {
+        if around(fixed) == around(heard) && !bare(fixed).is_empty() {
+            Text::Core(bare(fixed).to_string())
+        } else {
+            Text::Typed(fixed.to_string())
+        }
+    }
+
     fn on(&self, heard: &str) -> String {
         match self {
             Text::Core(core) => {
@@ -203,11 +212,7 @@ pub fn spread(fixes: &mut Vec<Fix>, words: &[(usize, &Word)], which: Which) -> S
                 // Only the punctuation around it changed.
                 continue;
             }
-            if around(&f.text) == around(was) && !bare(&f.text).is_empty() {
-                Text::Core(bare(&f.text).to_string())
-            } else {
-                Text::Typed(f.text.clone())
-            }
+            Text::of(was, &f.text)
         } else {
             let said: Vec<&str> = at.iter().map(|&i| bare(heard[i].text)).collect();
             let typed: Vec<&str> = f.text.split_whitespace().map(bare).collect();
@@ -286,6 +291,15 @@ pub fn spread(fixes: &mut Vec<Fix>, words: &[(usize, &Word)], which: Which) -> S
                     text: t,
                 }
             };
+            // A fix whose words the transcript no longer has (5h: left in the list, shown on no word)
+            // can still lie inside this run's keys; the list would not read back with both.
+            if fixes
+                .iter()
+                .chain(added.iter().map(|(f, _)| f))
+                .any(|f| f.overlaps(&fix))
+            {
+                continue;
+            }
             for &j in run {
                 taken[j] = true;
             }
@@ -377,15 +391,20 @@ pub fn snapshot(fixes: &[Fix], words: &[(usize, &Word)]) -> Vec<Carried> {
 /// reto." 0.4 s earlier).
 const NEAR: f64 = 1.0;
 
-/// What [`carry`] did, for the log.
+/// The longest a word lasts, in seconds, for [`carry`]'s search by start: Whisper's words are inside a
+/// chunk of at most 28 s, and far shorter in practice.
+const LONGEST: f64 = 30.0;
+
+/// What [`carry`] did.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CarryReport {
     /// Fixes now on their word in the new transcript.
     pub kept: usize,
     /// Fixes no longer needed: Whisper now hears the words as the fix says.
     pub right: usize,
-    /// Fixes whose words the new transcript does not have: each one's heard text and time.
-    pub gone: Vec<(String, f64)>,
+    /// Fixes whose words the new transcript does not have, as they were: set aside by the caller
+    /// (`fixes-set-aside.json`), never put on whatever word is there now.
+    pub gone: Vec<Carried>,
 }
 
 /// Moves the fixes `carried` names, where the list still has them as they were, onto `words` (the new
@@ -398,21 +417,30 @@ pub struct CarryReport {
 /// fix covers.
 pub fn carry(fixes: &mut Vec<Fix>, carried: &[Carried], words: &[(usize, &Word)]) -> CarryReport {
     let mut report = CarryReport::default();
+    let heard = read(words);
+    let tracks = by_track(&heard);
+    // A track the new transcript has no word on (heard as nothing, or not transcribed) keeps its
+    // fixes as they are: there is nothing to move them onto, and nothing they could land on wrongly.
     let ours: Vec<&Carried> = carried
         .iter()
+        .filter(|c| tracks.contains_key(&c.fix.track))
         .filter(|c| fixes.iter().any(|f| same(f, &c.fix)))
         .collect();
     if ours.is_empty() {
         return report;
     }
     fixes.retain(|f| !ours.iter().any(|c| same(f, &c.fix)));
-    let heard = read(words);
-    let tracks = by_track(&heard);
     let mut taken = covered(fixes, words);
-    let empty = Vec::new();
     for c in ours {
-        let on = tracks.get(&c.fix.track).unwrap_or(&empty);
-        let gone = |r: &mut CarryReport| r.gone.push((c.heard.join(" "), c.from));
+        let on = &tracks[&c.fix.track];
+        let gone = |r: &mut CarryReport| r.gone.push(c.clone());
+        // Where the new words near its old time are: the track's words are in time order, so a
+        // binary search, not a scan of a 30 h track per fix under the edit list's writer lock.
+        let near = {
+            let a = on.partition_point(|&i| heard[i].start < c.from - NEAR - LONGEST);
+            let b = on.partition_point(|&i| heard[i].start <= c.to + NEAR);
+            &on[a..b.max(a)]
+        };
         if !c.fix.is_span() {
             let likes: HashSet<String> = [
                 likeness(c.heard.first().map_or("", String::as_str)),
@@ -421,7 +449,7 @@ pub fn carry(fixes: &mut Vec<Fix>, carried: &[Carried], words: &[(usize, &Word)]
             .into_iter()
             .filter(|l| !l.is_empty())
             .collect();
-            let best = on
+            let best = near
                 .iter()
                 .copied()
                 .filter(|&i| {
@@ -440,29 +468,41 @@ pub fn carry(fixes: &mut Vec<Fix>, carried: &[Carried], words: &[(usize, &Word)]
                 gone(&mut report);
                 continue;
             };
-            taken[i] = true;
             let h = &heard[i];
             let kept = as_heard(c);
-            if h.text == c.fix.text && !kept {
-                report.right += 1;
-                continue;
-            }
-            fixes.push(Fix {
+            // As a spread writes it (5aa repair): a fix that kept the punctuation it was heard with
+            // takes the new word's own ("Vayne," onto a "Bane." heard now).
+            let text = if kept {
+                h.text.to_string()
+            } else {
+                let was = c.heard.first().map_or("", String::as_str);
+                match check_fix(&Text::of(was, &c.fix.text).on(h.text)) {
+                    Ok(t) if !t.is_empty() => t,
+                    _ => c.fix.text.clone(),
+                }
+            };
+            let new = Fix {
                 track: h.track,
                 start: h.at.start,
                 nth: h.at.nth,
                 through: None,
-                text: if kept {
-                    h.text.to_string()
-                } else {
-                    c.fix.text.clone()
-                },
-            });
+                text,
+            };
+            if fixes.iter().any(|f| f.overlaps(&new)) {
+                gone(&mut report);
+                continue;
+            }
+            taken[i] = true;
+            if h.text == new.text && !kept {
+                report.right += 1;
+                continue;
+            }
+            fixes.push(new);
             report.kept += 1;
         } else {
             // The same words heard again near where they were, else whatever is said in its time.
-            let inside = again(c, on, &heard, &taken).unwrap_or_else(|| {
-                on.iter()
+            let inside = again(c, near, &heard, &taken).unwrap_or_else(|| {
+                near.iter()
                     .copied()
                     .filter(|&i| {
                         let mid = (heard[i].start + heard[i].end) / 2.0;
@@ -474,12 +514,12 @@ pub fn carry(fixes: &mut Vec<Fix>, carried: &[Carried], words: &[(usize, &Word)]
                 gone(&mut report);
                 continue;
             }
-            for &i in &inside {
-                taken[i] = true;
-            }
             let said: Vec<&str> = inside.iter().map(|&i| heard[i].text).collect();
             let kept = as_heard(c);
             if check_span(&said.join(" ")).ok() == check_span(&c.fix.text).ok() && !kept {
+                for &i in &inside {
+                    taken[i] = true;
+                }
                 report.right += 1;
                 continue;
             }
@@ -493,17 +533,29 @@ pub fn carry(fixes: &mut Vec<Fix>, carried: &[Carried], words: &[(usize, &Word)]
                 &heard[*inside.last().expect("not empty")],
             );
             let through = (inside.len() > 1).then_some(b.at);
-            if through.is_none() && check_fix(&text).is_err() {
+            // A sentence now heard as one word is not made a one-word fix of several words: a
+            // spread would put that sentence on every word heard like it (5aa repair). Set aside.
+            if through.is_none()
+                && (text.split_whitespace().count() > 1 || check_fix(&text).is_err())
+            {
                 gone(&mut report);
                 continue;
             }
-            fixes.push(Fix {
+            let new = Fix {
                 track: a.track,
                 start: a.at.start,
                 nth: a.at.nth,
                 through,
                 text,
-            });
+            };
+            if fixes.iter().any(|f| f.overlaps(&new)) {
+                gone(&mut report);
+                continue;
+            }
+            for &i in &inside {
+                taken[i] = true;
+            }
+            fixes.push(new);
             report.kept += 1;
         }
     }
@@ -790,7 +842,9 @@ mod tests {
         let r = carry(&mut f, &carried, &refs(&new));
         assert_eq!(r.kept, 3, "{r:?}");
         assert_eq!(r.right, 1);
-        assert_eq!(r.gone, [("Mel".to_string(), 6.0), ("hom".to_string(), 8.0)]);
+        let gone: Vec<(String, f64)> = r.gone.iter().map(|g| (g.heard.join(" "), g.from)).collect();
+        assert_eq!(gone, [("Mel".to_string(), 6.0), ("hom".to_string(), 8.0)]);
+        assert_eq!(r.gone[0].fix.text, "Mell", "set aside as it was");
         assert_eq!(
             shown(&f, &new),
             ["Vayne,", "Tsunheto", "okay", "Uezar", "and", "house"]
@@ -801,6 +855,73 @@ mod tests {
         let before = f.clone();
         carry(&mut f, &again, &refs(&new));
         assert_eq!(f, before);
+    }
+
+    #[test]
+    fn a_spread_never_lays_a_fix_over_one_whose_word_is_gone() {
+        // 5aa repair: a fix left on no word (5h: a word re-transcribed away) inside the keys a
+        // spread span would cover; with both the list would not read back.
+        let ws = vec![
+            (0, word(1.0, " the")),
+            (0, word(1.3, " wezar")),
+            (0, word(2.0, " the")),
+            (0, word(2.3, " wezar")),
+        ];
+        let mut f = vec![
+            Fix {
+                track: 0,
+                start: 1.0,
+                nth: 0,
+                through: Some(at(1.3, 0)),
+                text: "Uezar".into(),
+            },
+            fix(0, 2.15, "stale"),
+        ];
+        let s = spread(&mut f, &refs(&ws), Which::All);
+        assert!(s.added.is_empty(), "{s:?}");
+        assert!(!super::super::fixes::clash(&f));
+        // A word fix next to it still spreads.
+        let mut g = vec![fix(0, 1.3, "Uezar"), fix(0, 2.15, "stale")];
+        assert_eq!(spread(&mut g, &refs(&ws), Which::All).added.len(), 1);
+        assert!(!super::super::fixes::clash(&g));
+    }
+
+    #[test]
+    fn a_carried_fix_takes_its_new_words_punctuation_and_keeps_its_shape() {
+        // 5aa repair: "Vayne," onto a "Bane." heard now is "Vayne.", as a spread would write it.
+        let old = vec![
+            (0, word(1.0, " Bane,")),
+            (0, word(3.0, " the")),
+            (0, word(3.3, " wezar")),
+            (1, word(5.0, " hola")),
+        ];
+        let mut f = vec![
+            fix(0, 1.0, "Vayne,"),
+            Fix {
+                track: 0,
+                start: 3.0,
+                nth: 0,
+                through: Some(at(3.3, 0)),
+                text: "Uezar went".into(),
+            },
+            fix(1, 5.0, "Hola,"),
+        ];
+        let carried = snapshot(&f, &refs(&old));
+        // Track 1 heard nothing this time; the sentence came out as one word.
+        let new = vec![(0, word(1.0, " Bane.")), (0, word(3.1, " thewezar"))];
+        let r = carry(&mut f, &carried, &refs(&new));
+        assert_eq!(f[0].text, "Vayne.");
+        // A sentence is not made a one-word fix (a spread would copy it onto every such word):
+        // set aside.
+        assert_eq!(r.gone.len(), 1);
+        assert_eq!(r.gone[0].fix.text, "Uezar went");
+        // The track with no words keeps its fix as it was.
+        assert_eq!(f.len(), 2);
+        assert_eq!(
+            (f[1].track, f[1].start, f[1].text.as_str()),
+            (1, 5.0, "Hola,")
+        );
+        assert!(!super::super::fixes::clash(&f));
     }
 
     #[test]

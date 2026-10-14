@@ -420,7 +420,7 @@
     if (!opened) return null;
     const file = opened.file;
     const yes = await ask(
-      "Every word heard the same way as one you fixed gets the same fix. Then the speakers are heard again against the remembered voices and the whole recording is transcribed again with your word list, about as long as its first transcription took; the words come back five minutes at a time. Your cuts, names, fixes and caption settings stay.",
+      "Every word heard the same way as one you fixed gets the same fix. Then the speakers are heard again against the remembered voices and the whole recording is transcribed again with your word list, about as long as its first transcription took; the words come back five minutes at a time. Your cuts, names and caption settings stay; your fixes move onto the new words, and any whose word is heard otherwise now are listed above the transcript for you to redo.",
       { title: "Correct this recording?", kind: "info", okLabel: "Correct", cancelLabel: "Not now" },
     );
     if (!yes || opened?.file !== file) return null;

@@ -834,8 +834,14 @@ impl Core {
         file: Option<&str>,
         others: &[Fix],
         heard: &[String],
-    ) -> Result<(), String> {
-        self.change(file, |ed, list, _| ed.keep_heard(list, others, heard))
+    ) -> Result<usize, String> {
+        let mut n = 0;
+        self.change(file, |ed, list, _| {
+            let (r, k) = ed.keep_heard(list, others, heard)?;
+            n = k;
+            Ok(r)
+        })?;
+        Ok(n)
     }
 
     /// Sets the edit list's caption settings and saves them.

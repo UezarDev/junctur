@@ -26,7 +26,7 @@ use crate::state::PlayerState;
 use crate::translation::{Run, Translation};
 use crate::voices::VoiceView;
 use crate::waves::{self, WavesState};
-use junctur_core::pipeline::StageState;
+use junctur_core::pipeline::{self, Project, SetAside, StageState};
 use junctur_core::transcribe;
 
 /// The player, or why it could not start (libmpv missing, no GL): the window still opens and
@@ -543,14 +543,36 @@ pub async fn fix_words(
 
 /// Takes back fixes a fix made on other words (5aa: "Undo those"), where they are still as made:
 /// those words keep what they were heard as (`heard`, beside each), and no later spread reaches them.
+/// How many were still as made (none once a re-transcription moved them).
 #[tauri::command]
 pub async fn keep_heard(
     app: State<'_, App>,
     others: Vec<Fix>,
     heard: Vec<String>,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     let e = app.editable()?;
     e.keep_heard(e.file(), &others, &heard)
+}
+
+/// The fixes a re-transcription of the open recording could not put on any word (5aa), until
+/// [`forget_fixes_set_aside`].
+#[tauri::command]
+pub async fn fixes_set_aside(app: State<'_, App>) -> Result<Vec<SetAside>, String> {
+    let Some(file) = app.core()?.file() else {
+        return Ok(Vec::new());
+    };
+    let p = Project::open(Path::new(&file), None, None).map_err(|e| e.to_string())?;
+    Ok(pipeline::fixes_set_aside(&p))
+}
+
+/// The user has seen the fixes set aside for the open recording.
+#[tauri::command]
+pub async fn forget_fixes_set_aside(app: State<'_, App>) -> Result<(), String> {
+    let Some(file) = app.core()?.file() else {
+        return Ok(());
+    };
+    let p = Project::open(Path::new(&file), None, None).map_err(|e| e.to_string())?;
+    pipeline::forget_fixes_set_aside(&p).map_err(|e| e.to_string())
 }
 
 /// What the Correct button started (5aa).
@@ -573,20 +595,16 @@ pub struct Corrected {
 /// refused while it is analysed.
 #[tauri::command]
 pub async fn correct(handle: AppHandle, app: State<'_, App>) -> Result<Corrected, String> {
-    let (s, path) = {
-        let e = app.editable()?;
-        let path = e.file().ok_or("no recording is open")?.to_string();
-        if app.analysis.busy(Path::new(&path)) {
-            return Err("this recording is already being analysed".into());
-        }
-        (e.spread_fixes(e.file())?, path)
-    };
-    let analysis = app.analysis.clone();
-    let progress = tauri::async_runtime::spawn_blocking(move || {
-        analysis.correct(Path::new(&path), notifier(handle))
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+    let e = app.editable()?;
+    let path = e.file().ok_or("no recording is open")?.to_string();
+    // The run first, while this edit's mark is held (5aa repair): refused, nothing has changed; started,
+    // it waits for the mark before it reads anything, so the spread below is in the list it keeps.
+    let progress = app.analysis.correct(Path::new(&path), notifier(handle))?;
+    let s = e.spread_fixes(e.file()).unwrap_or_else(|err| {
+        eprintln!("junctur-app: Correct's spread: {err}");
+        Default::default()
+    });
+    drop(e);
     Ok(Corrected {
         progress,
         others: s.added,
