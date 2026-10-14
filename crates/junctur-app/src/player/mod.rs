@@ -226,6 +226,7 @@ impl Player {
     }
 
     /// New mpv frames drawn onto the surface so far (redraws of the same frame not counted).
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
     pub fn frames(&self) -> u64 {
         #[cfg(windows)]
         if let Some(v) = &self.video {
@@ -409,12 +410,14 @@ impl Core {
     }
 
     /// The edit list's path and the list in play (test mode compares them).
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
     pub fn edit_file(&self) -> (Option<PathBuf>, Option<Arc<EditList>>) {
         let c = lock(&self.ctl);
         (c.edit_path.clone(), c.edit.list.clone())
     }
 
     /// How many loads the player has asked mpv for (test mode checks saves do not reload twice).
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
     pub fn loads(&self) -> i64 {
         lock(&self.loads).last
     }

@@ -87,6 +87,7 @@ impl Core {
     }
 
     /// The meters (each track's peak) and what is heard after the mutes, in dBFS, read now.
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
     pub fn levels(&self) -> (Vec<Option<f32>>, Option<f32>) {
         let n = lock(&self.mixer).len();
         let meter = meter(&self.mpv);

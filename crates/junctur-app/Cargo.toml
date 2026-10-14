@@ -34,3 +34,5 @@ windows-sys = { version = "0.61", features = [
 # GPU analysis (Whisper and the ONNX models on CUDA), as the CLI's `cuda`. Without it the app
 # analyses on CPU.
 cuda = ["junctur-core/cuda"]
+# Test mode (`JUNCTUR_TEST_OFFSCREEN`, src/testmode.rs) in a release build; dev builds always have it.
+test-hooks = []

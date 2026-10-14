@@ -365,6 +365,7 @@ pub fn levels(json: &str, tracks: usize) -> Vec<Option<f32>> {
 }
 
 /// What is heard after the mutes, in dBFS, from `af-metadata/mix`.
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub fn heard(json: &str) -> Option<f32> {
     let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(json).ok()?;
     let v: f32 = map

@@ -19,7 +19,15 @@ mod settings;
 mod state;
 #[cfg(test)]
 mod test_support;
+// Test mode (the off-screen launch checks) is in dev builds, and in a release build only with
+// `--features test-hooks`.
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
 mod testmode;
+#[cfg(not(any(debug_assertions, feature = "test-hooks")))]
+#[path = "testmode/off.rs"]
+mod testmode;
+// Only test mode makes a trace.
+#[cfg_attr(not(any(debug_assertions, feature = "test-hooks")), allow(dead_code))]
 mod trace;
 mod translation;
 #[cfg(windows)]

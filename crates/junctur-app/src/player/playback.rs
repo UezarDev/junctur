@@ -93,6 +93,7 @@ impl Core {
     }
 
     /// The margins mpv has now, right, bottom and top (test mode).
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
     pub fn video_margins(&self) -> [Option<String>; 3] {
         ["right", "bottom", "top"]
             .map(|side| self.mpv.get_string(&format!("video-margin-ratio-{side}")))
@@ -210,6 +211,7 @@ impl Core {
     }
 
     /// The speed and A-B loop mpv has now (test mode).
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
     pub fn looping(&self) -> [Option<String>; 3] {
         ["speed", "ab-loop-a", "ab-loop-b"].map(|p| self.mpv.get_string(p))
     }

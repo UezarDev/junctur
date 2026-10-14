@@ -92,6 +92,7 @@ impl VideoOutput {
         });
     }
 
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
     pub fn frames(&self) -> u64 {
         self.shared.frames.load(Ordering::Relaxed)
     }
