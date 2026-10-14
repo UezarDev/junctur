@@ -29,11 +29,14 @@
   import { Talk, same } from "./lib/talking";
   import * as sel from "./lib/selection";
   import { words as toWords, type Words } from "./lib/transcript";
+  import { blockReload } from "./lib/noReload";
 
   // Raw (not deeply reactive): these are replaced whole on every update, and a 30 h transcript or
   // edit list read through a reactive proxy makes every layout pass several times slower.
   let player = $state.raw<api.PlayerState | null>(null);
-  let opened = $state<api.Opened | null>(null);
+  // Raw (2q repair): replaced whole, never changed in place, and `attach` compares it with the
+  // object it set; a deep `$state` stored a proxy, so that check never held.
+  let opened = $state.raw<api.Opened | null>(null);
   let edit = $state.raw<api.EditState | null>(null);
   // Every track's mute, solo and role (2e, 2g); the meters go straight to the bars (meters.ts).
   let mixer = $state.raw<api.MixerState | null>(null);
@@ -283,30 +286,58 @@
         if (closedAt === loadGen) void api.closeFile().catch(() => {});
         return;
       }
-      opened = o;
-      analysis = o.analysis;
-      // Progress sent while the open was on its way was dropped (no `opened` yet to match it):
-      // read where the run is now. A run that already ended needs nothing more, as the
-      // transcript is read just below.
-      const now = await api.analysis(o.file);
-      if (stale()) return;
-      // Never back: an event handled meanwhile may already be further on than this answer.
-      if (now && opened === o && rank(now) >= rank(analysis)) {
-        analysis = now;
-        if (now.phase === "done") opened = { ...o, outdated: [] };
-      }
-      const w = await api.wavesState();
-      if (stale()) return;
-      if (w && w.file === o.file) {
-        waves = w;
-        wavesVersion++;
-      }
-      await loadTranscript();
+      await attach(o, stale);
     } catch (e) {
       if (!stale()) failure = String(e);
     } finally {
       if (!stale()) opening = false;
     }
+  }
+
+  // A page that started over while the app went on (2q: F5 reloaded it; now the keys do nothing,
+  // noReload.ts, but a dev build's Vite or a crash of the page still can): the player has a
+  // recording open, and the page takes it as it is, from the backend, without opening it again.
+  // Before, the reloaded page showed it playing with "No transcript" and an empty Properties tab.
+  async function reattach() {
+    const gen = ++loadGen;
+    const stale = () => gen !== loadGen;
+    opening = true;
+    try {
+      // This page is not in review, so neither is the player (its loop, the skip toggle it holds).
+      await api.endReview().catch(() => {});
+      const o = await api.currentRecording();
+      if (stale() || !o) return;
+      await attach(o, stale);
+      void api.uiLog(`page reattached to ${o.file}: ${words?.text.length ?? 0} words, analysis ${analysis?.phase ?? "none"}`);
+    } catch (e) {
+      if (!stale()) failure = String(e);
+    } finally {
+      if (!stale()) opening = false;
+    }
+  }
+
+  // What the page holds for an open recording, from what opening it (or `currentRecording`) said:
+  // its analysis as it is now, its waveforms, its transcript.
+  async function attach(o: api.Opened, stale: () => boolean) {
+    opened = o;
+    analysis = o.analysis;
+    // Progress sent while the open was on its way was dropped (no `opened` yet to match it):
+    // read where the run is now. A run that already ended needs nothing more, as the
+    // transcript is read just below.
+    const now = await api.analysis(o.file);
+    if (stale()) return;
+    // Never back: an event handled meanwhile may already be further on than this answer.
+    if (now && opened === o && rank(now) >= rank(analysis)) {
+      analysis = now;
+      if (now.phase === "done") opened = { ...o, outdated: [] };
+    }
+    const w = await api.wavesState();
+    if (stale()) return;
+    if (w && w.file === o.file) {
+      waves = w;
+      wavesVersion++;
+    }
+    await loadTranscript();
   }
 
   const busy = steps.busy;
@@ -517,6 +548,7 @@
         mixer = await api.mixer();
         const file = await api.startupFile();
         if (file) await load(file);
+        else if (s.path) await reattach();
         starting = false;
       },
       (e) => {
@@ -537,6 +569,7 @@
         }
       }),
       api.onMenu(onMenu),
+      Promise.resolve(blockReload()),
       getCurrentWebview().onDragDropEvent((e) => {
         const p = e.payload;
         dragging = p.type === "enter" || p.type === "over";

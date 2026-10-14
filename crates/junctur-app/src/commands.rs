@@ -4,6 +4,7 @@
 //! thread: an mpv command blocks until mpv takes it, and a dragged seek bar sends many.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use junctur_core::edit::Captions;
@@ -167,11 +168,24 @@ pub struct Opened {
     pub outdated: Vec<String>,
 }
 
+/// Whether the page has had the command line's file (2q).
+static STARTUP_TAKEN: AtomicBool = AtomicBool::new(false);
+
 /// A file named on the command line (`junctur-app <file>`, or "Open with"), for the page to open
-/// once it is ready.
+/// once it is ready. Only the first page start gets it (2q): before, a reloaded page (F5) opened it
+/// again from its start, whatever recording was open by then.
 #[tauri::command]
 pub fn startup_file() -> Option<String> {
-    std::env::args().nth(1)
+    once(std::env::args().nth(1))
+}
+
+/// `arg` the first time, nothing after ([`STARTUP_TAKEN`]).
+fn once(arg: Option<String>) -> Option<String> {
+    if STARTUP_TAKEN.swap(true, Ordering::SeqCst) {
+        None
+    } else {
+        arg
+    }
 }
 
 #[tauri::command]
@@ -212,25 +226,7 @@ pub async fn open_file(
     let mut analysis = app.analysis.progress(file);
     let mut outdated = Vec::new();
     if let Ok(s) = &status {
-        // No list, or one that does not parse left by a run that never finished its `edit` stage
-        // (a list the user broke by hand after a finished run is theirs to fix, not to replace).
-        let finished = s
-            .stages
-            .iter()
-            .any(|st| st.name == "edit" && st.state == StageState::Done);
-        let unanalysed = s.edit.is_none() && (s.edit_error.is_none() || !finished);
-        // 2j: the list comes before the transcript, so a list does not mean a finished run. One
-        // whose transcription never finished (a closed app, a failed Whisper) is resumed: every
-        // finished stage and chunk is reused and the user's edits are kept.
-        let untranscribed = s
-            .stages
-            .iter()
-            .any(|st| st.name == "transcribe" && st.state != StageState::Done);
-        // Not while another process transcribes it (`junctur analyze`): the stage reads
-        // `running` then too, and a second Whisper on its partial would only be refused (2j
-        // repair). A run of this app's own is returned by `start` as it is.
-        let elsewhere = || transcribe::transcribing_elsewhere(Path::new(&s.dir));
-        if unanalysed || (untranscribed && (app.analysis.busy(file) || !elsewhere())) {
+        if needs_run(s, app.analysis.busy(file)) {
             // The file plays even when its analysis cannot start; the panel says why.
             analysis = Some(
                 app.analysis
@@ -252,20 +248,79 @@ pub async fn open_file(
             core.transcribed(&absolute, now.words_through());
         }
     }
-    let (project, project_error) = match status {
-        Ok(s) => (Some(s), None),
-        Err(e) => (None, Some(e)),
+    Ok(Opened::new(file, status, analysis, outdated))
+}
+
+/// Whether opening a recording with this project starts a run of it, `busy` being whether one of
+/// this app's own is on. A recording that needs one is never offered a re-analysis (its out-of-date
+/// list stays empty), whether its run started or could not.
+fn needs_run(s: &ProjectStatus, busy: bool) -> bool {
+    // No list, or one that does not parse left by a run that never finished its `edit` stage
+    // (a list the user broke by hand after a finished run is theirs to fix, not to replace).
+    let finished = s
+        .stages
+        .iter()
+        .any(|st| st.name == "edit" && st.state == StageState::Done);
+    let unanalysed = s.edit.is_none() && (s.edit_error.is_none() || !finished);
+    // 2j: the list comes before the transcript, so a list does not mean a finished run. One
+    // whose transcription never finished (a closed app, a failed Whisper) is resumed: every
+    // finished stage and chunk is reused and the user's edits are kept.
+    let untranscribed = s
+        .stages
+        .iter()
+        .any(|st| st.name == "transcribe" && st.state != StageState::Done);
+    // Not while another process transcribes it (`junctur analyze`): the stage reads `running`
+    // then too, and a second Whisper on its partial would only be refused (2j repair). A run of
+    // this app's own is returned by `start` as it is.
+    let elsewhere = || transcribe::transcribing_elsewhere(Path::new(&s.dir));
+    unanalysed || (untranscribed && (busy || !elsewhere()))
+}
+
+impl Opened {
+    fn new(
+        file: &Path,
+        status: Result<ProjectStatus, String>,
+        analysis: Option<Progress>,
+        outdated: Vec<String>,
+    ) -> Opened {
+        let (project, project_error) = match status {
+            Ok(s) => (Some(s), None),
+            Err(e) => (None, Some(e)),
+        };
+        Opened {
+            file: std::path::absolute(file)
+                .unwrap_or_else(|_| file.to_path_buf())
+                .display()
+                .to_string(),
+            project,
+            project_error,
+            analysis,
+            outdated,
+        }
+    }
+}
+
+/// The recording the player has open, as [`open_file`] returned it, without opening it again: for a
+/// page that started over while the app went on (2q: F5 reloaded the page, which then showed the
+/// recording playing with an empty Transcript and Properties). Nothing starts here: a run its
+/// opening needed was started then and goes on, so its progress is read as it is now, and the
+/// out-of-date list follows `open_file`'s rule ([`needs_run`]). The player is not told the words
+/// so far again, as `open_file` does after loading: the page's reload did not touch it, and the
+/// run's events have kept it current since (telling it again would only drop the words it read).
+#[tauri::command]
+pub async fn current_recording(app: State<'_, App>) -> Result<Option<Opened>, String> {
+    let Some(path) = app.core()?.file() else {
+        return Ok(None);
     };
-    Ok(Opened {
-        file: std::path::absolute(file)
-            .unwrap_or_else(|_| file.to_path_buf())
-            .display()
-            .to_string(),
-        project,
-        project_error,
-        analysis,
-        outdated,
-    })
+    let file = Path::new(&path);
+    let status = project::status(file, None);
+    let analysis = app.analysis.progress(file);
+    let busy = app.analysis.busy(file);
+    let outdated = match &status {
+        Ok(s) if !busy && !needs_run(s, false) => analysis::outdated(file),
+        _ => Vec::new(),
+    };
+    Ok(Some(Opened::new(file, status, analysis, outdated)))
 }
 
 /// The recordings opened before, newest first, for the start window.
@@ -812,4 +867,18 @@ pub fn snap_layouts(window: tauri::WebviewWindow) -> Result<(), String> {
 #[tauri::command]
 pub fn ui_log(message: String) {
     crate::testmode::ui_log(message);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The only test of the process-wide `STARTUP_TAKEN`, which `startup_file` hands out through.
+    #[test]
+    fn startup_file_is_given_once() {
+        assert_eq!(once(Some("a.mp4".into())).as_deref(), Some("a.mp4"));
+        // A reloaded page asks again: the file is not opened a second time.
+        assert_eq!(once(Some("a.mp4".into())), None);
+        assert_eq!(once(None), None);
+    }
 }

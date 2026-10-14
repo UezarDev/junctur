@@ -364,6 +364,9 @@ export interface Reanalysed {
 export const startupFile = () => invoke<string | null>("startup_file");
 export const playerState = () => invoke<PlayerState>("player_state");
 export const openFile = (path: string) => invoke<Opened>("open_file", { path });
+/** The recording the player has open, as `openFile` gave it, without opening it again: for a page
+ * that started over while the app went on (2q: a reload). */
+export const currentRecording = () => invoke<Opened | null>("current_recording");
 export const recent = () => invoke<Recent[]>("recent");
 export const forgetRecent = (path: string) => invoke<void>("forget_recent", { path });
 export const analysis = (path: string) => invoke<Progress | null>("analysis", { path });

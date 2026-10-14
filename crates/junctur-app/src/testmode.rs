@@ -29,6 +29,9 @@
 //! set `JUNCTUR_CONFIG` to a scratch file before anything saves them);
 //! `speed=1.5`, `loop=<a>-<b>` (source seconds: into review, the whole file playing) and `unloop`
 //! (out of it, the skip toggle back) drive review's speed and loop of one clip (2o), each step's report adding what mpv has then (`speedLoop`: speed, `ab-loop-a`, `-b`);
+//! `reload` reloads the page as F5 did before 2q made the keys do nothing (the page starts over
+//! while the app goes on, and should come back to the open recording; its `ui` lines say what it
+//! read);
 //! the picture's shape is in the `state` (`width`, `height`, `aspect`). Each step's
 //! report adds the edit state it left, and the final report re-reads `edit.junctur` from disk
 //! (`disk`: does it parse, and is it the list in play), counts the loads asked of mpv (a save must
@@ -110,6 +113,8 @@ enum Action {
     Speed(f64),
     Loop(f64, f64),
     Unloop,
+    /// 2q: the page loads again, the app going on.
+    Reload,
 }
 
 /// The frontend's log lines (`ui_log`), kept for the report.
@@ -204,6 +209,7 @@ fn parse_steps(s: &str) -> Result<Vec<(f64, Action)>, String> {
             None if action == "reanalyse" => Action::Reanalyse(false),
             None if action == "reanalyse_fresh" => Action::Reanalyse(true),
             None if action == "unloop" => Action::Unloop,
+            None if action == "reload" => Action::Reload,
             _ => return Err(bad()),
         };
         steps.push((at, action));
@@ -242,6 +248,10 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
     if let Action::Menu(id) = a {
         use tauri::Emitter;
         return app.emit(MENU_EVENT, id).map_err(|e| e.to_string());
+    }
+    if let Action::Reload = a {
+        let window = app.get_webview_window("main").ok_or("no window")?;
+        return window.eval("location.reload()").map_err(|e| e.to_string());
     }
     if let Action::Reanalyse(fresh) = *a {
         let file = with_player(app, |p| p.file())?.ok_or("no file is open")?;
@@ -570,6 +580,11 @@ mod tests {
                 (3.0, Action::Unloop)
             ]
         );
+        assert_eq!(
+            parse_steps("4:reload").unwrap(),
+            vec![(4.0, Action::Reload)]
+        );
+        assert!(parse_steps("4:reload=now").is_err());
         assert!(parse_steps("1:loop=10").is_err());
         assert!(parse_steps("1:speed=fast").is_err());
         assert!(parse_steps("1:mute=x").is_err());

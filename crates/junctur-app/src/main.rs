@@ -111,6 +111,7 @@ fn main() {
             commands::startup_file,
             commands::player_state,
             commands::open_file,
+            commands::current_recording,
             commands::recent,
             commands::forget_recent,
             commands::analysis,
