@@ -721,9 +721,9 @@ pub async fn reveal(app: State<'_, App>) -> Result<(), String> {
         .map_err(|e| format!("opening {dir}: {e}"))
 }
 
-/// Closes the open recording (2i: File > Close recording, back to the start window). Its
-/// waveform read stops; an analysis of it goes on (runs are not the player's), and reopening the
-/// recording shows where it is.
+/// Closes the open recording, back to the start window (2i; 2u: File > Back to recordings and the
+/// title bar's back arrow). Its waveform read stops; an analysis of it goes on (runs are not the
+/// player's), and reopening the recording shows where it is.
 #[tauri::command]
 pub async fn close_file(app: State<'_, App>) -> Result<(), String> {
     // The player first: an open on its way checks it after starting its waveforms (`open_file`).

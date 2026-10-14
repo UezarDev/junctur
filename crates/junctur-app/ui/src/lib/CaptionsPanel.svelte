@@ -15,12 +15,16 @@
   // 5j and the translation of 5k, whose run `CaptionTranslation` shows, how cues are cut) are
   // `CaptionRules`, shared with Settings (2i); a list without
   // its own settings follows the user's defaults, and "Save as default" makes this recording's the
-  // defaults.
+  // defaults. Each group is a `Section`; what used to be a paragraph under it is its (i) (2t), and
+  // only status and results show as text.
   import { save } from "@tauri-apps/plugin-dialog";
   import * as api from "./api";
   import { captionFace, captionFont } from "./captionStyle";
   import CaptionRules from "./CaptionRules.svelte";
   import CaptionTranslation from "./CaptionTranslation.svelte";
+  import InfoTip from "./InfoTip.svelte";
+  import Section from "./Section.svelte";
+  import { section } from "./captionSections";
 
   let {
     edit,
@@ -38,6 +42,8 @@
   const face = $derived(captionFace(captions ?? { bold: false, italic: false, underline: false }));
   const font = $derived(captions ? captionFont(captions) : "inherit");
   const names = $derived(speakers.map((s) => s.name));
+  // A shared group's heading and (i) (captionSections.ts).
+  const head = (part: Parameters<typeof section>[0]) => ({ title: section(part).title, info: section(part).info });
   let exported = $state<string[] | null>(null);
   let busy = $state(false);
   let savedDefault = $state(false);
@@ -177,142 +183,123 @@
 
   <div class="body">
     {#if !usable || !captions}
-      <p class="note">Open a recording with an edit list to set up its captions.</p>
+      <p class="status">Open a recording with an edit list to set up its captions.</p>
     {:else}
-      <CaptionRules value={captions} part="switches" onChange={(c) => setCaptions(c)} {onError} />
+      <Section {...head("switches")}>
+        <CaptionRules value={captions} part="switches" onChange={(c) => setCaptions(c)} {onError} />
+      </Section>
 
-      <h3>Speakers</h3>
-      {#if speakers.length === 0}
-        <p class="note">No speakers in this edit list yet; captions will be white. Run the pipeline to tell them apart.</p>
-      {/if}
-      {#each speakers as s (s.id)}
-        <div class="speaker">
-          <input
-            type="color"
-            value={s.color}
-            title="Caption colour for {s.name}"
-            onchange={(e) => call(() => api.recolorSpeaker(s.id, (e.currentTarget as HTMLInputElement).value))}
-          />
-          <input class="name" value={s.name} maxlength="60" aria-label="Name of speaker {s.id}" onchange={(e) => rename(s.id, e)} />
-        </div>
-        <div
-          class="sample"
-          style:color={s.color}
-          style:font-weight={face.weight}
-          style:font-style={face.style}
-          style:text-decoration={face.decoration}
-          style:font-family={font}
-        >
-          {s.name}: ¿qué tal? Hola a todos
-        </div>
-      {/each}
+      <Section title="Speakers" info="Each speaker's caption colour and name, with a sample of how it reads.">
+        {#if speakers.length === 0}
+          <p class="status">No speakers yet: captions are white. Run the pipeline to tell them apart.</p>
+        {/if}
+        {#each speakers as s (s.id)}
+          <div class="speaker">
+            <input
+              type="color"
+              value={s.color}
+              title="Caption colour for {s.name}"
+              onchange={(e) => call(() => api.recolorSpeaker(s.id, (e.currentTarget as HTMLInputElement).value))}
+            />
+            <input class="name" value={s.name} maxlength="60" aria-label="Name of speaker {s.id}" onchange={(e) => rename(s.id, e)} />
+          </div>
+          <div
+            class="sample"
+            style:color={s.color}
+            style:font-weight={face.weight}
+            style:font-style={face.style}
+            style:text-decoration={face.decoration}
+            style:font-family={font}
+          >
+            {s.name}: ¿qué tal? Hola a todos
+          </div>
+        {/each}
+      </Section>
 
-      <h3>Style</h3>
-      <CaptionRules value={captions} part="style" onChange={(c) => setCaptions(c)} {onError} />
-      <CaptionRules value={captions} part="look" onChange={(c) => setCaptions(c)} {onError} />
-      <p class="note">
-        The preview and "Send to Resolve" use all of these. An SRT brings only the colour, bold, italic and underline
-        into Resolve: there the font, size, outline and position are the subtitle track's style (select the track,
-        Inspector &gt; Track). Resolve has been reported to give bold or italic (perhaps underlined) SRT captions
-        their own style rather than the track's: if a Track Style change then misses them, turn these off.
-      </p>
+      <Section {...head("style")}>
+        <CaptionRules value={captions} part="style" onChange={(c) => setCaptions(c)} {onError} />
+        <CaptionRules value={captions} part="look" onChange={(c) => setCaptions(c)} {onError} />
+      </Section>
 
-      <h3>People talking at once</h3>
-      <CaptionRules value={captions} part="overlap" {names} onChange={(c) => setCaptions(c)} {onError} />
-      <p class="note">
-        Where their captions go in the preview and in Resolve. The protagonist keeps the normal spot and the others
-        move round them. Side by side needs short lines (about 20 characters per line) not to run into each other.
-        The SRT always stacks them in one caption, first to speak on top.
-      </p>
+      <Section {...head("overlap")}>
+        <CaptionRules value={captions} part="overlap" {names} onChange={(c) => setCaptions(c)} {onError} />
+      </Section>
 
-      <h3>Caption text</h3>
-      <CaptionRules value={captions} part="text" onChange={(c) => setCaptions(c)} {onError} />
-      <CaptionTranslation
-        {captions}
-        {source}
-        cuts={`${edit?.ranges.join(",") ?? ""}|${edit?.speakersKey ?? ""}|${edit?.fixesKey ?? ""}`}
-        {onError}
-      />
-      <p class="note">
-        What the captions show, in the SRT, in Resolve and in the preview; the transcript keeps the words as
-        spoken, so clearing one brings them back. A translation is made first, a sentence at a time on this
-        machine, then find and replace, case, punctuation and censoring apply to the translated words.
-      </p>
+      <Section {...head("text")}>
+        <CaptionRules value={captions} part="text" onChange={(c) => setCaptions(c)} {onError} />
+        <CaptionTranslation
+          {captions}
+          {source}
+          cuts={`${edit?.ranges.join(",") ?? ""}|${edit?.speakersKey ?? ""}|${edit?.fixesKey ?? ""}`}
+          {onError}
+        />
+      </Section>
 
-      <h3>How captions are cut</h3>
-      <CaptionRules value={captions} part="cut" onChange={(c) => setCaptions(c)} {onError} />
+      <Section {...head("cut")}>
+        <CaptionRules value={captions} part="cut" onChange={(c) => setCaptions(c)} {onError} />
+      </Section>
+
       <div class="defaults">
-        <span class="note">
+        <span class="status">
           {edit?.captionsOwn ? "Set for this recording." : "Following your defaults (Settings)."}
         </span>
         <button onclick={saveDefault} title="New recordings, and ones not set by hand, start from these">
           Save as default
         </button>
       </div>
-      {#if savedDefault}<p class="done">Saved as the default for every recording.</p>{/if}
+      {#if savedDefault}<p class="status good">Saved as the default for every recording.</p>{/if}
 
-      <button class="export" onclick={exportSrt} disabled={busy || !source}>
-        {busy ? "Writing…" : "Export captions (.srt)…"}
-      </button>
-      {#if exported}
-        {#each exported as line (line)}<p class="done">{line}</p>{/each}
-      {/if}
-      <p class="note">
-        Cues follow the edited timeline, like the render and the FCPXML. When people talk at once, one caption
-        holds them all, each speaker on their own line in their colour; the line and word limits apply to each speaker.
-        In DaVinci Resolve import the file (File &gt; Import &gt; Subtitle) onto one subtitle track at the start
-        of the timeline; the colours, bold, italic and underline come through. An SRT carries no size or position: set
-        those in Resolve. Premiere Pro is untested and likely shows its default style.
-      </p>
+      <Section
+        title="Export (.srt)"
+        info="Cues follow the edited timeline, like the render and the FCPXML; people talking at once share one caption, a line each. In Resolve: File > Import > Subtitle, onto one subtitle track at the timeline's start. Size and position are set there. Premiere Pro is untested."
+      >
+        <button class="wide" onclick={exportSrt} disabled={busy || !source}>
+          {busy ? "Writing…" : "Export captions (.srt)…"}
+        </button>
+        {#if exported}
+          {#each exported as line (line)}<p class="status good path">{line}</p>{/each}
+        {/if}
+      </Section>
 
-      <h3>Send to Resolve</h3>
-      <CaptionRules value={captions} part="resolve" onChange={(c) => setCaptions(c)} {onError} />
-      <button class="export" onclick={sendResolve} disabled={sending || !source}>
-        {sending ? "Sending…" : "Send to Resolve"}
-      </button>
-      {#if sentLines}
-        {#each sentLines as line (line)}<p class="done">{line}</p>{/each}
-      {/if}
-      <button onclick={installScript} title="Puts the Junctur script into Resolve's Scripts folder; sending does this too">
-        Install script in Resolve
-      </button>
-      {#if installed}<p class="done">Installed: {installed}</p>{/if}
-      <p class="note">
-        Places every caption on the open Resolve timeline as a Text+ clip, each speaker on their own video track
-        ("Junctur", their number and name) in their colour, styled as above, at the edited timeline's times: put the
-        edited video (render or FCPXML) at the start of that timeline. Once per Resolve session, choose Workspace
-        &gt; Scripts &gt; Junctur in Resolve and leave it running; Junctur installs the script when you send.
-        Sending again updates the captions already there instead of adding more. The template is Junctur's
-        own Text+ unless you name a Text+ title from Resolve's media pool; your template keeps its shadow and
-        background, these settings set the rest.
-      </p>
-
-      <h3>Remembered voices</h3>
-      {#if voiceList.length === 0}
-        <p class="note">
-          None yet. Select some words only one person says in the transcript and choose "Remember voice…": every
-          recording then names that person's speaker the same, in the same colour. Any length works, even one
-          word, and the words picked are that person's from then on; half a minute from a few places makes the
-          voice recognisable elsewhere. Add more by remembering the same name again.
-        </p>
-      {/if}
-      {#each voiceList as v (v.name)}
-        <div class="speaker">
-          <span class="swatch" style:background={v.color}></span>
-          <span class="name">{v.name} <span class="note">({v.seconds.toFixed(0)} s)</span></span>
-          <button onclick={() => forget(v.name)} title="Forget {v.name}'s voice in every recording">Forget</button>
+      <Section {...head("resolve")}>
+        <CaptionRules value={captions} part="resolve" onChange={(c) => setCaptions(c)} {onError} />
+        <div class="buttons">
+          <button class="grow" onclick={sendResolve} disabled={sending || !source}>
+            {sending ? "Sending…" : "Send to Resolve"}
+          </button>
+          <button onclick={installScript} title="Puts the Junctur script into Resolve's Scripts folder; sending does this too">
+            Install script
+          </button>
         </div>
-      {/each}
-      <button class="export" onclick={rehear} disabled={rehearing || !source}>
-        {rehearing ? "Analysing speakers…" : "Analyse speakers again"}
-      </button>
-      {#if reheard}<p class="done">{reheard}</p>{/if}
-      <p class="note">
-        Remembering a voice relabels at once and keeps the words you picked as that person's. Analysing again
-        also reads the recording again, with its voice windows cut where your picks begin and end: it takes
-        about as long as the first speaker analysis, and remembering or forgetting a voice is not possible
-        until it is done.
-      </p>
+        {#if sentLines}
+          {#each sentLines as line (line)}<p class="status good path">{line}</p>{/each}
+        {/if}
+        {#if installed}<p class="status good path">Installed: {installed}</p>{/if}
+      </Section>
+
+      <Section
+        title="Remembered voices"
+        info="Select words only one person says in the transcript and choose Remember voice…: every recording then names that speaker the same, in the same colour. Half a minute from a few places makes a voice recognisable; remember the same name again to add more."
+      >
+        {#if voiceList.length === 0}<p class="status">None yet.</p>{/if}
+        {#each voiceList as v (v.name)}
+          <div class="speaker">
+            <span class="swatch" style:background={v.color}></span>
+            <span class="name">{v.name} <span class="seconds">({v.seconds.toFixed(0)} s)</span></span>
+            <button onclick={() => forget(v.name)} title="Forget {v.name}'s voice in every recording">Forget</button>
+          </div>
+        {/each}
+        <div class="buttons">
+          <button class="grow" onclick={rehear} disabled={rehearing || !source}>
+            {rehearing ? "Analysing speakers…" : "Analyse speakers again"}
+          </button>
+          <InfoTip
+            label="Analyse speakers again"
+            text="Reads the recording again, its voice windows cut where your picks begin and end. Takes about as long as the first speaker analysis; voices cannot be remembered or forgotten until it is done."
+          />
+        </div>
+        {#if reheard}<p class="status good">{reheard}</p>{/if}
+      </Section>
     {/if}
   </div>
 </section>
@@ -336,20 +323,7 @@
   .body {
     flex: 1;
     overflow-y: auto;
-    padding: 4px 12px 16px;
-  }
-  h3 {
-    margin: 14px 0 8px;
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-  .note {
-    color: var(--muted);
-    font-size: 12px;
-    line-height: 1.5;
+    padding: 4px 12px 20px;
   }
   .speaker {
     display: flex;
@@ -364,9 +338,21 @@
     border: 1px solid var(--line);
     background: none;
   }
+  .speaker input.name {
+    font: inherit;
+    color: inherit;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 4px 8px;
+  }
   .name {
     flex: 1;
     min-width: 0;
+  }
+  .seconds {
+    color: var(--muted);
+    font-size: 12px;
   }
   .sample {
     margin: 4px 0 2px 40px;
@@ -383,11 +369,27 @@
     justify-content: space-between;
     align-items: center;
     gap: 8px;
+    margin-top: 10px;
+  }
+  .defaults .status {
+    margin: 0;
+  }
+  .defaults button {
+    flex: none;
+    white-space: nowrap;
+  }
+  .wide {
+    width: 100%;
+    margin-top: 6px;
+  }
+  .buttons {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     margin-top: 8px;
   }
-  .export {
-    margin-top: 16px;
-    width: 100%;
+  .grow {
+    flex: 1;
   }
   .swatch {
     width: 32px;
@@ -395,9 +397,7 @@
     border-radius: 3px;
     border: 1px solid var(--line);
   }
-  .done {
-    color: var(--good);
-    font-size: 12px;
+  .path {
     word-break: break-all;
   }
 </style>

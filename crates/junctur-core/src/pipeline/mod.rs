@@ -1386,7 +1386,7 @@ mod tests {
         mine.speakers = Speakers::new(vec![turn(1.0, 1), turn(4.0, 2)], &[None, None], None);
         mine.speakers.rename(2, "Ana");
         mine.speakers.recolor(2, "#123456");
-        edit::set_fix(&mut mine.fixes, 0, 4.25, "anna", "Ana").unwrap();
+        edit::set_fix(&mut mine.fixes, 0, 4.25, 0, "anna", "Ana").unwrap();
         mine.captions = Some(edit::Captions {
             chars: 21,
             ..Default::default()
@@ -1623,7 +1623,7 @@ mod tests {
             None,
         );
         mine.speakers.rename(2, "Ana");
-        edit::set_fix(&mut mine.fixes, 0, 1.5, "anna", "Ana").unwrap();
+        edit::set_fix(&mut mine.fixes, 0, 1.5, 0, "anna", "Ana").unwrap();
         edit::save(&p.edit_path(), &mine).unwrap();
         let opts = PipelineOptions {
             keep_list: KeepList::Whole,

@@ -5,6 +5,7 @@
   // model works in the background (src/translation.rs), so the editor is never held up, and the
   // preview shows what is translated so far. An export or a send waits for all of it.
   import * as api from "./api";
+  import InfoTip from "./InfoTip.svelte";
 
   let {
     captions,
@@ -76,7 +77,7 @@
       </div>
       <span class="note">
         {#if run.done === 0}
-          Starting… (the first translation downloads the model, about 630 MB)
+          Starting… (the first run downloads the model, about 630 MB)
         {:else}
           Translating… {run.done.toLocaleString()} of {run.total.toLocaleString()} sentences
         {/if}
@@ -84,10 +85,13 @@
       <button onclick={() => api.cancelTranslation().catch((e) => onError(String(e)))}>Cancel</button>
     {:else if left && left.missing > 0}
       <span class="note">
-        {left.missing.toLocaleString()} of {left.sentences.toLocaleString()} sentences not translated yet; until
-        they are, the preview shows them as spoken and the export waits.
+        {left.missing.toLocaleString()} of {left.sentences.toLocaleString()} sentences not translated yet
+        <InfoTip
+          label="sentences not translated"
+          text="Until they are, the preview shows them as spoken and an export waits. The first translation downloads the model (about 630 MB)."
+        />
       </span>
-      <button onclick={translate} title="The first translation downloads the model (about 630 MB)">Translate</button>
+      <button onclick={translate}>Translate</button>
     {:else if left}
       <span class="note">All {left.sentences.toLocaleString()} sentences translated.</span>
     {/if}
@@ -123,10 +127,14 @@
   }
   .note {
     flex: 1;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.5;
   }
   .error {
     flex: 1 1 100%;
     color: var(--bad);
+    font-size: 12px;
     margin: 0;
   }
 </style>

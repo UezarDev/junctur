@@ -4,7 +4,9 @@
 
 use std::path::Path;
 
-use junctur_core::edit::{word_span, CutSettings, Envelope, Fix, Fixes, Speakers};
+use junctur_core::edit::{
+    same_millisecond, word_span, CutSettings, Envelope, Fix, Fixes, Speakers,
+};
 use junctur_core::transcribe::{self, Word};
 use serde::Serialize;
 
@@ -79,6 +81,20 @@ impl Words {
         }
     }
 
+    /// Which of the words heard on its track starting in its millisecond word `i` is, 0 for the
+    /// first (5w): what names it in a fix, with its track and start. The list is sorted by start, so
+    /// those words sit together just before it (other tracks' words among them).
+    pub fn nth(&self, i: usize) -> usize {
+        let Some(w) = self.list.get(i) else {
+            return 0;
+        };
+        (0..i)
+            .rev()
+            .take_while(|&j| same_millisecond(self.list[j].start, w.start))
+            .filter(|&j| self.tracks[j] == self.tracks[i])
+            .count()
+    }
+
     /// The source seconds words `first..=last` are said in: the first one's start to the latest
     /// end up to the last (5b: a voice is enrolled from this). `None` for an index out of range.
     pub fn stretch(&self, first: usize, last: usize) -> Option<(f64, f64)> {
@@ -136,7 +152,7 @@ pub struct TranscriptView {
 impl TranscriptView {
     pub fn new(words: &Words, speakers: &Speakers, fixes: &[Fix]) -> Self {
         let ms = |s: f64| (s.max(0.0) * 1000.0).round() as u64;
-        let fixed = Fixes::new(fixes);
+        let mut fixed = Fixes::new(fixes);
         let w = &words.list;
         let label = speakers.labeller();
         let (speaker, also) = w
@@ -257,10 +273,36 @@ mod tests {
         let fix = Fix {
             track: 0,
             start: 10.5,
+            nth: 0,
             text: "Uezar".into(),
         };
         let v = TranscriptView::new(&sample(), &Speakers::default(), &[fix]);
         assert_eq!(v.text, vec!["uno", "Uezar", "tres"]);
+    }
+
+    #[test]
+    fn a_fix_shows_on_its_own_word_of_those_starting_together() {
+        // 5w: "en" and "él" start at one millisecond (the 2026-06-15 recording); a fix on "él"
+        // showed on "en" too. Another track's word at that moment is counted on its own track.
+        let w = Words::from_tracked(vec![
+            (0, word(54.174, 54.944, "manada")),
+            (0, word(54.944, 54.944, "en")),
+            (1, word(54.944, 55.2, "yes")),
+            (0, word(54.9441, 54.944, "él")),
+            (0, word(55.5, 55.8, "y")),
+        ]);
+        assert_eq!(
+            (0..5).map(|i| w.nth(i)).collect::<Vec<_>>(),
+            [0, 0, 0, 1, 0]
+        );
+        let fix = Fix {
+            track: 0,
+            start: 54.944,
+            nth: w.nth(3),
+            text: "miel".into(),
+        };
+        let v = TranscriptView::new(&w, &Speakers::default(), &[fix]);
+        assert_eq!(v.text, ["manada", "en", "yes", "miel", "y"]);
     }
 
     #[test]

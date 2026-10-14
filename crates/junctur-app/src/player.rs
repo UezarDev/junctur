@@ -732,8 +732,11 @@ impl Core {
         let (Some(word), Some(&track)) = (words.list.get(index), words.tracks.get(index)) else {
             return Err("no such word in the transcript".into());
         };
+        let nth = words.nth(index);
         let fixed = junctur_core::edit::check_fix(text)?;
-        self.change(file, |ed, list, _| ed.fix_word(list, track, word, &fixed))?;
+        self.change(file, |ed, list, _| {
+            ed.fix_word(list, track, word, nth, &fixed)
+        })?;
         Ok((word.text.clone(), fixed))
     }
 
