@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use junctur_core::edit::{
-    same_millisecond, word_span, CutSettings, Envelope, Fix, Fixes, Speakers,
+    same_millisecond, word_span, CutSettings, Envelope, Fix, Fixed, Fixes, Speakers, WordAt,
 };
 use junctur_core::transcribe::{self, Word};
 use serde::Serialize;
@@ -95,6 +95,57 @@ impl Words {
             .count()
     }
 
+    /// What fixing words `first..=last` as one text (5x) names: the track of the first and last, the
+    /// first and last words as a fix names them, and what the run's words on that track were heard
+    /// as. Words of another track among them (someone else's "yeah" between a sentence's words, on
+    /// separate voice tracks) are not part of it. Refused, saying why, when the first and last are on
+    /// two tracks, or when the track's words in it are two people's: a caption gives each speaker
+    /// their own part, and one text cannot be shared out between them.
+    pub fn retyped(
+        &self,
+        first: usize,
+        last: usize,
+        speakers: &Speakers,
+    ) -> Result<Retyped, String> {
+        let (first, last) = (first.min(last), first.max(last));
+        if last >= self.list.len() {
+            return Err("no such word in the transcript".into());
+        }
+        let track = self.tracks[first];
+        if self.tracks[last] != track {
+            return Err("These words start and end on two different voice tracks: fix each track's words on their own.".into());
+        }
+        let label = speakers.labeller();
+        let name = |id: u32| speakers.name(id).unwrap_or("someone").to_string();
+        let mut who: Option<u32> = None;
+        let mut heard: Vec<&str> = Vec::new();
+        for i in (first..=last).filter(|&i| self.tracks[i] == track) {
+            let w = &self.list[i];
+            heard.push(w.text.trim());
+            match (who, label.of_word(track, w.start, w.end)) {
+                (Some(a), Some(b)) if a != b => {
+                    return Err(format!(
+                        "These words are said by two people ({} and {}): fix each one's words on their own.",
+                        name(a),
+                        name(b)
+                    ))
+                }
+                (None, Some(b)) => who = Some(b),
+                _ => {}
+            }
+        }
+        let at = |i: usize| WordAt {
+            start: self.list[i].start,
+            nth: self.nth(i),
+        };
+        Ok(Retyped {
+            track,
+            first: at(first),
+            last: at(last),
+            heard: heard.join(" "),
+        })
+    }
+
     /// The source seconds words `first..=last` are said in: the first one's start to the latest
     /// end up to the last (5b: a voice is enrolled from this). `None` for an index out of range.
     pub fn stretch(&self, first: usize, last: usize) -> Option<(f64, f64)> {
@@ -136,6 +187,16 @@ impl Words {
     }
 }
 
+/// A run of words to fix as one text (5x, [`Words::retyped`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Retyped {
+    pub track: usize,
+    pub first: WordAt,
+    pub last: WordAt,
+    /// The words on `track` as heard, joined by spaces.
+    pub heard: String,
+}
+
 /// The words for the frontend, compact for a 30 h transcript (hundreds of thousands of words):
 /// times in whole milliseconds, each word's speaker id (0: none) from the edit list's turns, and its
 /// text as the user fixed it (5h), else as heard.
@@ -147,6 +208,14 @@ pub struct TranscriptView {
     pub speaker: Vec<u32>,
     /// Someone else who says the word too (5b: two people talking at once), 0 for none.
     pub also: Vec<u32>,
+    /// The audio track each word was heard on (5x: words starting together on one track open as one
+    /// field).
+    pub track: Vec<u32>,
+    /// The span fixed as one text each word is in (5x), 1-based into `spans`; 0 for none. Such a
+    /// word's `text` is what was heard: the span's text stands for all its words.
+    pub span: Vec<u32>,
+    /// Each span's text, in the order their first words come.
+    pub spans: Vec<String>,
 }
 
 impl TranscriptView {
@@ -166,16 +235,39 @@ impl TranscriptView {
                 )
             })
             .unzip();
+        let mut text = Vec::with_capacity(w.len());
+        let mut span = Vec::with_capacity(w.len());
+        // Each span's place in `fixes`, by its id here.
+        let mut ids: Vec<usize> = Vec::new();
+        let mut spans: Vec<String> = Vec::new();
+        for (w, &t) in w.iter().zip(&words.tracks) {
+            let (shown, id) = match fixed.of(t, w) {
+                Some(Fixed::Word(fix)) => (fix, 0),
+                Some(Fixed::Span { index, text }) => {
+                    let id = match ids.iter().position(|&i| i == index) {
+                        Some(at) => at,
+                        None => {
+                            ids.push(index);
+                            spans.push(text.to_string());
+                            ids.len() - 1
+                        }
+                    };
+                    (w.text.as_str(), id as u32 + 1)
+                }
+                None => (w.text.as_str(), 0),
+            };
+            text.push(shown.trim().to_string());
+            span.push(id);
+        }
         Self {
-            text: w
-                .iter()
-                .zip(&words.tracks)
-                .map(|(w, &t)| fixed.text(t, w).trim().to_string())
-                .collect(),
+            text,
             start: w.iter().map(|w| ms(w.start)).collect(),
             end: w.iter().map(|w| ms(w.end)).collect(),
             speaker,
             also,
+            track: words.tracks.iter().map(|&t| t as u32).collect(),
+            span,
+            spans,
         }
     }
 }
@@ -274,6 +366,7 @@ mod tests {
             track: 0,
             start: 10.5,
             nth: 0,
+            through: None,
             text: "Uezar".into(),
         };
         let v = TranscriptView::new(&sample(), &Speakers::default(), &[fix]);
@@ -299,10 +392,68 @@ mod tests {
             track: 0,
             start: 54.944,
             nth: w.nth(3),
+            through: None,
             text: "miel".into(),
         };
         let v = TranscriptView::new(&w, &Speakers::default(), &[fix]);
         assert_eq!(v.text, ["manada", "en", "yes", "miel", "y"]);
+    }
+
+    #[test]
+    fn a_span_shows_as_its_words_heard_and_its_text_once() {
+        // 5x: "the wezar went" retyped as one text; someone's "yeah" on track 1 between its words is
+        // not in it.
+        let w = Words::from_tracked(vec![
+            (0, word(1.0, 1.4, "so")),
+            (0, word(2.0, 2.2, "the")),
+            (0, word(2.2, 2.6, "wezar")),
+            (1, word(2.4, 2.6, "yeah")),
+            (0, word(3.0, 3.4, "went")),
+            (0, word(4.0, 4.4, "ok")),
+        ]);
+        let r = w.retyped(4, 1, &Speakers::default()).unwrap();
+        assert_eq!(r.track, 0);
+        assert_eq!(r.heard, "the wezar went");
+        assert_eq!((r.first.start, r.last.start), (2.0, 3.0));
+        let fix = Fix {
+            track: 0,
+            start: r.first.start,
+            nth: r.first.nth,
+            through: Some(r.last),
+            text: "Uezar left".into(),
+        };
+        let v = TranscriptView::new(&w, &Speakers::default(), &[fix]);
+        assert_eq!(v.text, ["so", "the", "wezar", "yeah", "went", "ok"]);
+        assert_eq!(v.span, [0, 1, 1, 0, 1, 0]);
+        assert_eq!(v.spans, ["Uezar left"]);
+        assert_eq!(v.track, [0, 0, 0, 1, 0, 0]);
+        // Refused: starting and ending on two tracks; two people's words.
+        assert!(w.retyped(1, 3, &Speakers::default()).is_err());
+        assert!(w.retyped(0, 9, &Speakers::default()).is_err());
+        use junctur_core::edit::Turn;
+        let turn = |start, end, speaker| Turn {
+            start,
+            end,
+            speaker,
+        };
+        let two = Speakers::new(
+            vec![turn(0.5, 1.9, 1), turn(1.9, 5.0, 2)],
+            &[None, None],
+            None,
+        );
+        let why = w.retyped(0, 2, &two).unwrap_err();
+        assert!(why.contains("two people"), "{why}");
+        assert!(
+            w.retyped(1, 4, &two).is_ok(),
+            "one person's words, and track 1's are not counted"
+        );
+        // A same-start group (5w) is a run like any other.
+        let g = Words::from_tracked(vec![
+            (0, word(54.944, 54.944, "en")),
+            (0, word(54.944, 55.0, "él")),
+        ]);
+        let r = g.retyped(0, 1, &Speakers::default()).unwrap();
+        assert_eq!((r.first.nth, r.last.nth), (0, 1));
     }
 
     #[test]

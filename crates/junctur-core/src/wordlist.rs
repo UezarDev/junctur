@@ -67,6 +67,34 @@ pub fn learned(heard: &str, fixed: &str) -> Option<String> {
     entry(new)
 }
 
+/// What a run of words heard as `heard` and retyped as `fixed` adds to the list (5x): each word of
+/// the new text not among the heard words, compared as [`learned`] compares one (without the
+/// punctuation around it, case kept), in the order typed, each once. A word that starts a sentence
+/// (the first, or one after `.`, `?` or `!`) and differs from a heard word only in case is the
+/// sentence's capital, not a name, and adds nothing. A sentence whose words only moved, or only
+/// changed punctuation, adds nothing.
+pub fn learned_all(heard: &str, fixed: &str) -> Vec<String> {
+    let was: Vec<&str> = heard.split_whitespace().map(bare).collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut starts = true;
+    for w in fixed.split_whitespace() {
+        let new = bare(w);
+        let capital = starts && was.iter().any(|h| h.to_lowercase() == new.to_lowercase());
+        starts = w
+            .trim_end_matches(|c: char| !c.is_alphanumeric() && !matches!(c, '.' | '?' | '!'))
+            .ends_with(['.', '?', '!']);
+        if new.is_empty() || capital || was.contains(&new) {
+            continue;
+        }
+        if let Some(e) = entry(new) {
+            if !out.contains(&e) {
+                out.push(e);
+            }
+        }
+    }
+    out
+}
+
 /// What Whisper is told: the list's leading entries that fit, and how many were left out.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Prompt {
@@ -132,6 +160,21 @@ mod tests {
         let p = prompt(&l, 15, chars);
         assert_eq!(p.text, "Delay, Tsunheto");
         assert_eq!(p.left_out, list(&["Uezar"]));
+    }
+
+    #[test]
+    fn a_retyped_sentence_adds_its_new_words_in_order() {
+        // 5x: every word not heard, once, in the order typed.
+        assert_eq!(
+            learned_all("the wezar went hom", "Uezar went home, Uezar!"),
+            ["Uezar", "home"]
+        );
+        // A sentence's capital is not a name; a name's capital is.
+        assert_eq!(learned_all("so tsunheto", "So, Tsunheto."), ["Tsunheto"]);
+        assert!(learned_all("ok. so? yes", "Ok. So? Yes").is_empty());
+        assert_eq!(learned_all("ok. so", "ok so Ok"), ["Ok"]);
+        assert!(learned_all("hola amigos", "amigos, hola.").is_empty());
+        assert!(learned_all("eh eh", "... !").is_empty());
     }
 
     #[test]

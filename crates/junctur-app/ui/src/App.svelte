@@ -261,12 +261,8 @@
       (view) => {
         // Only onto the same transcript (another file may have opened meanwhile).
         if (view && words === before && view.speaker.length === before.text.length) {
-          words = {
-            ...before,
-            text: view.text,
-            speaker: Uint32Array.from(view.speaker),
-            also: Uint32Array.from(view.also ?? []),
-          };
+          // Text, speakers and the spans fixed as one text (5x) all come from the view.
+          words = toWords(view);
         }
       },
       (e) => (failure = String(e)),

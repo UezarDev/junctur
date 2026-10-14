@@ -276,11 +276,15 @@ fn speakers_key(s: &edit::Speakers) -> String {
     key(names.chain(turns))
 }
 
-/// Over the fixed words (5h): what the words' text depends on.
+/// Over the fixed words (5h) and spans (5x): what the words' text depends on.
 fn fixes_key(fixes: &[edit::Fix]) -> String {
     key(fixes.iter().flat_map(|f| {
+        let through = f
+            .through
+            .map_or([u64::MAX, u64::MAX], |t| [t.start.to_bits(), t.nth as u64]);
         [f.track as u64, f.start.to_bits(), f.nth as u64]
             .into_iter()
+            .chain(through)
             .chain(f.text.bytes().map(u64::from))
             .chain([u64::MAX])
     }))
