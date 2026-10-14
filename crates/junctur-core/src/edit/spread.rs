@@ -138,7 +138,18 @@ impl SpreadIndex {
     /// Whether this can be the index of `words`: as many words. Which words is the caller's to
     /// keep (the app keeps the index beside the words it was built from).
     fn fits(&self, words: &[(usize, &Word)]) -> bool {
-        self.likes.len() == words.len() && self.place.len() == words.len()
+        let fits = self.likes.len() == words.len() && self.place.len() == words.len();
+        // The words' tracks, at least, must be the indexed ones.
+        debug_assert!(
+            !fits
+                || words.iter().enumerate().all(|(i, &(t, _))| self
+                    .tracks
+                    .get(&t)
+                    .and_then(|on| on.get(self.place[i]))
+                    == Some(&i)),
+            "a spread index of other words"
+        );
+        fits
     }
 }
 

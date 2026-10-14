@@ -81,8 +81,11 @@ fn status_of(p: &Project) -> ProjectStatus {
 /// run logs, and parsing a long recording's list each time is the cost, not reading it.
 type Parsed = HashMap<PathBuf, (String, Result<EditSummary, String>)>;
 static PARSED: Mutex<Option<Parsed>> = Mutex::new(None);
-/// More lists than a session opens: past it the cache starts over rather than grow.
-const PARSED_MAX: usize = 64;
+/// The lists the status is read for at once (the open recording, runs, the start window's rows),
+/// and the text they may hold together: past either the cache starts over, and a list bigger than
+/// that is parsed each time rather than held.
+const PARSED_MAX: usize = 8;
+const PARSED_BYTES: usize = 16 << 20;
 
 /// `p`'s edit list summed up, or why it does not read, as `p.edit()` says it; parsed again only when
 /// its text is not the text parsed last.
@@ -103,9 +106,14 @@ fn summary(p: &Project) -> Result<EditSummary, String> {
             duration: e.duration,
         })
         .map_err(|e| e.to_string());
+    if text.len() > PARSED_BYTES {
+        return s;
+    }
     let mut held = lock(&PARSED);
     let m = held.get_or_insert_with(HashMap::new);
-    if m.len() >= PARSED_MAX && !m.contains_key(&path) {
+    m.remove(&path);
+    let bytes: usize = m.values().map(|(t, _)| t.len()).sum();
+    if m.len() >= PARSED_MAX || bytes + text.len() > PARSED_BYTES {
         m.clear();
     }
     m.insert(path, (text, s.clone()));

@@ -112,7 +112,8 @@ pub struct Editor {
     /// every track is transcribed; `None` reads the finished transcript.
     pub through: Option<f64>,
     /// What a spread reads of `words`, kept beside the words it was built from. Weak, so words
-    /// read again are not kept alive for it and it is never taken for a later transcript's.
+    /// read again are not kept alive for it and it is never taken for a later transcript's. The
+    /// pointer names the words because `Words` behind its `Arc` is never changed in place.
     spread_index: Option<(Weak<Words>, Arc<SpreadIndex>)>,
 }
 

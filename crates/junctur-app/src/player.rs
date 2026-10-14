@@ -363,6 +363,7 @@ impl Player {
         });
         let mut ed = lock(&self.editor);
         ed.reset(edit_path.clone());
+        *lock(&self.so_far) = transcribe::SoFar::default();
         let mut c = lock(&self.ctl);
         // A review of the recording before ends with it, its skip toggle back for this one; the
         // load below clears the loop again anyway, so a failure here does not stop the open.
@@ -739,6 +740,7 @@ impl Core {
     pub fn close(&self) -> Result<(), String> {
         let mut ed = lock(&self.editor);
         ed.reset(None);
+        *lock(&self.so_far) = transcribe::SoFar::default();
         let mut c = lock(&self.ctl);
         let left = self.leave_review(&mut c);
         c.watch = None;
@@ -1186,7 +1188,11 @@ impl Core {
                     let segs = r.read(&dir).unwrap_or_default();
                     Some(Words::so_far(&segs, t))
                 }
-                None => Words::load(&dir),
+                None => {
+                    // Whole now: the partial's chunks read so far are not needed again.
+                    *lock(&self.so_far) = transcribe::SoFar::default();
+                    Words::load(&dir)
+                }
             })
             .flatten()
             .map(Arc::new);

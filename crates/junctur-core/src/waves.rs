@@ -30,10 +30,10 @@ const BLOCK: usize = 8;
 /// Every track's peaks so far.
 #[derive(Debug, Clone, Default)]
 pub struct Waves {
-    pub tracks: usize,
-    /// Hop-major: `data[hop * tracks + track]`. Appended to through [`Waves::extend`], so the
-    /// pyramid follows; hops pushed here directly are read from the bytes.
-    pub data: Vec<u8>,
+    tracks: usize,
+    /// Hop-major: `data[hop * tracks + track]`. Private, and only appended to ([`Waves::extend`]):
+    /// a change anywhere else would leave the pyramid stale.
+    data: Vec<u8>,
     /// Each track's max over whole aligned blocks of `BLOCK << level` hops, block-major like
     /// `data`: a zoomed-out lane reads a column from a few blocks instead of every hop in it.
     levels: Vec<Vec<u8>>,
@@ -117,6 +117,15 @@ impl Waves {
             }
         }
         peak
+    }
+
+    pub fn tracks(&self) -> usize {
+        self.tracks
+    }
+
+    /// The peaks, hop-major: `data()[hop * tracks + track]`.
+    pub fn data(&self) -> &[u8] {
+        &self.data
     }
 
     pub fn hops(&self) -> usize {
@@ -376,6 +385,21 @@ mod tests {
             back.columns(0.0, w.seconds(), 800),
             scanned(&w, 0.0, w.seconds(), 800)
         );
+        // Loaded, then read on: the pyramid goes on from the loaded one as from one appended to.
+        let mut back = back;
+        for read in [5usize, 3000, 11] {
+            let more: Vec<u8> = (0..read * 3).map(|_| next()).collect();
+            back.extend(&more);
+            w.extend(&more);
+            assert_eq!(back.levels, w.levels);
+            let secs = back.seconds();
+            for (from, to, columns) in [(0.0, secs, 640), (secs * 0.4, secs, 77)] {
+                assert_eq!(
+                    back.columns(from, to, columns),
+                    scanned(&back, from, to, columns)
+                );
+            }
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
