@@ -931,6 +931,32 @@ mod tests {
     }
 
     #[test]
+    fn finished_cues_refuse_untranslated_and_cut_as_the_srt_does() {
+        // The SRT and the send to Resolve cut through `finished_cues` (5q): refused while a
+        // sentence is not translated, then the very cues the preview cuts with every translation.
+        use crate::export::finished_cues;
+        let w = [word(0.0, 0.4, "Hola."), word(10.5, 11.0, "Adiós.")];
+        let words: Vec<(usize, &Word)> = w.iter().map(|w| (0, w)).collect();
+        let c = Captions {
+            translate: "en".into(),
+            ..Default::default()
+        };
+        let e = edit(&[(0.0, 5.0), (10.0, 40.0)], c.clone());
+        let mut t = Translations::default();
+        t.insert("es", "en", "Hola.", "Hello.");
+        let refused = finished_cues(&e, &c, &words, 30, 1, &t).unwrap_err();
+        assert!(refused.to_string().contains("1 of 2"), "{refused}");
+        t.insert("es", "en", "Adiós.", "Goodbye.");
+        let got = finished_cues(&e, &c, &words, 30, 1, &t).unwrap();
+        assert_eq!(got, cues(&e, &c, words.iter().copied(), 30, 1, Some(&t)));
+        assert_eq!(solo(&got), ["Hello.", "Goodbye."]);
+        // Not translated: never refused, cut as said.
+        let plain = Captions::default();
+        let got = finished_cues(&e, &plain, &words, 30, 1, &Translations::default()).unwrap();
+        assert_eq!(solo(&got), ["Hola.", "Adiós."]);
+    }
+
+    #[test]
     fn translated_captions_are_cut_and_styled_as_the_translation() {
         use crate::edit::{Case, Replace};
         // Two sentences, the second after a cut (5..10 s cut out).

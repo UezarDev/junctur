@@ -729,7 +729,7 @@ impl Core {
     /// shows what Resolve will, cue for cue. Translated captions (5k) show what is translated so
     /// far, the rest as said.
     pub fn caption_cues(&self, aspect: f64) -> Result<Vec<Placed>, String> {
-        let (list, captions, cues) = self.cut_captions()?;
+        let (list, captions, cues) = self.cut_captions(false, |_| Ok(()))?;
         Ok(layout::place(&cues, &list, &captions, aspect))
     }
 
@@ -744,11 +744,28 @@ impl Core {
         &self,
         existing: Option<ExistingClips>,
     ) -> Result<junctur_core::resolve::Sent, String> {
+        let (list, captions, cues) = self.cut_captions(true, |c| {
+            if let Some(e) = existing {
+                c.existing_clips = e;
+            }
+            c.check()
+        })?;
+        junctur_core::resolve::send(&cues, &list, &captions)
+    }
+
+    /// The list in play, its caption settings and its cues as the SRT export cuts them: the one
+    /// cut the preview and the send share, so the preview shows what Resolve gets (5q; the send
+    /// had a copy of its own that could drift). `finished`: the send's cut, refused while the
+    /// translation is not all made (`export::finished_cues`, as the SRT); else with what is
+    /// translated so far (5k), what the preview lays out. `adjust` sets or checks the settings
+    /// before cutting.
+    fn cut_captions(
+        &self,
+        finished: bool,
+        adjust: impl FnOnce(&mut Captions) -> Result<(), String>,
+    ) -> Result<(Arc<EditList>, Captions, Vec<srt::Cue>), String> {
         let (list, mut captions, words, fps) = self.caption_source()?;
-        if let Some(e) = existing {
-            captions.existing_clips = e;
-        }
-        captions.check()?;
+        adjust(&mut captions)?;
         let tracked: Vec<_> = words
             .tracks
             .iter()
@@ -756,26 +773,19 @@ impl Core {
             .zip(words.list.iter())
             .collect();
         let tr = self.translations();
-        export::untranslated(&list, &captions, &tracked, fps.num, fps.den, &tr)
-            .map_err(|e| e.to_string())?;
-        let cues = srt::cues(
-            &list,
-            &captions,
-            tracked.iter().copied(),
-            fps.num,
-            fps.den,
-            Some(&*tr),
-        );
-        junctur_core::resolve::send(&cues, &list, &captions)
-    }
-
-    /// The list in play, its caption settings and its cues as the SRT export cuts them, with what
-    /// is translated so far (5k): what the preview lays out.
-    fn cut_captions(&self) -> Result<(Arc<EditList>, Captions, Vec<srt::Cue>), String> {
-        let (list, captions, words, fps) = self.caption_source()?;
-        let tracked = words.tracks.iter().copied().zip(words.list.iter());
-        let tr = self.translations();
-        let cues = srt::cues(&list, &captions, tracked, fps.num, fps.den, Some(&*tr));
+        let cues = if finished {
+            export::finished_cues(&list, &captions, &tracked, fps.num, fps.den, &tr)
+                .map_err(|e| e.to_string())?
+        } else {
+            srt::cues(
+                &list,
+                &captions,
+                tracked.iter().copied(),
+                fps.num,
+                fps.den,
+                Some(&*tr),
+            )
+        };
         Ok((list, captions, cues))
     }
 

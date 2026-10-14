@@ -10,6 +10,7 @@
   // next one is), and with an animation each caption comes in and goes out as it does there.
   // Cues are on the edited (output) timeline, so the playhead's output time picks one; while the
   // whole recording plays, a cut stretch shows none, since it is not in the export.
+  import { untrack } from "svelte";
   import * as api from "./api";
   import { animationProgress, animationStyle, captionFace, captionStyle, highlightColors } from "./captionStyle";
   import type { Rect } from "./layout";
@@ -79,8 +80,12 @@
       return;
     }
     const n = ++asked;
+    // The aspect itself is read untracked: `shape` already holds it to three decimals, and reading
+    // the picture's size here would ask for a new cut of the whole transcript on every tick of a
+    // window resize that keeps its shape (5q).
+    const aspect = untrack(() => (picture.w > 0 ? picture.h / picture.w : 9 / 16));
     api
-      .captionCues(picture.w > 0 ? picture.h / picture.w : 9 / 16)
+      .captionCues(aspect)
       .then((c) => {
         if (n === asked) cues = c;
       })
