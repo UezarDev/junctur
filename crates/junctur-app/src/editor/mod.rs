@@ -14,7 +14,7 @@ use junctur_core::edit::{
 
 use crate::cuts::Fps;
 use junctur_core::transcribe::Word;
-pub use words::{TranscriptView, Words};
+pub use words::{Retyped, TranscriptView, Words};
 
 /// What a word edit under a frame is refused with: [`Editor::edit_all`] tells it from the others.
 const UNDER_A_FRAME: &str = "that is shorter than a frame: select a little more";
@@ -304,6 +304,20 @@ impl Editor {
     ) -> Result<Option<Edited>, String> {
         self.restyle(list, |l| {
             edit::set_fix(&mut l.fixes, track, word.start, nth, &word.text, text).map(|_| ())
+        })
+    }
+
+    /// Sets the text of the run `r` names (5x, [`super::Words::retyped`]) as one fix, and saves;
+    /// the fixes of words inside it, and a span overlapping it, go. Empty text or the heard text again
+    /// takes them all away. Like [`Self::fix_word`], not an undo step.
+    pub fn fix_words(
+        &mut self,
+        list: &EditList,
+        r: &Retyped,
+        text: &str,
+    ) -> Result<Option<Edited>, String> {
+        self.restyle(list, |l| {
+            edit::set_span(&mut l.fixes, r.track, r.first, r.last, &r.heard, text).map(|_| ())
         })
     }
 
@@ -806,6 +820,56 @@ mod tests {
         // The heard spelling again takes the fix away.
         let l3 = e
             .fix_word(&back, 1, &heard, 0, "Wezar,")
+            .unwrap()
+            .unwrap()
+            .list;
+        assert!(l3.fixes.is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_retyped_sentence_is_saved_at_once_and_replaces_its_word_fixes() {
+        // 5x: one fix for the run, saved as a `span` line; the word fix inside it goes.
+        use super::Words;
+        let d = scratch("span");
+        let path = d.join("edit.junctur");
+        let mut e = Editor::default();
+        e.reset(Some(path.clone()));
+        let w = |start: f64, text: &str| Word {
+            start,
+            end: start + 0.3,
+            text: format!(" {text}"),
+            p: 1.0,
+        };
+        let words = Words::from_tracked(vec![
+            (0, w(2.0, "the")),
+            (0, w(2.5, "wezar")),
+            (0, w(3.0, "went")),
+        ]);
+        let l0 = list(vec![r(1.0, 30.0)]);
+        let l1 = e
+            .fix_word(&l0, 0, &words.list[1], 0, "Uezar")
+            .unwrap()
+            .unwrap()
+            .list;
+        let run = words
+            .retyped(0, 2, "Uezar left.", &Default::default())
+            .unwrap();
+        let l2 = e
+            .fix_words(&l1, &run, "Uezar left.")
+            .unwrap()
+            .expect("a change")
+            .list;
+        assert_eq!(l2.fixes.len(), 1, "{:?}", l2.fixes);
+        assert!(l2.fixes[0].is_span());
+        assert_eq!(reread(&path), l2, "saved at once");
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("\nspan 0 2.000 3.000 Uezar left.\n"));
+        assert!(!e.can_undo(), "not an undo step");
+        // The heard words again take it away.
+        let l3 = e
+            .fix_words(&l2, &run, "the  wezar went")
             .unwrap()
             .unwrap()
             .list;

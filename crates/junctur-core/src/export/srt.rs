@@ -25,7 +25,7 @@ use serde::Serialize;
 
 use super::caption_text;
 use super::translated::{self, Shown};
-use crate::edit::{frame_ranges, frames_ceil, Captions, EditList, Fixes, Labeller};
+use crate::edit::{frame_ranges, frames_ceil, Captions, EditList, Fixed, Fixes, Labeller};
 use crate::transcribe::Word;
 use crate::translate::{Sentence, Translations};
 
@@ -229,7 +229,8 @@ pub fn cues<'a>(
 /// The kept words, in time order, each in its kept range and cleaned (a word left empty is kept
 /// here, so a phrase around it does not match, and dropped as a unit). A word the user fixed
 /// shows as fixed (5h), here and so in the preview, every export, and the sentences translated
-/// (5k), before the text options (5j) and the word limit (5i).
+/// (5k), before the text options (5j) and the word limit (5i). The kept words of a span fixed as one
+/// text (5x) give way to the text's own words ([`spread`]), which everything after takes as words.
 fn kept<'a>(
     tl: &Timeline,
     edit: &EditList,
@@ -240,18 +241,108 @@ fn kept<'a>(
     // apart (5w).
     let mut words: Vec<(usize, &Word)> = words.into_iter().collect();
     words.sort_by(|a, b| a.1.start.total_cmp(&b.1.start));
-    words
-        .into_iter()
-        .filter_map(|(track, w)| {
-            // Read before a cut word is dropped: `Fixes` counts every word.
-            let text = fixes.text(track, w);
-            let r = tl.range_of((w.start + w.end) / 2.0)?;
-            Some(Shown {
-                track,
-                start: (r, w.start),
-                end: (r, w.end),
-                text: clean(text),
-            })
+    let mut out = Vec::with_capacity(words.len());
+    // Each span's kept words in time order, by the span's place in the list (5x).
+    let mut spans: Vec<SpanSaid> = Vec::new();
+    // Each span's place in `spans`, by its place in the list.
+    let mut at: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    for (track, w) in words {
+        // Read before a cut word is dropped: `Fixes` counts every word.
+        let fixed = fixes.of(track, w);
+        let Some(r) = tl.range_of((w.start + w.end) / 2.0) else {
+            continue;
+        };
+        let text = match fixed {
+            Some(Fixed::Span { index, text }) => {
+                match at.get(&index) {
+                    Some(&k) => spans[k].said.push((r, w)),
+                    None => {
+                        at.insert(index, spans.len());
+                        spans.push(SpanSaid {
+                            track,
+                            text,
+                            said: vec![(r, w)],
+                        });
+                    }
+                }
+                continue;
+            }
+            Some(Fixed::Word(t)) => t,
+            None => &w.text,
+        };
+        out.push(Shown {
+            track,
+            start: (r, w.start),
+            end: (r, w.end),
+            text: clean(text),
+        });
+    }
+    if spans.is_empty() {
+        return out;
+    }
+    for s in &spans {
+        out.extend(spread(s.track, s.text, &s.said));
+    }
+    // A span's words came in at the end; another track's words said meanwhile go between them.
+    out.sort_by(|a, b| a.start.1.total_cmp(&b.start.1));
+    out
+}
+
+/// A span fixed as one text (5x), and its kept words in time order with their kept ranges.
+struct SpanSaid<'a> {
+    track: usize,
+    text: &'a str,
+    said: Vec<(usize, &'a Word)>,
+}
+
+/// A span's text (5x) as words on the timeline, over `said`, the span's kept words in time order
+/// with their kept ranges: those words' times end to end (a pause between two of them, or words cut
+/// out of the span, left out) cut into one equal share per word of the text, each share's start and
+/// end placed back on the word it falls in. So the first starts where the span's first kept word does
+/// and the last ends where its last kept word does, every word lands in a kept range (through the
+/// range of the word it falls on, even with a cut through the span), and none is put over a pause.
+/// Words with no length at all leave nothing to share: then every word starts and ends with the first.
+fn spread(track: usize, text: &str, said: &[(usize, &Word)]) -> Vec<Shown> {
+    let new: Vec<&str> = text.split_whitespace().collect();
+    if new.is_empty() || said.is_empty() {
+        return Vec::new();
+    }
+    // Each word's stretch, from where the one before it ended (words on one track may overlap).
+    let mut stretches: Vec<(usize, f64, f64)> = Vec::with_capacity(said.len());
+    let mut at = f64::NEG_INFINITY;
+    for (r, w) in said {
+        let a = w.start.max(at);
+        let b = w.end.max(a);
+        stretches.push((*r, a, b));
+        at = b;
+    }
+    let total: f64 = stretches.iter().map(|(_, a, b)| b - a).sum();
+    let first = stretches[0];
+    // `x` seconds into the stretches end to end: a start goes into the stretch after a seam, an end
+    // into the one before it.
+    let place = |x: f64, end: bool| -> (usize, f64) {
+        if total <= 0.0 {
+            return (first.0, first.1);
+        }
+        let mut before = 0.0;
+        for (i, &(r, a, b)) in stretches.iter().enumerate() {
+            let len = b - a;
+            let last = i + 1 == stretches.len();
+            if x < before + len || (end && x <= before + len) || last {
+                return (r, a + (x - before).clamp(0.0, len));
+            }
+            before += len;
+        }
+        (first.0, first.1)
+    };
+    let n = new.len() as f64;
+    new.iter()
+        .enumerate()
+        .map(|(j, word)| Shown {
+            track,
+            start: place(total * j as f64 / n, false),
+            end: place(total * (j + 1) as f64 / n, true),
+            text: clean(word),
         })
         .collect()
 }
@@ -717,6 +808,7 @@ mod tests {
             track: 3,
             start: 10.6,
             nth: 0,
+            through: None,
             text: "Uezar".into(),
         }];
         let one = [word(10.6, 10.9, "Wezar"), word(11.0, 11.3, "hola")];
@@ -739,6 +831,7 @@ mod tests {
             track: 0,
             start: 9.9,
             nth: 1,
+            through: None,
             text: "miel".into(),
         }];
         let w = [
@@ -753,6 +846,129 @@ mod tests {
         assert_eq!(solo(&c), ["en miel hola"]);
     }
 
+    /// The words of a sentence retyped as one span (5x): "the wezar" (10.0-10.6), a pause, "went
+    /// hom" (11.0-11.6), then "ok".
+    fn retyped() -> (EditList, Vec<Word>) {
+        let mut e = edit(&[(9.0, 13.0)], Captions::default());
+        e.fixes = vec![crate::edit::Fix {
+            track: 0,
+            start: 10.0,
+            nth: 0,
+            through: Some(crate::edit::WordAt {
+                start: 11.4,
+                nth: 0,
+            }),
+            text: "Uezar went home.".into(),
+        }];
+        let w = vec![
+            word(10.0, 10.2, "the"),
+            word(10.2, 10.6, "wezar"),
+            word(11.0, 11.4, "went"),
+            word(11.4, 11.6, "hom"),
+            word(12.0, 12.2, "ok"),
+        ];
+        (e, w)
+    }
+
+    /// The kept words' text and source start and end, with their kept range.
+    /// A kept word's text, start and end.
+    type Got = (String, (usize, f64), (usize, f64));
+
+    fn said(e: &EditList, w: &[(usize, Word)]) -> Vec<Got> {
+        let tl = Timeline::new(e, 30, 1);
+        kept(&tl, e, w.iter().map(|(t, w)| (*t, w)))
+            .into_iter()
+            .map(|s| (s.text, s.start, s.end))
+            .collect()
+    }
+
+    fn close(a: (usize, f64), b: (usize, f64)) -> bool {
+        a.0 == b.0 && (a.1 - b.1).abs() < 1e-9
+    }
+
+    #[test]
+    fn a_span_shows_its_own_words_spread_over_the_words_it_replaces() {
+        // 5x: 1.2 s of speech (the pause between "wezar" and "went" left out), 0.4 s a word; the
+        // span keeps its start (10.0) and end (11.6).
+        let (e, w) = retyped();
+        let w: Vec<(usize, Word)> = w.into_iter().map(|w| (0, w)).collect();
+        let got = said(&e, &w);
+        let texts: Vec<&str> = got.iter().map(|g| g.0.as_str()).collect();
+        assert_eq!(texts, ["Uezar", "went", "home.", "ok"]);
+        let want = [(10.0, 10.4), (10.4, 11.2), (11.2, 11.6), (12.0, 12.2)];
+        for (g, (a, b)) in got.iter().zip(want) {
+            assert!(close(g.1, (0, a)) && close(g.2, (0, b)), "{got:?}");
+        }
+        // Words per caption (5i) count the new words; one at a time, each in its own share.
+        let one = Captions {
+            words: 1,
+            ..Captions::default()
+        };
+        let c = cues(&e, &one, w.iter().map(|(t, w)| (*t, w)), 30, 1, None);
+        assert_eq!(solo(&c), ["Uezar", "went", "home.", "ok"]);
+        assert!((c[1].start - 1.4).abs() < 1e-9, "{c:?}");
+        // And the text options (5j) take them as words.
+        let upper = Captions {
+            case: crate::edit::Case::Upper,
+            ..Captions::default()
+        };
+        let c = cues(&e, &upper, w.iter().map(|(t, w)| (*t, w)), 30, 1, None);
+        assert_eq!(solo(&c), ["UEZAR WENT HOME. OK"]);
+    }
+
+    #[test]
+    fn a_span_with_a_cut_through_it_spreads_over_its_kept_words() {
+        // 5x: "wezar" cut (kept 9-10.3 and 10.9-13): 0.8 s of the span's speech left, 0.267 s a
+        // word; the first word starts in the first range and ends in the second.
+        let (mut e, w) = retyped();
+        e.keep = vec![
+            Range {
+                start: 9.0,
+                end: 10.3,
+            },
+            Range {
+                start: 10.9,
+                end: 13.0,
+            },
+        ];
+        let w: Vec<(usize, Word)> = w.into_iter().map(|w| (0, w)).collect();
+        let got = said(&e, &w);
+        assert_eq!(got.len(), 4, "{got:?}");
+        assert!(close(got[0].1, (0, 10.0)), "{got:?}");
+        assert!(close(got[0].2, (1, 11.0 + 0.8 / 3.0 - 0.2)), "{got:?}");
+        assert!(close(got[2].2, (1, 11.6)), "{got:?}");
+        assert!(got[..3].iter().all(|g| g.1 .1 <= g.2 .1));
+        // Every word of it cut: the span shows nothing.
+        e.keep = vec![Range {
+            start: 11.9,
+            end: 13.0,
+        }];
+        let got = said(&e, &w);
+        assert_eq!(got.iter().map(|g| g.0.as_str()).collect::<Vec<_>>(), ["ok"]);
+    }
+
+    #[test]
+    fn a_span_of_words_with_no_length_and_another_tracks_words_inside_it() {
+        // 5x: words Whisper gave no length leave nothing to share: every new word at the start.
+        let (e, _) = retyped();
+        let flat: Vec<(usize, Word)> = [(10.0, "the"), (10.5, "wezar"), (11.4, "hom")]
+            .into_iter()
+            .map(|(s, t)| (0, word(s, s, t)))
+            .collect();
+        let got = said(&e, &flat);
+        assert_eq!(got.len(), 3);
+        assert!(got
+            .iter()
+            .all(|g| close(g.1, (0, 10.0)) && close(g.2, (0, 10.0))));
+        // Someone else's "yeah" on another track during the sentence stays theirs, in its place.
+        let (e, w) = retyped();
+        let mut w: Vec<(usize, Word)> = w.into_iter().map(|w| (0, w)).collect();
+        w.push((1, word(10.5, 10.7, "yeah")));
+        let got = said(&e, &w);
+        let texts: Vec<&str> = got.iter().map(|g| g.0.as_str()).collect();
+        assert_eq!(texts, ["Uezar", "went", "yeah", "home.", "ok"]);
+    }
+
     #[test]
     fn a_fixed_word_is_translated_as_fixed() {
         // The sentences sent to translation (5k) read the fix (5h), as the captions do.
@@ -761,6 +977,7 @@ mod tests {
             track: 0,
             start: 10.6,
             nth: 0,
+            through: None,
             text: "Uezar".into(),
         }];
         let one = [word(10.6, 10.9, "Wezar"), word(11.0, 11.3, "hola")];

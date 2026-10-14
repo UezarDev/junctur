@@ -456,6 +456,33 @@ pub async fn fix_word(
     }
 }
 
+/// Fixes transcript words `first..=last` as one text (5x: a sentence retyped; empty or the heard
+/// words again clears their fixes) and adds its new words to the word list (no prompt, never twice);
+/// resolves to the entries added. One word is learned as [`fix_word`] learns it. A word list that
+/// cannot be saved does not undo the fix: it is logged.
+#[tauri::command]
+pub async fn fix_words(
+    app: State<'_, App>,
+    first: usize,
+    last: usize,
+    text: String,
+) -> Result<Vec<String>, String> {
+    let e = app.editable()?;
+    let (heard, fixed) = e.fix_words(e.file(), first, last, &text)?;
+    let learned = if first == last {
+        settings::learn(&heard, &fixed).map(|a| a.into_iter().collect())
+    } else {
+        settings::learn_all(&heard, &fixed)
+    };
+    match learned {
+        Ok(added) => Ok(added),
+        Err(err) => {
+            eprintln!("junctur-app: adding {fixed:?}'s words to the word list: {err}");
+            Ok(Vec::new())
+        }
+    }
+}
+
 /// Sets speaker `id`'s caption colour (`#RRGGBB`).
 #[tauri::command]
 pub async fn recolor_speaker(app: State<'_, App>, id: u32, color: String) -> Result<(), String> {
