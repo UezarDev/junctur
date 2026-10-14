@@ -11,6 +11,7 @@
   import CaptionRules from "./CaptionRules.svelte";
   import Field from "./Field.svelte";
   import InfoTip from "./InfoTip.svelte";
+  import ModelPicker, { chosenModel } from "./ModelPicker.svelte";
   import Section from "./Section.svelte";
   import { CAPTION_SECTIONS } from "./captionSections";
   import { slot } from "./floating.svelte";
@@ -24,7 +25,8 @@
   // The word list as the text box holds it, one entry per line; the core trims it and drops blank
   // lines and repeats when it saves.
   let wordsText = $state("");
-  const model = $derived(view?.models.find((m) => m.key === draft?.whisperModel) ?? null);
+  // Resolved as the picker resolves it, so the (i) explains the model the picker shows.
+  const model = $derived(view ? chosenModel(view.models, draft?.whisperModel ?? "") : undefined);
 
   onMount(() => {
     api.settings().then(
@@ -79,16 +81,15 @@
       <Section title="Transcription">
         <Field
           label="Whisper model"
-          info={`${model ? `${model.note} ` : ""}Used by the next analysis; recordings already transcribed keep their transcript until re-analysed (Properties says when one was made with another model).`}
+          info={`${model ? `${model.name} is Whisper ${model.model}. ${model.note} ` : ""}Used by the next analysis; recordings already transcribed keep their transcript until re-analysed (Properties says when one was made with another model).`}
         >
           {#snippet children(id)}
-            <!-- A function binding: TypeScript does not carry the {#if draft} into the snippet. -->
-            <select
+            <ModelPicker
               {id}
-              bind:value={() => draft?.whisperModel ?? "", (v) => draft && (draft.whisperModel = v)}
-            >
-              {#each view?.models ?? [] as m (m.key)}<option value={m.key}>{m.label}</option>{/each}
-            </select>
+              models={view?.models ?? []}
+              value={draft?.whisperModel ?? ""}
+              onChange={(v) => draft && (draft.whisperModel = v)}
+            />
           {/snippet}
         </Field>
         <Field
@@ -183,7 +184,7 @@
     font-size: 14px;
     font-weight: 600;
   }
-  /* The Whisper model's labels are long ("Automatic (large-v3-turbo)"); the dialog has the room. */
+  /* The dialog has the room for a wider control column than the panel's. */
   .dialog {
     --control-width: 240px;
   }

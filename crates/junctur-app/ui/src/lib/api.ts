@@ -230,8 +230,16 @@ export interface Sent {
 
 /** A Whisper model the Settings dialog offers (src/settings.rs). */
 export interface ModelChoice {
+  /** What the config file holds. */
   key: string;
-  label: string;
+  /** The readable name ("Fast"). */
+  name: string;
+  /** The line under it in the picker (2v). */
+  summary: string;
+  /** Which icon the picker draws. */
+  family: "auto" | "turbo" | "large";
+  /** The Whisper model it loads ("large-v3-turbo"). */
+  model: string;
   note: string;
 }
 
@@ -485,8 +493,6 @@ export const translationStatus = () => invoke<TranslationStatus>("translation_st
 let languages: Promise<Language[]> | null = null;
 /** The languages captions can be translated into, by name; asked once. */
 export const translationLanguages = () => (languages ??= invoke<Language[]>("translation_languages"));
-/** Installs the Junctur script into Resolve's Scripts folder; resolves to its path. */
-export const installResolveScript = () => invoke<string>("install_resolve_script");
 /** The Fusion Titles in the open Resolve project's media pool by clip name (5m), Junctur's own left out. */
 export const resolveTemplates = () => invoke<string[]>("resolve_templates");
 export const voices = () => invoke<Voice[]>("voices");

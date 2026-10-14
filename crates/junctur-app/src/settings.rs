@@ -17,35 +17,57 @@ use junctur_core::wordlist;
 use serde::{Deserialize, Serialize};
 
 /// A Whisper model the dialog offers.
-#[derive(Debug, Clone, Copy, Serialize)]
+///
+/// The picker (2v) shows it by a readable name, a line under it saying how fast, how big or where it
+/// runs, and its family's icon; the Whisper model it is and the longer note go in the (i). The names
+/// live here beside the keys rather than in the UI, so the list has one source, and the config file
+/// keeps holding the keys it always held.
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelChoice {
     /// What the config file holds (`ModelPref::key`).
     pub key: &'static str,
-    pub label: &'static str,
+    /// What the user reads: "Fast", "Best".
+    pub name: &'static str,
+    /// The line under the name: speed, size or where it runs.
+    pub summary: &'static str,
+    /// The icon the picker draws, one per model family ("auto", "turbo", "large"), so the two
+    /// large-v3 entries share one.
+    pub family: &'static str,
+    /// The Whisper model it loads (`ModelPref::name`), as Properties and the transcript name it.
+    pub model: String,
     pub note: &'static str,
 }
 
-/// Every model, the default first. Turbo is the default and large-v3 opt-in (1f).
-const MODELS: [(ModelPref, &str, &str); 4] = [
+/// Every model, the default first: preference, family, name, summary, note. Turbo is the default and
+/// large-v3 opt-in (1f).
+const MODELS: [(ModelPref, &str, &str, &str, &str); 4] = [
     (
         ModelPref::Auto,
-        "Automatic (large-v3-turbo)",
-        "large-v3-turbo, on the GPU when 2.1 GB of its memory is free, else on the CPU.",
+        "auto",
+        "Automatic",
+        "Fast, on the GPU when it has room",
+        "On the GPU when 2.1 GB of its memory is free, else on the CPU.",
     ),
     (
         ModelPref::LargeV3Turbo,
-        "large-v3-turbo",
+        "turbo",
+        "Fast",
+        "The quickest, about 2.1 GB of GPU memory",
         "The fastest; close to large-v3, weaker at telling Spanish from English on short lines.",
     ),
     (
         ModelPref::LargeV3,
-        "large-v3 (best)",
+        "large",
+        "Best",
+        "The most accurate, slower, about 4.8 GB",
         "The best quality, and slower: wants about 4.8 GB of free GPU memory.",
     ),
     (
         ModelPref::LargeV3Q5,
-        "large-v3 q5_0",
+        "large",
+        "Best, smaller",
+        "Close to Best in about 2.2 GB",
         "large-v3 quantised to 5 bits: its decoder in about 2.2 GB of GPU memory, a little more than turbo.",
     ),
 ];
@@ -85,9 +107,12 @@ pub struct SettingsView {
 fn models() -> Vec<ModelChoice> {
     MODELS
         .iter()
-        .map(|&(m, label, note)| ModelChoice {
+        .map(|&(m, family, name, summary, note)| ModelChoice {
             key: m.key(),
-            label,
+            name,
+            summary,
+            family,
+            model: m.name(),
             note,
         })
         .collect()
@@ -218,6 +243,22 @@ mod tests {
                 .filter(|(n, p)| p.key() == *n)
                 .count()
         );
+    }
+
+    #[test]
+    fn every_model_has_its_own_name_and_an_icon_the_picker_draws() {
+        let m = models();
+        for (i, c) in m.iter().enumerate() {
+            assert!(
+                ["auto", "turbo", "large"].contains(&c.family),
+                "{}",
+                c.family
+            );
+            assert!(!c.summary.is_empty() && !c.model.is_empty());
+            assert!(m[..i].iter().all(|o| o.name != c.name), "{}", c.name);
+        }
+        assert_eq!(m[0].name, "Automatic");
+        assert_eq!(m[0].model, "large-v3-turbo");
     }
 
     #[test]

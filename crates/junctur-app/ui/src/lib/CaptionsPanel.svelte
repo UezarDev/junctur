@@ -182,15 +182,6 @@
       sending = false;
     }
   }
-  let installed = $state<string | null>(null);
-  async function installScript() {
-    installed = null;
-    try {
-      installed = await api.installResolveScript();
-    } catch (e) {
-      onError(String(e));
-    }
-  }
 
   async function saveDefault() {
     if (!captions) return;
@@ -339,9 +330,6 @@
           <button class="grow" onclick={() => sendResolve()} disabled={sending || !source}>
             {sending ? "Sending…" : "Send to Resolve"}
           </button>
-          <button onclick={installScript} title="Puts the Junctur script into Resolve's Scripts folder; sending does this too">
-            Install script
-          </button>
         </div>
         {#if inTheWay}
           <div class="ask" role="group" aria-label="Clips already on Junctur's tracks">
@@ -382,7 +370,6 @@
         {#if sentLines}
           {#each sentLines as line (line)}<p class="status good path">{line}</p>{/each}
         {/if}
-        {#if installed}<p class="status good path">Installed: {installed}</p>{/if}
       </Section>
 
       <Section

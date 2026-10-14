@@ -143,7 +143,6 @@ fn main() {
             commands::cancel_translation,
             commands::translation_status,
             commands::translation_languages,
-            commands::install_resolve_script,
             commands::resolve_templates,
             commands::voices,
             commands::enroll_voice,
