@@ -245,7 +245,9 @@
   canvas {
     --track: rgba(255, 255, 255, 0.18);
     --cut: rgba(255, 255, 255, 0.1);
-    --kept: rgba(242, 179, 61, 0.75);
+    /* Read by the canvas through getPropertyValue, which hands back the text unresolved, so this is
+       --accent (#ff5b3a) written out rather than var() (2x). */
+    --kept: rgba(255, 91, 58, 0.75);
     position: absolute;
     left: 0;
     right: 0;

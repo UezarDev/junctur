@@ -288,7 +288,7 @@
   }
   .badge.busy {
     color: var(--accent);
-    background: rgba(242, 179, 61, 0.1);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
   .badge.bad {
     color: var(--bad);
@@ -322,13 +322,13 @@
     align-items: center;
     justify-content: center;
     gap: 10px;
-    border: 2px dashed rgba(242, 179, 61, 0.45);
+    border: 2px dashed color-mix(in srgb, var(--accent) 45%, transparent);
     border-radius: 14px;
-    background: rgba(242, 179, 61, 0.025);
+    background: color-mix(in srgb, var(--accent) 2.5%, transparent);
   }
   .drop.dragging {
     border-color: var(--accent);
-    background: rgba(242, 179, 61, 0.08);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
   }
   .drop svg {
     width: 34px;
@@ -351,7 +351,7 @@
     padding: 6px 16px;
     border-radius: 6px;
     background: var(--accent);
-    color: #101114;
+    color: var(--on-accent);
     font-weight: 600;
   }
   .note {

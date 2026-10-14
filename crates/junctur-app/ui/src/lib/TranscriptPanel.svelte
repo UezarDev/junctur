@@ -865,18 +865,18 @@
     background: rgba(255, 255, 255, 0.08);
   }
   .w.sel {
-    background: rgba(242, 179, 61, 0.28);
+    background: color-mix(in srgb, var(--accent) 28%, transparent);
   }
   .w.fixed {
     text-decoration: underline dotted rgba(255, 255, 255, 0.35);
     text-underline-offset: 3px;
   }
   .w.cur {
-    color: #101114;
+    color: var(--on-accent);
     background: var(--accent);
   }
   .w.doubt {
-    text-decoration: underline wavy rgba(242, 179, 61, 0.9);
+    text-decoration: underline wavy color-mix(in srgb, var(--accent) 90%, transparent);
     text-decoration-thickness: 1px;
     text-underline-offset: 4px;
   }
@@ -907,8 +907,8 @@
     line-height: 16px;
     padding: 1px 6px;
     color: var(--muted);
-    background: rgba(239, 111, 94, 0.12);
-    border: 1px solid rgba(239, 111, 94, 0.35);
+    background: color-mix(in srgb, var(--bad) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--bad) 35%, transparent);
   }
   .fold .label {
     border-radius: 4px 0 0 4px;
@@ -926,7 +926,7 @@
     vertical-align: middle;
     border: none;
     border-radius: 2px;
-    background: rgba(239, 111, 94, 0.45);
+    background: color-mix(in srgb, var(--bad) 45%, transparent);
   }
   .gap:hover {
     background: var(--bad);
