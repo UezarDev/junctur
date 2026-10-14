@@ -126,7 +126,8 @@
     const c = document.createElement("canvas");
     c.width = c.height = n;
     const g = c.getContext("2d")!;
-    g.strokeStyle = "rgba(239, 111, 94, 0.22)";
+    // --bad (#f25f8f) written out: a canvas colour cannot read a CSS token (2x).
+    g.strokeStyle = "rgba(242, 95, 143, 0.22)";
     g.lineWidth = dpr;
     g.beginPath();
     g.moveTo(0, n);
@@ -250,7 +251,8 @@
       // Every cut's edge in view, drawn at once (2w: Uezar, "it should be higlighted
       // inmediately"), so an edge is seen before it is hovered; the one in reach lights up above.
       if (edges && edit.editable) {
-        ctx.fillStyle = "rgba(255, 220, 140, 0.5)";
+        // A light tint of --accent written out (the canvas cannot read the token; 2x, was a pale yellow).
+        ctx.fillStyle = "rgba(255, 160, 140, 0.5)";
         for (let i = lo; i < n; i++) {
           if (sec(r[2 * i]) > end) break;
           for (const f of [r[2 * i], r[2 * i + 1]]) {
@@ -677,12 +679,12 @@
     left: -2px;
     width: 4px;
     border-radius: 2px;
-    background: rgba(255, 220, 140, 0.85);
-    box-shadow: 0 0 6px rgba(255, 220, 140, 0.6);
+    background: color-mix(in srgb, color-mix(in srgb, var(--accent) 55%, white) 85%, transparent);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 60%, transparent);
     pointer-events: none;
   }
   .edge.on {
-    background: rgba(255, 230, 160, 1);
+    background: color-mix(in srgb, var(--accent) 40%, white);
   }
   .when {
     position: absolute;

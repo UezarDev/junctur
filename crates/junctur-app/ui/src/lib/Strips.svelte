@@ -68,7 +68,7 @@
   .bar {
     position: absolute;
     inset: 0;
-    background: linear-gradient(to top, var(--good) 75%, var(--accent) 92%, var(--bad));
+    background: linear-gradient(to top, var(--good) 75%, var(--warn) 92%, var(--bad));
     transform: scaleY(0);
     transition: transform 80ms linear;
   }
