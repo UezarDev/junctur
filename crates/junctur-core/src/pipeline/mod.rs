@@ -1,6 +1,8 @@
 //! The job queue: a recording's analysis stages, each leaving its result in the project folder so
 //! a rerun skips what is done. Two halves, [`prepare`] (minutes) and [`finish`] (Whisper, hours), so
-//! one recording's fast stages need not wait on another's transcription.
+//! one recording's fast stages need not wait on another's transcription. Within a recording the
+//! stages run one at a time: Whisper and the ONNX models share one GPU, and two at once on a full
+//! card would both fall back to the CPU.
 
 mod adopt;
 mod jobs;

@@ -1,6 +1,8 @@
 //! Takes the results a packaged app's run (Claude desktop) left in a hidden copy of the cache
 //! ([`crate::hidden`]) into the real project folder as one unit: only into a folder with no run of
 //! its own, only from the newest settled copy, `jobs.json` last, and once per recording.
+//! So one analysis never mixes with another's files, a half-written run is never taken, a folder
+//! never says done before its results are in, and a forgotten analysis does not return.
 
 use std::fs;
 use std::path::{Path, PathBuf};

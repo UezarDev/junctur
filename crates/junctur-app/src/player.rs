@@ -1,5 +1,7 @@
 //! The player: one mpv instance, its embedded video, and an event thread turning mpv's events into
 //! [`PlayerState`]; it plays the whole file or only the kept ranges (an EDL, see `cuts`).
+//! Edits reach playback through [`Core::take`] directly, never waiting for the app's own save to
+//! come back through the edit-list watch.
 //! Locks are taken in the order editor, ctl, state, mixer (state and mixer never together).
 
 use std::collections::VecDeque;

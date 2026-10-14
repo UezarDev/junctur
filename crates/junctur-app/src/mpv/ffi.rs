@@ -1,6 +1,7 @@
 //! The slice of libmpv's C API the app uses, resolved by name from `libmpv-2.dll` at runtime, so a
-//! build never needs the DLL and a missing one is an error the window can show. Values mirror
-//! `client.h` (API 2.x), `render.h` and `render_gl.h`.
+//! clean checkout builds before `scripts/fetch-libmpv.ps1` has run and a missing DLL is an error
+//! the window can show instead of an exe that will not start. Values mirror `client.h` (API 2.x),
+//! `render.h` and `render_gl.h`.
 
 use std::ffi::{c_char, c_double, c_int, c_void};
 use std::path::Path;

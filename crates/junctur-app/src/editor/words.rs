@@ -1,6 +1,7 @@
 //! The transcript as the editor sees it: every word of every track in one list, sorted by start, so
 //! the frontend and the editor name a word by the same index. Words are kept as heard, which names
-//! them in a fix or retime; where time places a word, the retimed words are read through [`Times`].
+//! them in a fix or retime; where time places a word, the retimed words are read through [`Times`],
+//! so the page and the captions place every word the same way.
 
 use std::path::Path;
 
