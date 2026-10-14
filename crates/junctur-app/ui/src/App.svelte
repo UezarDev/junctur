@@ -34,7 +34,9 @@
   // Raw (not deeply reactive): these are replaced whole on every update, and a 30 h transcript or
   // edit list read through a reactive proxy makes every layout pass several times slower.
   let player = $state.raw<api.PlayerState | null>(null);
-  let opened = $state<api.Opened | null>(null);
+  // Raw (2q repair): replaced whole, never changed in place, and `attach` compares it with the
+  // object it set; a deep `$state` stored a proxy, so that check never held.
+  let opened = $state.raw<api.Opened | null>(null);
   let edit = $state.raw<api.EditState | null>(null);
   // Every track's mute, solo and role (2e, 2g); the meters go straight to the bars (meters.ts).
   let mixer = $state.raw<api.MixerState | null>(null);

@@ -6,10 +6,13 @@
 // 2.12, and would take F12 / Ctrl+Shift+I, the dev build's DevTools, with them; those stay.
 
 /** A key that reloads the page in WebView2: F5 with any modifier, Ctrl (Cmd) + R with or without
- * Shift, and a keyboard's own Refresh key. */
+ * Shift, and a keyboard's own Refresh key. R is the letter (`key`), as WebView2 reloads on Windows'
+ * virtual key, which follows the layout: on Dvorak or Colemak the letter R is not on the physical
+ * R key (`code` KeyR). The physical key too, for layouts with no Latin letters (Russian's "к" sits
+ * there, and Windows still calls it VK_R). */
 export function reloads(e: Pick<KeyboardEvent, "code" | "key" | "ctrlKey" | "metaKey" | "altKey">): boolean {
   if (e.code === "F5" || e.key === "F5" || e.code === "BrowserRefresh" || e.key === "BrowserRefresh") return true;
-  return (e.ctrlKey || e.metaKey) && !e.altKey && e.code === "KeyR";
+  return (e.ctrlKey || e.metaKey) && !e.altKey && (e.key.toLowerCase() === "r" || e.code === "KeyR");
 }
 
 /** A text field, where the context menu is Cut, Copy and Paste rather than Back and Refresh. */
