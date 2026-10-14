@@ -8,8 +8,15 @@
   --line: rgba(255, 255, 255, 0.1);
   --text: #e8e6e3;
   --muted: #9a978f;
-  --accent: #f2b33d;
-  --bad: #ef6f5e;
+  /* The logo's orange (2x; was the yellow #f2b33d). Text drawn ON an accent fill uses --on-accent, the
+     logo's ink: white on this orange is 3.1:1, the ink 5.8:1. */
+  --accent: #ff5b3a;
+  --on-accent: #15171c;
+  /* Caution, not the brand (2x): the level meter's middle keeps the old yellow. */
+  --warn: #f2b33d;
+  /* Moved away from the accent (2x; was #ef6f5e, hue 6deg against the accent's 10deg): pink, hue 340deg, so a
+     warning never reads as the brand colour. 6.1:1 on the panel. */
+  --bad: #f25f8f;
   --good: #7fc98a;
   color-scheme: dark;
   font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
