@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 
 use junctur_core::config;
-use junctur_core::pipeline::{self, PipelineOptions, Project, Step, Steps};
+use junctur_core::pipeline::{self, KeepList, PipelineOptions, Project, Step, Steps};
 use serde::Serialize;
 
 use crate::lane::Lane;
@@ -309,9 +309,9 @@ impl Analysis {
 
     /// The options a run of `p` uses: the user's, device auto, and the cut settings of the list on
     /// disk, so a re-analysis keeps settings `junctur cut` set. Never `force`: stages whose results
-    /// still answer the options are reused. `keep_list`: a list with the user's edits is kept
-    /// (every run but an explicit re-analysis, 2j).
-    fn options(&self, p: &Project, keep_list: bool) -> Result<PipelineOptions, String> {
+    /// still answer the options are reused. `keep_list`: what becomes of a list with the user's
+    /// edits ([`KeepList`]: kept on every run but a fresh cut, 2j and 5s).
+    fn options(&self, p: &Project, keep_list: KeepList) -> Result<PipelineOptions, String> {
         let mut o = (self.user)()?;
         if let Ok(e) = p.edit() {
             o.cut = e.settings;
@@ -397,10 +397,15 @@ impl Analysis {
     /// after they edited while it transcribed, 2j); a run already waiting or running is returned as
     /// it is.
     pub fn start(&self, file: &Path, notify: Notify) -> Result<Progress, String> {
-        self.start_with(file, notify, true)
+        self.start_with(file, notify, KeepList::Edits)
     }
 
-    fn start_with(&self, file: &Path, notify: Notify, keep_list: bool) -> Result<Progress, String> {
+    fn start_with(
+        &self,
+        file: &Path,
+        notify: Notify,
+        keep_list: KeepList,
+    ) -> Result<Progress, String> {
         // Before opening the project: a run going on is the answer even when the folder cannot be
         // opened just now (2k repair; the check under the lock below closes the race).
         if let Some(r) = self.progress(file).filter(|r| r.phase.busy()) {
@@ -447,7 +452,8 @@ impl Analysis {
     ///
     /// Not `fresh` (the Re-analyse button): the edit list the user made is kept, cut, names, word
     /// fixes and caption settings, and only this run's speakers are put into it
-    /// (`PipelineOptions::keep_list`); nothing to ask. `fresh` ("Start over with a fresh cut"): the
+    /// ([`KeepList::Whole`]: one that does not parse is left as it is too, the run failing and
+    /// saying so); nothing to ask. `fresh` ("Start over with a fresh cut"): the
     /// list is re-cut as before 5s, so with the user's edits in it nothing starts unless
     /// `replace`, and the page asks first (the pipeline then keeps their list as a backup).
     pub fn reanalyse(
@@ -472,7 +478,11 @@ impl Analysis {
         Ok(Reanalysed {
             // A fresh cut asked for (or nothing of the user's to lose) re-cuts the list; else it
             // is kept.
-            progress: Some(self.start_with(file, notify, !fresh)?),
+            progress: Some(self.start_with(
+                file,
+                notify,
+                if fresh { KeepList::No } else { KeepList::Whole },
+            )?),
             hand_edited: false,
         })
     }
@@ -532,7 +542,7 @@ impl Analysis {
         f()
     }
 
-    fn run(&self, p: &Project, notify: &Notify, keep_list: bool) {
+    fn run(&self, p: &Project, notify: &Notify, keep_list: KeepList) {
         let k = p.file.clone();
         // A panic is a failure like any other (2m): unwound past the update below, it left the run
         // busy for good, its recording refusing edits and re-analysis until a restart. What it
@@ -569,7 +579,7 @@ impl Analysis {
 
     /// The pipeline's first half on the `first` lane, then its transcription on the
     /// `transcription` lane, telling the page when the list is written and as pieces land.
-    fn halves(&self, p: &Project, notify: &Notify, keep_list: bool) -> Result<(), String> {
+    fn halves(&self, p: &Project, notify: &Notify, keep_list: KeepList) -> Result<(), String> {
         let k = p.file.clone();
         let notify = notify.as_ref();
         let name = k.file_name().map(|n| n.to_string_lossy().into_owned());
@@ -1127,7 +1137,7 @@ mod tests {
     }
 
     /// What each run of the test below was told about the user's list.
-    static KEPT: Mutex<Vec<bool>> = Mutex::new(Vec::new());
+    static KEPT: Mutex<Vec<KeepList>> = Mutex::new(Vec::new());
 
     /// A pipeline that only notes whether the run keeps the user's list.
     fn noting_halves<'a>(
@@ -1157,7 +1167,7 @@ mod tests {
         let r = a.reanalyse(&file, false, false, quiet()).unwrap();
         assert!(!r.hand_edited && r.progress.is_some());
         ended(&a);
-        assert_eq!(*lock(&KEPT), [true]);
+        assert_eq!(*lock(&KEPT), [KeepList::Whole]);
         // A fresh cut over it is asked first: nothing started.
         let r = a.reanalyse(&file, true, false, quiet()).unwrap();
         assert!(r.hand_edited && r.progress.is_none());
@@ -1166,13 +1176,13 @@ mod tests {
         let r = a.reanalyse(&file, true, true, quiet()).unwrap();
         assert!(!r.hand_edited && r.progress.is_some());
         ended(&a);
-        assert_eq!(*lock(&KEPT), [true, false]);
+        assert_eq!(*lock(&KEPT), [KeepList::Whole, KeepList::No]);
         // Nothing of the user's to lose: a fresh cut starts without asking.
         std::fs::remove_file(p.edit_path()).unwrap();
         let r = a.reanalyse(&file, true, false, quiet()).unwrap();
         assert!(!r.hand_edited && r.progress.is_some());
         ended(&a);
-        assert_eq!(*lock(&KEPT), [true, false, false]);
+        assert_eq!(*lock(&KEPT), [KeepList::Whole, KeepList::No, KeepList::No]);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

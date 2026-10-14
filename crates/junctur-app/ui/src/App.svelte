@@ -371,7 +371,8 @@
     const file = opened.file;
     try {
       let r = await api.reanalyse(file, fresh, false);
-      if (r.handEdited) {
+      // Only a fresh cut is ever held back to ask; a plain Re-analyse never replaces the cut.
+      if (fresh && r.handEdited) {
         const yes = await ask(
           "Your cut is replaced by a fresh one from the analysis; speaker names, fixed words and caption settings stay. Your version is kept beside it as edit.junctur.bak (or .bak2, …).",
           { title: "Start over with a fresh cut?", kind: "warning", okLabel: "Start over", cancelLabel: "Keep my cut" },
