@@ -570,12 +570,6 @@ pub async fn translation_languages() -> Vec<Language> {
     l
 }
 
-/// Puts the Junctur script into Resolve's Scripts folder (5g) and says where.
-#[tauri::command]
-pub async fn install_resolve_script() -> Result<String, String> {
-    junctur_core::resolve::install().map(|i| i.script.display().to_string())
-}
-
 /// The voices Junctur remembers (5b).
 #[tauri::command]
 pub async fn voices() -> Result<Vec<VoiceView>, String> {

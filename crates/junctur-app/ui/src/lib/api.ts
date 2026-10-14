@@ -436,8 +436,6 @@ export const translationStatus = () => invoke<TranslationStatus>("translation_st
 let languages: Promise<Language[]> | null = null;
 /** The languages captions can be translated into, by name; asked once. */
 export const translationLanguages = () => (languages ??= invoke<Language[]>("translation_languages"));
-/** Installs the Junctur script into Resolve's Scripts folder; resolves to its path. */
-export const installResolveScript = () => invoke<string>("install_resolve_script");
 export const voices = () => invoke<Voice[]>("voices");
 /** Remembers `name`'s voice from every run of words (`[first, last]` each, 2p: one enrolment) and
  * relabels the speakers; resolves to a line for the user. */
