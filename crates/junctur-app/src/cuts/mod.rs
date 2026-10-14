@@ -279,7 +279,7 @@ fn speakers_key(s: &edit::Speakers) -> String {
 /// Over the fixed words (5h): what the words' text depends on.
 fn fixes_key(fixes: &[edit::Fix]) -> String {
     key(fixes.iter().flat_map(|f| {
-        [f.track as u64, f.start.to_bits()]
+        [f.track as u64, f.start.to_bits(), f.nth as u64]
             .into_iter()
             .chain(f.text.bytes().map(u64::from))
             .chain([u64::MAX])

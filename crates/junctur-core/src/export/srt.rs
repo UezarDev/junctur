@@ -235,18 +235,22 @@ fn kept<'a>(
     edit: &EditList,
     words: impl IntoIterator<Item = (usize, &'a Word)>,
 ) -> Vec<Shown> {
-    let fixes = Fixes::new(&edit.fixes);
+    let mut fixes = Fixes::new(&edit.fixes);
+    // Stable, so words starting together keep the transcript's order, which tells their fixes
+    // apart (5w).
     let mut words: Vec<(usize, &Word)> = words.into_iter().collect();
     words.sort_by(|a, b| a.1.start.total_cmp(&b.1.start));
     words
         .into_iter()
         .filter_map(|(track, w)| {
+            // Read before a cut word is dropped: `Fixes` counts every word.
+            let text = fixes.text(track, w);
             let r = tl.range_of((w.start + w.end) / 2.0)?;
             Some(Shown {
                 track,
                 start: (r, w.start),
                 end: (r, w.end),
-                text: clean(fixes.text(track, w)),
+                text: clean(text),
             })
         })
         .collect()
@@ -712,6 +716,7 @@ mod tests {
         e.fixes = vec![crate::edit::Fix {
             track: 3,
             start: 10.6,
+            nth: 0,
             text: "Uezar".into(),
         }];
         let one = [word(10.6, 10.9, "Wezar"), word(11.0, 11.3, "hola")];
@@ -726,12 +731,36 @@ mod tests {
     }
 
     #[test]
+    fn a_fix_shows_on_its_own_word_of_those_starting_together() {
+        // 5w: Whisper gave "en" and "él" one start; a fix on "él" showed on both. The first is cut
+        // here (its middle before the kept range) and is still counted.
+        let mut e = edit(&[(10.0, 12.0)], Captions::default());
+        e.fixes = vec![crate::edit::Fix {
+            track: 0,
+            start: 9.9,
+            nth: 1,
+            text: "miel".into(),
+        }];
+        let w = [
+            word(9.9, 9.95, "en"),
+            word(9.9, 10.5, "él"),
+            word(10.6, 11.0, "hola"),
+        ];
+        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1, None);
+        assert_eq!(solo(&c), ["miel hola"]);
+        e.keep[0].start = 9.0;
+        let c = cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1, None);
+        assert_eq!(solo(&c), ["en miel hola"]);
+    }
+
+    #[test]
     fn a_fixed_word_is_translated_as_fixed() {
         // The sentences sent to translation (5k) read the fix (5h), as the captions do.
         let mut e = two_tracks(Captions::default());
         e.fixes = vec![crate::edit::Fix {
             track: 0,
             start: 10.6,
+            nth: 0,
             text: "Uezar".into(),
         }];
         let one = [word(10.6, 10.9, "Wezar"), word(11.0, 11.3, "hola")];

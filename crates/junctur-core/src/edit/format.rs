@@ -26,7 +26,11 @@
 //! while a list with them tells an older build it is a newer format instead of failing on its
 //! first new line. Both versions read here. A list with `fix` lines (5h: a word's spelling fixed by
 //! hand, `fix <track> <start> <text>`, the text the rest of the line) is version 3 for the same
-//! reason; every version reads here.
+//! reason. A fix on a word that is not the first on its track to start in its millisecond (5w:
+//! Whisper gives runs of short words one start) writes which one it is after the start,
+//! `fix <track> <start>+<n> <text>`, and makes the list version 4, which a 5h build would fail on;
+//! a list without one is still version 3. Every version reads here, a `fix` line without `+<n>` as
+//! the first word of its millisecond.
 
 use std::fmt::Write;
 use std::path::PathBuf;
@@ -37,15 +41,18 @@ use super::{
     SpeakerName, Speakers, Turn, Window,
 };
 
-/// The newest version this build writes (with fixed words, 5h); lists without them are written as
-/// 2 (with speakers or captions) or 1.
-pub const FORMAT_VERSION: u32 = 3;
+/// The newest version this build writes (a fixed word sharing its start millisecond with an earlier
+/// one, 5w); lists with fixed words but none of those are written as 3 (5h), lists without fixed
+/// words as 2 (with speakers or captions) or 1.
+pub const FORMAT_VERSION: u32 = 4;
 
 pub fn write(e: &EditList) -> String {
     let s = &e.settings;
     let mut out = String::new();
-    let version = if !e.fixes.is_empty() {
+    let version = if e.fixes.iter().any(|f| f.nth > 0) {
         FORMAT_VERSION
+    } else if !e.fixes.is_empty() {
+        3
     } else if e.speakers.is_empty() && e.captions.is_none() {
         1
     } else {
@@ -97,14 +104,19 @@ pub fn write(e: &EditList) -> String {
     if !e.fixes.is_empty() {
         let _ = writeln!(
             out,
-            "# fix <track> <start> <text>: a word's spelling, fixed by hand"
+            "# fix <track> <start>[+<n>] <text>: a word's spelling, fixed by hand (+n: the n-th later word starting in that millisecond)"
         );
         let mut fixes = e.fixes.clone();
         fixes::sort(&mut fixes);
         for f in &fixes {
+            let nth = if f.nth > 0 {
+                format!("+{}", f.nth)
+            } else {
+                String::new()
+            };
             let _ = writeln!(
                 out,
-                "fix {} {} {}",
+                "fix {} {}{nth} {}",
                 f.track,
                 fixes::written(f.start),
                 f.text
@@ -232,15 +244,29 @@ pub fn parse(text: &str) -> Result<EditList, String> {
             "fix" => {
                 let mut parts = rest.splitn(3, ' ');
                 let track = parts.next().and_then(|t| t.parse::<usize>().ok());
-                let start = parts.next().and_then(|t| t.parse::<f64>().ok());
+                // `<start>+<n>` (5w); a bare start is the millisecond's first word. Split at the
+                // last `+` so an exponent's sign (`1e+1`) stays the start's.
+                let at = parts.next().map(|t| match t.rsplit_once('+') {
+                    Some((s, n)) if !s.ends_with(['e', 'E']) && !s.is_empty() => {
+                        (s, n.parse::<usize>().ok())
+                    }
+                    _ => (t, Some(0)),
+                });
+                let start = at.and_then(|(s, _)| s.parse::<f64>().ok());
+                let nth = at.and_then(|(_, n)| n);
                 let text = check_fix(parts.next().unwrap_or("")).map_err(|why| bad(&why))?;
-                let (Some(track), Some(start)) = (track, start) else {
-                    return Err(bad("expected `fix <track> <start> <text>`"));
+                let (Some(track), Some(start), Some(nth)) = (track, start, nth) else {
+                    return Err(bad("expected `fix <track> <start>[+<n>] <text>`"));
                 };
                 if text.is_empty() || !start.is_finite() {
-                    return Err(bad("expected `fix <track> <start> <text>`"));
+                    return Err(bad("expected `fix <track> <start>[+<n>] <text>`"));
                 }
-                let fix = Fix { track, start, text };
+                let fix = Fix {
+                    track,
+                    start,
+                    nth,
+                    text,
+                };
                 if e.fixes.iter().any(|f| f.same_word(&fix)) {
                     return Err(bad("a second `fix` line for this word"));
                 }
@@ -381,7 +407,8 @@ mod tests {
         let plain = sample().to_text();
         assert!(!plain.contains("speaker"));
         assert!(plain.starts_with("junctur-edit 1\n"));
-        assert!(parse("junctur-edit 4\n").is_err());
+        let newer = format!("junctur-edit {}\n", FORMAT_VERSION + 1);
+        assert!(parse(&newer).is_err());
         // Caption settings alone make a version-2 list, and round-trip.
         let c = EditList {
             captions: Some(Captions {
@@ -500,11 +527,13 @@ mod tests {
                 Fix {
                     track: 0,
                     start: 2.5,
+                    nth: 0,
                     text: "Tsun Heto,".into(),
                 },
                 Fix {
                     track: 1,
                     start: 1.25,
+                    nth: 0,
                     text: "Uezar".into(),
                 },
             ],
@@ -527,6 +556,7 @@ mod tests {
             fixes: vec![Fix {
                 track: 0,
                 start: 12.3125,
+                nth: 0,
                 text: "Uezar".into(),
             }],
             ..sample()
@@ -544,9 +574,66 @@ mod tests {
             "fix 1 soon Ana\n",
             "fix -1 2.000 Ana\n",
             "fix 1 2.000 Ana\nfix 1 2.0001 Bo\n",
+            "fix 1 2.000+ Ana\n",
+            "fix 1 2.000+x Ana\n",
+            "fix 1 2.000+-1 Ana\n",
+            "fix 1 2.000+1 Ana\nfix 1 2.000+1 Bo\n",
         ] {
             assert!(parse(&format!("{head}{bad}")).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_later_word_of_one_millisecond_is_written_with_its_place_as_version_4() {
+        // 5w: "en" and "él" both start at 54.944; each word its own fix.
+        let e = EditList {
+            fixes: vec![
+                Fix {
+                    track: 0,
+                    start: 54.944,
+                    nth: 1,
+                    text: "miel".into(),
+                },
+                Fix {
+                    track: 0,
+                    start: 54.944,
+                    nth: 0,
+                    text: "de".into(),
+                },
+            ],
+            ..sample()
+        };
+        let text = e.to_text();
+        assert!(text.starts_with("junctur-edit 4\n"), "{text}");
+        assert!(
+            text.contains("fix 0 54.944 de\nfix 0 54.944+1 miel\n"),
+            "{text}"
+        );
+        let back = parse(&text).unwrap();
+        assert_eq!(back.fixes, [e.fixes[1].clone(), e.fixes[0].clone()]);
+        assert!(!back.fixes[0].same_word(&back.fixes[1]));
+        assert_eq!(back.to_text(), text);
+        // A 5h list's bare line names the first word of its millisecond and is written back byte
+        // for byte, still version 3.
+        let old = EditList {
+            fixes: vec![Fix {
+                track: 0,
+                start: 54.944,
+                nth: 0,
+                text: "mel".into(),
+            }],
+            ..sample()
+        }
+        .to_text();
+        assert!(old.starts_with("junctur-edit 3\n"), "{old}");
+        assert!(old.contains("\nfix 0 54.944 mel\n"), "{old}");
+        let back = parse(&old).unwrap();
+        assert_eq!(back.fixes[0].nth, 0);
+        assert_eq!(back.to_text(), old);
+        // An exponent's sign is the start's, not a place.
+        let e = parse("junctur-edit 4\nsource x.mp4\nfix 0 1e+1 Ana\nfix 0 1E+1+2 Bo\n").unwrap();
+        assert_eq!((e.fixes[0].start, e.fixes[0].nth), (10.0, 0));
+        assert_eq!((e.fixes[1].start, e.fixes[1].nth), (10.0, 2));
     }
 
     #[test]
