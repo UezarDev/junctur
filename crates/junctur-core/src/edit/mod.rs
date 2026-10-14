@@ -5,6 +5,7 @@
 mod caption_text;
 mod captions;
 mod captions_line;
+mod carry;
 mod fixes;
 mod format;
 mod frames;
@@ -24,6 +25,9 @@ pub use caption_text::{Case, CensorStyle, Replace};
 pub use captions::{
     default_color, parse_color, title_name, Animation, Captions, ExistingClips, Layout,
 };
+pub use carry::{
+    carry, carry_times, snapshot, snapshot_times, Carried, CarriedTime, CarryReport, TimesReport,
+};
 pub use fixes::{
     check_fix, check_span, clash, confirm_fix, same_millisecond, set_fix, set_span, Fix, Fixed,
     Fixes, WordAt, MAX_FIX, MAX_SPAN,
@@ -37,10 +41,7 @@ pub use speakers::{
     check_name, default_name, Labeller, Person, SpeakerName, Speakers, Turn, MAX_NAME,
 };
 pub use splice::{cut_span, keep_span};
-pub use spread::{
-    carry, carry_times, keep_heard, likeness, snapshot, snapshot_times, spread, spread_with,
-    Carried, CarriedTime, CarryReport, Spread, SpreadIndex, TimesReport, Which,
-};
+pub use spread::{keep_heard, likeness, spread, spread_with, Spread, SpreadIndex, Which};
 pub use times::{set_time, to_ms, Retime, Times};
 
 /// A kept stretch of the source, in seconds.
