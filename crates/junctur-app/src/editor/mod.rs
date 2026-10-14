@@ -1,7 +1,5 @@
-//! Text-based and range editing of the edit list: each edit changes the kept ranges, is saved to
-//! `edit.junctur` at once (the file on disk is always a valid list), and can be undone in the
-//! session. Kept apart from the player so the editing rules are tested without mpv; the player
-//! hands it the list in play and takes back the new one ([`crate::player`]).
+//! Text-based and range editing of the edit list: each edit is saved to `edit.junctur` at once and
+//! can be undone in the session. Apart from the player so the editing rules are tested without mpv.
 
 pub mod words;
 
@@ -53,16 +51,15 @@ pub struct Edited {
     pub unsnapped: bool,
     /// Stretches of a several-stretch edit left out as under a frame ([`Editor::edit_all`]).
     pub skipped: usize,
-    /// Fixes a word fix also made on the words heard like it (5aa, [`Editor::fix_word`]), and what
+    /// Fixes a word fix also made on the words heard like it ([`Editor::fix_word`]), and what
     /// those words were heard as.
     pub others: Vec<Fix>,
     pub heard: Vec<String>,
 }
 
 /// Runs of transcript words (`(first, last)`, inclusive) as the engine takes them from the page:
-/// sorted and joined where they overlap or touch, so no word is cut, kept or (above all) fed into
-/// a voiceprint twice (2p repair: the page joins them too, but the engine does not rely on it).
-/// No runs, or a run that ends before it starts, is refused.
+/// sorted and joined where they overlap or touch, so no word is cut, kept or fed into a voiceprint
+/// twice, whatever the page sent. No runs, or a run that ends before it starts, is refused.
 pub fn join_runs(runs: &[(usize, usize)]) -> Result<Vec<(usize, usize)>, String> {
     if runs.is_empty() {
         return Err("select the words first".into());
@@ -82,8 +79,8 @@ pub fn join_runs(runs: &[(usize, usize)]) -> Result<Vec<(usize, usize)>, String>
     Ok(out)
 }
 
-/// What an undo step puts back: the kept ranges and, since a moved cut edge moves words with it
-/// (2w), the retimed words. Everything else in the list (names, fixes, captions) is not undone.
+/// What an undo step puts back: the kept ranges and, since a moved cut edge moves words with it,
+/// the retimed words. Everything else in the list (names, fixes, captions) is not undone.
 #[derive(Debug, Clone, PartialEq)]
 struct Snapshot {
     keep: Vec<Range>,
@@ -111,12 +108,11 @@ pub struct Editor {
     /// is retried, since the pipeline may write them while the app is open.
     pub words: Option<Arc<Words>>,
     pub envelope: Option<Arc<Envelope>>,
-    /// While the recording transcribes (2j): the words are read up to this many seconds, where
+    /// While the recording transcribes: the words are read up to this many seconds, where
     /// every track is transcribed; `None` reads the finished transcript.
     pub through: Option<f64>,
-    /// What a spread reads of `words` (5aa), kept beside the words it was built from: every fix
-    /// spreads over the same transcript until a piece more of it lands. Weak: words read again
-    /// are not kept alive for it, and a weak pointer is never taken for a later transcript's.
+    /// What a spread reads of `words`, kept beside the words it was built from. Weak, so words
+    /// read again are not kept alive for it and it is never taken for a later transcript's.
     spread_index: Option<(Weak<Words>, Arc<SpreadIndex>)>,
 }
 
@@ -181,12 +177,9 @@ impl Editor {
     }
 
     /// Makes frame edit `start..end` (`keep`) and, when it moves edge `from` of a kept range to
-    /// its other end (2w: a cut's edge dragged on the lanes or stepped in review or the range
-    /// toolbar), moves the words beside that edge with it ([`Words::moved_edge`]), saved as **one**
-    /// undo step. An edit that is not such a move (review's clips are not always the list's ranges,
-    /// and a clip edge between two kept clips is no edge of the list) is the frame edit alone, as
-    /// is one on a recording without a transcript. The words are the editor's, read before
-    /// ([`crate::player`] prepares them).
+    /// its other end, moves the words beside that edge with it ([`Words::moved_edge`]), as **one**
+    /// undo step. Any other edit (review's clips are not always the list's ranges) is the frame
+    /// edit alone, as is one on a recording without a transcript.
     pub fn move_edge(
         &mut self,
         list: &EditList,
@@ -203,10 +196,8 @@ impl Editor {
         };
         let total = frames_ceil(list.duration, fps.num, fps.den);
         let ranges = frame_ranges(&list.keep, fps.num, fps.den, total);
-        // The kept range whose edge `from` is, and which edge: one the edit moves (keeping frames
-        // past a range's end or before its start, or cutting frames inside it from that edge).
-        // With the far end of the cut beside the edge: the next range's start, the previous one's
-        // end, or the file's.
+        // The kept range whose edge `from` is and which edge the edit moves, with the far end of
+        // the cut beside it (the next range's start, the previous one's end, or the file's).
         let moved = to.and_then(|to| {
             ranges.iter().enumerate().find_map(|(k, &(a, b))| {
                 if b == from && b < total && keep == (to > from) {
@@ -230,16 +221,10 @@ impl Editor {
         self.commit(list, Step::Do(op), to, false, fps)
     }
 
-    /// Applies every op of `ops` in order to `list` and saves the result as **one** undo step (2p:
-    /// a selection of several stretches is cut or kept at once, and one undo puts all of it back).
-    /// Each op sees the ranges the ones before it left, so overlapping ops land as they would one
-    /// after another. `None` when together they change nothing; no ops is that.
-    ///
-    /// A stretch under a frame among others is left out and counted ([`Edited::skipped`], said in
-    /// the notice; 2p repair): one stray short word in a selection of someone's lines should not
-    /// refuse the lot. When every stretch is under a frame, or the ones left change nothing, it is
-    /// refused saying so. Any other refusal (a word out of range, no transcript) refuses the whole
-    /// batch and nothing is written.
+    /// Applies `ops` in order to `list` and saves the result as **one** undo step; each op sees the
+    /// ranges the ones before it left. `None` when together they change nothing, or there are none.
+    /// A stretch under a frame among others is left out and counted ([`Edited::skipped`]), so one
+    /// stray short word does not refuse the lot; any other refusal refuses the whole batch.
     pub fn edit_all(
         &mut self,
         list: &EditList,
@@ -338,8 +323,8 @@ impl Editor {
     }
 
     /// Renames speaker `id` and saves; `None` when the name is already that. Like every styling
-    /// change (below) not an undo step: the history holds kept ranges (and retimed words, 2w) only, so undoing a cut keeps
-    /// the new name (the list saved for an undo is the one in play with older ranges).
+    /// change, not an undo step: the history holds kept ranges and retimed words only, so undoing a
+    /// cut keeps the new name.
     pub fn rename(
         &mut self,
         list: &EditList,
@@ -385,11 +370,10 @@ impl Editor {
         })
     }
 
-    /// Fixes the spelling of `word`, heard on `track` (5h), the `nth` of that track's words starting
-    /// in its millisecond (5w, [`super::Words::nth`]), and saves; empty text or the heard text again
-    /// takes the fix away. Every other word heard like it gets the same fix in the same save (5aa,
-    /// [`edit::spread`]), [`Edited::others`] naming those. Like a rename, not an undo step: the
-    /// history holds kept ranges.
+    /// Fixes the spelling of `word`, heard on `track`, the `nth` of that track's words starting in
+    /// its millisecond ([`super::Words::nth`]), and saves; empty text or the heard text again takes
+    /// the fix away. Every word heard like it gets the same fix in the same save
+    /// ([`edit::spread`]), [`Edited::others`] naming those. Like a rename, not an undo step.
     pub fn fix_word(
         &mut self,
         list: &EditList,
@@ -415,10 +399,9 @@ impl Editor {
         self.set_fixes(list, fixes, s)
     }
 
-    /// Marks `word`, heard on `track`, the `nth` of that track's words starting in its millisecond
-    /// (5w), as checked by the user (5o: a fix line with the heard text, so the transcript panel no
-    /// longer flags it) and saves; a word fixed already is left as it is. Like a fix, not an undo
-    /// step.
+    /// Marks `word` (as for [`Self::fix_word`]) as checked by the user, a fix line with the heard
+    /// text so the transcript panel stops flagging it, and saves; a word fixed already is left as
+    /// it is. Not an undo step.
     pub fn confirm_word(
         &mut self,
         list: &EditList,
@@ -431,10 +414,9 @@ impl Editor {
         })
     }
 
-    /// Sets the text of the run `r` names (5x, [`super::Words::retyped`]) as one fix, and saves;
-    /// the fixes of words inside it, and a span overlapping it, go. Empty text or the heard text again
-    /// takes them all away. The same words heard elsewhere get the same text (5aa), as for
-    /// [`Self::fix_word`]. Not an undo step.
+    /// Sets the text of the run `r` names ([`super::Words::retyped`]) as one fix, and saves; the
+    /// fixes of words inside it, and a span overlapping it, go. Empty text or the heard text again
+    /// takes them all away. Spreads as [`Self::fix_word`] does. Not an undo step.
     pub fn fix_words(
         &mut self,
         list: &EditList,
@@ -454,7 +436,7 @@ impl Editor {
         self.set_fixes(list, fixes, s)
     }
 
-    /// Gives every word heard like a fixed one the same fix (5aa: the Correct button's first step),
+    /// Gives every word heard like a fixed one the same fix (the Correct button's first step),
     /// and saves; what was added and the heard texts two fixes disagree on. Not an undo step.
     pub fn spread_all(&mut self, list: &EditList) -> Result<(Option<Edited>, Spread), String> {
         let mut fixes = list.fixes.clone();
@@ -463,7 +445,7 @@ impl Editor {
         Ok((edited, s))
     }
 
-    /// Takes back the fixes a fix also made elsewhere (5aa: the note's Undo), those still as they
+    /// Takes back the fixes a fix also made elsewhere (the note's Undo), those still as they
     /// were: their words keep what they were heard as (`heard`), as fixes of the heard text, so no
     /// later spread gives them the fix again ([`edit::keep_heard`]). Saved; not an undo step.
     pub fn keep_heard(
@@ -501,8 +483,8 @@ impl Editor {
         fixes: Vec<Fix>,
         s: Spread,
     ) -> Result<Option<Edited>, String> {
-        // Never a list the parser would refuse (5aa repair): a spread checks this itself, so this
-        // is the last line, not the rule.
+        // Never save a list the parser would refuse; a spread checks this itself, this is the
+        // last line.
         if edit::clash(&fixes) {
             return Err("that would give a word two fixes: nothing was changed".into());
         }
@@ -517,7 +499,7 @@ impl Editor {
         }))
     }
 
-    /// Puts `speakers` in place of the list's (5b: labelled again after a voice was enrolled or
+    /// Puts `speakers` in place of the list's (labelled again after a voice was enrolled or
     /// forgotten) and saves. Like a rename, not an undo step.
     pub fn respeak(
         &mut self,
@@ -1036,7 +1018,7 @@ mod tests {
             .unwrap()
             .list;
         assert!(l3.fixes.is_empty());
-        // 5o: confirmed, the word keeps its heard text in a fix line, saved at once.
+        // Confirmed, the word keeps its heard text in a fix line, saved at once.
         let l4 = e.confirm_word(&l3, 1, &heard, 0).unwrap().unwrap().list;
         assert_eq!(l4.fixes[0].text, "Wezar,");
         assert_eq!(reread(&path), l4);
@@ -1047,7 +1029,6 @@ mod tests {
 
     #[test]
     fn a_fix_lands_on_every_word_heard_alike_and_those_can_be_taken_back() {
-        // 5aa: Uezar fixed one "Bane" and the other stayed.
         use super::Words;
         let d = scratch("spread");
         let path = d.join("edit.junctur");
@@ -1101,7 +1082,7 @@ mod tests {
 
     #[test]
     fn a_retyped_sentence_is_saved_at_once_and_replaces_its_word_fixes() {
-        // 5x: one fix for the run, saved as a `span` line; the word fix inside it goes.
+        // One fix for the run, saved as a `span` line; the word fix inside it goes.
         use super::Words;
         let d = scratch("span");
         let path = d.join("edit.junctur");
@@ -1152,8 +1133,7 @@ mod tests {
 
     #[test]
     fn a_moved_edge_moves_the_words_beside_it_and_undoes_with_it() {
-        // 2w: kept 10.0-11.0 at 30 fps (frames 300..330). Whisper put "dos" at 10.2-10.8 and "tres"
-        // at 10.9-11.6, so moving the end out to 11.4 (frame 342) would make "tres" kept by its
+        // Kept 10.0-11.0 at 30 fps; moving the end out to 11.4 would keep "tres" (10.9-11.6) by its
         // middle: "dos" follows the edge, "tres" starts at it and stays cut.
         let d = scratch("edge");
         let path = d.join("edit.junctur");
@@ -1241,8 +1221,7 @@ mod tests {
 
     #[test]
     fn a_word_far_from_the_edge_is_not_stretched_and_one_passed_whole_turns_kept() {
-        // 2w: a range kept by hand to 20.0 whose last word ended at 15.0: moving its end out leaves
-        // the word (it is not beside the edge). And moving an end over a whole short word keeps
+        // A word not beside the edge is left as it is; an end moved over a whole short word keeps
         // that word, the word following the edge stopping at it.
         let d = scratch("edge-far");
         let path = d.join("edit.junctur");
@@ -1284,9 +1263,8 @@ mod tests {
 
     #[test]
     fn an_edge_moved_across_a_cut_into_the_next_range_trims_none_of_its_words() {
-        // 2w repair: kept 10.0-11.0 and 11.5-20.0 at 30 fps (frames 300..330, 345..600); the
-        // toolbar steps the first range's end to 11.7 (frame 351), joining the two. "y", kept in the
-        // second range, keeps its head, and "dos" follows the edge only to where that range starts.
+        // Kept 10.0-11.0 and 11.5-20.0; the first end stepped to 11.7 joins them. The word in the
+        // second range keeps its head, and the one before follows the edge only to where it starts.
         let d = scratch("edge-join");
         let mut e = Editor::default();
         e.reset(Some(d.join("edit.junctur")));
@@ -1314,8 +1292,8 @@ mod tests {
 
     #[test]
     fn a_word_left_with_under_a_frame_kept_is_cut_whole() {
-        // 2w repair: kept 10.0-11.0; the end moved in to 10.7 (frame 321) leaves "z" (10.69-10.9,
-        // kept by its middle) under a frame on the kept side: it is cut, its head clipped to the edge.
+        // Kept 10.0-11.0; the end moved in to 10.7 leaves "z" under a frame on the kept side: it is
+        // cut, its head clipped to the edge.
         let d = scratch("edge-straddle");
         let mut e = Editor::default();
         e.reset(Some(d.join("edit.junctur")));

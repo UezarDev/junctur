@@ -1,9 +1,6 @@
-//! The edit list: which ranges of the source to keep, as a readable text file the user can diff,
-//! commit and hand-edit, plus who speaks when (named speakers and their turns) and a score per short
-//! time window for the later Review/Swipe modes.
-//!
-//! It is the one piece of state a project owns; everything else in the project folder is a cache
-//! that can be rebuilt. The source itself is never touched.
+//! The edit list: which ranges of the source to keep, who speaks when, word fixes and scores, as a
+//! readable text file the user can diff and hand-edit. It is the one piece of state a project owns;
+//! everything else in the project folder is a rebuildable cache, and the source is never touched.
 
 mod caption_text;
 mod captions;
@@ -107,13 +104,13 @@ pub struct EditList {
     /// Who speaks when; empty when the project has no speakers stage result.
     pub speakers: Speakers,
     /// How the caption file is cut into cues, and whether captions are on; `None` when the list has
-    /// no `captions` line, and then it follows the user's defaults (2i, `config::captions`), which
+    /// no `captions` line, and then it follows the user's defaults (`config::captions`), which
     /// the caller resolves before cutting cues.
     pub captions: Option<Captions>,
-    /// Words the user fixed (5h), and runs of words fixed as one text (5x), in time order: shown in
+    /// Words the user fixed, and runs of words fixed as one text, in time order: shown in
     /// place of what Whisper heard.
     pub fixes: Vec<Fix>,
-    /// Words the user retimed by moving a cut's edge (2w), in heard order: their start and end in
+    /// Words the user retimed by moving a cut's edge, in heard order: their start and end in
     /// place of Whisper's wherever a word's time is read.
     #[serde(default)]
     pub times: Vec<Retime>,
@@ -130,11 +127,8 @@ impl EditList {
         format::write(self)
     }
 
-    /// [`Self::to_text`] when [`parse`] reads it back, else the parser's reason (5ad). What every
-    /// writer of an edit list writes ([`save`], [`amend`], the pipeline's re-cut): a list the parser
-    /// refuses opens as a recording whose edits are gone until it is fixed by hand (5aa's carry once
-    /// wrote a kept-as-heard span longer than [`MAX_SPAN`]), so such a list is never written, whatever
-    /// made it.
+    /// [`Self::to_text`] when [`parse`] reads it back, else the parser's reason. Every writer of an
+    /// edit list uses it: a list the parser refuses opens with its edits gone.
     pub fn checked_text(&self) -> Result<String, String> {
         let text = self.to_text();
         match parse(&text) {

@@ -1,11 +1,6 @@
-//! A recording's results that a run started by a packaged app (Claude desktop) left in a hidden copy
-//! of the cache (2f, [`crate::hidden`]), taken into the real project folder as one unit.
-//!
-//! Only into a folder with no run of its own (nothing but [`BENIGN`] files), so one analysis is never
-//! mixed with another's stage files; only from a finished, settled copy (no stage `running`, nothing
-//! written in the last [`hidden::SETTLED`]), since stage files are written while a run goes on; from the
-//! newest such copy alone; `jobs.json` last, so a folder never says "done" before its results are in;
-//! and once per recording (the `projects` folder's ledger), so a forgotten analysis does not return.
+//! Takes the results a packaged app's run (Claude desktop) left in a hidden copy of the cache
+//! ([`crate::hidden`]) into the real project folder as one unit: only into a folder with no run of
+//! its own, only from the newest settled copy, `jobs.json` last, and once per recording.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,7 +9,7 @@ use std::time::SystemTime;
 use super::jobs::{self, Jobs, StageState};
 use crate::hidden::{self, Adopted, Ledger, Lookup};
 
-/// What a project folder holds before any run: the mixer's mutes (2e), saved when the recording is
+/// What a project folder holds before any run: the mixer's mutes, saved when the recording is
 /// first played.
 const BENIGN: [&str; 2] = ["mutes.json", hidden::LEDGER];
 

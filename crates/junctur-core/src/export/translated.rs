@@ -1,16 +1,7 @@
-//! Translated captions (5k) on the kept words: the words are grouped into sentences, each
-//! sentence's translation is looked up ([`crate::translate::Translations`]), and its words are
-//! spread over the time the sentence was said, so they are cut into cues like spoken words.
-//!
-//! Before the text options (5j) and the cut (5i): case, punctuation, censoring and replacements
-//! then apply to the words shown, the translated ones, and a word limit counts translated words.
-//! Rejected: translating finished cues, which cuts sentences mid-way (a cue ends at the line
-//! limit, not where a sentence does) and translates text 5j already masked or replaced.
-//!
-//! A translated word's time is found by where it sits in its sentence, in characters: the word a
-//! third of the way through the translation starts where the spoken sentence was a third of the
-//! way through its characters, in that spoken word's time. So each end lands inside a kept word,
-//! on its kept range, even when a sentence runs across a cut.
+//! Translated captions on the kept words: the words are grouped into sentences, each sentence's
+//! translation looked up ([`crate::translate::Translations`]) and its words spread over the time
+//! the sentence was said by character position, so each end lands in a kept word. Runs before the
+//! text options and the cut, since a cue ends at the line limit rather than at a sentence's end.
 
 /// A word as captions show it, between two points of source time, each held in the kept range
 /// `(range, seconds)` it falls in.
@@ -36,13 +27,9 @@ fn ends(text: &str) -> bool {
 
 /// The sentences of `shown` (time order), as indices into it: one speaker's words on one track,
 /// until a word ends a sentence, the speaker changes, a pause of `pause` output seconds, or
-/// [`MOST_WORDS`]. `speaker` and `out` give a word's speaker and output time of a point.
-///
-/// A word with no text (cleaning left it empty: a fix or a Whisper word of tags only) has no say
-/// in any of that (5q): it joins its track's open sentence, or is a sentence of its own when none
-/// is open, and the pause, the full stop and the count look at the words with text. Counted, it
-/// could join two sentences a second apart, hide the full stop before it, or split one by the
-/// speaker its time fell to, which moved the translation over the words.
+/// [`MOST_WORDS`]. `speaker` and `out` give a word's speaker and output time of a point. A word
+/// with no text joins its track's open sentence (or is one of its own) and has no say in where
+/// sentences end, so it cannot merge two sentences, hide a full stop or split one.
 pub(super) fn sentences(
     shown: &[Shown],
     speaker: impl Fn(&Shown) -> u32,
@@ -140,11 +127,9 @@ fn spread(spoken: &[&Shown], words: Vec<String>) -> Vec<Shown> {
     }
     let total = total - 1.0;
     // The point `p` characters in: inside a word, a share of its time; in the space after it, a
-    // share of the pause to the next word, so a translation longer than its sentence does not
-    // bunch its extra words at one instant where a pause leaves room (5p met them there). A pause
-    // across a cut has no time on the edited timeline: the word's end. `ending` takes the word
-    // before a point exactly at a word's start, so a translated word ending there ends with that
-    // word or in the pause after it.
+    // share of the pause to the next word, so extra translated words do not bunch at one instant.
+    // A pause across a cut has no time: the word's end. `ending` takes the word before a point
+    // exactly at a word's start, so a word ending there ends with it or in the pause after it.
     let point = |p: f64, ending: bool| -> (usize, f64) {
         let k = at
             .iter()
@@ -241,7 +226,7 @@ mod tests {
     #[test]
     fn an_empty_word_neither_joins_nor_splits_sentences() {
         // A word cleaning left empty (a fix or a Whisper word of tags only) stays with the words
-        // around it but plays no part in where sentences end (5q).
+        // around it but plays no part in where sentences end.
         let n = |shown: &[Shown]| sentences(shown, |_| 1, |p| p.1, 1.0);
         // 0.6 s on either side of it, 1.4 s between the words with text: a pause.
         let pause = vec![
@@ -366,7 +351,7 @@ mod tests {
                 "{got:?}"
             );
         }
-        // Touching words leave no pause: the word's end, as before.
+        // Touching words leave no pause: the word's end.
         let touching = vec![w(0, 0.0, 1.0, "aa"), w(0, 1.0, 2.0, "bb")];
         let got = apply(touching, &[vec![0, 1]], |_| Some(many), |t| t.to_string());
         assert!(got.iter().all(|w| (0.0..=2.0).contains(&w.start.1)));

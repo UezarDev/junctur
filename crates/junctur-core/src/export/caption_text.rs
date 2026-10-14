@@ -1,16 +1,8 @@
-//! The caption text options (5j) applied to the kept words: find and replace, then case, then
-//! punctuation, then censoring, giving the units [`super::srt::cues`] cuts into cues. Before the cut
-//! and not on finished cues, because a replacement or a mask changes a line's width (wrapping on the
-//! old words could pass the line limit) and a phrase to find can straddle two cues.
-//!
-//! Matching is on whole words, case aside: a Whisper word carries its punctuation (`"¿Qué?"`), so
-//! each is split into that and its core, from its first to its last letter or digit, and only cores
-//! are compared. It runs over one track's words at a time, since two people talking at once have
-//! their words interleaved in time.
-//!
-//! A replacement's text is split back into words that keep the span of what it replaced (a
-//! `group`), so case, punctuation and the censor list see each of its words; the group is joined
-//! again into one unit at the end, so the cut still treats it as one word.
+//! The caption text options applied to the kept words: find and replace, then case, punctuation
+//! and censoring, giving the units [`super::srt::cues`] cuts into cues. Before the cut, since a
+//! replacement changes a line's width and a phrase to find can straddle two cues. Matching is on
+//! whole words, case aside, comparing each word's core (first to last letter or digit), one track
+//! at a time since people talking at once interleave in time.
 
 use crate::edit::{Captions, Case, CensorStyle};
 
@@ -61,8 +53,8 @@ impl Piece {
 
     /// The core lower-cased. `İ` lower-cases to `i` and a combining dot, so it is made a plain `i`
     /// first (written whole or as `I` and the dot) and `İstanbul` matches `istanbul`. Only that
-    /// dot goes: 5j dropped every U+0307 after lower-casing, which also made a letter written with
-    /// a combining dot of its own (`ż` as `z` and the dot) match its bare letter (5p).
+    /// dot goes, so a letter written with a combining dot of its own (`ż` as `z` and the dot) does
+    /// not match its bare letter.
     fn key(&self) -> String {
         self.core
             .replace('\u{130}', "i")
@@ -394,7 +386,7 @@ mod tests {
             shown(&["$5.50.", "3.14,", "1,000", "10:30:", "a.b"], &c),
             ["$5.50", "3.14", "1,000", "10:30", "ab"]
         );
-        // Only between two digits: a comma after a word goes even with a digit after it (5p).
+        // Only between two digits: a comma after a word goes even with a digit after it.
         assert_eq!(shown(&["apples,2", "1995.2"], &c), ["apples2", "1995.2"]);
     }
 
@@ -449,7 +441,7 @@ mod tests {
         };
         assert_eq!(shown(&["İstanbul"], &city), ["İ******l"]);
         // Only that dot: a letter written with a combining dot of its own (`ż` as `z` and
-        // U+0307) is not its bare letter (5p).
+        // U+0307) is not its bare letter.
         let zed = Captions {
             censor: vec!["zero".into()],
             ..Default::default()

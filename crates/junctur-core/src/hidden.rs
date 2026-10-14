@@ -1,16 +1,6 @@
-//! Copies of the user's AppData folders that Windows hid from them (2f).
-//!
-//! A process started by a packaged (MSIX) app, such as `junctur analyze` run from Claude desktop, has
-//! its new AppData folders redirected into `%LOCALAPPDATA%\Packages\<package>\LocalCache\Local\...`
-//! (`...\Roaming\...` for `%APPDATA%`), and keeps writing there once a folder exists in that copy. It
-//! sees both merged; every other process sees only the real folder, so a recording analysed from Claude
-//! opened in the app as never analysed. Nothing inside such a process escapes it (measured: not
-//! `KF_FLAG_NO_PACKAGE_REDIRECTION`, not a `\\?\` path; the processes have no package identity to
-//! undo), so the real folder instead takes what a hidden copy has and it lacks.
-//!
-//! The rules, for every caller: copy, never move, delete or replace anything that is the user's; take
-//! a file only once it has settled ([`SETTLED`]) and only if it did not change while being copied; and
-//! take each file once ([`Ledger`]), so one the user deletes later does not come back.
+//! Copies of the user's AppData folders that Windows hid in `Packages\<package>\LocalCache` for a
+//! process started by a packaged (MSIX) app; such a process cannot escape the redirect, so the real
+//! folder copies in what a hidden copy has and it lacks: never replacing, once settled, once each.
 
 use std::collections::{BTreeSet, HashSet};
 use std::ffi::{OsStr, OsString};
@@ -483,8 +473,8 @@ pub(crate) mod tests {
             "the hidden copy is untouched"
         );
 
-        // The user deletes the taken config: it does not come back, from either copy. The now
-        // settled recent.json comes.
+        // A taken config the user deletes does not come back, from either copy; the settled
+        // recent.json comes.
         fs::remove_file(real.join("config.json")).unwrap();
         let later = SystemTime::now() + Duration::from_secs(60);
         assert_eq!(adopt_files_with(&l, &real, all, later).copied, 1);

@@ -1,13 +1,7 @@
 /**
- * What the user has selected to cut or keep: transcript words (the engine snaps their boundaries
- * into the pauses around them) or a stretch of source frames from the timeline (taken exactly).
- * Shared by the transcript, the timeline and the edit bars so all of them show and act on one thing.
- *
- * Words can be several stretches at once (2p: Ctrl+click and Ctrl+drag add one, so all of one
- * person's lines can be picked together and remembered as their voice). The runs are kept in the
- * order they were made, the latest last, because Shift+click extends the latest one; they may
- * overlap or touch, so everything that reads or acts on them goes through `runs`, which sorts and
- * joins them. Frames stay one stretch: a lanes or timeline drag replaces whatever was selected.
+ * What is selected to cut or keep: transcript words or source frames, shared by the transcript,
+ * timeline and edit bars. Word runs keep creation order (Shift+click extends the latest) and may
+ * overlap, so readers go through `runs`, which sorts and joins them.
  */
 import * as api from "./api";
 import { toSeconds } from "./time";

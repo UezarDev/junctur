@@ -33,7 +33,7 @@ pub struct Region {
 pub struct Vad {
     session: Session,
     /// The model's inputs, made once and written in place frame by frame: a 30 h track is 3.4
-    /// million frames, and building three tensors for each was most of the allocation in VAD.
+    /// million frames, too many to build three tensors for each.
     input: Tensor<f32>,
     state: Tensor<f32>,
     sr: Tensor<i64>,

@@ -1,26 +1,6 @@
-//! The `speakers` stage: who talks when, for a recording, in one of two ways.
-//!
-//! When OBS recorded the voices on their own tracks (a mic, a Discord) there are several voice
-//! tracks, and each one is a speaker: exact and free, no model. A mix track is never one speaker:
-//! it holds everyone, so with voice tracks beside it the speakers are the voice tracks (words
-//! heard on the mix go to whichever voice track talks then). When there are fewer than two voice
-//! tracks, the speakers are told apart by voice on one track (the mix if there is one): VAD regions
-//! from the `speech` stage, CAM++ embeddings of 1.5 s windows, straight on the mix (5a measured the
-//! vocal stem buying nothing for this while separation costs ~19 GB per 30 h).
-//!
-//! Telling them apart by voice is two steps since 5b. **Hearing** reads the track once: the windows'
-//! embeddings and, with pyannote's segmentation model, where two people talk at once
-//! ([`crate::diarize::analyze`]). It is the slow part and is kept: the embeddings in `windows.f32`,
-//! the rest in `speakers.json` ([`Heard`]). **Labelling** is cheap and runs on every stage run and
-//! whenever a voice is enrolled or forgotten ([`relabel`]): windows like an enrolled voice are that
-//! person, the rest are clustered as in 5a, and each overlap stretch gives its two people a turn
-//! each, so turns of different people overlap there. Its own stage and file because it is analysis
-//! the edit list is made from, like `speech.json`; the names the user gives the speakers live in the
-//! edit list ([`crate::edit::Speakers`]).
-//!
-//! Since 5c the seconds a user picks to remember a voice are **pins** ([`Pin`]): those seconds are
-//! that person whatever the windows say, at every labelling, and hearing again cuts its windows at
-//! them ([`seeded`]), so the user's picks shape both the cheap pass and the slow one.
+//! The `speakers` stage: who talks when. Two or more voice tracks are a speaker each; otherwise
+//! voices are told apart on one track by slow **hearing**, kept ([`Heard`], `windows.f32`), then
+//! cheap **labelling** ([`relabel`]), rerun whenever a voice is enrolled, with [`Pin`]s overruling.
 
 use std::path::{Path, PathBuf};
 
@@ -50,7 +30,7 @@ const MIN_CLIP_S: f64 = 0.5;
 /// Turn pieces shorter than this, left between two pins, are dropped (turns are held to the ms).
 const SLIVER_S: f64 = 0.001;
 
-/// Seconds the user said are one person's (5c): the stretch picked to remember their voice. At
+/// Seconds the user said are one person's: the stretch picked to remember their voice. At
 /// every labelling those seconds are that person and nobody else ([`label`]); hearing again cuts
 /// its windows at them ([`seeded`]). By name, so a pin follows the voice the name is; a pin whose
 /// name is no usable voice (forgotten, another model) is ignored but kept, and remembering the
@@ -78,7 +58,7 @@ pub struct Found {
     pub method: Method,
     /// Per speaker (speaker `i + 1`): the track it is, when speakers are tracks.
     pub tracks: Vec<Option<usize>>,
-    /// Per speaker: the enrolled voice it was recognised as (5b), whose name and colour it takes.
+    /// Per speaker: the enrolled voice it was recognised as, whose name and colour it takes.
     #[serde(default)]
     pub people: Vec<Option<Person>>,
     /// Sorted by start; speaker ids from 1. Two people's turns overlap where both talk at once.
@@ -87,8 +67,8 @@ pub struct Found {
     /// and finds other regions, this result is stale and the stage runs again too.
     #[serde(default)]
     pub speech: String,
-    /// What was heard on the track, for labelling again without reading it (5b); `None` when the
-    /// speakers are tracks, and in a 5a file (which is then heard again once).
+    /// What was heard on the track, for labelling again without reading it; `None` when the
+    /// speakers are tracks, and in an older file (which is then heard again once).
     #[serde(default)]
     pub heard: Option<Heard>,
     /// Every name an enrolled voice has had while labelling this recording, current or since
@@ -96,7 +76,7 @@ pub struct Found {
     /// cluster ([`crate::edit::Speakers::found`]).
     #[serde(default)]
     pub known: Vec<String>,
-    /// The seconds the user pinned to a person (5c), sorted by start, never overlapping. The
+    /// The seconds the user pinned to a person, sorted by start, never overlapping. The
     /// project's own record of what the user said, so it is carried over when hearing runs again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pins: Vec<Pin>,
@@ -179,12 +159,9 @@ fn outside(start: f64, end: f64, cut: &[(f64, f64)]) -> Vec<(f64, f64)> {
     out
 }
 
-/// Speech regions for hearing, cut at every pin's edges (5c), with the pins that lie outside the
-/// regions added (the user says someone talks there), so the windows of a piece 1.5 s or longer
-/// stay inside it and the pinned seconds get windows of their own. Not every window: a piece under
-/// 0.5 s gets none, and one under 1.5 s gets one centred window ([`diarize::segments`]) that
-/// reaches past its edges, since every window is 1.5 s (one input shape on CUDA). Such a window's
-/// label is still overruled inside the pin ([`label`]).
+/// Speech regions for hearing, cut at every pin's edges, with the pins outside the regions added,
+/// so the pinned seconds get windows of their own. A piece under 1.5 s gets one centred window
+/// ([`diarize::segments`]) reaching past its edges, still overruled inside the pin ([`label`]).
 pub fn seeded(regions: &[Region], pins: &[Pin]) -> Vec<Region> {
     let mut edges: Vec<f64> = pins.iter().flat_map(|p| [p.start, p.end]).collect();
     edges.sort_by(f64::total_cmp);
@@ -231,17 +208,16 @@ pub struct Heard {
 }
 
 impl Heard {
-    /// Heard by this build's hearing ([`hearing_key`]). Windows heard otherwise (5r: maybe on the
-    /// GPU, not CAM++'s numbers) are never reused, labelled with or taken as a voice sample.
+    /// Heard by this build's hearing ([`hearing_key`]). Windows heard otherwise (maybe on the GPU,
+    /// not CAM++'s numbers) are never reused, labelled with or taken as a voice sample.
     pub fn is_current(&self) -> bool {
         self.key == hearing_key(self.track)
     }
 }
 
 impl Found {
-    /// Told apart by voice, but heard by an older Junctur: before 5b kept the windows, or before
-    /// 5r. Its speakers cannot be labelled again until they are heard again; its pins still can be
-    /// renamed.
+    /// Told apart by voice, but heard by an older Junctur (no windows kept, or maybe the GPU's).
+    /// Its speakers cannot be labelled again until they are heard again; its pins can be renamed.
     pub fn heard_by_an_older_junctur(&self) -> bool {
         self.method == Method::Voices && !self.heard.as_ref().is_some_and(Heard::is_current)
     }
@@ -313,11 +289,8 @@ fn plan<'a>(speech: &'a Speech, voice: &[usize]) -> Plan<'a> {
 }
 
 /// Who talks when in `file`, from the speech stage's regions, labelled with `voices`. `voice` names
-/// the speech tracks whose role is a single voice; the others are mixes. When the speakers are told
-/// apart by voice, the window embeddings are written to project folder `dir` for [`relabel`], and
-/// the windows are cut at `pins` (5c: [`seeded`]), which the result keeps. `heard` is told the
-/// track being heard and how far through it the hearing is (2h); speakers told apart by track hear
-/// nothing, so it is not called.
+/// the single-voice speech tracks. Hearing by voice writes the embeddings to `dir` for [`relabel`]
+/// and cuts the windows at `pins` ([`seeded`]); `heard` is told the track and how far it has got.
 #[allow(clippy::too_many_arguments)]
 pub fn find(
     file: &Path,
@@ -420,12 +393,12 @@ pub fn cached(
     Some((found, e))
 }
 
-/// Why a recording heard by voice has no windows to label or sample from: heard before 5b kept
-/// them, or before 5r, whose windows may be the GPU's and not CAM++'s.
+/// Why a recording heard by voice has no windows to label or sample from: heard by an older Junctur
+/// that did not keep them, or whose windows may be the GPU's and not CAM++'s.
 const HEARD_BY_AN_OLDER_JUNCTUR: &str = "this recording's speakers were found by an older Junctur: analyse them again first (`junctur analyze`, or \"Analyse speakers again\" in the app)";
 
 /// `windows.f32` in `dir` when it is the one `heard` was written with, by this build's hearing
-/// ([`hearing_key`]): windows from another one, such as 5r's GPU-made ones, are never labelled
+/// ([`hearing_key`]): windows from another one, such as GPU-made ones, are never labelled
 /// with or taken as a voice sample (a voice remembered from them would match nobody).
 fn heard_embeddings(heard: &Heard, dir: &Path) -> Option<Vec<Vec<f32>>> {
     if !heard.is_current() {
@@ -454,19 +427,10 @@ pub fn relabel(found: &Found, dir: &Path, voices: &[Voice]) -> Result<Found> {
     Ok(label(found, &e, voices))
 }
 
-/// A voice sample from what was heard (5b): the cached embeddings of the windows whose middle is
-/// in one of `stretches` (source seconds), and the seconds of speech they cover. Windows touching a
-/// stretch where two people talk at once are left out: their voiceprint is two people's.
-///
-/// A short selection (5c: one word is allowed) often has no such window: windows are 1.5 s. Then
-/// the windows reaching into it that touch no overlap stretch, each counted by the seconds of the
-/// selection it covers, so a word moves a voice built from more only a little. Such a window is
-/// mostly the seconds around the word, usually the same person still talking but not always.
-/// Embedding just the word instead was measured in the repair pass and is far worse: CAM++ on
-/// 0.4 s gives prints too noisy to recognise anyone (five words each on the sample: the brother
-/// right 1% of his frames, against 34% from the windows around the same words). Empty when no
-/// such window either (overlaps on both sides, or no window there at all): the caller then embeds
-/// the selected audio itself ([`embed_stretches`]).
+/// A voice sample from what was heard: the cached embeddings of the windows whose middle is in one
+/// of `stretches` (source seconds), and the seconds they cover, leaving out windows touching an
+/// overlap. For a short pick, the windows reaching into it, weighted by the seconds covered: CAM++
+/// on one word alone is too noisy. Empty when none: the caller then uses [`embed_stretches`].
 pub fn voice_sample(
     found: &Found,
     dir: &Path,
@@ -523,12 +487,9 @@ pub fn voice_sample(
     Ok((out, seconds))
 }
 
-/// Embeddings of `stretches` of `track` read straight from `file`, and their seconds: the voice
-/// sample (5c) when no cached window lies inside the selection (one word, a region under 0.5 s, a
-/// word outside the speech regions). Each stretch is read at least [`MIN_CLIP_S`] long, centred on it.
-/// On the CPU, as every embedding is (5r). 5b rejected decoding at enrollment as
-/// the way to get a sample, since the stage already has the numbers; this is only for what it
-/// never saw.
+/// Embeddings of `stretches` of `track` read straight from `file`, and their seconds, on the CPU:
+/// the voice sample only when no cached window covers the selection. Each stretch is read at least
+/// [`MIN_CLIP_S`] long, centred on it.
 pub fn embed_stretches(
     file: &Path,
     track: usize,
@@ -569,13 +530,9 @@ pub fn embed_stretches(
     Ok((out, seconds))
 }
 
-/// Labels the heard windows: enrolled voices first, then clusters ([`diarize::label`]); turns from
-/// the windows, plus a turn for each of the two people in every overlap stretch.
-///
-/// Pins (5c) of a voice in `voices` win over all of it: a window whose middle is in one is that
-/// voice outright ([`diarize::label_fixed`]), every turn is cut out of the pins, and each pin is a
-/// turn of its person, so inside a pin there is exactly one speaker, the pinned one. A pinned voice
-/// no window came out as still gets a speaker, after the others.
+/// Labels the heard windows ([`diarize::label`]); turns from the windows, plus a turn for each of
+/// the two people in every overlap stretch. Pins of a voice in `voices` win: inside a pin there is
+/// exactly one speaker, the pinned one, who gets a speaker even if no window came out as them.
 pub fn label(found: &Found, embeddings: &[Vec<f32>], voices: &[Voice]) -> Found {
     let Some(heard) = &found.heard else {
         return found.clone();
@@ -653,8 +610,7 @@ pub fn label(found: &Found, embeddings: &[Vec<f32>], voices: &[Voice]) -> Found 
             // else talks nearest to the stretch, as the one cutting in or being cut in on.
             (Some(x), _) | (_, Some(x)) => neighbour(o, x, &base).map(|y| (x, y)),
             // Neither talks alone in the window: whoever the windows say talks there, and the
-            // nearest other speaker. Measured in the repair pass: 13 s more of two people on
-            // the sample at the same 91% against the avatars.
+            // nearest other speaker.
             (None, None) => covering(o, &base).and_then(|x| neighbour(o, x, &base).map(|y| (x, y))),
         };
         for speaker in pair.into_iter().flat_map(|(a, b)| [a, b]) {
@@ -932,7 +888,7 @@ mod tests {
 
     #[test]
     fn the_hearing_key_says_the_windows_were_embedded_on_the_cpu() {
-        // 5b to 5q's key did not, so windows made on the GPU (not CAM++'s numbers) were reused.
+        // Without it, windows made on the GPU (not CAM++'s numbers) would be reused.
         assert!(diarize::hearing_settings().ends_with(" emb=cpu"));
     }
 
@@ -1033,7 +989,7 @@ mod tests {
         both.dedup();
         assert_eq!(both, vec![1, 2]);
         assert_eq!(at(20.0), vec![1]);
-        // No voices: 5a's numbering, and the same overlap turns.
+        // No voices: plain cluster numbering, and the same overlap turns.
         let plain = label(&found, &e, &[]);
         assert_eq!(plain.people, vec![None, None]);
         assert_eq!(plain.turns.len(), f.turns.len());
@@ -1138,7 +1094,7 @@ mod tests {
         other.heard.as_mut().unwrap().key = "old".into();
         assert!(other.heard_by_an_older_junctur());
         assert!(cached(other.clone(), &speech, &[], &d).is_none());
-        // Nor are windows another hearing made (5r: maybe on the GPU) labelled or sampled from.
+        // Nor are windows another hearing made (maybe on the GPU) labelled or sampled from.
         let err = relabel(&other, &d, &[]).unwrap_err().to_string();
         assert!(err.contains("older Junctur"), "{err}");
         assert!(voice_sample(&other, &d, &[(0.0, 6.0)]).is_err());

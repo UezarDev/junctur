@@ -17,7 +17,7 @@ fn project(a: &Args) -> Result<Project, String> {
     Project::open(&a.file()?, a.path("--cache-dir"), a.path("--project")).map_err(|e| e.to_string())
 }
 
-/// The caption settings `e`'s cues are cut with (2i): its own, else the config file's defaults, as
+/// The caption settings `e`'s cues are cut with: its own, else the config file's defaults, as
 /// the app shows them, so a render and an export cut the cues the app would. The config file is
 /// read only for a list without its own.
 fn captions(e: &EditList) -> Result<Captions, String> {
@@ -131,7 +131,7 @@ pub fn cut(a: Args) -> Result<(), String> {
     a.reject_unknown(&k)?;
     let p = project(&a)?;
     // The voices may have changed since `analyze`: label the speakers again first (cheap). A
-    // project heard before 5b cannot be; its speakers stay as they were.
+    // project heard by an older Junctur cannot be; its speakers stay as they were.
     if let Some(f) = p.speakers() {
         if f.heard_by_an_older_junctur() {
             eprintln!("junctur: speakers were found by an older Junctur: run `junctur analyze` to hear them again");
@@ -180,7 +180,7 @@ fn write_captions(
     Ok(())
 }
 
-/// The translations captions set to be translated need (5k), made first where missing, with a
+/// The translations captions set to be translated need, made first where missing, with a
 /// progress line; the model is fetched on first use.
 fn translations(
     p: &Project,

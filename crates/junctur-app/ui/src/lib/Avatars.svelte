@@ -1,10 +1,6 @@
 <script lang="ts">
-  // The speakers as avatars (2g): initials in their caption colour, lit while their turn is under
-  // the playhead, like the talking avatars of an OBS overlay. Three sizes, one component, so the
-  // Speakers lane's header (small), the portrait side (big, P4) and the overlay on the picture
-  // (pills, LV3) always agree on who is talking. The level bars move with the speaker's own track
-  // when they have one (told apart by track), else with the loudest track heard; they are written
-  // outside Svelte's reactivity (meters.ts), like every meter.
+  // The speakers as avatars, lit while their turn is under the playhead. One component in three
+  // sizes so the Speakers lane, the portrait side and the picture overlay agree on who is talking.
   import { onMount } from "svelte";
   import type * as api from "./api";
   import { share, subscribe } from "./meters";
@@ -133,7 +129,7 @@
     font-size: 9px;
   }
 
-  /* Portrait's large avatars (P4). */
+  /* Portrait's large avatars. */
   .big {
     flex-direction: column;
     align-items: center;
@@ -165,7 +161,7 @@
     height: 7px;
   }
 
-  /* The overlay's pills on the picture (LV3). */
+  /* The overlay's pills on the picture. */
   .pill {
     flex-direction: column;
     gap: 6px;

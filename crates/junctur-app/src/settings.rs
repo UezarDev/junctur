@@ -1,14 +1,6 @@
-//! The app's Settings (2i): what the Settings dialog shows and saves, kept in the user's
-//! `junctur/config.json` (core `config`), the file `junctur analyze` reads, so the CLI and the app
-//! transcribe with the same model and cut captions with the same defaults.
-//!
-//! It also holds the word list Whisper is told (5h), which a word fixed in the transcript joins
-//! ([`learn`]).
-//!
-//! Its own module because it is the one place the app writes the config file. The analysis only
-//! reads it when a run starts (`analysis.rs`, through `config::analysis_options`), so a changed
-//! model applies to the next run and never starts one; the open recording learns of it through 2d's
-//! out-of-date notice.
+//! The app's Settings dialog, kept in the user's `junctur/config.json`, the file `junctur analyze`
+//! also reads, with the word list Whisper is told ([`learn`]). Its own module because it is the one
+//! place the app writes the config file; a changed model applies from the next run.
 
 use junctur_core::config::{self, Config};
 use junctur_core::edit::{Captions, ExistingClips};
@@ -16,12 +8,8 @@ use junctur_core::transcribe::ModelPref;
 use junctur_core::wordlist;
 use serde::{Deserialize, Serialize};
 
-/// A Whisper model the dialog offers.
-///
-/// The picker (2v) shows it by a readable name, a line under it saying how fast, how big or where it
-/// runs, and its family's icon; the Whisper model it is and the longer note go in the (i). The names
-/// live here beside the keys rather than in the UI, so the list has one source, and the config file
-/// keeps holding the keys it always held.
+/// A Whisper model the dialog offers, with the names the picker shows. They live here beside the
+/// keys rather than in the UI, so the list has one source.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelChoice {
@@ -39,8 +27,7 @@ pub struct ModelChoice {
     pub note: &'static str,
 }
 
-/// Every model, the default first: preference, family, name, summary, note. Turbo is the default and
-/// large-v3 opt-in (1f).
+/// Every model, the default first: preference, family, name, summary, note.
 const MODELS: [(ModelPref, &str, &str, &str, &str); 4] = [
     (
         ModelPref::Auto,
@@ -80,11 +67,11 @@ pub struct Settings {
     pub whisper_model: String,
     /// The caption settings a recording without its own starts from.
     pub captions: Captions,
-    /// The word list (5h), in its order: the first entries win when Whisper's prompt is full.
+    /// The word list, in its order: the first entries win when Whisper's prompt is full.
     #[serde(default)]
     pub words: Vec<String>,
-    /// The transcript panel flags a word Whisper was less sure of than this many percent (5o); 0
-    /// flags none.
+    /// The transcript panel flags a word Whisper was less sure of than this many percent; 0 flags
+    /// none.
     #[serde(default = "flag_below")]
     pub flag_below: u8,
 }
@@ -133,7 +120,7 @@ fn to_config(s: &Settings) -> Result<Config, String> {
     s.captions
         .check()
         .map_err(|e| format!("caption defaults: {e}"))?;
-    // What to do with clips in the way in Resolve (5n) is remembered per recording only: "Save as
+    // What to do with clips in the way in Resolve is remembered per recording only: "Save as
     // default" from a recording that remembered one starts the next asking.
     let captions = Captions {
         existing_clips: ExistingClips::Ask,
@@ -168,9 +155,8 @@ pub fn read() -> SettingsView {
     view(config::load().map_err(|e| e.to_string()))
 }
 
-/// One reader-and-writer of the config file at a time in the app (5h repair): a word learned from a
-/// fix (read, add, save) and the Captions panel's "Save as default" (read, change, save) running
-/// together would each save over the other's change. Every write here holds it from the read on.
+/// One reader-and-writer of the config file at a time: two read-change-saves running together would
+/// each save over the other's change. Every write here holds it from the read on.
 static CONFIG: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn config_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -200,10 +186,9 @@ pub fn save_caption_defaults(captions: Captions) -> Result<SettingsView, String>
     })
 }
 
-/// Adds `entries` (what a fix teaches: `wordlist::learned_in`, `learned_all_in`, worked out by the
-/// player, which has the recording's words, 5aa) at the top of the word list in the order given
-/// ([`wordlist::add_first`]) and saves it once; the entries added (none already there). A config file
-/// that cannot be read is not replaced from here.
+/// Adds `entries` (what a fix teaches, worked out by the player) at the top of the word list in the
+/// order given ([`wordlist::add_first`]) and saves it once; the entries added (none already there).
+/// A config file that cannot be read is not replaced from here.
 pub fn learn(entries: &[String]) -> Result<Vec<String>, String> {
     if entries.is_empty() {
         return Ok(Vec::new());
@@ -291,7 +276,7 @@ mod tests {
 
     #[test]
     fn a_recordings_remembered_choice_for_clips_in_resolve_never_becomes_a_default() {
-        // 5n: "Save as default" from a recording that remembered "new track" saves asking.
+        // "Save as default" from a recording that remembered "new track" saves asking.
         let s = Settings {
             whisper_model: "auto".into(),
             captions: Captions {
@@ -357,7 +342,7 @@ mod tests {
         assert!(to_config(&s).unwrap_err().contains("caption defaults"));
     }
 
-    /// 5o: the flag threshold is written only off its default, 0 (none flagged) included, and a
+    /// The flag threshold is written only off its default, 0 (none flagged) included, and a
     /// percentage over 100 is refused.
     #[test]
     fn the_flag_threshold_is_saved_off_its_default_only() {
@@ -375,7 +360,7 @@ mod tests {
             ..s.clone()
         };
         assert!(to_config(&bad).is_err());
-        // Settings sent without it (a page from before 5o): the default.
+        // Settings sent without it: the default.
         let mut v = serde_json::to_value(Settings { flag_below: 7, ..s }).unwrap();
         v.as_object_mut().unwrap().remove("flagBelow").unwrap();
         let old: Settings = serde_json::from_value(v).unwrap();

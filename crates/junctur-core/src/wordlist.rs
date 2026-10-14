@@ -1,12 +1,6 @@
-//! The user's word list (5h): names and recurring terms Whisper is told before every chunk it hears,
-//! so they come out spelled the user's way. One list for every recording, kept in `config.json`
-//! ([`crate::config::Config::words`]); the app's Settings edits it and a word fixed in a transcript
-//! joins it at the top ([`learned`], [`add_first`]): when the list is longer than Whisper's prompt
-//! the first entries win, so the word just fixed is one Whisper is told.
-//!
-//! A module of its own so the rules (what an entry is, what a fix adds, how a long list is cut to
-//! Whisper's prompt) are one place for the config file, the app and the transcriber, and testable
-//! without a model.
+//! The user's word list: names and terms Whisper is told before every chunk, so they come out
+//! spelled the user's way. The rules (what an entry is, what a fix adds, how a long list is cut to
+//! the prompt) live here once for the config file, the app and the transcriber.
 
 /// Longest entry kept, in characters: a name or a short phrase, not a paragraph.
 pub const MAX_ENTRY: usize = 100;
@@ -50,7 +44,7 @@ pub fn add_first(list: &mut Vec<String>, raw: &str) -> bool {
     }
 }
 
-/// `s` without the punctuation around it (`"Uezar,"` is the name `Uezar`).
+/// `s` without the punctuation around it (`"Ana,"` is the name `Ana`).
 fn bare(s: &str) -> &str {
     s.trim_matches(|c: char| !c.is_alphanumeric())
 }
@@ -67,12 +61,9 @@ pub fn learned(heard: &str, fixed: &str) -> Option<String> {
     entry(new)
 }
 
-/// What a run of words heard as `heard` and retyped as `fixed` adds to the list (5x): each word of
-/// the new text not among the heard words, compared as [`learned`] compares one (without the
-/// punctuation around it, case kept), in the order typed, each once. A word that starts a sentence
-/// (the first, or one after `.`, `?` or `!`) and differs from a heard word only in case is the
-/// sentence's capital, not a name, and adds nothing. A sentence whose words only moved, or only
-/// changed punctuation, adds nothing.
+/// What a run of words heard as `heard` and retyped as `fixed` adds to the list: each new word not
+/// among the heard ones (compared as [`learned`] does), in the order typed, each once. A sentence's
+/// capital (a heard word recased at a sentence start) is not a name and adds nothing.
 pub fn learned_all(heard: &str, fixed: &str) -> Vec<String> {
     let was: Vec<&str> = heard.split_whitespace().map(bare).collect();
     let mut out: Vec<String> = Vec::new();
@@ -95,7 +86,7 @@ pub fn learned_all(heard: &str, fixed: &str) -> Vec<String> {
     out
 }
 
-/// The words a recording's transcript heard, as a fix's new words are compared with them (5aa): each
+/// The words a recording's transcript heard, as a fix's new words are compared with them: each
 /// without the punctuation around it, lower-cased ([`crate::edit::likeness`]). A fix teaches the word
 /// list only words the recording never heard: a retyped sentence's common words ("went", "home") would
 /// otherwise push the names out of Whisper's ~223-token prompt ([`prompt`] keeps the first entries).
@@ -124,7 +115,7 @@ impl Heard {
 }
 
 /// [`learned`], for a word of a recording that heard `recording`: the spelling only when it has a word
-/// the recording never heard, or when it changes nothing but the heard word's case (5h's name heard in
+/// the recording never heard, or when it changes nothing but the heard word's case (a name heard in
 /// lower case, `tsunheto` to `Tsunheto`: heard, but not as the user spells it).
 pub fn learned_in(heard: &str, fixed: &str, recording: &Heard) -> Option<String> {
     let e = learned(heard, fixed)?;
@@ -215,7 +206,7 @@ mod tests {
 
     #[test]
     fn a_retyped_sentence_adds_its_new_words_in_order() {
-        // 5x: every word not heard, once, in the order typed.
+        // Every word not heard, once, in the order typed.
         assert_eq!(
             learned_all("the wezar went hom", "Uezar went home, Uezar!"),
             ["Uezar", "home"]
@@ -230,7 +221,7 @@ mod tests {
 
     #[test]
     fn a_fix_teaches_only_words_the_recording_never_heard() {
-        // 5aa: a retyped sentence's common words stay out of the list, names go in.
+        // A retyped sentence's common words stay out of the list, names go in.
         let rec = Heard::new([
             " the",
             " Wezar,",

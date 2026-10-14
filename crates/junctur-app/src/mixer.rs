@@ -1,19 +1,6 @@
-//! Every audio track heard at once in the preview (2e), each with a meter and a mute. A module of
-//! its own because it is mpv filter graphs, a rule for the default mutes and a small file, none of
-//! which needs mpv to test.
-//!
-//! mpv plays the tracks together through `lavfi-complex`: each one is made 48 kHz stereo and they
-//! are merged into one stream of 2 channels per track, so the `af` chain after it still sees every
-//! track apart. There an `astats` (`@meter`) measures each channel, which mpv exposes as
-//! `af-metadata/meter`, and an `amix` (`@mix`) sums the tracks with one weight each: a mute is a
-//! weight of 0, changed in place by `af-command` (amix's `weights` is a runtime command), so a click
-//! never rebuilds the chain or leaves a gap. Mutes in `pan` (no runtime command), `volume` filters
-//! in `lavfi-complex` (a rebuild per click), or meters inside `lavfi-complex` (mpv gives no metadata
-//! from it) were each ruled out against the bundled libmpv.
-//!
-//! The graphs go in each `loadfile`'s own options, so they last one load and a recording with other
-//! tracks never meets a stale graph. Mutes are playback only: nothing here reaches the edit list or
-//! a render.
+//! Every audio track heard at once in the preview, each with a meter and a mute (playback only):
+//! mpv filter graphs and the default-mute rule, testable without mpv. A mute is an amix weight
+//! changed in place by `af-command`, so a click never rebuilds the chain or leaves a gap.
 
 use std::path::{Path, PathBuf};
 
@@ -37,7 +24,7 @@ pub const MIX_FILTER: &str = "amix";
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Source {
-    /// No track roles yet (the recording is not analysed): track 1 only, as before 2e.
+    /// No track roles yet (the recording is not analysed): track 1 only.
     #[default]
     Provisional,
     /// From the roles: the mix alone, or every separate track.
@@ -55,7 +42,7 @@ pub struct Track {
     pub muted: bool,
     /// The user set this track's mute: the roles' defaults no longer move it.
     pub set: bool,
-    /// Soloed (2g): while any track is, only the soloed ones are heard, muted or not. Playback only
+    /// Soloed: while any track is, only the soloed ones are heard, muted or not. Playback only
     /// and never remembered: a recording opens with no solo.
     pub solo: bool,
     /// The role of the distinct track this is, when the analysis got that far.
@@ -220,7 +207,7 @@ impl Mixer {
         Ok(self.memory())
     }
 
-    /// Solos or unsolos track `index` (2g); nothing is remembered.
+    /// Solos or unsolos track `index`; nothing is remembered.
     pub fn set_solo(&mut self, index: usize, on: bool) -> Result<(), String> {
         let t = self
             .tracks
@@ -309,7 +296,7 @@ fn escape(s: &str) -> String {
     format!("%{}%{s}", s.len())
 }
 
-/// Which tracks the roles say to hear (decision 2): with a mix, the mix alone; without one, every
+/// Which tracks the roles say to hear: with a mix, the mix alone; without one, every
 /// separate track. Copies are never heard: a copy only doubles its original.
 fn default_heard(report: &TrackReport, n: usize) -> Vec<bool> {
     let mut heard = vec![false; n];
@@ -467,7 +454,7 @@ mod tests {
         assert_eq!(muted(&m), [false, false, false, true]);
         assert_eq!(m.state().tracks[3].copy_of, Some(0));
         assert_eq!(m.state().tracks[0].copy_of, None);
-        // Four copies of one mix (the June sample): track 1 alone.
+        // Four copies of one mix: track 1 alone.
         let r = report(vec![logical(&[0, 1, 2, 3], Role::Mix)]);
         assert_eq!(
             muted(&Mixer::new(4, Some(&r), None)),

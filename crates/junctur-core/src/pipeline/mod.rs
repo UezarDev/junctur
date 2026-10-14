@@ -1,13 +1,6 @@
-//! The job queue: analysis stages run one after another for a recording, each leaving its result
-//! in the project folder, so a rerun skips what is done and an interrupted one resumes.
-//!
-//! Sequential within a recording: Whisper and the ONNX models share one GPU, and running two at
-//! once on a card another app already fills would only make both fall back to CPU. Across
-//! recordings the run is two halves (2j): [`prepare`] (tracks, speech, speakers and the edit list,
-//! minutes at most) and [`finish`] (Whisper, hours), so a caller can run a recording's first half
-//! while another's transcription goes on, as Uezar asked: "tracks speech and speakers runs
-//! generally fast, so we shouldnt hold those back". `jobs.json` records what each stage did, for
-//! `junctur status`; the stage results themselves are the source of truth.
+//! The job queue: a recording's analysis stages, each leaving its result in the project folder so
+//! a rerun skips what is done. Two halves, [`prepare`] (minutes) and [`finish`] (Whisper, hours), so
+//! one recording's fast stages need not wait on another's transcription.
 
 mod adopt;
 mod jobs;
@@ -33,24 +26,23 @@ use crate::{cache, hidden, Error, Result};
 
 const ENVELOPE_FILE: &str = "envelope.f32";
 
-/// There while a re-transcription asked for (5aa: the Correct button) has not finished: a run resumed
-/// after the app closed then still hears the recording again and carries the fixes onto the new words
-/// ([`hear_again`], [`carry_fixes`]). Empty; the transcript it replaces is kept beside it
-/// ([`BEFORE_FILE`]).
+/// There while a re-transcription asked for (the Correct button) has not finished: a run resumed
+/// after the app closed still hears the recording again and carries the fixes onto the new words
+/// ([`hear_again`], [`carry_fixes`]). Empty; the old transcript is kept in [`BEFORE_FILE`].
 const AGAIN_FILE: &str = "transcribe-again";
 
 /// What [`AGAIN_FILE`] holds once the re-transcription it asks for has written its transcript and
-/// the carry is still to come (5ad repair): a run that finds it carries rather than hearing the
+/// the carry is still to come: a run that finds it carries rather than hearing the
 /// recording again. Empty while the hearing is still asked for.
 const HEARD: &[u8] = b"heard";
 
-/// The transcript a re-transcription replaces, copied when it is asked for (5aa repair): the fixes are
+/// The transcript a re-transcription replaces, copied when it is asked for: the fixes are
 /// read against it at the end, and `transcript.json` is the new one from the moment Whisper finishes,
 /// so a run that stopped between that write and the carry would otherwise carry against the new words.
 const BEFORE_FILE: &str = "transcript.before.json";
 
-/// Fixes a re-transcription could not put on any word (5aa repair: Whisper heard something else there,
-/// or nothing), as they were, for the user to see and redo: kept until the app is told they were seen
+/// Fixes a re-transcription could not put on any word (Whisper heard something else there, or
+/// nothing), as they were, for the user to see and redo: kept until the app is told they were seen
 /// ([`forget_fixes_set_aside`]), each later run adding to them.
 const SET_ASIDE_FILE: &str = "fixes-set-aside.json";
 
@@ -65,16 +57,16 @@ pub struct SetAside {
     pub heard: String,
     /// What the user had fixed them to; for a word time, the word as fixed or heard.
     pub text: String,
-    /// A word time set by moving a cut's edge (2w) that the re-transcription could not put on a
-    /// word (5ad): the start and end the user had given it. `None` for a fix.
+    /// A word time set by moving a cut's edge that the re-transcription could not put on a
+    /// word: the start and end the user had given it. `None` for a fix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retimed: Option<[f64; 2]>,
-    /// Its track has no words in the new transcript at all (5ad repair): not heard otherwise, not
+    /// Its track has no words in the new transcript at all: not heard otherwise, not
     /// heard (or not transcribed) this time.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub silent: bool,
-    /// Not a fix: what the carry could not do, said where the user looks until they have seen it
-    /// (5ad repair: the log's line was gone by the run's end). The other fields are empty.
+    /// Not a fix: what the carry could not do, said where the user looks until they have seen it,
+    /// since a log line is gone by the run's end. The other fields are empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
@@ -94,7 +86,7 @@ impl SetAside {
     }
 }
 
-/// The fixes re-transcriptions of `p` set aside and the user has not yet seen (5aa).
+/// The fixes re-transcriptions of `p` set aside and the user has not yet seen.
 pub fn fixes_set_aside(p: &Project) -> Vec<SetAside> {
     std::fs::read(p.dir.join(SET_ASIDE_FILE))
         .ok()
@@ -103,9 +95,8 @@ pub fn fixes_set_aside(p: &Project) -> Vec<SetAside> {
 }
 
 /// Forgets the fixes set aside for `p` that the user has seen (`seen`, as [`fixes_set_aside`] gave
-/// them): only those (5ad: the whole file went, with any a run had added since the panel listed
-/// them, unseen). Under the edit list's writer lock, as a run's additions are ([`keep_set_aside`]),
-/// so neither read-modify-write lands inside the other.
+/// them): only those, so any a run added since the panel listed them stay. Under the edit list's
+/// writer lock, as a run's additions are ([`keep_set_aside`]), so neither lands inside the other.
 pub fn forget_fixes_set_aside(p: &Project, seen: &[SetAside]) -> Result<()> {
     let _writing = edit::hold();
     let path = p.dir.join(SET_ASIDE_FILE);
@@ -149,7 +140,7 @@ impl Project {
                 .join(cache::key(file, "project1")?),
         };
         std::fs::create_dir_all(&dir)?;
-        // 2f: a run started by a packaged app (Claude desktop) may have analysed this recording into
+        // A run started by a packaged app (Claude desktop) may have analysed this recording into
         // a hidden copy of the cache ([`adopt`]). Its track reports are keyed by file and settings, so
         // a missing one is taken alone, once per process.
         if in_cache {
@@ -192,8 +183,8 @@ impl Project {
         self.speakers_file().ok().flatten()
     }
 
-    /// `speakers.json`: `None` when there is none, an error when it is there but unreadable. Since
-    /// 5c it holds the user's pins, so an unreadable one is not the same as none.
+    /// `speakers.json`: `None` when there is none, an error when it is there but unreadable. It
+    /// holds the user's pins, so an unreadable one is not the same as none.
     fn speakers_file(&self) -> Result<Option<Found>> {
         match std::fs::read(self.speakers_path()) {
             Ok(b) => Ok(Some(serde_json::from_slice(&b)?)),
@@ -215,10 +206,10 @@ impl Project {
 #[derive(Debug, Clone, Default)]
 pub struct PipelineOptions {
     /// Where Whisper may run. Only transcription uses it: tracks, speech and speakers always run on
-    /// the CPU (5r: CAM++ on the GPU found a speaker per sentence).
+    /// the CPU (CAM++ on the GPU finds a speaker per sentence).
     pub device: DevicePref,
     pub model: ModelPref,
-    /// The word list Whisper is told (5h; the caller reads the config file). Not part of what makes
+    /// The word list Whisper is told (the caller reads the config file). Not part of what makes
     /// a transcript up to date: a changed list applies to the next transcription only.
     pub words: Vec<String>,
     pub languages: Languages,
@@ -229,15 +220,15 @@ pub struct PipelineOptions {
     pub no_transcript: bool,
     /// Skip telling speakers apart (the edit list then names none).
     pub no_speakers: bool,
-    /// Enrolled voices to label speakers by (5b; the caller reads the voices file).
+    /// Enrolled voices to label speakers by (the caller reads the voices file).
     pub voices: Vec<Voice>,
     /// Whether an edit list holding the user's edits is kept or re-cut ([`KeepList`]).
     pub keep_list: KeepList,
     /// Hear the speakers again from the audio, cut at the user's pins, instead of reusing the
-    /// hearing (5aa: the Correct button; what 5c's [`rehear`] does outside a run).
+    /// hearing (the Correct button; what [`rehear`] does outside a run).
     pub rehear: bool,
     /// Transcribe the recording again, the word list as it is now, and carry the edit list's fixes
-    /// onto the new words ([`finish`], 5aa: the Correct button).
+    /// onto the new words ([`finish`]; the Correct button).
     pub retranscribe: bool,
 }
 
@@ -248,12 +239,12 @@ pub enum KeepList {
     /// with a fresh cut", which asks first).
     #[default]
     No,
-    /// Keep it, taking only the speakers the run found; one that does not parse (a run killed
-    /// mid-write before 1d, a broken hand edit) is backed up and re-cut, or the recording would
-    /// never have a list (2j: the app resuming a run the user edited during).
+    /// Keep it, taking only the speakers the run found; one that does not parse (a broken hand
+    /// edit) is backed up and re-cut, or the recording would never have a list (the app resuming a
+    /// run the user edited during).
     Edits,
     /// As `Edits`, and one that does not parse is left as it is too: the run fails saying so,
-    /// since re-cutting is only ever the user's choice here (5s: the app's Re-analyse).
+    /// since re-cutting is only ever the user's choice here (the app's Re-analyse).
     Whole,
 }
 
@@ -285,7 +276,7 @@ pub fn tracks_options(p: &Project, force: bool) -> tracks::AnalyzeOptions {
 }
 
 /// The track report the `tracks` stage left for `p`, without analysing: `None` before it ran.
-/// For the app's player, which only wants the roles when they are known (2e).
+/// For the app's player, which only wants the roles when they are known.
 pub fn cached_tracks(p: &Project) -> Option<TrackReport> {
     tracks::cached(&p.file, &tracks_options(p, false))
 }
@@ -296,7 +287,7 @@ pub fn run(p: &Project, opts: &PipelineOptions, log: &mut dyn FnMut(&str)) -> Re
 }
 
 /// [`run`], telling `steps` how far each track has got through the speech, speakers and
-/// transcribe stages as they go (2h: the app's progress bars). [`prepare`], then [`finish`].
+/// transcribe stages as they go (the app's progress bars). [`prepare`], then [`finish`].
 pub fn run_with(
     p: &Project,
     opts: &PipelineOptions,
@@ -308,7 +299,7 @@ pub fn run_with(
 }
 
 /// A run's first half: tracks, speech, speakers and the edit list, written at its end without word
-/// counts (2j: nothing else in it needs the transcript, so the recording is editable before Whisper
+/// counts (nothing else in it needs the transcript, so the recording is editable before Whisper
 /// starts). With `opts.keep_list` a list holding the user's edits is kept, with this run's speakers
 /// ([`KeepList`]).
 pub fn prepare(
@@ -350,7 +341,7 @@ pub fn prepare(
 }
 
 /// A run's second half: Whisper over the speech, piece by piece (`transcribed` is told where the
-/// transcript is whole, `between` is called between chunks and may block: the app's pause, 2k;
+/// transcript is whole, `between` is called between chunks and may block: the app's pause;
 /// [`transcribe::Reports`]), then the words counted into the edit list's score windows in place
 /// ([`count_words`]). Never re-cuts: edits made since [`prepare`] stay.
 pub fn finish(
@@ -413,20 +404,10 @@ pub fn finish(
     })
 }
 
-/// The `edit` stage's write: unless `keep` is [`KeepList::No`], a list on disk holding the user's
-/// edits is kept, only its speakers replaced by the ones this run found (5s: the app's Re-analyse
-/// matches the speakers against the remembered voices again and puts them on top of the user's cut,
-/// names, fixes and caption settings). A list that does not parse is re-cut with [`KeepList::Edits`]
-/// and left, failing the stage, with [`KeepList::Whole`].
-///
-/// Whether the list is the user's is decided again, and the list written, under the edit-list writer
-/// lock ([`Draft::recheck`], 5s repair): `d` was drafted outside it (seconds on a long recording),
-/// and a save in between would otherwise be re-cut over without a backup.
-///
-/// The speakers go in through [`edit::amend`], as the word counts do: one writer at a time, an app
-/// save saved again as the app would, and a list edited outside Junctur (comments, another layout)
-/// left whole rather than rewritten for its speakers. They are worked out from the list as amend reads
-/// it ([`speakers_for`]), so its names and colours carry over by what each speaker says.
+/// The `edit` stage's write: unless `keep` is [`KeepList::No`], a list holding the user's edits is
+/// kept with only its speakers replaced, through [`edit::amend`]; one that does not parse is re-cut
+/// with [`KeepList::Edits`] and fails the stage with [`KeepList::Whole`]. Decided again under the
+/// writer lock ([`Draft::recheck`]), since `d` was drafted outside it.
 fn keep_or_write(
     p: &Project,
     d: Draft,
@@ -471,16 +452,10 @@ fn keep_or_write(
     write_draft(p, d)
 }
 
-/// Whether this run's transcription hears the recording again (5aa): asked for now
-/// (`opts.retranscribe`, which leaves [`AGAIN_FILE`]), or asked for by an earlier run that stopped
-/// before its first chunk (the file is there, no partial to resume), so a reopened recording does not
-/// settle for the old transcript. A run stopped later resumes its partial as any run does.
-///
-/// An earlier ask whose carry never ran (5ad) keeps its copy of the old transcript when Correct is
-/// asked again: `transcript.json` may be that run's new transcript by then, and the fixes are still on
-/// the old one's words. And a run that finds that ask finished (the mark, no partial, and a
-/// `transcript.json` that is not the copy: Whisper wrote the new one, then the app stopped before the
-/// carry) does not hear the recording again: it carries.
+/// Whether this run's transcription hears the recording again: asked for now (`opts.retranscribe`,
+/// which leaves [`AGAIN_FILE`]), or by an earlier run that stopped before its first chunk. An earlier
+/// ask whose carry never ran keeps its copy of the old transcript, which the fixes are on; one whose
+/// transcription finished is carried, not heard again.
 fn hear_again(p: &Project, opts: &PipelineOptions, log: &mut dyn FnMut(&str)) -> Result<bool> {
     let mark = p.dir.join(AGAIN_FILE);
     if opts.retranscribe {
@@ -499,7 +474,7 @@ fn hear_again(p: &Project, opts: &PipelineOptions, log: &mut dyn FnMut(&str)) ->
             }
         }
         if let Err(e) = crate::output::write_replacing(&mark, b"") {
-            // Nor a copy without its mark (5ad): nothing would ever remove it.
+            // Nor a copy without its mark: nothing would ever remove it.
             let _ = std::fs::remove_file(&before);
             return Err(e.into());
         }
@@ -516,17 +491,16 @@ fn hear_again(p: &Project, opts: &PipelineOptions, log: &mut dyn FnMut(&str)) ->
     Ok(true)
 }
 
-/// A re-transcription asked for has written its transcript (5ad): the mark says so ([`HEARD`],
-/// written by [`heard_again`] once the transcription stage ends) and the transcript is there. Told
-/// by the mark, not by the transcript differing from the copy (5ad repair: a hearing that came out
-/// the same would have been heard again on every open).
+/// A re-transcription asked for has written its transcript: the mark says so ([`HEARD`], written by
+/// [`heard_again`] once the transcription stage ends) and the transcript is there. Not told by the
+/// transcript differing from the copy, which a hearing that came out the same never would.
 fn heard_again_already(p: &Project) -> bool {
     std::fs::read(p.dir.join(AGAIN_FILE)).is_ok_and(|m| m == HEARD)
         && transcribe::path(&p.dir).is_file()
 }
 
 /// The transcription stage of a run with [`AGAIN_FILE`] there has ended with the new transcript
-/// (5ad repair): the mark says so, so a run stopped before the carry carries on the next open
+/// the mark says so, so a run stopped before the carry carries on the next open
 /// instead of hearing the recording again.
 fn heard_again(p: &Project, log: &mut dyn FnMut(&str)) {
     let mark = p.dir.join(AGAIN_FILE);
@@ -539,7 +513,7 @@ fn heard_again(p: &Project, log: &mut dyn FnMut(&str)) {
     }
 }
 
-/// A transcription that failed (5aa repair): a re-transcription asked for is forgotten when nothing of
+/// A transcription that failed: a re-transcription asked for is forgotten when nothing of
 /// it is left to resume, or every later run of the recording would hear it again from the start. One
 /// with a partial keeps its mark: the next run resumes it, and its end must still carry the fixes.
 fn not_again(p: &Project, log: &mut dyn FnMut(&str)) {
@@ -557,32 +531,24 @@ fn not_again(p: &Project, log: &mut dyn FnMut(&str)) {
     log("the transcription again stopped before its first chunk: asked for no longer");
 }
 
-/// After a re-transcription (5aa, [`AGAIN_FILE`] there): the edit list's fixes, read against the
-/// transcript it replaced ([`BEFORE_FILE`]: every fix made before, and during the run on a word it
-/// shares with the old one), are moved onto the new words ([`edit::carry`]), and so are the words the
-/// user retimed by moving a cut's edge (5ad, [`edit::carry_times`]); then every fix is spread to the
-/// words heard alike ([`edit::spread`]), in the edit list on disk through [`edit::amend`] as the word
-/// counts go. Read at the end rather than written down at the start, so a word the user kept as heard
-/// while it ran ("Undo those") is kept. A fix or time put on no word is set aside ([`SET_ASIDE_FILE`]),
-/// never lost. The mark and the copy go in every case, the log saying when the list could not take
-/// them: left behind, they would ask for another re-transcription.
-///
-/// Not carried, and said (5ad): with no copy of the old transcript (missing or unreadable, so the
-/// fixes' words cannot be found), or a new transcript with no words at all (a run that heard nothing).
-/// The fixes and times are then left as they are rather than spread from keys that name other words.
+/// After a re-transcription ([`AGAIN_FILE`] there): the fixes and retimes, read against the old
+/// transcript ([`BEFORE_FILE`]) at the end so edits made during the run count, move onto the new
+/// words ([`edit::carry`], [`edit::carry_times`]) and fixes spread ([`edit::spread`]); what lands on
+/// no word is set aside ([`SET_ASIDE_FILE`]). Nothing is carried with no old copy or no new words.
+/// The mark and copy always go, or they would ask for another re-transcription.
 fn carry_fixes(p: &Project, t: &Transcript, log: &mut dyn FnMut(&str)) {
     let mark = p.dir.join(AGAIN_FILE);
     if !mark.is_file() {
         return;
     }
-    // The set-aside file is written under the same lock as the list (5ad), so the app's "seen"
+    // The set-aside file is written under the same lock as the list, so the app's "seen"
     // cannot land between its read and its write.
     let _writing = edit::hold();
     let old = std::fs::read(p.dir.join(BEFORE_FILE))
         .map_err(|e| e.to_string())
         .and_then(|b| serde_json::from_slice::<Transcript>(&b).map_err(|e| e.to_string()));
     let words = t.in_order();
-    // Said where the user looks too (5ad repair), when there was anything to carry.
+    // Said where the user looks too, when there was anything to carry.
     let left = |why: &str, log: &mut dyn FnMut(&str)| {
         log(&format!(
             "{why}: fixed words and word times are left where they were"
@@ -654,12 +620,9 @@ fn carry_all(
     done
 }
 
-/// [`carry_fixes`]' work on the list, `before` and `words` the old and new transcripts. A result the
-/// parser would refuse is not written ([`EditList::checked_text`]: two fixes on one word, a text too
-/// long): the carry is tried without the spread, its set-aside kept (5ad: the fallback restored the
-/// fixes and dropped what the carry had set aside, unlisted); and when that would not read back
-/// either, the fixes and times stay as they were and nothing is set aside, nothing having been taken
-/// out.
+/// [`carry_fixes`]' work on the list, `before` and `words` the old and new transcripts. A result
+/// the parser would refuse ([`EditList::checked_text`]) is retried without the spread, keeping its
+/// set-aside; if that fails too, the list stays as it was and nothing is set aside.
 fn carry_onto(
     p: &Project,
     before: &[(usize, &transcribe::Word)],
@@ -680,7 +643,7 @@ fn carry_onto(
         }
     });
     // A track the new transcript has no words on: its fixes are set aside as not heard, not as
-    // heard otherwise (5ad repair).
+    // heard otherwise.
     let heard: std::collections::HashSet<usize> = words.iter().map(|&(t, _)| t).collect();
     let why = |track: usize| {
         if heard.contains(&track) {
@@ -867,7 +830,7 @@ fn speakers_stage(
     log: &mut dyn FnMut(&str),
     steps: Steps,
 ) -> Result<Found> {
-    // An unreadable file holds pins (5c) nothing else knows: kept aside under another name and
+    // An unreadable file holds pins nothing else knows: kept aside under another name and
     // said, not silently replaced by a file without them.
     let previous = match p.speakers_file() {
         Ok(f) => f,
@@ -896,7 +859,7 @@ fn speakers_stage(
             again
         }
         None => jobs.stage(&p.dir, "speakers", log, |_| {
-            // The user's pins (5c) cut the windows and outlive the hearing they were made on.
+            // The user's pins cut the windows and outlive the hearing they were made on.
             let pins = previous
                 .as_ref()
                 .map(|f| f.pins.clone())
@@ -924,17 +887,10 @@ fn speakers_stage(
     Ok(found)
 }
 
-/// Remembers `name`'s voice from `stretches` of this recording (source seconds; 5b): the cached
-/// windows there, without overlapping talk, are averaged into a voiceprint added to `voices`, and
-/// the project's speakers are labelled with it. Nothing is written: the caller saves the voices
-/// file first and then the speakers ([`save_speakers`]), so a failure on the way leaves the old
-/// voices with the old labels, and new labels never stand on voices that were not saved. The edit
-/// list is the caller's to update ([`speakers_for`], [`respeak`]).
-///
-/// Since 5c any stretch will do, one word included ([`speakers::voice_sample`]'s fallbacks, then
-/// the audio itself: [`speakers::embed_stretches`]), and the stretches are pinned to `name`
-/// ([`Found::pin`]): labelled as that person from now on, whatever the windows there sound like.
-/// Returns the speakers and the seconds of speech this added to the voice.
+/// Remembers `name`'s voice from `stretches` of this recording (source seconds; one word will do)
+/// into `voices`, pins them to `name` ([`Found::pin`]) and labels the speakers with it. Nothing is
+/// written: the caller saves the voices, then the speakers ([`save_speakers`]), so new labels never
+/// stand on unsaved voices. Returns the speakers and the seconds of speech this added to the voice.
 pub fn enroll(
     p: &Project,
     voices: &mut Voices,
@@ -960,7 +916,7 @@ pub fn enroll(
     Ok((again, seconds))
 }
 
-/// Hears the project's speakers again from the audio (5c: "Analyse speakers again"), the windows
+/// Hears the project's speakers again from the audio ("Analyse speakers again"), the windows
 /// cut at the pins the user made ([`speakers::seeded`]), and labels them with `voices`; the other
 /// stages' results are reused, never rerun (they need nothing new: `--force` would redo Whisper
 /// for minutes). Saves `speakers.json`; the edit list is the caller's ([`respeak`]).
@@ -994,7 +950,7 @@ pub fn labelled(p: &Project, voices: &[Voice]) -> Result<Found> {
 }
 
 /// [`labelled`] after a remembered person was renamed `from` -> `to` in `voices`: the seconds
-/// pinned to them (5c) follow the new name. Speakers heard by an older Junctur (5r) cannot be
+/// pinned to them follow the new name. Speakers heard by an older Junctur cannot be
 /// labelled again, but their pins still follow the name, so that the next hearing gives those
 /// seconds to the renamed person instead of dropping them; the rest is kept as it is.
 pub fn labelled_renamed(p: &Project, voices: &[Voice], from: &str, to: &str) -> Result<Found> {
@@ -1009,7 +965,7 @@ pub fn labelled_renamed(p: &Project, voices: &[Voice], from: &str, to: &str) -> 
 }
 
 /// Writes `speakers.json` whole through a temporary file of its own renamed over it (retried
-/// briefly when a reader holds it on Windows, like the voices file): since 5c it holds the user's
+/// briefly when a reader holds it on Windows, like the voices file): it holds the user's
 /// pins, and a write torn by a crash would lose them.
 fn write_speakers(p: &Project, found: &Found) -> Result<()> {
     static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1062,8 +1018,8 @@ pub fn save_speakers(p: &Project, found: &Found) -> Result<()> {
 /// that changes it. For the CLI after enrolling. `None` when there is no readable edit list;
 /// else the list and where a replaced hand edit was kept, if one was.
 pub fn respeak(p: &Project, found: &Found) -> Result<Option<(EditList, Option<PathBuf>)>> {
-    // From the read to the save (2m): word counts the app's own analysis writes meanwhile
-    // ([`edit::amend`], 2j) would otherwise be saved over.
+    // From the read to the save: word counts the app's own analysis writes meanwhile
+    // ([`edit::amend`]) would otherwise be saved over.
     let _writing = edit::hold();
     let Ok(mut e) = p.edit() else {
         return Ok(None);
@@ -1104,7 +1060,7 @@ pub fn describe(found: &Found) -> String {
     }
 }
 
-/// Labels the project's speakers again with `voices` (5b: after enrolling or forgetting one), from
+/// Labels the project's speakers again with `voices` (after enrolling or forgetting one), from
 /// what the stage heard, and saves the result; no audio is read. The edit list is not touched: the
 /// caller puts the new speakers into the list it holds ([`speakers_for`]).
 pub fn relabel(p: &Project, voices: &[Voice]) -> Result<Found> {
@@ -1207,7 +1163,7 @@ fn write_draft(p: &Project, d: Draft) -> Result<EditList> {
         back_up(&p.dir, old)?;
     }
     // Whole or not at all: a list cut short by a close would open as an analysed recording whose
-    // list does not parse. And only a list that reads back (5ad), as every edit-list writer.
+    // list does not parse. And only a list that reads back, as every edit-list writer.
     let text = d.list.checked_text().map_err(Error::Edit)?;
     crate::output::write_replacing(&p.edit_path(), text)?;
     Ok(d.list)
@@ -1255,12 +1211,12 @@ fn draft(
     let old = std::fs::read_to_string(p.edit_path()).ok();
     let parsed = old.as_deref().and_then(|t| edit::parse(t).ok());
     let previous = parsed.as_ref().map(|e| e.speakers.clone());
-    // Fixed words too (5h): a re-cut changes what is kept, not what a word says.
+    // Fixed words too: a re-cut changes what is kept, not what a word says.
     let fixes = parsed.as_ref().map_or_else(Vec::new, |e| e.fixes.clone());
-    // And retimed words (2w): where a word is said is not what a re-cut decides.
+    // And retimed words: where a word is said is not what a re-cut decides.
     let times = parsed.as_ref().map_or_else(Vec::new, |e| e.times.clone());
     // Caption settings are the user's, like the names: a re-cut keeps them.
-    // None stays None: a list that followed the user's defaults still does (2i).
+    // None stays None: a list that followed the user's defaults still does.
     let captions = parsed.and_then(|e| e.captions);
     let speakers = speakers_for(speakers, previous.as_ref());
     let make = |settings: &CutSettings, starts: &[f64]| EditList {
@@ -1284,8 +1240,8 @@ fn draft(
         let had_speakers = previous.as_ref().is_some_and(|s| !s.is_empty());
         old != list.to_text()
             && !is_generated(old, |s| {
-                // As this call would write it, and as a run writes it before its transcript (2j:
-                // no word counts) and once it is done (the finished transcript's).
+                // As this call would write it, and as a run writes it before its transcript (no
+                // word counts) and once it is done (the finished transcript's).
                 let done = finished.get_or_init(|| {
                     transcribe::load(&p.dir)
                         .map(|t| t.words().map(|w| w.start).collect())
@@ -1309,7 +1265,7 @@ fn draft(
 /// Whether the edit list on disk holds anything of the user's: a re-run of the pipeline (whose
 /// `edit` stage re-cuts) would back it up and replace it. Drafted from the cached analysis with the
 /// list's own settings; nothing is written. False without a list; true for one that does not parse
-/// or whose analysis is gone. For the app to ask before a re-analysis (2d).
+/// or whose analysis is gone. For the app to ask before a re-analysis.
 pub fn hand_edited(p: &Project) -> Result<bool> {
     let Ok(old) = std::fs::read_to_string(p.edit_path()) else {
         return Ok(false);
@@ -1334,7 +1290,7 @@ pub fn hand_edited(p: &Project) -> Result<bool> {
     Ok(d.users)
 }
 
-/// Why a re-run with `opts` would redo more than the cut, one line each for the user (2d): no
+/// Why a re-run with `opts` would redo more than the cut, one line each for the user: no
 /// transcript yet, or one made with another model or languages than `opts` asks. Empty when the
 /// analysis answers `opts`; `Auto` takes any model, as [`run`] does, so this never offers a re-run
 /// that would redo nothing.
@@ -1389,8 +1345,7 @@ fn is_generated(old: &str, regenerate: impl Fn(&CutSettings) -> Vec<String>) -> 
 }
 
 /// Keeps `old` at the first free `edit.junctur.bak`, `edit.junctur.bak2`, ... Backups are never
-/// overwritten: a single `.bak` rewritten on every re-cut lost the hand edit to the next generated
-/// list (1d).
+/// overwritten: a single `.bak` would lose a hand edit to the next re-cut.
 fn back_up(dir: &Path, old: &str) -> Result<()> {
     let free = (1..)
         .map(|n| match n {
@@ -1456,11 +1411,9 @@ mod tests {
         out
     }
 
-    /// 5r: tracks, speech and speakers open every model on the CPU; only Whisper may use the GPU
-    /// (Uezar: "GPU only for the transcribing part"). CAM++ on ONNX Runtime's CUDA provider made a
-    /// speaker of every sentence. The stages' code (every file in their folders, so a new one is
-    /// read too) may open a model only through [`runtime::open_on_cpu`], and may not name a device
-    /// at all; this file, which runs them, hands the run's device to transcription only.
+    /// Tracks, speech and speakers open every model on the CPU (CAM++ on CUDA makes a speaker of
+    /// every sentence): their code may open a model only through [`runtime::open_on_cpu`] and name
+    /// no device; this file hands the run's device to transcription only.
     #[test]
     fn tracks_speech_and_speakers_open_their_models_on_the_cpu_only() {
         let mut stages = Vec::new();
@@ -1696,7 +1649,7 @@ mod tests {
 
     #[test]
     fn a_rename_moves_the_pins_of_speakers_an_older_junctur_heard() {
-        // 5r: heard before the fix, so not labelled again; the renamed person's pins must still
+        // Heard by an older Junctur, so not labelled again; the renamed person's pins must still
         // follow the name, or the next hearing would drop them as a name no voice has.
         let (d, p) = scratch_project("rename-stale");
         let mut found = Found {
@@ -1812,7 +1765,7 @@ mod tests {
 
     #[test]
     fn a_reanalysis_keeps_the_users_cut_names_and_fixes_and_takes_the_new_speakers() {
-        // 5s: Re-analyse keeps the list the user edited and puts on top of it only the speakers
+        // Re-analyse keeps the list the user edited and puts on top of it only the speakers
         // the run matched against the remembered voices.
         let (d, p) = scratch_project("reanalyse-keeps");
         let turn = |start: f64, speaker| edit::Turn {
@@ -1939,7 +1892,7 @@ mod tests {
 
     #[test]
     fn a_list_saved_after_the_draft_is_backed_up_not_lost() {
-        // 5s repair: the draft reads the list outside the writer lock; a save landing before the
+        // The draft reads the list outside the writer lock; a save landing before the
         // write is decided on again under it.
         let (d, p) = scratch_project("recheck");
         // Junctur's own list, as an untouched app save (so the user's save below is no backup).
@@ -1986,7 +1939,7 @@ mod tests {
 
     #[test]
     fn a_reanalysis_run_keeps_the_users_cut_and_names_and_takes_the_speakers_found() {
-        // 5s repair: the whole first half a Re-analyse runs (`prepare` with `KeepList::Whole`),
+        // The whole first half a Re-analyse runs (`prepare` with `KeepList::Whole`),
         // every stage's result in the cache as an earlier analysis left it, so no media or model
         // is needed: tracks and speech reused, the speakers found again from the cache (two voice
         // tracks, one speaker each), the edit list kept.
@@ -2158,7 +2111,7 @@ keep x
 
     #[test]
     fn a_retranscription_carries_the_fixes_onto_the_new_words_and_spreads_them() {
-        // 5aa: the Correct button's re-transcription. At its end the fixes, read against the
+        // The Correct button's re-transcription. At its end the fixes, read against the
         // transcript it replaces, are moved onto the new words and spread to the words heard
         // alike, and the mark that asked for it goes.
         let (d, p) = scratch_project("carry");
@@ -2208,8 +2161,8 @@ keep x
         e.fixes.push(fix(3.0, "Bane."));
         std::fs::write(p.edit_path(), e.to_text()).unwrap();
         // The new transcript: "Bane," a little later, "Mel" now "and", a third "Bane" at 7. It is
-        // in `transcript.json` already, as when the app stopped between Whisper's end and the carry
-        // (5aa repair): the copy of the old one is what the fixes are read against.
+        // in `transcript.json` already, as when the app stopped between Whisper's end and the carry:
+        // the copy of the old one is what the fixes are read against.
         let new = transcript_of(&[
             (1.1, " Bane,"),
             (3.0, " Bane."),
@@ -2267,11 +2220,10 @@ keep x
 
     #[test]
     fn a_retranscription_carries_word_times_and_survives_being_stopped_or_asked_again() {
-        // 5ad: the leftovers of 5aa's review. A word retimed by moving a cut's edge (2w) is carried
-        // like a fix; Correct asked again before an earlier one's carry keeps that one's copy of the
-        // old transcript; a finished re-transcription is carried, not heard again; no copy means the
-        // fixes are left, said; a failed mark takes the copy with it; "seen" forgets only what was
-        // seen.
+        // A word retimed by moving a cut's edge is carried like a fix; Correct asked again keeps the
+        // earlier copy of the old transcript; a finished re-transcription is carried, not heard
+        // again; no copy leaves the fixes, said; a failed mark takes the copy; "seen" forgets only
+        // what was seen.
         let (d, p) = scratch_project("carry-times");
         let e = EditList {
             source: p.file.clone(),
@@ -2436,7 +2388,7 @@ keep x
             .is_some_and(|n| n.starts_with("Correct could not move your fixed words")));
         forget_fixes_set_aside(&p, &aside).unwrap();
         // A hearing that came out exactly as the transcript it replaces is still finished: carried
-        // on the next open, not heard again (5ad repair: told by the mark, not by the bytes).
+        // on the next open, not heard again (told by the mark, not by the bytes).
         assert!(hear_again(&p, &asked, &mut log).unwrap());
         heard_again(&p, &mut log);
         assert_eq!(

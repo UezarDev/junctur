@@ -9,7 +9,7 @@ use super::{run, Process};
 use crate::Result;
 
 /// Sample rate the analysis decodes at. 16 kHz mono keeps eight windows of four tracks small while
-/// keeping speech and most game audio energy; it is also what the VAD/Whisper stages will want.
+/// keeping speech and most game audio energy; it is also what VAD and Whisper take.
 pub const ANALYSIS_RATE: u32 = 16_000;
 
 // ffmpeg writes `f32le`; the samples are read and written in place as native f32.
@@ -64,12 +64,9 @@ pub fn decode_windows(
     Ok(out)
 }
 
-/// The output side of an ffmpeg that decodes `tracks` (at least one) as mono f32 at `rate`, laid
-/// side by side as channels in that order: `aformat` per track (the conversion `-ac 1 -ar` makes)
-/// then `amerge`, or a plain map for one track. `amerge` ends with the shortest input, so without
-/// `pad` every track comes out as long as the shortest; with `pad` (seconds), every track is padded
-/// with silence and the output lasts exactly that long, so a track that ends early does not cut the
-/// others short.
+/// The output side of an ffmpeg that decodes `tracks` (at least one) as mono f32 at `rate`, side by
+/// side as channels in that order. `amerge` ends with the shortest input; with `pad` (seconds) every
+/// track is padded with silence to that length, so a track that ends early does not cut the others.
 fn merge_args(tracks: &[usize], rate: u32, pad: Option<f64>) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
     if let Some(len) = pad {
@@ -161,7 +158,7 @@ impl PcmReader {
 
     /// Every one of `tracks` (at least one) from the start, mono at `rate`, interleaved one sample
     /// per track in that order (`channels` is their count): one decode for all, as
-    /// [`decode_windows`] does, streamed for a pass over a whole recording (2g's waveforms). Every
+    /// [`decode_windows`] does, streamed for a pass over a whole recording (the waveforms). Every
     /// track lasts `len` seconds when given (the recording's length), padded with silence where it
     /// ends early; without, all stop with the shortest.
     pub fn merged(file: &Path, tracks: &[usize], rate: u32, len: Option<f64>) -> Result<Self> {
@@ -320,7 +317,7 @@ mod tests {
         for (i, got) in together.iter().enumerate() {
             assert_eq!(got.len(), shortest, "track {i}");
             // The same samples, but for the resampler's first millisecond, which settles from a
-            // different start (measured: 17 samples, at most 0.0024 apart).
+            // different start (17 samples, at most 0.0024 apart).
             let (head, rest) = got.split_at(32);
             assert_eq!(rest, &alone[i][32..shortest], "track {i}");
             assert!(head

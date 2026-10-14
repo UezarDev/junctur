@@ -1,11 +1,6 @@
 <script lang="ts">
-  // The caption text options (5j), `CaptionRules`' `text` part: the language captions are shown in
-  // (5k: translated on this machine; the Captions panel runs the translation), case, punctuation,
-  // censored words and find-and-replace pairs, which apply to the translated words. A component of
-  // its own because the two lists are edited as text, one entry per line, with their own parsing. They change only what the captions show (the SRT, Send to
-  // Resolve, the preview), never the transcript. A list commits when the box loses focus; a line
-  // the engine would refuse (core edit/caption_text.rs) is reported and the box snaps back. Laid
-  // out as `Field`s, their explanations behind (i)s (2t).
+  // The caption text options (`CaptionRules`' `text` part). Its own component because the two lists
+  // are edited as text, one entry per line; a line the engine would refuse snaps the box back.
   import { translationLanguages, type CaptionCase, type Captions, type CensorStyle, type Language } from "./api";
   import Field from "./Field.svelte";
 

@@ -10,11 +10,8 @@ pub struct Word {
     pub text: String,
     /// Mean token probability, 0..1.
     pub p: f32,
-    /// The lowest probability of its tokens, 0..1 (5o): how unsure Whisper was of its weakest
-    /// piece, which is what the transcript panel flags a word by. A misheard name is often one
-    /// unsure piece among sure ones, which the mean ([`Self::p`]) averages away. `None` in a
-    /// transcript made before 5o, whose words are then never flagged; read without it, written only
-    /// when set, so such a transcript still reads and is not taken for outdated.
+    /// The lowest probability of its tokens, 0..1, which the transcript panel flags a word by: a
+    /// misheard name is often one unsure piece the mean averages away. `None` in older transcripts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub p_min: Option<f32>,
 }
@@ -95,11 +92,9 @@ impl Piece {
     }
 }
 
-/// A word's confidence (5o): the lowest probability among its tokens that hold part of a letter or
-/// digit, else (a word of punctuation alone) among all of them. Whisper is often unsure whether a
-/// comma, a `¿` or a `…` goes with a word it heard plainly; flagging the word for that would bury the
-/// misheard ones. Letters are told from the decoded characters, not the bytes (`¿`, `—`, `…` and
-/// curly quotes are past ASCII too), and a character split across tokens belongs to each of them.
+/// A word's confidence: the lowest probability among its tokens holding part of a letter or digit
+/// (else among all), so an unsure comma or `¿` does not bury the misheard words. Letters are told
+/// from decoded characters, and a character split across tokens belongs to each of them.
 fn lowest(bytes: &[u8], tokens: &[(usize, usize, f32)]) -> f32 {
     // Per byte: part of a letter or digit. Bytes that do not decode are not.
     let mut letter = vec![false; bytes.len()];
@@ -177,7 +172,7 @@ mod tests {
         assert!(group(&[t(b" ", 0.0, 0.1)]).is_empty());
     }
 
-    /// 5o: a word's weakest piece is its confidence; the mean is kept beside it as before.
+    /// A word's weakest piece is its confidence; the mean is kept beside it.
     #[test]
     fn a_word_keeps_its_lowest_token_probability() {
         let w = group(&[
@@ -213,7 +208,7 @@ mod tests {
         assert_eq!(w[0].p_min, Some(0.3));
     }
 
-    /// Repair: punctuation past ASCII (common in Spanish) is not a letter either, whole or split.
+    /// Punctuation past ASCII (common in Spanish) is not a letter either, whole or split.
     #[test]
     fn unsure_spanish_punctuation_does_not_flag_its_word() {
         let open_q = "¿".as_bytes(); // C2 BF
@@ -240,7 +235,7 @@ mod tests {
         assert_eq!(w[0].p_min, Some(0.2));
     }
 
-    /// A transcript from before 5o reads with no confidence, and one without it writes as before.
+    /// A word without a lowest probability reads with none, and writes without the field.
     #[test]
     fn an_older_word_reads_without_a_lowest_probability() {
         let old: Word =

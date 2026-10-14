@@ -1,14 +1,8 @@
-//! What a send asks Resolve to do (5g), worked out here so the script in Resolve only carries it
-//! out: one Text+ clip per speaker per caption, on that speaker's own video track, at integer
-//! timeline frames, with every Text+ input it sets already computed, and the tag that lets the next
-//! send find it again.
-//!
-//! With the word highlight or an animation on (5l) the clips are copies of auto-subs' animated
-//! caption (a Fusion macro round a Text+, in the same bundled bin), and each carries its words'
-//! character ranges and frames in the shape that macro reads (`WordTiming`).
-//!
-//! With a template of the user's picked and its look kept (5m), the look is left out: the script
-//! sets only the text, the timing and the speaker's colour.
+//! What a send asks Resolve to do, worked out here so the script in Resolve only carries it out:
+//! one Text+ clip per speaker per caption on that speaker's own track, at integer timeline frames,
+//! with every Text+ input computed and a tag that lets the next send find it again. With the
+//! highlight or an animation on, clips are copies of auto-subs' animated caption (a Fusion macro
+//! round a Text+); with a user template's look kept, only text, timing and colour are set.
 
 use sha2::{Digest, Sha256};
 
@@ -37,22 +31,22 @@ pub struct Clip {
     pub text: String,
     /// The fill, the speaker's colour, 0 to 1 per channel.
     pub fill: [f64; 3],
-    /// The speaker has a colour of their own (5m): without one the fill is white, which a
+    /// The speaker has a colour of their own: without one the fill is white, which a
     /// template whose look is kept should not get, so it keeps its own.
     pub colored: bool,
-    /// The animated caption's text and lit word colours (5l, `Captions::highlight_colors`): white
+    /// The animated caption's text and lit word colours (`Captions::highlight_colors`): white
     /// and the speaker's under the highlight in the speaker's colour; both the fill without it.
     pub base: [f64; 3],
     pub highlight: [f64; 3],
     /// `Center`: fractions of the frame, y up from the bottom.
     pub x: f64,
     pub y: f64,
-    /// When each word of `text` (as the macro splits it, at whitespace) is lit (5l), with the
+    /// When each word of `text` (as the macro splits it, at whitespace) is lit, with the
     /// highlight on.
     pub words: Vec<WordTiming>,
 }
 
-/// One entry of the animated caption's `WordTiming` (5l): `from..=to` are 0-based character
+/// One entry of the animated caption's `WordTiming`: `from..=to` are 0-based character
 /// indices into the clip's text, a word after the first starting just after the one before (its
 /// space or line break included), as the macro's own `UpdateTextContent` counts them; `start` and
 /// `end` are frames from the clip's start, in the template's frames.
@@ -74,12 +68,12 @@ pub struct Look {
     pub size: f64,
     pub outline: Option<([f64; 3], f64)>,
     pub underline: bool,
-    /// The word highlight and the animation (5l): `animation` is its word on the captions line
+    /// The word highlight and the animation: `animation` is its word on the captions line
     /// (`none`, `fade`, `pop`, `slide`), its length in seconds.
     pub highlight: bool,
     pub animation: String,
     pub animation_length: f64,
-    /// The template's own look is kept (5m, [`Captions::keeps_look`]): the script sets none of
+    /// The template's own look is kept ([`Captions::keeps_look`]): the script sets none of
     /// the inputs above but the highlight and the animation.
     pub keep: bool,
 }
@@ -94,10 +88,10 @@ pub struct Job {
     pub timeline: String,
     /// Track names, one per speaker; the script finds each by name or adds it.
     pub tracks: Vec<String>,
-    /// The clips are the animated caption (5l): the highlight or an animation is on.
+    /// The clips are the animated caption: the highlight or an animation is on.
     pub animated: bool,
     /// What the script does with clips Junctur did not place that are in the way of new
-    /// captions on these tracks (5n): ask (change nothing, count them), replace, skip, or a
+    /// captions on these tracks: ask (change nothing, count them), replace, skip, or a
     /// new track.
     pub existing: ExistingClips,
     pub look: Look,
@@ -141,21 +135,17 @@ pub fn build(placed: &[Placed], edit: &EditList, c: &Captions, timeline: &Timeli
     let animated = c.animated();
     // A send with the other kind of clip is a different caption: the key says which, so turning
     // the highlight or an animation on or off replaces every clip instead of restyling a plain
-    // Text+ as the macro (or back). The highlight is a kind of its own: the macro's helper only
-    // writes the highlight's keyframes when it is on, never clears them (its RemoveHighlight runs
-    // from an input's change, which a script setting it may not trigger), so a clip that had it
-    // is replaced rather than restyled without it.
+    // Text+ as the macro (or back). The highlight is a kind of its own, since the macro never
+    // clears its highlight keyframes, so a clip that had it is replaced rather than restyled.
     let mut kind = match (c.highlight, animated) {
         (true, _) => "|highlight",
         (false, true) => "|animated",
         _ => "",
     }
     .to_string();
-    // A clip says which template it is a copy of and whether its look was kept (5m): picking
-    // another template, or switching the look on or off, then replaces the clips. Restyled
-    // instead, the old template's clip would stay, and one restyled with the look kept would keep
-    // the font and size Junctur gave it before (with the look kept they are not set). Junctur's
-    // own template adds nothing, so its keys are 5g's and 5l's.
+    // A clip says which template it is a copy of and whether its look was kept: picking another
+    // template, or switching the look on or off, then replaces the clips rather than leaving the
+    // old template's clip or the font Junctur set. Junctur's own template adds nothing to the key.
     let named = template(c);
     let keep = c.keeps_look();
     if !named.is_empty() {
@@ -175,9 +165,9 @@ pub fn build(placed: &[Placed], edit: &EditList, c: &Captions, timeline: &Timeli
         } else {
             (fill, fill)
         };
-        // Each track's clips in time order, never overlapping: a clip that rounds to nothing gets one
-        // frame, and one that would start inside the previous clip starts at its end instead (shifted,
-        // not dropped; only a clip past the timeline's end is left out).
+        // Each track's clips in time order, never overlapping: a clip that rounds to nothing gets
+        // one frame, and one that would start inside the previous clip starts at its end instead
+        // (only a clip past the timeline's end is left out).
         let mut last_end = i64::MIN;
         for p in placed {
             let Some(part) = p.parts.iter().find(|q| q.speaker == id) else {
@@ -236,13 +226,10 @@ pub fn build(placed: &[Placed], edit: &EditList, c: &Captions, timeline: &Timeli
     }
 }
 
-/// The animated caption's `WordTiming` for a clip: one entry per span (a word, as layout cuts them),
-/// its character range counted exactly as the macro's own `UpdateTextContent` re-counts it each
-/// time the text is set (the first word from 0, each later one from just after the one before,
-/// one separator ahead of it, characters by `utf8len`), so the entries survive that re-count
-/// unchanged; its seconds made clip frames by `at`, never going back (the macro lights words in
-/// order), the start inside the clip and the end before its last frame, since the macro's
-/// `ScaleWordTiming` squeezes every word when the last one ends past the comp's last frame.
+/// The animated caption's `WordTiming` for a clip: one entry per span, its character range counted
+/// as the macro's own `UpdateTextContent` re-counts it each time the text is set, so the entries
+/// survive that re-count unchanged. Frames never go back (the macro lights words in order) and
+/// end before the clip's last frame, since `ScaleWordTiming` squeezes every word otherwise.
 fn word_timing(spans: &[WordSpan], length: i64, at: impl Fn(f64) -> i64) -> Vec<WordTiming> {
     let last = (length - 1).max(1);
     let mut out: Vec<WordTiming> = Vec::with_capacity(spans.len());
@@ -262,7 +249,7 @@ fn word_timing(spans: &[WordSpan], length: i64, at: impl Fn(f64) -> i64) -> Vec<
     out
 }
 
-/// A short tag of a clip's word timing for its key (5l repair): a resend whose words moved but
+/// A short tag of a clip's word timing for its key: a resend whose words moved but
 /// whose frames and text did not would otherwise restyle the clip, and the macro only rebuilds its
 /// word keyframes when its text changes. Empty without words, so other keys stay as they were.
 fn timing_tag(words: &[WordTiming]) -> String {
@@ -591,7 +578,7 @@ mod tests {
         );
         assert!(text.contains("[\"text\"] = \"say \\\"hi\\\"\""), "{text}");
         assert!(text.contains("[\"timeline\"] = \"T-1\""), "{text}");
-        // 5n: asking unless the recording remembered a choice.
+        // Asking unless the recording remembered a choice.
         assert!(text.contains("[\"existing\"] = \"ask\""), "{text}");
         let new_track = Captions {
             existing_clips: ExistingClips::NewTrack,
@@ -695,7 +682,7 @@ mod tests {
         let w = &build(&[late], &edit(), &c, &t).clips[0].words;
         assert_eq!((w[0].start, w[0].end, w[1].start, w[1].end), (0, 1, 94, 95));
         // An animation alone makes the clips animated, with no word timing and the speaker's
-        // colour; neither, and the key is 5g's.
+        // colour; neither, and the key is the plain one.
         let anim = Captions {
             animation: Animation::Fade,
             ..Default::default()
@@ -720,7 +707,7 @@ mod tests {
     fn a_picked_template_and_its_kept_look_are_in_the_key() {
         let cues = [placed(0.0, 1.0, &[(1, "a"), (0, "b")])];
         let t = timeline(24.0);
-        // Junctur's own: 5g's key, the switch ignored, nothing kept.
+        // Junctur's own: the plain key, the switch ignored, nothing kept.
         let own = Captions {
             keep_look: true,
             ..Default::default()

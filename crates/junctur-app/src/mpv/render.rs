@@ -19,10 +19,9 @@ pub struct RenderContext {
 
 impl RenderContext {
     /// Must be called with the GL context current on this thread, and before any file is loaded
-    /// (with `vo=libmpv`, video output needs a render context to exist). `on_update` runs on an
-    /// mpv thread whenever a new frame (or a redraw) is wanted; it must not call into mpv, only
-    /// wake the render thread. It is set once here, so it can never be swapped out while mpv may
-    /// be calling it.
+    /// (`vo=libmpv` needs a render context). `on_update` runs on an mpv thread whenever a frame is
+    /// wanted; it must not call into mpv, only wake the render thread. Set once, so it is never
+    /// swapped out while mpv may be calling it.
     pub fn opengl(
         mpv: Arc<Mpv>,
         get_proc_address: ffi::GetProcAddress,

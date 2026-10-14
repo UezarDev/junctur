@@ -1,8 +1,6 @@
 /**
- * Range-level edits from the playhead: the stretch under it (a kept range, or the cut between two)
- * and what moving one of its ends by some frames means as an edit. Moving a boundary turns the
- * frames it passes over into whatever the growing side is, so every nudge is one exact frame edit.
- * The lanes' edge drags (2s) find their edge here and end in the same edit.
+ * Range-level edits from the playhead: the stretch under it and what moving one of its ends means
+ * as an edit. The frames a boundary passes over take the growing side's kind.
  */
 import type { EditState } from "./api";
 import type { Stretch } from "./transcript";
@@ -49,10 +47,8 @@ export function nudge(
 }
 
 /**
- * A cut's edge on the lanes (2s): a boundary of the kept ranges, by its place in `edit.ranges`
- * (even: a range's start, odd: its end) and its frame, with the frames it may be dragged between:
- * one inside the boundaries either side (or the file's ends), so no stretch vanishes and no edge
- * passes its neighbour. The file's own start and end are not edges.
+ * A cut's edge on the lanes: a boundary of the kept ranges by its place in `edit.ranges` (even: a
+ * start, odd: an end) and its frame, with the room it may be dragged in so no stretch vanishes.
  */
 export interface Edge {
   at: number;

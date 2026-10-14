@@ -5,8 +5,8 @@ use super::{LogicalTrack, Sameness};
 use crate::ffmpeg::ANALYSIS_RATE;
 use crate::signal::{self, Activity};
 
-/// Mean level below which a non-silent track counts as "faint". The faint second track of the
-/// 3-track recording sits near -70 dB; the main mix near -35 dB.
+/// Mean level below which a non-silent track counts as "faint": faint tracks sit near -70 dB, a
+/// main mix near -35 dB.
 pub const FAINT_MEAN_DB: f64 = -55.0;
 /// Correlation at or above which two non-identical tracks count as the same source (encoder noise,
 /// a slightly different gain stage).

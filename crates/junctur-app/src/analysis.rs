@@ -1,30 +1,6 @@
-//! Analysis run by the app itself (2d): a recording opened without an edit list is analysed in the
-//! background while it already plays, and an analysed one can be analysed again when the settings
-//! moved. Each run is `pipeline::run` on its own thread with the options `junctur analyze` uses
-//! (`config::analysis_options`), and its log lines become [`Progress`] for the project panel, with
-//! how far each track has got through the running stage (2h: the pipeline's [`Step`]s).
-//!
-//! Its own module because none of it is the player's: a run outlives the recording being open (it
-//! resumes where it stopped if the app closes, as the CLI's does), and several recordings may be
-//! waiting.
-//!
-//! A run is the pipeline's two halves on two lanes (2j): the first half (tracks, speech, speakers,
-//! the edit list) behind `first`, one recording at a time, then the transcription behind
-//! `transcription`, also one at a time. A recording opened while another transcribes gets its edit
-//! list at once (Uezar: the fast steps are not held back by "another transcript ... going in the
-//! back") and its transcription queues; once its list is written it can be edited while the rest
-//! runs, the words growing a 5-minute piece at a time ([`Progress::transcribed`]). Rejected:
-//! cancelling (the pipeline has no point to stop at between its stages' own steps), and both halves
-//! on one gate (2d), which held a new recording's minutes behind another's hours.
-//!
-//! The transcription lane is a [`Lane`] (2k): first come, first served, and paused from any
-//! recording, the transcribing one stopping between chunks ([`Analysis::pause`]); the page sees
-//! who is on it through [`Analysis::transcription`].
-//!
-//! A run that panics ends `Failed` like any other (2m), and an edit of a recording and a run of it
-//! never overlap ([`Analysis::edit`], 2m): a check that a recording is editable followed by the
-//! edit let a re-analysis asked meanwhile read `speakers.json` before an enrollment wrote its pin
-//! and write over it after.
+//! Background analysis run by the app: the pipeline on its own thread, its first half (tracks to
+//! edit list) and its transcription on two one-at-a-time lanes, so a new recording's minutes never
+//! wait behind another's hours. Apart from the player because a run outlives the open recording.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -41,7 +17,7 @@ use crate::project::{self, ProjectStatus};
 /// The event every change of a run's progress is sent as.
 pub const EVENT: &str = "analysis";
 
-/// The event the transcription lane's [`Transcription`] is sent as (2k).
+/// The event the transcription lane's [`Transcription`] is sent as.
 pub const LANE_EVENT: &str = "transcription";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -74,23 +50,21 @@ pub struct Progress {
     pub error: Option<String>,
     /// The project as `jobs.json` and the files say now: each stage's state.
     pub project: Option<ProjectStatus>,
-    /// Per track, in track order, the latest stage it reported and how far through it it is (2h).
-    /// Only the running stage's are current; the page shows those.
+    /// Per track, in track order, the latest stage it reported and how far through it it is.
+    /// Only the running stage's are current.
     pub steps: Vec<Step>,
-    /// The run's edit list is written (2j): it can be edited, and nothing later in the run
-    /// replaces it.
+    /// The run's edit list is written: it can be edited, and nothing later in the run replaces it.
     pub listed: bool,
-    /// While transcribing: every word before this many seconds of the recording is transcribed, on
-    /// every track (a whole number of 5-minute pieces, or where a resumed run starts). `None`
-    /// before the transcription starts and once it is whole.
+    /// While transcribing: every word before this many seconds is transcribed on every track.
+    /// `None` before the transcription starts and once it is whole.
     pub transcribed: Option<f64>,
 }
 
 impl Progress {
-    /// How far the editor's words go for this run ([`crate::player::Core::transcribed`]): once the
-    /// run's list is written and while its transcription is to come, runs or failed part way, the
-    /// words so far (none before the first piece); else (not this far, or done) the finished
-    /// transcript. Never an older run's `transcript.json` under the new words' indices (2j repair).
+    /// How far the editor's words go ([`crate::player::Core::transcribed`]): once the list is
+    /// written and the transcription is pending, running or failed part way, the words so far;
+    /// else `None` (the finished transcript), so an older `transcript.json` never sits under new
+    /// indices.
     pub fn words_through(&self) -> Option<f64> {
         if self.listed && (self.phase.busy() || self.phase == Phase::Failed) {
             Some(self.transcribed.unwrap_or(0.0))
@@ -100,7 +74,7 @@ impl Progress {
     }
 }
 
-/// The transcription lane as the page shows it, whichever recording is open (2k).
+/// The transcription lane as the page shows it, whichever recording is open.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Transcription {
@@ -128,7 +102,7 @@ fn shape(t: &Transcription) -> Shape {
 struct How {
     /// What becomes of an edit list holding the user's edits.
     keep_list: KeepList,
-    /// Hear the speakers and the words again (5aa: the Correct button).
+    /// Hear the speakers and the words again (the Correct button).
     correct: bool,
 }
 
@@ -149,12 +123,12 @@ pub enum Change {
     /// Its phase, log line or stages: the app looks at the project again (the track roles, a
     /// finished run's results).
     Run,
-    /// Only a track's step (2h): the page redraws a bar, nothing else needs reading.
+    /// Only a track's step: the page redraws a bar, nothing else needs reading.
     Steps,
-    /// The run's edit list was just written (2j): the player takes it, and the new speech envelope.
+    /// The run's edit list was just written: the player takes it, and the new speech envelope.
     Listed,
-    /// A piece more of the transcript is whole (2j, [`Progress::transcribed`]): the player reads
-    /// the words again.
+    /// A piece more of the transcript is whole ([`Progress::transcribed`]): the player reads the
+    /// words again.
     Transcribed,
 }
 
@@ -166,18 +140,15 @@ pub struct Analysis {
     runs: Arc<Mutex<HashMap<PathBuf, Progress>>>,
     /// Held through a run's first half (tracks to edit list).
     first: Arc<Mutex<()>>,
-    /// Held through a run's transcription: the one shared background job (2j), in turn and
-    /// pausable (2k).
+    /// Held through a run's transcription: one at a time, in turn and pausable.
     transcription: Arc<Lane>,
-    /// Held from taking a snapshot of a run until `notify` has it, so snapshots reach the page in
-    /// the order they were taken: the speech stage reports from a thread per track, and an older
-    /// snapshot sent last would move a bar back (79 % after 100 %). Not `runs` itself: the app's
-    /// handler asks the analysis about runs ([`Analysis::busy`]).
+    /// Held from taking a snapshot until `notify` has it, so the speech stage's per-track threads
+    /// never send an older snapshot last. Not `runs`: the app's handler asks about runs.
     order: Arc<Mutex<()>>,
     /// The lane's shape as last sent to the page ([`Analysis::lane_moved`]).
     lane_sent: Arc<Mutex<Option<Shape>>>,
     /// Edits in progress per recording ([`Analysis::edit`]); a run of one waits for its edits to
-    /// end before its first half (2m).
+    /// end before its first half.
     editing: Arc<Edits>,
     /// The cache the projects live in; `None` is the default one (the CLI's).
     cache_dir: Option<PathBuf>,
@@ -206,7 +177,7 @@ impl Default for Analysis {
 }
 
 /// A run's second half (the transcription), as its first half leaves it: told the log, the steps,
-/// where the transcript is whole, and called between chunks (where a pause holds it, 2k).
+/// where the transcript is whole, and called between chunks (where a pause holds it).
 type Second<'a> = Box<
     dyn FnOnce(
             &mut dyn FnMut(&str),
@@ -272,7 +243,7 @@ impl Drop for Editing {
     }
 }
 
-/// A recording whose run is `r` may be edited: no run, or its run has written the list (2j), which
+/// A recording whose run is `r` may be edited: no run, or its run has written the list, which
 /// nothing later in the run replaces.
 fn may_edit(r: Option<&Progress>) -> bool {
     r.is_none_or(|p| !p.phase.busy() || p.listed)
@@ -316,11 +287,8 @@ impl Analysis {
         }
     }
 
-    /// The options a run of `p` uses: the user's, device auto, and the cut settings of the list on
-    /// disk, so a re-analysis keeps settings `junctur cut` set. Never `force`: stages whose results
-    /// still answer the options are reused. `how`: what becomes of a list with the user's edits
-    /// ([`KeepList`]: kept on every run but a fresh cut, 2j and 5s), and whether the speakers and the
-    /// words are heard again (5aa: Correct).
+    /// The options a run of `p` uses: the user's, and the cut settings of the list on disk, so a
+    /// re-analysis keeps settings `junctur cut` set. Never `force`: still-valid stages are reused.
     fn options(&self, p: &Project, how: How) -> Result<PipelineOptions, String> {
         let mut o = (self.user)()?;
         if let Ok(e) = p.edit() {
@@ -333,10 +301,8 @@ impl Analysis {
     }
 
     /// A run that could not start (its project could not be opened), recorded so the page shows
-    /// the error where it shows progress, not as a failed open.
-    /// A run already waiting or running is returned as it is: a failed open beside it (a project
-    /// folder briefly unreadable) must not mark it failed while its thread goes on, or the
-    /// recording could be started again into a second place on the lane (2k repair).
+    /// the error where it shows progress. A busy run is returned as it is: marking it failed while
+    /// its thread goes on would let the recording take a second place on the lane.
     pub fn failed(&self, file: &Path, error: String) -> Progress {
         let k = key(file);
         let mut runs = lock(&self.runs);
@@ -367,18 +333,15 @@ impl Analysis {
     }
 
     /// `file`'s edit list may be edited ([`may_edit`]); the app asks through [`Self::edit`], which
-    /// also holds a run off while the edit works (2m).
+    /// also holds a run off while the edit works.
     #[cfg(test)]
     fn editable(&self, file: &Path) -> bool {
         may_edit(self.progress(file).as_ref())
     }
 
-    /// Marks an edit of `file` in progress, when it may be edited ([`may_edit`]); `None` when
-    /// not. While the mark is held a run of `file` asked for meanwhile waits, queued, before its
-    /// first half; once a run is queued no mark is given. The check and the count are one step
-    /// under `runs`, which a run is queued under, so the edit and the run's speakers stage never
-    /// overlap (2m: a pin enrolled just as a re-analysis started was read before it was written
-    /// and written over).
+    /// Marks an edit of `file` in progress when it may be edited ([`may_edit`]), else `None`; a run
+    /// asked for meanwhile waits before its first half. Check and count are one step under `runs`,
+    /// so an edit (an enrolled pin) and a run's speakers stage never overlap.
     pub fn edit(&self, file: &Path) -> Option<Editing> {
         let k = key(file);
         let runs = lock(&self.runs);
@@ -405,9 +368,8 @@ impl Analysis {
         }
     }
 
-    /// Analyses `file` in the background, keeping an edit list with the user's edits (a run resumed
-    /// after they edited while it transcribed, 2j); a run already waiting or running is returned as
-    /// it is.
+    /// Analyses `file` in the background, keeping an edit list with the user's edits; a run already
+    /// waiting or running is returned as it is.
     pub fn start(&self, file: &Path, notify: Notify) -> Result<Progress, String> {
         self.start_with(
             file,
@@ -421,7 +383,7 @@ impl Analysis {
 
     fn start_with(&self, file: &Path, notify: Notify, how: How) -> Result<Progress, String> {
         // Before opening the project: a run going on is the answer even when the folder cannot be
-        // opened just now (2k repair; the check under the lock below closes the race).
+        // opened just now (the check under the lock below closes the race).
         if let Some(r) = self.progress(file).filter(|r| r.phase.busy()) {
             return Ok(r);
         }
@@ -461,15 +423,9 @@ impl Analysis {
         Ok(first)
     }
 
-    /// Analyses `file` again with the settings now (5s). Stages whose inputs or settings changed
-    /// run again, and the speakers are matched against the remembered voices again.
-    ///
-    /// Not `fresh` (the Re-analyse button): the edit list the user made is kept, cut, names, word
-    /// fixes and caption settings, and only this run's speakers are put into it
-    /// ([`KeepList::Whole`]: one that does not parse is left as it is too, the run failing and
-    /// saying so); nothing to ask. `fresh` ("Start over with a fresh cut"): the
-    /// list is re-cut as before 5s, so with the user's edits in it nothing starts unless
-    /// `replace`, and the page asks first (the pipeline then keeps their list as a backup).
+    /// Analyses `file` again with the settings now. Not `fresh`: the user's edit list is kept and
+    /// only this run's speakers go into it. `fresh`: the list is re-cut, so with the user's edits
+    /// in it nothing starts unless `replace`, and the page asks first.
     pub fn reanalyse(
         &self,
         file: &Path,
@@ -490,8 +446,6 @@ impl Analysis {
             }
         }
         Ok(Reanalysed {
-            // A fresh cut asked for (or nothing of the user's to lose) re-cuts the list; else it
-            // is kept.
             progress: Some(self.start_with(
                 file,
                 notify,
@@ -504,12 +458,8 @@ impl Analysis {
         })
     }
 
-    /// The Correct button's run (5aa): as Re-analyse ([`KeepList::Whole`]: the user's edit list kept,
-    /// only the speakers found put into it), and the speakers heard again from the audio against the
-    /// remembered voices and the recording transcribed again with the word list as it is now, its
-    /// fixes carried onto the new words (`PipelineOptions::rehear`, `retranscribe`). An ordinary run
-    /// otherwise: its transcription waits its turn on the lane, can be paused, and the words come a
-    /// piece at a time, editable as they come. Refused while the recording is being analysed.
+    /// The Correct button's run: Re-analyse keeping the user's list, with the speakers heard and
+    /// the words transcribed again, fixes carried onto the new words. Refused while being analysed.
     pub fn correct(&self, file: &Path, notify: Notify) -> Result<Progress, String> {
         if self.busy(file) {
             return Err("this recording is already being analysed".into());
@@ -524,12 +474,8 @@ impl Analysis {
         )
     }
 
-    /// Pauses or resumes the transcription lane (2k): the transcribing recording stops after the
-    /// chunk it is on, the ones waiting keep waiting. Nothing on the lane: nothing to pause. Whether
-    /// anything changed.
-    ///
-    /// `send` gets the lane as it is now, under the same lock every run's notification is taken
-    /// and sent under, so a pause's snapshot never lands after a newer one (2k repair).
+    /// Pauses or resumes the transcription lane after the current chunk; whether anything changed.
+    /// `send` runs under `order`, so a pause's snapshot never lands after a newer one.
     pub fn pause(&self, paused: bool, send: &dyn Fn(&Transcription)) -> bool {
         let _order = lock(&self.order);
         let changed = self.transcription.pause(paused);
@@ -539,10 +485,8 @@ impl Analysis {
         changed
     }
 
-    /// The lane, when its shape (who is on it, their phases, the pause) moved since it was last
-    /// sent; for the app's notifier, which is called under `order`. Each job's progress reaches the
-    /// page through its own `analysis` events, so a log line or a piece landing is not a reason to
-    /// send the lane again.
+    /// The lane, when its shape (members, phases, pause) moved since last sent; called under
+    /// `order`. Each job's progress goes through its own `analysis` events.
     pub fn lane_moved(&self) -> Option<Transcription> {
         let now = self.transcription();
         let mut last = lock(&self.lane_sent);
@@ -569,11 +513,8 @@ impl Analysis {
         }
     }
 
-    /// Runs `f` behind the lane runs' first halves take (2j: tracks to edit list, the speakers
-    /// stage among them): after the first half in progress, if any, and with none starting until
-    /// it returns. For work that loads the speaker models outside a run (5c: a recording's
-    /// speakers heard again). Not behind the transcription lane: like a first half, it is minutes,
-    /// and Uezar's rule is that those never wait on another recording's transcription.
+    /// Runs `f` on the first-half lane, for work that loads the speaker models outside a run. Not
+    /// on the transcription lane: minutes of work never wait on another recording's hours.
     pub fn exclusive<T>(&self, f: impl FnOnce() -> T) -> T {
         let _turn = lock(&self.first);
         f()
@@ -581,9 +522,8 @@ impl Analysis {
 
     fn run(&self, p: &Project, notify: &Notify, how: How) {
         let k = p.file.clone();
-        // A panic is a failure like any other (2m): unwound past the update below, it left the run
-        // busy for good, its recording refusing edits and re-analysis until a restart. What it
-        // shares survives the unwind: poison-tolerant locks, the lane's place a `Turn`.
+        // A panic must end the run `Failed`, or it stays busy for good; shared state survives the
+        // unwind (poison-tolerant locks, the lane's place a `Turn`).
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.halves(p, notify, how)))
                 .unwrap_or_else(|e| {
@@ -603,8 +543,7 @@ impl Analysis {
             Err(e) => {
                 r.phase = Phase::Failed;
                 r.error = Some(e.clone());
-                // A transcription that failed part way keeps the pieces it finished in the
-                // editor (2j repair); one that failed before any is "none yet", not an older
+                // Failed part way: the finished pieces stay; none yet is 0, not an older
                 // run's transcript.
                 if r.listed {
                     r.transcribed = r.transcribed.or(Some(0.0));
@@ -628,7 +567,7 @@ impl Analysis {
             self.update(&k, notify, Change::Run, |r| r.line = Some(line.to_string()));
         };
         // Before anything of the recording is read: an edit begun before this run was queued
-        // ends first (2m).
+        // ends first.
         self.wait_for_edits(&k);
         let o = self.options(p, how)?;
         let second = {
@@ -687,10 +626,8 @@ impl Analysis {
         notify(&now, change);
     }
 
-    /// Takes a track's step and tells `notify` only when its stage or whole percentage moved: at
-    /// most a hundred events per track and stage however long the recording, where the speech
-    /// stage reports every minute of audio. The project status is not read again (stage changes
-    /// come through the log lines, [`Self::update`]).
+    /// Takes a track's step and tells `notify` only when its stage or whole percentage moved, so
+    /// at most a hundred events per track and stage. The project status is not read again.
     fn step(&self, k: &Path, s: Step, notify: &dyn Fn(&Progress, Change)) {
         let _order = lock(&self.order);
         let now = {
@@ -1199,7 +1136,7 @@ mod tests {
         let ended = |a: &Analysis| wait_for("the run ends", || !a.busy(&file));
         let quiet = || -> Notify { Arc::new(|_: &Progress, _| {}) };
         std::fs::write(p.edit_path(), "junctur-edit 1\nkeep x\n").unwrap();
-        // 5s: Re-analyse on a list the user edited starts at once and keeps it.
+        // Re-analyse on a list the user edited starts at once and keeps it.
         let r = a.reanalyse(&file, false, false, quiet()).unwrap();
         assert!(!r.hand_edited && r.progress.is_some());
         ended(&a);
@@ -1241,8 +1178,7 @@ mod tests {
 
     #[test]
     fn correct_hears_the_speakers_and_the_words_again_keeping_the_list() {
-        // 5aa: the Correct button's run is Re-analyse's (the list kept whole) with the speakers
-        // and the transcript heard again; a second one while it runs is refused.
+        // Correct is Re-analyse with speakers and words heard again; a second one is refused.
         let d = std::env::temp_dir().join(format!("junctur-app-correct-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();

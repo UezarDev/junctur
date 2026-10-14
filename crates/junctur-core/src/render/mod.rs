@@ -1,15 +1,8 @@
 //! Smart rendering: the edit list becomes an MP4 in which only the frames around each cut are
-//! re-encoded (NVENC, matched to the source) and everything between keyframes is copied.
-//!
-//! [`source`] reads the encoding and the real keyframes, [`plan`] splits the kept frames into copy
-//! and encode pieces, [`video`] writes each piece, [`audio`] rebuilds every audio track with
-//! crossfades, and [`mux`] joins them in one ffmpeg. When the source cannot be matched
-//! the same machinery encodes every frame instead (a full re-encode) and says why.
-//!
-//! Scratch files go in a folder beside the output (same disk; a 30 h render does not fit in a
-//! small temp drive) and are deleted when the render ends, failed or not (a killed process leaves
-//! them). The output is muxed in there too and renamed into place only once it is complete, so a
-//! failed `--force` keeps the previous render. The source is only read.
+//! re-encoded (NVENC, matched to the source) and everything between keyframes is copied; when the
+//! source cannot be matched, every frame is encoded instead and the reason given. Scratch files go
+//! beside the output (a long render may not fit a small temp drive) and the output is renamed into
+//! place only once complete, so a failed `--force` keeps the previous render.
 
 mod audio;
 mod mux;
@@ -494,7 +487,7 @@ mod tests {
                 apart.extend(small_frames(&each));
             }
             // Compared with the pieces encoded one by one, not the source: on these clips both
-            // land one frame late (1e open issue), and batching must not change where.
+            // land one frame late, and batching must not change where.
             let together = small_frames(&one);
             assert_eq!(together.len(), apart.len());
             for (k, f) in together.iter().enumerate() {

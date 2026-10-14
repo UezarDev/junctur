@@ -1,13 +1,6 @@
 <script lang="ts">
-  // What the app shows with nothing open (2d; laid out as 2g's mock S), in the spirit of Resolve's
-  // project chooser: the recordings opened before on the left, each with a still, its length and
-  // folder and where its analysis stands, and a place to drop or pick a recording on the right.
-  // Dropping works anywhere on the window (App.svelte listens); this only draws the target. A new
-  // recording opens straight into the editor and is analysed there; nothing here waits on analysis.
-  //
-  // The list is drawn from recent.json at once; each row then asks for its details and still in
-  // the background (`recent_info`, `thumbnail`), so twenty recordings never hold the list up; at
-  // most WORKERS rows at a time, top first, as each may start an ffprobe and an ffmpeg.
+  // What the app shows with nothing open: recent recordings on the left, a drop target on the right.
+  // Rows fill their details in the background, `WORKERS` at a time, as each may run ffprobe and ffmpeg.
   import { onMount } from "svelte";
   import * as api from "./api";
   import { clock } from "./time";

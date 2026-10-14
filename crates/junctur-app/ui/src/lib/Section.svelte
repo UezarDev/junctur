@@ -1,6 +1,6 @@
 <script lang="ts">
-  // A group of settings under one heading (2t): the eyebrow, its (i) when the group as a whole needs
-  // explaining, and a rule under it, so the Captions panel and Settings separate their groups alike.
+  // A group of settings under one heading, its (i) and a rule, so the Captions panel and Settings
+  // separate their groups alike.
   import type { Snippet } from "svelte";
   import InfoTip from "./InfoTip.svelte";
 

@@ -1,6 +1,6 @@
 //! Role decision for one distinct track, from its loudness profile and, when available, speech.
 //!
-//! Without speech this is Phase 1's loudness heuristic. With it, the questions become "does it carry
+//! Without speech this is the loudness heuristic. With it, the questions become "does it carry
 //! speech" and "what is under the speech": a voice track goes near-silent between phrases, a mix
 //! keeps game or music going.
 
@@ -173,7 +173,7 @@ fn with_speech(s: Speech, substantial: usize) -> (Role, f64, String) {
     }
 }
 
-/// Phase 1's guess, used when speech detection is off or unavailable.
+/// The loudness-only guess, used when speech detection is off or unavailable.
 fn loudness_only(a: &Activity, substantial: usize) -> (Role, f64, String) {
     if substantial == 1 {
         (
@@ -268,7 +268,7 @@ mod tests {
 
     #[test]
     fn reasons_read_as_one_line() {
-        // Every branch: a line continuation lost in a refactor once left runs of spaces in these.
+        // Every branch: a lost line continuation would leave runs of spaces in these.
         let mut silent = act(-120.0);
         silent.silent = true;
         let mut sum = cx(false, 3);

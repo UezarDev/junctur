@@ -1,8 +1,6 @@
-//! The timeline a send makes in Resolve (5z): its name, and what to do when the open project already
-//! has a timeline of that name. Decided here, from the names the script lists, so the question the
-//! app asks and the name Create new picks are tested without Resolve. Since 5ab the answer can also
-//! be to update only the captions on the timeline that is there, and [`cut_note`] says when that
-//! timeline's cut no longer matches the edit's.
+//! The timeline a send makes in Resolve: its name, and what to do when the open project already
+//! has one of that name (ask, make a new one, replace it, or update only its captions). Decided
+//! here from the names the script lists, so it is tested without Resolve.
 
 use serde::Deserialize;
 
@@ -17,7 +15,7 @@ pub enum Answer {
     New,
     /// Delete it and make it again from this edit.
     Replace,
-    /// Leave it and its cut as they are and refresh only Junctur's captions on it (5ab).
+    /// Leave it and its cut as they are and refresh only Junctur's captions on it.
     Update,
 }
 
@@ -28,7 +26,7 @@ pub enum Decision {
     Ask,
     /// Make the timeline `name`; `replace` the one of that name already there.
     Build { name: String, replace: bool },
-    /// Refresh the captions on the one timeline called `name` (5ab).
+    /// Refresh the captions on the one timeline called `name`.
     Update { name: String },
 }
 
@@ -131,10 +129,9 @@ fn cut_frames(edit: &EditList, fps: f64) -> i64 {
 }
 
 /// What an update says when the timeline's clips (captions aside) end at `cut_end`, more than a
-/// frame off the edit's length (Resolve's end frame may count the last frame or not) (5ab). Only
-/// the two lengths are known, not why they differ (a cut changed on either side, or a music bed
-/// or an outro added past it), so the note says just that. Not a refusal: what was added in
-/// Resolve is the user's. No clips on it (`None`) says nothing: there is nothing to compare.
+/// frame off the edit's length (Resolve's end frame may count the last frame or not). Only the two
+/// lengths are known, not why they differ, so the note says just that; not a refusal, since what
+/// was added in Resolve is the user's. No clips on it (`None`) says nothing.
 pub fn cut_note(edit: &EditList, t: &Timeline, cut_end: Option<i64>) -> Option<String> {
     let theirs = cut_end? - t.start;
     let ours = cut_frames(edit, t.fps);

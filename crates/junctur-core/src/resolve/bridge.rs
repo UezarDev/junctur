@@ -1,4 +1,4 @@
-//! Talking to the Junctur script running inside Resolve (5g): a request file in the mailbox, the
+//! Talking to the Junctur script running inside Resolve: a request file in the mailbox, the
 //! answer in `Fusion.prefs` ([`super::reply`]). One request at a time, since the mailbox holds one
 //! file. The waiting is a loop over a "read the prefs" function so it is tested without Resolve.
 

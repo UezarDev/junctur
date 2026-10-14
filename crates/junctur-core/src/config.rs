@@ -1,13 +1,6 @@
-//! The user's settings: the optional config file (the file named by `JUNCTUR_CONFIG`, else
-//! `junctur/config.json` in the OS config folder) and the pipeline options `junctur analyze` and the
-//! app both start from ([`analysis_options`]); the app's Settings dialog writes it ([`save`], 2i), the
-//! CLI only reads it. A missing default file means defaults; a broken file,
-//! or a `JUNCTUR_CONFIG` that names nothing, is an error, so a typo never silently falls back to a
-//! different model.
-//!
-//! The engine itself never reads these: [`crate::pipeline::run`] takes its options, and a caller that
-//! wants the user's asks for them here. Moved from the CLI (2d) so the app builds its analysis from
-//! the same rules instead of a copy.
+//! The user's config file (`JUNCTUR_CONFIG`, else `junctur/config.json` in the OS config folder)
+//! and the pipeline options the CLI and the app both start from. A broken or named-but-missing file
+//! is an error, so a typo never silently falls back to a different model.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -25,27 +18,21 @@ pub struct Config {
     /// Whisper model used when the command line names none (`auto` when this is unset too).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub whisper_model: Option<ModelPref>,
-    /// The caption settings of a recording whose edit list has none of its own (2i, [`captions`]).
+    /// The caption settings of a recording whose edit list has none of its own ([`captions`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub captions: Option<Captions>,
-    /// The word list Whisper is told before every chunk (5h, [`crate::wordlist`]): names and terms
-    /// to spell the user's way. Read when a transcription starts, so a change applies to the next.
+    /// Names and terms Whisper is told before every chunk ([`crate::wordlist`]); read when a
+    /// transcription starts, so a change applies to the next.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub words: Vec<String>,
-    /// The transcript panel flags a word for review (5o) when Whisper's lowest token probability in
-    /// it is under this many percent; 0 flags none. Unset: [`FLAG_BELOW`]. Only the app reads it.
-    /// Read as any whole number, so a hand-typed 300 reads as 100 rather than making the whole file
-    /// an error and taking every other setting with it.
+    /// Flag a word for review when its lowest token probability is under this many percent; 0 flags
+    /// none. Any whole number reads (300 clamps to 100), so one bad value cannot break the file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flag_below: Option<u64>,
 }
 
-/// The default of [`Config::flag_below`], in percent; the page's own fallback before it reads the
-/// settings is 0 (`App.svelte`), not this. Measured on 4 min 40 s of the sample recording
-/// (large-v3-turbo, 628 words, 5o): under 25 % fall 4.6 % of the words, about one in twenty, and
-/// among them nearly every word that reads as a misheard name or a made-up one (`WDuel?` at 6 %,
-/// `Waystuff`, `fuoco`, `flasho`, `Arokeret` from 16 to 24 %); 30 % would add a `Wen` (Gwen?) at
-/// 28 % and flag 6.8 %. The mean under 25 % flags 1.6 % and none of those (their means are 40 to 74 %).
+/// The default of [`Config::flag_below`], in percent: flags about one word in twenty, nearly all
+/// of them misheard or made-up names.
 pub const FLAG_BELOW: u8 = 25;
 
 impl Config {
@@ -56,7 +43,7 @@ impl Config {
 }
 
 /// The user's Junctur folder in the OS config folder (`%APPDATA%\junctur`), where the config file,
-/// the voices (5b) and the app's recent recordings (2d) live; `None` when there is no config folder.
+/// the voices and the app's recent recordings live; `None` when there is no config folder.
 pub fn folder() -> Option<PathBuf> {
     std::env::var_os("APPDATA")
         .or_else(|| std::env::var_os("XDG_CONFIG_HOME"))
@@ -71,10 +58,9 @@ pub const FILES: [(&str, &str); 2] = [
     ("voices.json", voices::ENV),
 ];
 
-/// Takes into [`folder`] those of `files` (name, overriding variable) that a packaged app's hidden copy
-/// of it holds and it lacks (2f, [`hidden`]), so settings and voices saved from a Claude-launched run
-/// reach every run. A file whose variable is set is not the folder's and is left alone. Called once at
-/// startup by the CLI and the app, never by a path lookup.
+/// Takes into [`folder`] those of `files` (name, overriding variable) that a packaged app's hidden
+/// copy holds and it lacks ([`hidden`]), so settings saved from a sandboxed run reach every run.
+/// A file whose variable is set is left alone. Called once at startup, never by a path lookup.
 pub fn adopt_hidden(files: &[(&str, &str)]) {
     let Some(folder) = folder() else {
         return;
@@ -147,7 +133,7 @@ pub fn whisper_model(
     }
 }
 
-/// The model and word list a transcription runs with (5h): the model as [`whisper_model`] says; the
+/// The model and word list a transcription runs with: the model as [`whisper_model`] says; the
 /// word list is the config file's, empty when an explicit model meets a file that cannot be read
 /// (that file cannot block the choice, and its list is not known).
 fn transcription(flag: Option<&str>, cfg: Result<Config>) -> Result<(ModelPref, Vec<String>)> {
@@ -246,7 +232,7 @@ mod tests {
     fn typos_are_errors() {
         assert!(parse(br#"{"whisper_model":"large-v4"}"#).is_err());
         assert!(parse(br#"{"whisper_modle":"large-v3"}"#).is_err());
-        // PR #1's `models_dir` is not supported: models live in the cache folder.
+        // `models_dir` is not supported: models live in the cache folder.
         assert!(parse(br#"{"models_dir":"D:/m"}"#).is_err());
     }
 
@@ -341,7 +327,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// 5o: the flag threshold is read, defaults when unset, and is not written unset.
+    /// The flag threshold is read, defaults when unset, and is not written unset.
     #[test]
     fn the_flag_threshold_reads_and_defaults() {
         assert_eq!(parse(b"{}").unwrap().flag_below(), FLAG_BELOW);
@@ -349,7 +335,7 @@ mod tests {
         assert_eq!((c.flag_below, c.flag_below()), (Some(25), 25));
         assert_eq!(parse(br#"{"flag_below":0}"#).unwrap().flag_below(), 0);
         assert_eq!(parse(br#"{"flag_below":250}"#).unwrap().flag_below(), 100);
-        // Past a byte too (repair): the rest of the file still reads.
+        // Past a byte too: the rest of the file still reads.
         let c = parse(br#"{"flag_below":300,"words":["Uezar"]}"#).unwrap();
         assert_eq!((c.flag_below(), c.words.len()), (100, 1));
         assert!(parse(br#"{"flag_below":-1}"#).is_err());

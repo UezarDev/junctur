@@ -1,7 +1,6 @@
 /**
- * Where an analysis run stands, for the three places that show it (2h): the Properties tab, the
- * chip on the picture and the start window's rows. One place for the step names and the
- * arithmetic, which 2g had as a regex on the pipeline's log line in each of them.
+ * Where an analysis run stands, for the Properties tab, the chip on the picture and the start
+ * window's rows: one place for the step names and the arithmetic.
  */
 import type * as api from "./api";
 
@@ -39,20 +38,20 @@ export function whole(steps: api.Step[]): number | null {
   return percent({ stage: "", track: 0, at: steps.reduce((n, s) => n + Math.min(s.of, s.at), 0), of });
 }
 
-/** A run is waiting or running, on either of its lanes (2j). */
+/** A run is waiting or running, on either of its lanes. */
 export function busy(p: api.Progress | null): boolean {
   return p?.phase === "queued" || p?.phase === "running" || p?.phase === "waiting";
 }
 
 /** Where a run is, as a number that only grows through its life: running again after waiting to
- * transcribe is later than waiting (2j), so an older event answered late never moves it back. */
+ * transcribe is later than waiting, so an older event answered late never moves it back. */
 export function rank(p: api.Progress | null): number {
   if (!p) return 0;
   if (p.phase === "running") return p.listed ? 4 : 2;
   return { queued: 1, waiting: 3, done: 5, failed: 5 }[p.phase];
 }
 
-/** Whether the transcription lane holds `file` paused (2k): `pausing` while it finishes its chunk,
+/** Whether the transcription lane holds `file` paused: `pausing` while it finishes its chunk,
  * `paused` once stopped; null when it is not the one transcribing or the lane is not paused. */
 export function paused(lane: api.Transcription | null, file: string | null | undefined): "pausing" | "paused" | null {
   if (!lane?.paused || !file || lane.jobs[0]?.file !== file) return null;

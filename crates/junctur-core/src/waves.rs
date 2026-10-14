@@ -1,14 +1,6 @@
-//! Every audio track's loudness over time, for the app's track lanes (2g): a byte per track per
-//! [`HOP`] seconds, the hop's peak on a -60..0 dBFS scale.
-//!
-//! A module of its own, not part of the pipeline: the lanes want every track (the game, a mix next
-//! to the mics), while the `speech` stage's envelope ([`crate::pipeline::envelope`]) is the loudest
-//! speech track per 10 ms, made for snapping cuts; and nothing in the CLI needs waveforms, so the
-//! stages `junctur analyze` runs and `jobs.json` lists stay as they were. One ffmpeg decodes every
-//! track at once ([`PcmReader::merged`]) at 8 kHz, plenty for a peak per 20 ms.
-//!
-//! Kept in the project folder as [`FILE`] (a header and the bytes, hop by hop: every track's byte for
-//! hop 0, then hop 1, ...), written whole once the read finishes; 30 h of 4 tracks is 21.6 MB.
+//! Every audio track's loudness for the app's track lanes: a byte per track per [`HOP`], the hop's
+//! peak on a -60..0 dBFS scale. Not a pipeline stage: the lanes want every track, the CLI none.
+//! Kept as [`FILE`]: a 16-byte header, then every track's byte for hop 0, then hop 1, ...
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -219,11 +211,9 @@ pub fn save(dir: &Path, w: &Waves) -> Result<()> {
     Ok(written?)
 }
 
-/// Reads the peaks of audio tracks `0..tracks` of `file` from start to `duration` seconds when
-/// known (the recording's length: a track that ends early is padded with silence, so it never cuts
-/// the others short; unknown, every track stops with the shortest), handing each new stretch (whole
-/// hops, hop-major) to `more` as it is decoded. Keeps nothing itself: the caller holds the one copy. Returns the hops read, or `Ok(None)` when `stop`
-/// was set before the end (the decoder is killed). A final partial hop counts as a hop.
+/// Reads the peaks of tracks `0..tracks` of `file` to `duration` seconds (a short track is padded
+/// with silence; unknown, all stop with the shortest), handing each new stretch of whole hops to
+/// `more`. Returns the hops read, or `Ok(None)` when `stop` was set before the end.
 pub fn read(
     file: &Path,
     tracks: usize,
@@ -328,7 +318,7 @@ mod tests {
         assert_eq!(Waves::default().hops(), 0);
     }
 
-    /// `columns` as it was before the pyramid: every hop of every column read.
+    /// `columns` without the pyramid: every hop of every column read.
     fn scanned(w: &Waves, from: f64, to: f64, columns: usize) -> Vec<u8> {
         let flat = Waves {
             tracks: w.tracks,

@@ -1,6 +1,6 @@
 //! A recording's Junctur project as the app shows it: the same folder `junctur status` reads
 //! (`pipeline::Project::open` with the default cache), with each stage's state and whether the
-//! transcript and edit list exist. The app runs the stages itself in `analysis` (2d).
+//! transcript and edit list exist. The app runs the stages itself in `analysis`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -112,7 +112,7 @@ fn summary(p: &Project) -> Result<EditSummary, String> {
     s
 }
 
-/// A recent recording's line on the start window (2g's S): how long it is and where its analysis
+/// A recent recording's line on the start window: how long it is and where its analysis
 /// stands. Asked per row after the list is drawn, so the list never waits on its projects.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -285,7 +285,7 @@ mod tests {
             times: Vec::new(),
             windows: vec![],
         };
-        // What the status said before the parse was kept: the list read and parsed afresh.
+        // The list read and parsed afresh, with no kept parse.
         let afresh = || match p.edit() {
             Ok(e) => (
                 Some(EditSummary {

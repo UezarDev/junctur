@@ -1,15 +1,7 @@
-//! The native surface mpv draws on: a child window of the app window, under the WebView.
-//!
-//! A child window rather than the app window itself, because WebView2 already owns the app
-//! window's client area; a sibling placed at the bottom of the z-order shows through wherever the
-//! (transparent) page draws nothing. It ignores input (`HTTRANSPARENT`, disabled) so every click
-//! and drop reaches the WebView above it, and it paints nothing itself: the render thread does.
-//!
-//! GL presents by blitting into the redirection surface the app window shares with its children,
-//! so two clip rules had to go (each alone left the video hidden in the launch checks): the
-//! surface has no `WS_CLIPSIBLINGS`, or wry's container window above it (which paints nothing)
-//! would clip away every pixel; and the app window gets `WS_CLIPCHILDREN`, or tao's background
-//! fill paints over the video.
+//! The native surface mpv draws on: a child window under the WebView (which owns the app window's
+//! client area), ignoring input so every click reaches the page. GL blits into a surface shared
+//! with siblings, so it has no `WS_CLIPSIBLINGS` and the app window gets `WS_CLIPCHILDREN`, or the
+//! video is clipped or painted over.
 
 use std::sync::Once;
 
@@ -66,8 +58,7 @@ impl Surface {
                 RegisterClassW(&wc);
             });
             // tao's window lacks WS_CLIPCHILDREN (see the module comment). No SWP_FRAMECHANGED:
-            // that is for frame styles, and WS_CLIPCHILDREN only changes how the client area is
-            // clipped, which Windows reads at the next paint.
+            // clipping is read at the next paint.
             let style = GetWindowLongPtrW(parent as HWND, GWL_STYLE);
             SetWindowLongPtrW(parent as HWND, GWL_STYLE, style | WS_CLIPCHILDREN as isize);
             let hwnd = CreateWindowExW(

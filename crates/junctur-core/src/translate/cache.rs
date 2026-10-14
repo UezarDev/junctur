@@ -1,14 +1,6 @@
-//! The translations made for a recording, kept in its project folder (`translations.json`), so a
-//! second export, a send to Resolve or the preview never translates a sentence again. Keyed by the
-//! target language and the sentence as the captions would show it untranslated: a cut that changes
-//! a sentence's words makes a new key, and the old one stays, so undoing the cut finds it again.
-//! Each keeps the language it was translated from: a sentence heard again in another language (a
-//! new transcript) is made again ([`Translations::needs`]), while showing one needs only its text,
-//! which is all the cue cutting has.
-//!
-//! The CLI and the app may both translate one recording at once, so a save merges what is on disk
-//! with its own, through a temporary file of its own; a file that is there but does not read is
-//! never written over ([`Translations::read`]).
+//! A recording's translations (`translations.json`), keyed by target language and untranslated
+//! sentence, so undoing a cut finds the old one again. The CLI and the app may translate at once,
+//! so a save merges with what is on disk, and an unreadable file is never written over.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -21,7 +13,7 @@ use crate::{models, Error, Result};
 pub const FILE: &str = "translations.json";
 
 /// Bump when what a translation is made from changes (the sentence rules, the decoding), so old
-/// ones stop being used. 2: each keeps its source language (5k repair).
+/// ones stop being used.
 const VERSION: u32 = 2;
 
 /// A sentence's translation and the language it was translated from.

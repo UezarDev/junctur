@@ -52,8 +52,8 @@ pub struct Diarization {
     pub turns: Vec<Turn>,
 }
 
-/// Which embeddings a cached window or a remembered voiceprint holds: CAM++ on the CPU (5r). Part of
-/// [`hearing_settings`] and of a voiceprint's model key, so ones made before 5r are not trusted.
+/// Which embeddings a cached window or a remembered voiceprint holds: CAM++ on the CPU. Part of
+/// [`hearing_settings`] and of a voiceprint's model key, so ones made otherwise are not trusted.
 pub const EMBEDDINGS_MARK: &str = "cpu";
 
 pub struct Embedder {
@@ -62,9 +62,8 @@ pub struct Embedder {
 }
 
 impl Embedder {
-    /// Always on the CPU (5r): ONNX Runtime's CUDA provider gives CAM++ embeddings that agree with the
-    /// CPU's at only 0.1 to 0.4 cosine for the same input, whatever its options, so on the GPU every
-    /// window became its own speaker. No device argument, so no caller can put it back there.
+    /// Always on the CPU: ONNX Runtime's CUDA provider gives CAM++ embeddings far from the CPU's for
+    /// the same input, so every window would be its own speaker. No device argument on purpose.
     pub fn open(model: &Path) -> Result<Self> {
         Ok(Self {
             session: runtime::open_on_cpu(model, None)?,
@@ -105,7 +104,7 @@ impl Embedder {
 
 /// Fixed-length embedding windows over the speech regions. Every window is exactly [`SEGMENT_S`]
 /// long (a short region gets one window centred on it), because on CUDA every new input shape
-/// costs a fresh kernel search: variable lengths made diarization 10x slower than separation.
+/// costs a fresh kernel search.
 pub fn segments(regions: &[Region]) -> Vec<Region> {
     let mut out: Vec<Region> = Vec::new();
     for r in regions {
@@ -133,7 +132,7 @@ pub fn hearing_settings() -> String {
     )
 }
 
-/// What one read of a track gives the `speakers` stage (5b): the fixed embedding windows over its
+/// What one read of a track gives the `speakers` stage: the fixed embedding windows over its
 /// speech and their unit embeddings, in the same order, and, when a segmentation model was given,
 /// where two people talk at once. Kept whole (not just the labels) so speakers can be labelled again
 /// from it, for a newly enrolled voice, without reading the recording again.
@@ -188,7 +187,7 @@ impl Clips<'_> {
 /// Embeds every [`segments`] window of a 16 kHz mono stream (which starts at time 0) over its
 /// speech `regions` and, with `segmenter`, finds the overlapping talk, all in one read: both kinds
 /// of clip are taken in order of start from one buffer, so the recording is decoded once. `heard`
-/// is told each clip's start (seconds) as it is taken: how far through the stream this is (2h).
+/// is told each clip's start (seconds) as it is taken: how far through the stream this is.
 pub fn analyze(
     reader: &mut PcmReader,
     regions: &[Region],
@@ -266,7 +265,7 @@ fn segment_all(seg: &mut Segmenter, clips: &mut Vec<(usize, Vec<f32>)>) -> Resul
 }
 
 /// Diarize a 16 kHz mono stream (which starts at time 0) over its speech `regions`, reading it
-/// once: 5a's two-pass clustering, no voiceprints, no overlap (what `junctur separate` reports).
+/// once: two-pass clustering, no voiceprints, no overlap (what `junctur separate` reports).
 pub fn diarize(
     reader: &mut PcmReader,
     regions: &[Region],
@@ -290,7 +289,7 @@ fn embed_all(embedder: &mut Embedder, clips: &mut Vec<Vec<f32>>) -> Result<Vec<V
 /// Turns from windows and their labels, in window order: adjacent windows of one speaker joined,
 /// and where a window reaches into the previous one of another speaker (a short region's window is
 /// centred on it and can), both stop at the middle of the overlap. Windows hold one voice each, so
-/// turns made from them never overlap; only [`Overlap`]s put two speakers at one instant (5b).
+/// turns made from them never overlap; only [`Overlap`]s put two speakers at one instant.
 pub fn turns(segs: &[Region], labels: &[usize]) -> Vec<Turn> {
     let mut turns: Vec<Turn> = Vec::new();
     for (s, &l) in segs.iter().zip(labels) {
@@ -367,10 +366,8 @@ mod tests {
         Region { start, end }
     }
 
-    /// 5r: the embeddings hearing makes must be CAM++'s, which the CPU gives. Through
-    /// [`Embedder::open`], batched and one at a time, against a plain CPU session on the same
-    /// features. In a `cuda` build the embedder on the CUDA provider gave 0.39 here (and the
-    /// embedder can only open through [`runtime::open_on_cpu`] since).
+    /// The embeddings hearing makes must be CAM++'s, which the CPU gives: [`Embedder::open`],
+    /// batched and one at a time, against a plain CPU session on the same features.
     #[test]
     #[ignore = "downloads models"]
     fn embeddings_agree_with_the_cpu_reference() {

@@ -9,21 +9,8 @@
 </script>
 
 <script lang="ts">
-  // The Whisper model picker in Settings (2v). It was a native select listing the names the app
-  // sends ("large-v3 q5_0"); a native select can show neither an icon nor a second line, so this is
-  // a select-only combobox (the WAI-ARIA pattern): a button showing the chosen model, opening a
-  // listbox of every model with its family's icon, a readable name and a line saying how fast, how
-  // big or where it runs. Names and lines come from `src/settings.rs` (`ModelChoice`); the icons
-  // are drawn here, one per family.
-  //
-  // Focus stays on the button while the list is open (`aria-activedescendant` names the highlighted
-  // option), as a native select does, so Tab leaves from where it entered. Keys: Down, Up, Enter,
-  // Space or Alt+Down open it, while Home, End or a letter change the model without opening it, as a
-  // native select's do; in it Up/Down/Home/End move, a letter jumps to the next name starting
-  // with it, Enter or Space picks and closes, Tab picks and moves on (as the pattern says), Escape
-  // closes the list and never the dialog round it. The list lives in `<body>` and takes the shared
-  // popup slot (floating.svelte.ts): the dialog scrolls and would clip it, and opening it closes any
-  // (i) tip, as an (i) opening closes it.
+  // The Whisper model picker: a select-only combobox (WAI-ARIA), since a native select can show
+  // neither an icon nor a second line. Focus stays on the button while open, as a native select's.
   import { place, portal, release, slot } from "./floating.svelte";
 
   let {
@@ -217,11 +204,8 @@
   </svg>
 </button>
 {#if open}
-  <!-- Presses are kept from taking focus, so it stays on the button and its blur does not close the
-       list before the click lands. Both events: Chromium moves focus on mousedown's default action,
-       which cancelling pointerdown alone does not reliably stop. A click or hover is read here by
-       the option's index rather than on each option: focus never goes to an option (the button's keys
-       drive the list), so options carry no tabindex or key handler of their own. -->
+  <!-- Presses are kept from taking focus, so the button's blur does not close the list before the
+       click lands; both events, as Chromium moves focus on mousedown's default action. -->
   <div
     use:portal
     bind:this={list}

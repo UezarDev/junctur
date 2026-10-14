@@ -1,17 +1,6 @@
 <script lang="ts">
-  // Editing controls on the picture (2g, mock B, replacing 2c's fixed edit row): one box of one size
-  // (layout.ts `TOOLS`) in the picture's bottom-right corner, clear of the captions (2r; 2n had it
-  // centred over the lanes, where it hid the cuts, and 2g beside the selection or the playhead).
-  // Every state draws in the same two rows, so no label, timecode or button text moves anything:
-  // what it acts on, the whole-stretch button's slot, Undo and Redo; then the frame nudges or the
-  // selection's buttons. With a selection (a stretch of the lanes or timeline, or transcript words
-  // while the Transcript tab is not showing): what is selected, Cut, Keep and ×. Words selected with
-  // the Transcript tab showing have their controls at its bottom (WordBar, 2p, with the one-click
-  // speakers that replaced 5b's Remember voice… here), so this box then only says so. With none: the
-  // stretch under the playhead (a kept range or a cut) with buttons that nudge either end by a frame
-  // (shift: ten) and cut or keep it whole. Every action is one edit the engine saves to
-  // edit.junctur at once. Its notices (an outside change, a backup made) float above it. The
-  // keyboard does the same without it (Delete, K, Ctrl+Z/Y).
+  // Editing controls on the picture: one fixed-size box (layout.ts `TOOLS`) in its bottom-right
+  // corner, clear of the captions. Every state draws in the same two rows, so no text moves it.
   import * as api from "./api";
   import * as sel from "./selection";
   import { nudge, under } from "./nudge";
@@ -30,7 +19,7 @@
     player: api.PlayerState | null;
     edit: api.EditState | null;
     selection: sel.Selection | null;
-    /** The Transcript tab is showing, with its own bar for a selection of words (2p). */
+    /** The Transcript tab is showing, with its own bar for a selection of words. */
     wordsShown?: boolean;
     /** Where the box's top-left goes (layout.ts `floatAt`). */
     at: { left: number; top: number; scale: number };
@@ -57,7 +46,7 @@
   function move(edge: "start" | "end", dir: number, e: MouseEvent) {
     if (!stretch || !edit) return;
     const step = nudge(stretch, edge, dir * (e.shiftKey ? 10 : 1), edit.totalFrames);
-    // 2w: the words beside the edge move with it.
+    // The words beside the edge move with it.
     const from = edge === "start" ? stretch.start : stretch.end;
     if (step) call(() => api.moveEdge(step, from));
   }

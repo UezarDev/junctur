@@ -1,12 +1,6 @@
-//! Speech to text with word timestamps, only over speech regions, resumable chunk by chunk.
-//!
-//! Every finished chunk is appended to `transcript.partial.jsonl` in the project folder before the
-//! next starts, so an interrupted run (a 30h stream is hours of Whisper) loses one chunk at most.
-//! The finished transcript is `transcript.json`, plus a plain `transcript.txt` to read.
-//!
-//! The recording is heard in 5-minute pieces (2j, [`PIECE`]): every track's chunks in one piece
-//! before any of the next, so the editor can take the transcript a piece at a time ([`so_far`])
-//! while the rest is heard.
+//! Speech to text with word timestamps over speech regions. Each finished chunk is appended to
+//! `transcript.partial.jsonl`, so an interrupted run loses one chunk at most, and the recording is
+//! heard in [`PIECE`]s so the editor can take the transcript a piece at a time ([`so_far`]).
 
 mod audio;
 mod chunks;
@@ -78,13 +72,11 @@ pub struct TranscribeOptions {
     pub device: DevicePref,
     pub languages: Languages,
     pub force: bool,
-    /// Hear the recording again (5aa: the Correct button): an interrupted run is not resumed and the
-    /// finished transcript not reused, but it stays until the new one replaces it, unlike `force`,
-    /// which deletes it first: a run stopped early still leaves the words it had.
+    /// Hear the recording again without resuming or reusing, but unlike `force` keep the old
+    /// transcript until the new one replaces it, so a run stopped early still leaves its words.
     pub again: bool,
-    /// The user's word list (5h), told to Whisper before every chunk. Neither in the partial's
-    /// header nor in [`answers`]: a changed list applies to the next run and never restarts or
-    /// outdates one.
+    /// The user's word list, told to Whisper before every chunk. Not in the partial's header nor in
+    /// [`answers`], so a changed list applies to the next run and never restarts or outdates one.
     pub words: Vec<String>,
 }
 
@@ -106,7 +98,7 @@ impl Header {
     }
 }
 
-/// 2: the header names the model (1f). A version-1 partial has no model, so it is not resumed.
+/// A version-1 partial names no model, so it is not resumed.
 const VERSION: u32 = 2;
 
 /// Whether a finished transcript answers `opts`. `Auto` takes whatever model made it (rerunning
@@ -125,7 +117,7 @@ pub fn answers(model: &str, languages: &[String], opts: &TranscribeOptions) -> b
 /// What a project's finished transcript was made with: its model and languages; `None` when there
 /// is none, `Some(Err)` when there is one that cannot be read (a run would make it again). Reads
 /// the file without building its segments (a 30 h transcript is tens of MB), for asking whether it
-/// is out of date (2d).
+/// is out of date.
 pub fn made_with(project: &Path) -> Option<std::result::Result<(String, Vec<String>), String>> {
     #[derive(Deserialize)]
     struct Made {
@@ -167,9 +159,8 @@ pub fn interrupted(project: &Path) -> bool {
     partial_path(project).is_file()
 }
 
-/// Seconds of the recording heard as one piece (2j): Uezar's "5 minutes at a time". Every track's
-/// chunks that start in a piece are transcribed before any chunk of the next one, so the first
-/// piece is whole minutes in, not once track 1 is done hours later.
+/// Seconds of the recording heard as one piece: every track's chunks that start in a piece are
+/// transcribed before any of the next, so the first piece is whole minutes in, not hours.
 pub const PIECE: f64 = 300.0;
 
 /// The piece a chunk starting at `t` seconds belongs to.
@@ -180,7 +171,7 @@ pub(crate) fn piece(t: f64) -> u64 {
 /// The chunks a run in progress (or an interrupted one) has finished, from its partial file, sorted
 /// as the finished transcript sorts them, so a word keeps its place when the whole one replaces
 /// this; `None` when there is no readable partial. A torn last line is dropped, as a resume drops
-/// it. For the editor while the rest is transcribed (2j).
+/// it. For the editor while the rest is transcribed.
 pub fn so_far(project: &Path) -> Option<Vec<Segment>> {
     let (_, mut segs) = read_partial(&partial_path(project))?;
     sort(&mut segs);
@@ -268,16 +259,14 @@ fn sort(segs: &mut [Segment]) {
     segs.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.track.cmp(&b.track)));
 }
 
-/// What a run tells its caller as it goes besides the log: how far each track's transcript reaches
-/// ([`Reached`]; every track at the start and a chunk's track after each chunk, 2h), and where the
-/// transcript is whole on every track (2j): `transcribed(t)` says every word before `t` seconds is
-/// in, at the start of a run with work to do and each time `t` enters a new [`PIECE`]. Not at the
-/// end: the finished transcript says that. `between` is called before Whisper loads and after each
-/// chunk while chunks remain, the only points a run can stop at (a chunk is one Whisper call); it
-/// may block, and the run goes on when it returns (the app's pause, 2k).
+/// What a run tells its caller as it goes, besides the log.
 pub struct Reports<'a> {
+    /// How far a track's transcript reaches ([`Reached`]): every track at the start, then a chunk's.
     pub reach: &'a mut dyn FnMut(usize, f64),
+    /// Every word before `t` seconds is in: at the start, and each time `t` enters a new [`PIECE`].
     pub transcribed: &'a mut dyn FnMut(f64),
+    /// Called before Whisper loads and between chunks, the only points a run can stop at; it may
+    /// block (the app's pause), and the run goes on when it returns.
     pub between: &'a mut dyn FnMut(),
 }
 
@@ -301,9 +290,8 @@ pub fn transcribe(
         between,
     } = reports;
     let partial = partial_path(project);
-    // One transcription of a recording at a time across processes (2j repair): the app resumes an
-    // unfinished one on open, which must not start a second Whisper on the partial a `junctur
-    // analyze` is writing. Held until this returns; the OS lets go if the process dies.
+    // One transcription of a recording at a time across processes, so the app resuming on open never
+    // runs a second Whisper on a partial the CLI is writing. The OS lets go if the process dies.
     let _mine = Transcribing::claim(project)?;
     if opts.force {
         let _ = std::fs::remove_file(&partial);
@@ -452,7 +440,7 @@ impl Transcribing {
 }
 
 /// Whether another process (or another run here) is transcribing project folder `project` now:
-/// its lock is held. For the app, which resumes an unfinished transcription on open (2j repair).
+/// its lock is held. For the app, which resumes an unfinished transcription on open.
 pub fn transcribing_elsewhere(project: &Path) -> bool {
     match Transcribing::claim(project) {
         Ok(_) => false,
@@ -464,7 +452,7 @@ pub fn transcribing_elsewhere(project: &Path) -> bool {
 /// Every chunk of `sources` in the order Whisper hears them: piece by piece ([`PIECE`]), within a
 /// piece track by track (in `sources`' order), within a track in time. Track by track inside a
 /// piece keeps one decoder per track per piece (`audio::read` starts one per run of a track's
-/// groups); chunk by chunk across tracks would seek for every chunk, the cost 1e removed.
+/// groups); chunk by chunk across tracks would seek for every chunk.
 fn order(sources: &[Source], total: f64) -> Vec<(usize, Chunk)> {
     let mut work: Vec<(usize, usize, Chunk)> = sources
         .iter()
@@ -618,7 +606,7 @@ impl Run<'_> {
     }
 }
 
-/// What the log says about the word list in Whisper's prompt (5h); nothing without one.
+/// What the log says about the word list in Whisper's prompt; nothing without one.
 fn prompt_line(p: &crate::wordlist::Prompt) -> Option<String> {
     let entries = |n: usize| format!("{n} entr{}", if n == 1 { "y" } else { "ies" });
     match (p.kept, p.left_out.len()) {
@@ -683,12 +671,8 @@ impl<'a> Progress<'a> {
     }
 }
 
-/// How far each track's transcript reaches: the start of its earliest chunk not transcribed yet
-/// (everything before it is done, silence included), or [`f64::INFINITY`] once its last chunk is,
-/// meaning the end of the track: only the caller knows the track's own length, which can differ
-/// from the recording's. Not the latest chunk's end: a resumed run can have later chunks done than
-/// earlier ones, and a track that goes quiet at 80 % would never read more than 80 %. Not a chunk
-/// count: a chunk is 1 to 28 s.
+/// How far each track's transcript reaches: the start of its earliest chunk not done yet, or
+/// [`f64::INFINITY`] (the track's end, whose length only the caller knows) once all are.
 struct Reached {
     tracks: Vec<TrackChunks>,
 }
@@ -739,7 +723,7 @@ impl Reached {
             .collect()
     }
 
-    /// Where the transcript is whole on every track: the least of their positions (2j). Every word
+    /// Where the transcript is whole on every track: the least of their positions. Every word
     /// still to come starts at or after it, as its chunk does. Infinite when every track is done.
     fn whole(&self) -> f64 {
         self.tracks
@@ -776,8 +760,8 @@ fn read_partial(path: &Path) -> Option<(Header, Vec<Segment>)> {
 }
 
 /// Write the partial file afresh (`header`, then the chunks already done) and open it for
-/// appending. Rewritten rather than appended to: a killed run leaves a torn last line, and the next
-/// chunk appended to it shared its line, so both were lost at the next resume (1d).
+/// appending. Rewritten rather than appended to: a killed run leaves a torn last line, which the
+/// next chunk would share and be lost with.
 fn open_partial(path: &Path, header: &Header, done: &[Segment]) -> Result<std::fs::File> {
     let mut body = serde_json::to_string(header)? + "\n";
     for seg in done {
@@ -817,7 +801,7 @@ impl Transcript {
     }
 
     /// Every word with its track in time order, ties in transcript order (a stable sort by start):
-    /// the order the editor's words are in and `edit::Fixes` reads words in (5w).
+    /// the order the editor's words are in and `edit::Fixes` reads words in.
     pub fn in_order(&self) -> Vec<(usize, &Word)> {
         let mut out: Vec<(usize, &Word)> = self
             .segments
@@ -927,7 +911,7 @@ mod tests {
         let (_, segs) = read_partial(&p).unwrap();
         append(&segs);
         assert_eq!(read_partial(&p).unwrap().1, vec![seg.clone(), next]);
-        // A 1b partial (version 1, no model) is not resumed.
+        // A version-1 partial (no model) is not resumed.
         std::fs::write(&p, "{\"version\":1,\"languages\":\"es+en\"}\n").unwrap();
         assert!(read_partial(&p).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
@@ -1173,7 +1157,7 @@ mod tests {
             model,
             ..Default::default()
         };
-        // Auto keeps whatever made it, a 1b q5_0 transcript included.
+        // Auto keeps whatever made it, a q5_0 transcript included.
         assert!(reusable(&t("large-v3-q5_0"), &opts(ModelPref::Auto)));
         assert!(reusable(
             &t("large-v3-turbo"),
@@ -1192,8 +1176,8 @@ mod tests {
 
     #[test]
     fn again_drops_a_partial_and_never_reuses_the_finished_transcript() {
-        // 5aa: the Correct button hears the recording again. With nothing to hear (no sources) the
-        // run is a finish without Whisper, which shows what it starts from.
+        // With nothing to hear (no sources) the run is a finish without Whisper, which shows what
+        // it starts from.
         let dir = std::env::temp_dir().join(format!("junctur-again-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

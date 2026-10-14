@@ -9,7 +9,7 @@ pub struct Languages {
 }
 
 impl Default for Languages {
-    /// The user's streams: Spanish, with English mixed in.
+    /// Spanish, with English mixed in.
     fn default() -> Self {
         Self {
             allowed: vec!["es".into(), "en".into()],

@@ -1,20 +1,6 @@
-//! Words the user fixed (5h): a misheard word's right spelling, kept in the edit list as `fix
-//! <track> <start> <text>` and shown wherever the word is (the transcript panel, the caption
-//! preview, the SRT).
-//!
-//! In the edit list because a fix is the user's edit: saved with every other edit, kept through
-//! re-cuts, backed up before a list is replaced. Not beside the transcript, which is a cache a
-//! re-run replaces whole. A word is named by its track and its start to the millisecond (the list's
-//! precision): stable while a transcript grows piece by piece (2j) and the same in the app and the
-//! CLI, where word indices are not. And by which of the words starting in that millisecond on that
-//! track it is (5w): Whisper gives runs of short words one start ("en" and "él" both at 54.944), and
-//! a fix keyed by the millisecond alone showed on all of them and could not be taken from one.
-//!
-//! A fix can also cover a run of words (5x: a whole sentence retyped as one edit), a span from its
-//! first word to its last on one track. Which words it covers is a comparison of keys, not a lookup
-//! of words: a track's words in key order (millisecond, then `nth`) are its words in time order, so a
-//! word is in a span when its key lies between the span's ends, whatever words the transcript holds
-//! now (a re-transcribed word that moved, a last word that is gone).
+//! Words the user fixed, kept in the edit list (not the transcript, a cache a re-run replaces) as
+//! `fix <track> <start> <text>`. A word is named by track, start to the millisecond and `nth` among
+//! that millisecond's words, as indices are not stable; a span covers every key between its ends.
 
 use std::collections::HashMap;
 
@@ -25,7 +11,7 @@ use crate::transcribe::Word;
 /// Longest fixed text of one word, in characters: a word or a short phrase.
 pub const MAX_FIX: usize = 100;
 
-/// Longest fixed text of a span (5x), in characters: a sentence or a few.
+/// Longest fixed text of a span, in characters: a sentence or a few.
 pub const MAX_SPAN: usize = 1000;
 
 /// A word as a fix names it, its track aside: its start and which of that millisecond's words it is.
@@ -33,7 +19,8 @@ pub const MAX_SPAN: usize = 1000;
 pub struct WordAt {
     /// In source seconds, as the transcript has it.
     pub start: f64,
-    /// 0 for the first word on its track starting in that millisecond (5w).
+    /// 0 for the first word on its track starting in that millisecond: Whisper gives runs of short
+    /// words one start.
     pub nth: usize,
 }
 
@@ -43,7 +30,7 @@ impl WordAt {
     }
 }
 
-/// One fixed word, or a span of words fixed as one (5x).
+/// One fixed word, or a span of words fixed as one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Fix {
     /// The audio track (0-based) it was heard on.
@@ -51,9 +38,9 @@ pub struct Fix {
     /// Its start in source seconds, as the transcript has it (a span's: its first word's).
     pub start: f64,
     /// Which of the words heard on `track` starting in that millisecond it is, 0 for the first, in
-    /// time order with ties in transcript order (5w; [`Fixes`] counts it).
+    /// time order with ties in transcript order ([`Fixes`] counts it).
     pub nth: usize,
-    /// A span's last word (5x), on the same track; `None` for one word.
+    /// A span's last word, on the same track; `None` for one word.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub through: Option<WordAt>,
     /// What it says.
@@ -76,7 +63,7 @@ impl Fix {
         self.key() == other.key()
     }
 
-    /// Both cover a word in common (5x: a span and a fix inside it, or two spans).
+    /// Both cover a word in common (a span and a fix inside it, or two spans).
     pub fn overlaps(&self, other: &Fix) -> bool {
         let (a, b) = self.ends();
         let (c, d) = other.ends();
@@ -89,7 +76,7 @@ impl Fix {
         (self.track, a, b)
     }
 
-    /// A span of words rather than one (5x).
+    /// A span of words rather than one.
     pub fn is_span(&self) -> bool {
         self.through.is_some()
     }
@@ -104,7 +91,7 @@ fn key(track: usize, start: f64, nth: usize) -> Key {
 }
 
 /// Both starts fall in the same millisecond, as a fix names it: words that do are told apart by
-/// their `nth` (5w).
+/// their `nth`.
 pub fn same_millisecond(a: f64, b: f64) -> bool {
     millis(a) == millis(b)
 }
@@ -124,7 +111,7 @@ pub(super) fn written(start: f64) -> String {
     format!("{sign}{}.{:03}", ms / 1000, ms % 1000)
 }
 
-/// Whether `a` comes after `b` as words on one track do (5x: a span's last word before its first).
+/// Whether `a` comes after `b` as words on one track do (a span's last word before its first).
 pub(super) fn after(a: &WordAt, b: &WordAt) -> bool {
     a.key() > b.key()
 }
@@ -135,7 +122,7 @@ pub fn check_fix(text: &str) -> Result<String, String> {
     check_text(text, MAX_FIX, "a fixed word")
 }
 
-/// As [`check_fix`], for a span's text: at most [`MAX_SPAN`] characters (5x).
+/// As [`check_fix`], for a span's text: at most [`MAX_SPAN`] characters.
 pub fn check_span(text: &str) -> Result<String, String> {
     check_text(text, MAX_SPAN, "a fixed text")
 }
@@ -154,7 +141,7 @@ fn check_text(text: &str, max: usize, what: &str) -> Result<String, String> {
 
 /// Sets the fix of the word heard as `heard` on `track` at `start`, the `nth` starting in that
 /// millisecond, to `text` (through [`check_fix`]); empty text, or the heard text again, removes it.
-/// No other word's fix changes, but a span holding this word goes (5x): one word cannot show two
+/// No other word's fix changes, but a span holding this word goes: one word cannot show two
 /// texts. Kept in time order. Whether anything changed.
 pub fn set_fix(
     fixes: &mut Vec<Fix>,
@@ -168,12 +155,10 @@ pub fn set_fix(
     set_span(fixes, track, at, at, heard, text)
 }
 
-/// Sets the text of the words heard on `track` from `first` to `last` (5x), heard as `heard` (the
-/// words joined by spaces), to `text` (through [`check_span`], or [`check_fix`] for one word): every
-/// fix on the track touching those words goes, the fixes of single words inside them and a span
-/// overlapping them, and one fix takes their place unless `text` is empty or the heard text again
-/// (so an empty text clears the words' fixes). `first == last` is a one-word fix. Kept in time
-/// order. Whether anything changed.
+/// Sets the text of the words heard on `track` from `first` to `last`, heard as `heard`, to `text`
+/// (through [`check_span`], or [`check_fix`] for one word): every fix touching those words goes, and
+/// one fix takes their place unless `text` is empty or the heard text again. Whether anything
+/// changed.
 pub fn set_span(
     fixes: &mut Vec<Fix>,
     track: usize,
@@ -219,10 +204,8 @@ pub fn set_span(
     Ok(*fixes != before)
 }
 
-/// Whether two fixes of `fixes` cover a word in common, which the list's parser refuses (a second line
-/// for one word, a span over a fixed word or another span). For the code that adds fixes in bulk (5aa:
-/// a spread, a carry onto a new transcript) to check before anything is written: a list that would not
-/// read back must never be saved.
+/// Whether two fixes of `fixes` cover a word in common, which the list's parser refuses. Code adding
+/// fixes in bulk checks it before writing: a list that would not read back must never be saved.
 pub fn clash(fixes: &[Fix]) -> bool {
     let mut keys: Vec<_> = fixes.iter().map(Fix::span_keys).collect();
     keys.sort_by_key(|k| (k.0, k.1));
@@ -230,15 +213,9 @@ pub fn clash(fixes: &[Fix]) -> bool {
         .any(|w| w[0].0 == w[1].0 && w[1].1 <= w[0].2)
 }
 
-/// Marks the word heard as `heard` on `track` at `start`, the `nth` starting in that millisecond (5w),
-/// as checked by the user (5o): a fix line with the heard text, so every fix line means "the user
-/// vouched for this word" and the transcript panel flags none of them. Not a line kind of its own: an
-/// older build reads it as a fix that changes nothing, where a new kind would need a format version
-/// it refuses. A word with a fix already is left as it is, and so is a word inside a span (5x): the
-/// span is the user's text for it. Whether anything changed. Being a fix line, it goes the way of
-/// one: the heard text (or nothing) typed into the fix field takes it away ([`set_fix`]) and the
-/// word is flagged again, on purpose, so there is one rule for what that field does whatever the
-/// line was made by; a span set over it takes it away too, and the span vouches for the word.
+/// Marks the word heard as `heard` on `track` at `start` (the `nth` of that millisecond) as checked
+/// by the user: a fix line with the heard text, not a line kind of its own, so older builds still
+/// read the list. A word already fixed or inside a span is left. Whether anything changed.
 pub fn confirm_fix(
     fixes: &mut Vec<Fix>,
     track: usize,
@@ -281,7 +258,7 @@ pub enum Fixed<'a> {
     /// The word's own fix.
     Word(&'a str),
     /// It is one of the words of span `index` (its place in the slice [`Fixes`] was made from),
-    /// which shows `text` in place of all of them (5x).
+    /// which shows `text` in place of all of them.
     Span { index: usize, text: &'a str },
 }
 
@@ -291,7 +268,7 @@ pub enum Fixed<'a> {
 /// and the captions have them), a word to be left out (cut) included.
 pub struct Fixes<'a> {
     by_word: HashMap<Key, &'a str>,
-    /// Per track, its spans in order of their first word (5x).
+    /// Per track, its spans in order of their first word.
     spans: HashMap<usize, Vec<Span<'a>>>,
     /// Per track, the millisecond of the latest word read and how many of its words were read.
     seen: HashMap<usize, (i64, usize)>,
@@ -361,7 +338,7 @@ impl<'a> Fixes<'a> {
 
     /// What the next word, `w` heard on `track`, says on its own, for the tests: its fix, else what
     /// Whisper heard; a word in a span reads as heard. Callers showing words take [`Self::of`], which
-    /// tells a span apart (5x repair: no caller is left to read a span's words as heard by mistake).
+    /// tells a span apart.
     #[cfg(test)]
     pub fn text<'w>(&mut self, track: usize, w: &'w Word) -> &'w str
     where
@@ -417,8 +394,8 @@ mod tests {
         assert!(set_fix(&mut f, 0, 3.0, 0, "a", &"x".repeat(MAX_FIX + 1)).is_err());
     }
 
-    /// 5o: a confirmed word is a fix to its own text; a fixed word stays fixed, and the heard text
-    /// typed in again (5h) takes the confirmation away like any fix.
+    /// A confirmed word is a fix to its own text; a fixed word stays fixed, and the heard text
+    /// typed in again takes the confirmation away like any fix.
     #[test]
     fn a_word_is_confirmed_as_a_fix_to_what_was_heard() {
         let mut f = Vec::new();
@@ -434,7 +411,7 @@ mod tests {
         assert!(confirm_fix(&mut f, 0, 9.0, 0, "  ").is_err());
     }
 
-    /// 5o with 5x: a word inside a span is not confirmed beside it (the span is the user's text for
+    /// A word inside a span is not confirmed beside it (the span is the user's text for
     /// it), and a span set over a confirmed word takes the confirmation into it.
     #[test]
     fn a_confirmation_and_a_span_never_both_name_a_word() {
@@ -451,7 +428,7 @@ mod tests {
         assert!(confirm_fix(&mut f, 0, 4.0, 0, "cuatro").unwrap());
     }
 
-    /// 5o with 5w: confirming one of the words starting in one millisecond confirms that word alone,
+    /// Confirming one of the words starting in one millisecond confirms that word alone,
     /// next to another's fix, and taking it away leaves the other.
     #[test]
     fn a_word_of_those_starting_together_is_confirmed_alone() {
@@ -472,7 +449,7 @@ mod tests {
 
     #[test]
     fn two_fixes_on_one_word_are_found_before_a_list_is_written() {
-        // 5aa repair: the parser refuses such a list, so code adding fixes in bulk checks first.
+        // The parser refuses such a list, so code adding fixes in bulk checks first.
         let span = Fix {
             track: 0,
             start: 1.0,
@@ -523,7 +500,7 @@ mod tests {
         );
     }
 
-    /// The words of the 2026-06-15 recording around 54.9 s: Whisper gave "en" and "él" one start.
+    /// Words where Whisper gave "en" and "él" one start.
     fn same_start() -> Vec<Word> {
         vec![
             word(54.174, "manada"),
@@ -541,7 +518,7 @@ mod tests {
 
     #[test]
     fn words_starting_in_one_millisecond_each_take_their_own_fix() {
-        // 5w: a fix on "él" showed on "en" too, and neither could be taken away alone.
+        // A fix on "él" stays off "en", and each can be taken away alone.
         let ws = same_start();
         let mut f = Vec::new();
         assert!(set_fix(&mut f, 0, 54.944, 1, "él", "miel").unwrap());
@@ -571,7 +548,7 @@ mod tests {
 
     #[test]
     fn two_tracks_interleaved_in_one_millisecond_are_counted_each_on_its_own() {
-        // 5w: `Fixes` counts each track's words of a millisecond as they come, whatever the other
+        // `Fixes` counts each track's words of a millisecond as they come, whatever the other
         // track's words between them, and starts again at the next millisecond.
         let fix = |track, start, nth, text: &str| Fix {
             track,
@@ -642,7 +619,7 @@ mod tests {
 
     #[test]
     fn a_span_replaces_the_fixes_inside_it_and_an_empty_text_clears_them() {
-        // 5x: a sentence retyped as one edit; the word fixes inside it go.
+        // A sentence retyped as one edit; the word fixes inside it go.
         let ws = sentence();
         let mut f = Vec::new();
         set_fix(&mut f, 0, 2.5, 0, "wezar", "Uezar").unwrap();
@@ -725,7 +702,7 @@ mod tests {
 
     #[test]
     fn a_word_is_in_a_span_by_its_key_whatever_the_words_now() {
-        // 5x: the span names its first and last words; a word between them is in it, also one the
+        // The span names its first and last words; a word between them is in it, also one the
         // transcript did not have when it was set, and nothing past its last key is.
         let span = vec![Fix {
             track: 0,

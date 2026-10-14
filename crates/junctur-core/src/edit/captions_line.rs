@@ -1,8 +1,7 @@
-//! The edit list's `captions` line (5a; moved out of `format.rs` when 5g's look made it a parser of
-//! its own). `captions <on|off> chars=.. lines=.. seconds=..` then `key=value` settings, each written
-//! only when it is not the default (5d's rule), so a list that does not use a newer setting still
-//! reads in the builds before it, which refuse keys they do not know. Names with spaces (a font, a
-//! speaker) are written in double quotes; [`Captions::check`] refuses a quote inside one.
+//! The edit list's `captions` line: `captions <on|off> chars=.. lines=.. seconds=..` then `key=value`
+//! settings, each written only when not the default, so a list that does not use a newer setting
+//! still reads in older builds, which refuse unknown keys. Names with spaces are double-quoted;
+//! [`Captions::check`] refuses a quote inside one.
 
 use super::caption_text::{ENTRY_SEP, PAIR_SEP};
 use super::{Animation, Captions, Case, CensorStyle, ExistingClips, Layout, Replace};
@@ -27,11 +26,11 @@ pub fn write(c: &Captions) -> String {
         c.lines,
         c.seconds
     );
-    // 5i's word limit only when set.
+    // The word limit only when set.
     if c.words != 0 {
         out.push_str(&format!(" words={}", c.words));
     }
-    // 5d's switches and 5f's underline only when on.
+    // The switches and the underline only when on.
     for (k, on) in [
         ("preview", c.preview),
         ("bold", c.bold),
@@ -42,7 +41,7 @@ pub fn write(c: &Captions) -> String {
             out.push_str(&format!(" {k}=on"));
         }
     }
-    // 5g's look only when not the default.
+    // The look only when not the default.
     let mut put = |differs: bool, kv: String| {
         if differs {
             out.push(' ');
@@ -73,14 +72,14 @@ pub fn write(c: &Captions) -> String {
         c.template != d.template,
         format!("template=\"{}\"", c.template),
     );
-    // 5m's switch only when on.
+    // The keep-look switch only when on.
     put(c.keep_look, "keep_look=on".to_string());
-    // 5n's remembered choice only when there is one.
+    // The remembered choice for clips in the way only when there is one.
     put(
         c.existing_clips != d.existing_clips,
         format!("existing_clips={}", c.existing_clips.word()),
     );
-    // 5j's text options likewise; entries joined by `|`, a pair's halves by `>`.
+    // The text options likewise; entries joined by `|`, a pair's halves by `>`.
     put(c.case != d.case, format!("case={}", c.case.word()));
     put(
         c.punctuation != d.punctuation,
@@ -103,12 +102,12 @@ pub fn write(c: &Captions) -> String {
         !pairs.is_empty(),
         format!("replace=\"{}\"", pairs.join(&ENTRY_SEP.to_string())),
     );
-    // 5k's translation only when set.
+    // The translation only when set.
     put(
         !c.translate.is_empty(),
         format!("translate={}", c.translate),
     );
-    // 5l's highlight and animation likewise.
+    // The highlight and animation likewise.
     put(
         c.highlight,
         format!("highlight={}", if c.highlight { "on" } else { "off" }),
@@ -415,7 +414,7 @@ mod tests {
 
     #[test]
     fn a_remembered_choice_for_clips_in_the_way_is_written_only_when_there_is_one() {
-        // 5n: asking (the default) is not written, so a list that never chose reads in 5m.
+        // Asking (the default) is not written, so a list that never chose reads in older builds.
         let ask = Captions {
             on: true,
             ..Default::default()

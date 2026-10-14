@@ -1,6 +1,6 @@
 <script lang="ts">
-  // Source time and edited (output) time side by side. With an edit list both are timecode of the
-  // frame numbers the engine counts (the render's and FCPXML's frames); without one, 2a's clock.
+  // Source time and edited (output) time side by side, as timecode of the engine's frame numbers
+  // when there is an edit list.
   import type { EditState, PlayerState } from "./api";
   import { clock, timecode } from "./time";
 

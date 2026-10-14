@@ -1,10 +1,6 @@
-//! Writing an edit list that something else may have written before: an editor saving on every
-//! change, where the file on disk may be a hand edit or another tool's output.
-//!
-//! A save ends with a stamp comment, a hash of the text above it. A file whose stamp still matches
-//! is an editor save nobody has touched since (this session's or an earlier one's), so replacing it
-//! loses nothing and needs no backup; anything else is backed up first. A comment rather than a
-//! file beside the list, so a list kept in git or moved stays self-describing.
+//! Saving an edit list the disk may hold a hand edit of. A save ends with a stamp comment, a hash of
+//! the text above it: a file whose stamp still matches is replaced without a backup, anything else
+//! is backed up first. A comment rather than a file beside it, so a moved list stays self-describing.
 
 use std::path::{Path, PathBuf};
 
@@ -66,7 +62,7 @@ fn backup_name(edit_path: &Path, n: u32) -> PathBuf {
 }
 
 /// The first free backup name beside `edit_path`: `<name>.bak`, then `<name>.bak2`, ... Backups are
-/// never overwritten: a single `.bak` rewritten each time lost hand edits (1d).
+/// never overwritten: a single `.bak` rewritten each time would lose hand edits.
 pub fn backup_path(edit_path: &Path) -> PathBuf {
     (1..)
         .map(|n| backup_name(edit_path, n))
@@ -82,21 +78,17 @@ fn latest_backup(edit_path: &Path) -> Option<String> {
     std::fs::read_to_string(backup_name(edit_path, last)).ok()
 }
 
-/// Writes `list` to `path`. The file there is first copied to [`backup_path`] unless it is an
-/// untouched editor save, the same text, or the same as the newest backup (so a retried save does
-/// not pile up copies). The text goes to a temporary file and is renamed over the list, so a
-/// reader (or a crash) never sees a half-written or missing list; a failed save removes the
-/// temporary file and leaves the list as it was. A list the parser would not read back is refused,
-/// nothing written ([`EditList::checked_text`], 5ad).
+/// Writes `list` to `path`, first copying the file there to [`backup_path`] unless it is an untouched
+/// editor save, the same text, or the newest backup. Written through a temporary file renamed over
+/// the list, so a reader or a crash never sees a half-written list. A list the parser would not read
+/// back is refused, nothing written.
 pub fn save(path: &Path, list: &EditList) -> std::io::Result<Saved> {
     let _one = hold();
     save_now(path, list)
 }
 
-/// One writer of an edit list at a time in this process (2j): the app's editor saves while the
-/// app's own analysis fills in word counts ([`amend`]); either one reading and writing back over the
-/// other would lose a cut or the counts. Other processes (the CLI on a list the app has open) were
-/// never guarded and are not now.
+/// One writer of an edit list at a time in this process: the editor's saves and [`amend`]'s word
+/// counts would otherwise write over each other. Other processes are not guarded.
 static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 thread_local! {
@@ -116,7 +108,7 @@ impl Drop for Held {
     }
 }
 
-/// Holds the edit-list writer lock from reading a list to saving over it (2j repair): the app's
+/// Holds the edit-list writer lock from reading a list to saving over it: the app's
 /// editor takes an outside change on disk and then saves the list it made from it, and word counts
 /// [`amend`] wrote between the two would be saved over and lost.
 pub fn hold() -> Held {
@@ -142,12 +134,9 @@ pub enum Amended {
     Missing,
 }
 
-/// Applies `change` to the edit list at `path` and writes it back, when that loses nothing of what
-/// is there: an untouched editor save is saved again (stamped, as the editor would), and a list in
-/// Junctur's own form (its text is what its parse writes back) is written plain, as the pipeline
-/// wrote it. Anything else is left. For the pipeline putting word counts into a list the user may
-/// be editing (2j); under the same lock as [`save`]. A change the parser would not read back is
-/// refused as [`save`] refuses it, the file left as it was.
+/// Applies `change` to the edit list at `path` and writes it back when that loses nothing: an
+/// untouched editor save is saved again stamped, a list in Junctur's own form is written plain, and
+/// anything else is left. Under the same lock as [`save`], and refused as [`save`] refuses.
 pub fn amend(path: &Path, change: impl FnOnce(&mut EditList)) -> std::io::Result<Amended> {
     let _one = hold();
     let old = match std::fs::read_to_string(path) {
@@ -176,7 +165,7 @@ pub fn amend(path: &Path, change: impl FnOnce(&mut EditList)) -> std::io::Result
     Ok(Amended::Written(new))
 }
 
-/// `list`'s text when the parser reads it back ([`EditList::checked_text`], 5ad), else an
+/// `list`'s text when the parser reads it back ([`EditList::checked_text`]), else an
 /// `InvalidData` error: the file is left as it was.
 fn checked(list: &EditList) -> std::io::Result<String> {
     list.checked_text()
@@ -322,8 +311,7 @@ mod tests {
 
     #[test]
     fn a_list_the_parser_would_refuse_is_never_written() {
-        // 5ad: 5aa's carry could write a kept-as-heard span longer than a span's text may be, and
-        // the next open failed on that line. Every writer now checks the text reads back.
+        // A kept-as-heard span longer than a span's text may be would fail the next open.
         use super::super::Fix;
         let dir = scratch("refused");
         let path = dir.join("edit.junctur");

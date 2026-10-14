@@ -1,10 +1,6 @@
-//! Who speaks when, as the edit list keeps it: a name per speaker and the turns each one talks in.
-//!
-//! Kept in the edit file, not beside it, because the names are the user's (renamed from the
-//! "Speaker 1..N" Junctur starts with) and the edit file is the one piece of project state that is
-//! the user's: readable, diffable, carried through a re-cut. The turns come from the `speakers`
-//! stage ([`crate::pipeline`]); the words are labelled from them on demand ([`Speakers::of_word`])
-//! rather than stored per word, so a transcript and an edit list never have to agree on indices.
+//! Who speaks when, as the edit list keeps it (the names are the user's): a name per speaker and the
+//! turns each one talks in. Words are labelled from the turns on demand rather than stored per word,
+//! so a transcript and an edit list never have to agree on indices.
 
 use serde::{Deserialize, Serialize};
 
@@ -19,7 +15,7 @@ pub struct SpeakerName {
     /// (a mic and a Discord recorded on their own tracks). Every word heard on that track is
     /// theirs, which beats any overlap test when two tracks talk at once.
     pub track: Option<usize>,
-    /// Caption colour, `#RRGGBB` (5a): a palette colour by id until the user picks one.
+    /// Caption colour, `#RRGGBB`: a palette colour by id until the user picks one.
     pub color: String,
 }
 
@@ -38,7 +34,7 @@ pub struct Speakers {
     pub turns: Vec<Turn>,
 }
 
-/// A person a speaker was recognised as (5b): an enrolled voice's name and caption colour, which the
+/// A person a speaker was recognised as: an enrolled voice's name and caption colour, which the
 /// speaker takes in every recording.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Person {
@@ -88,18 +84,10 @@ impl Speakers {
         Self::found(turns, tracks, &[], previous, &[])
     }
 
-    /// [`Speakers::new`], where speaker `i + 1` recognised as `people[i]` (an enrolled voice, 5b)
-    /// takes that person's name and colour: they are the person's in every recording.
-    ///
-    /// Every other speaker takes the name and colour of the `previous` speaker it is, found by
-    /// what they say rather than by id: the speaker that is the same track, else the one whose
-    /// turns overlap its turns most (one to one, the largest overlaps first). Ids are renumbered
-    /// whenever the voices change (enrolled people come first), so carrying by id gave a rename to
-    /// someone else (the 5b review). With no turns on either side, by id. A previous
-    /// name in `exclude` (case aside) is never carried: those are the people's names, current or
-    /// forgotten, which belong to a voice, not to whatever cluster now sits where they were.
-    /// Speakers left without a name are "Speaker N" in the first palette colour no one else in
-    /// the list has.
+    /// [`Speakers::new`], where speaker `i + 1` recognised as `people[i]` takes that person's name
+    /// and colour. Others take those of the `previous` speaker on the same track, else with most
+    /// turn overlap (not by id: ids renumber when the voices change), never a name in `exclude`
+    /// (a voice's). Speakers left unnamed are "Speaker N" in the first palette colour nobody else has.
     pub fn found(
         mut turns: Vec<Turn>,
         tracks: &[Option<usize>],
@@ -264,7 +252,7 @@ impl Labeller<'_> {
 }
 
 impl Labeller<'_> {
-    /// Everyone who says a word (5b): its speaker by [`Labeller::of_word`] first, then anyone else
+    /// Everyone who says a word: its speaker by [`Labeller::of_word`] first, then anyone else
     /// whose turn holds the word's middle. Two people's turns overlap only where both talk at once,
     /// and the transcript is one mixed stream there, so the word is both of theirs. Empty when nobody
     /// is near.
@@ -336,7 +324,7 @@ fn carry<'p>(
         }
     }
     if previous.turns.is_empty() || turns.is_empty() {
-        // Nothing to match by: by id, as before 5b.
+        // Nothing to match by: by id.
         for (i, slot) in out.iter_mut().enumerate() {
             if slot.is_some() || is_person(i) {
                 continue;
@@ -405,7 +393,7 @@ fn overlap(a: &[(f64, f64)], b: &[(f64, f64)]) -> f64 {
 }
 
 /// Joins turns (sorted by start) of one speaker less than [`JOIN_S`] apart. Per speaker, not only
-/// when consecutive: since 5b another speaker's overlap turn can sit between two of one person's.
+/// when consecutive: another speaker's overlap turn can sit between two of one person's.
 fn join(turns: Vec<Turn>) -> Vec<Turn> {
     let mut out: Vec<Turn> = Vec::with_capacity(turns.len());
     // Index in `out` of each speaker's latest turn.

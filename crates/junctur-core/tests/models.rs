@@ -215,7 +215,7 @@ fn captions_translate_between_languages() {
         "{fr}"
     );
     assert!(en.to_lowercase().contains("know"), "{en}");
-    // Speed on caption-length sentences, for the phase notes.
+    // Speed on caption-length sentences, printed.
     let lines = [
         "Bueno, vamos a empezar con la partida de hoy.",
         "¿Alguien sabe dónde está el último cofre?",
@@ -307,7 +307,7 @@ fn captions_translate_between_languages() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// 5h: the word list reaches Whisper as prompt tokens, a long list cut to the prompt's room from
+/// The word list reaches Whisper as prompt tokens, a long list cut to the prompt's room from
 /// the end, and a chunk decodes with it (no panic on the tokenizer's count, no failure). Turbo, on
 /// the CPU: about 1.6 GB downloaded on a first run.
 #[test]

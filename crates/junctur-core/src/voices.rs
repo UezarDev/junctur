@@ -1,16 +1,6 @@
-//! Voices the user has told Junctur once (5b): a name, a caption colour and a voiceprint per person,
-//! used to label every recording by name ([`crate::diarize::label`]).
-//!
-//! Its own file, `junctur/voices.json` in the OS config folder (or the file `JUNCTUR_VOICES` names),
-//! beside the user's `config.json` rather than in it: `config.json` is hand-written, read by the CLI
-//! and the app's analysis only, and strict about unknown keys, while this file is written by the app and the CLI and holds
-//! 512 numbers per person. Kept apart, a hand edit of one and a save of the other never meet. The
-//! engine reads it only when its caller passes the path ([`default_path`] says where it usually is).
-//!
-//! A voiceprint is the unit mean of a person's CAM++ window embeddings. It is only comparable with
-//! embeddings of the same model made the same way, so each voice records which ([`print_model`]) and
-//! the others are dropped when the file is read, and so leave it at its next save (5r: Uezar, "were
-//! in testing phase so its ok to delete stuff").
+//! Voices the user has told Junctur once: a name, a caption colour and a voiceprint per person, used
+//! to label every recording by name ([`crate::diarize::label`]). A file apart from the hand-written
+//! `config.json`, so a hand edit of one and an app save of the other never meet.
 
 use std::path::{Path, PathBuf};
 
@@ -23,9 +13,8 @@ use crate::{models, Error, Result};
 /// Names the voices file instead of the default one (tests and the app's test mode).
 pub const ENV: &str = "JUNCTUR_VOICES";
 
-/// Under this much speech a voiceprint is rough: the app and the CLI say so. Not a floor: since 5c
-/// a clip of any length is remembered (Uezar: "even one word"), because the seconds picked are also
-/// pinned to the person in that recording, which holds however rough the print is.
+/// Under this much speech a voiceprint is rough: the app and the CLI say so. Not a floor: the
+/// seconds picked are also pinned to the person in that recording, which holds however rough.
 pub const SHORT_SECONDS: f64 = 3.0;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -36,8 +25,7 @@ pub struct Voice {
     /// Seconds of speech the print was made from.
     pub seconds: f64,
     /// [`print_model`] when it was made: a print is only comparable with embeddings of the very same
-    /// weights, made on the same device. A bare digest is a print from before 5r, maybe made on the
-    /// GPU, whose embeddings were not CAM++'s; [`Voices::load`] drops it.
+    /// weights, made on the same device; [`Voices::load`] drops any other.
     pub model: String,
     pub print: Vec<f32>,
 }
@@ -87,10 +75,8 @@ pub fn remembered_or_none(say: &mut dyn FnMut(&str)) -> Vec<Voice> {
 impl Voices {
     /// The voices at `path`; none when the file does not exist. A file that does not parse is an
     /// error, never silently empty (saving over it would lose every voice). A voice whose print this
-    /// build cannot compare with (another model, or made before 5r) is dropped as it is read, before
-    /// anything else is checked, and leaves the file at its next save; pins naming it are ignored,
-    /// like those of a forgotten voice.
-    /// A hand-edited name or colour the edit file could not hold is an error too, naming the voice.
+    /// build cannot compare with is dropped before anything else is checked. A hand-edited name or
+    /// colour the edit file could not hold is an error too, naming the voice.
     pub fn load(path: &Path) -> Result<Self> {
         let bad =
             |e: &dyn std::fmt::Display| Error::Edit(format!("voices file {}: {e}", path.display()));
@@ -162,10 +148,8 @@ impl Voices {
 
     /// Remembers `name`'s voice from these window embeddings (`seconds` of speech). A name already
     /// known gets the sample added (its print becomes the mean of both, weighted by seconds), so a
-    /// voice is built up from several selections: in a conversation a person rarely talks alone for
-    /// the half minute a good print wants (5b's measurement), and one selection is one stretch.
-    /// Forgetting starts over. A new person gets the first palette colour no other voice has.
-    /// Any length of speech will do (5c); only no sample at all is refused.
+    /// voice is built up from several selections, as a person rarely talks alone for the half minute
+    /// a good print wants. A new person gets the first free palette colour; no sample is refused.
     pub fn enroll(&mut self, name: &str, embeddings: &[&[f32]], seconds: f64) -> Result<&Voice> {
         let name = check_name(name).map_err(Error::Edit)?.to_string();
         if embeddings.is_empty() {
@@ -193,8 +177,7 @@ impl Voices {
                 v.seconds += seconds;
                 i
             }
-            // Known, but from another model or from before 5r: the old print cannot be added to;
-            // start it again.
+            // Known, but from another model: the old print cannot be added to; start it again.
             Some(i) => {
                 let v = &mut self.voices[i];
                 v.print = print;
@@ -323,7 +306,7 @@ mod tests {
         let u = v.get("uezar").unwrap();
         assert_eq!((u.name.as_str(), u.seconds), ("Uezar", 10.0));
         assert!((u.print[0] - u.print[1]).abs() < 1e-6 && (u.print[0] - 0.70710677).abs() < 1e-5);
-        // Any length of speech is remembered (5c), however short; no sample, or a name the edit
+        // Any length of speech is remembered, however short; no sample, or a name the edit
         // file cannot hold, is not.
         assert_eq!(v.enroll("Bea", &ee, 0.3).unwrap().seconds, 0.3);
         assert!(v.forget("bea"));
@@ -369,7 +352,7 @@ mod tests {
         v.save(&path).unwrap();
         assert_eq!(Voices::load(&path).unwrap(), v);
         assert_eq!(v.usable().len(), 1);
-        // A print from another model is not used, and not even read back (5r).
+        // A print from another model is not used, and not even read back.
         v.voices[0].model = "other.onnx".into();
         assert!(v.usable().is_empty());
         v.save(&path).unwrap();
@@ -402,8 +385,8 @@ mod tests {
         v.enroll("Uezar", &[&e], 30.0).unwrap();
         v.enroll("Ana", &[&e], 30.0).unwrap();
         assert!(v.voices.iter().all(|x| x.model.ends_with("+cpu")));
-        // As 5b to 5q saved it: the bare model digest, its windows maybe embedded on the GPU. Its
-        // colour is one this build would refuse: an old voice never makes the file unreadable.
+        // An old print under the bare model digest, with a colour this build would refuse: an old
+        // voice never makes the file unreadable.
         v.voices[0].model = models::SPEAKER_EMBEDDING.sha256.into();
         v.voices[0].color = "red".into();
         v.save(&path).unwrap();

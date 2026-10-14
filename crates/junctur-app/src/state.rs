@@ -1,9 +1,6 @@
-//! What the frontend shows of playback, folded from mpv's events. Kept apart from the player so
-//! the folding is tested without libmpv.
-//!
-//! mpv's own position means source time when the whole file plays and output time when only the
-//! kept ranges play (an EDL); this folds both into the two clocks the UI shows, with the timeline
-//! of the load that is actually playing.
+//! What the frontend shows of playback, folded from mpv's events into the source and output clocks
+//! with the timeline of the load actually playing. Apart from the player so it is tested without
+//! libmpv.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,7 +18,7 @@ pub const OBSERVED: [(u64, &str, Format); 8] = [
     (PAUSE, "pause", Format::Flag),
     (TRACK_LIST, "track-list", Format::Str),
     (HWDEC, "hwdec-current", Format::Str),
-    // The picture's shape (2g: the editor's layout follows it); integers read as doubles.
+    // The picture's shape, which the editor's layout follows; integers read as doubles.
     (VIDEO_W, "video-params/dw", Format::Double),
     (VIDEO_H, "video-params/dh", Format::Double),
     (ROTATE, "video-params/rotate", Format::Double),
@@ -109,7 +106,7 @@ impl PlayerState {
         self.derive();
     }
 
-    /// The recording was closed (2i): nothing plays. The decoder in use, the pause state and the
+    /// The recording was closed: nothing plays. The decoder in use, the pause state and the
     /// playlist entry stay what mpv last said; mpv's events after its `stop` clear the rest anyway.
     pub fn close(&mut self) {
         *self = Self {
@@ -203,9 +200,7 @@ impl PlayerState {
     }
 
     /// Folds a change of the picture's size or rotation into its shape. mpv's `dw`/`dh` are the
-    /// picture before rotation (checked against the bundled libmpv: a 640x360 clip tagged 90 degrees
-    /// reads 640x360 and `rotate` 270, while `video-out-params` says 360x640), so a quarter turn
-    /// swaps them.
+    /// picture before rotation, so a quarter turn swaps them.
     fn picture(&mut self, f: impl FnOnce(&mut (Option<f64>, Option<f64>, f64))) {
         f(&mut self.video);
         let (w, h, rotate) = self.video;

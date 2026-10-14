@@ -172,13 +172,12 @@ pub struct EditState {
     /// Changes when the list's turns (or speaker tracks) do, so the page asks for the words'
     /// labels again after an outside change; a rename leaves it as it was.
     pub speakers_key: String,
-    /// Changes when the list's fixed words do (5h), or its retimed words (2w: a moved cut edge), so
-    /// the page asks for the words' text and times again, after an edit of its own or an outside
-    /// change.
+    /// Changes when the list's fixed or retimed words do, so the page asks for the words' text and
+    /// times again, after an edit of its own or an outside change.
     pub fixes_key: String,
     /// The caption settings: the list's own, else the user's defaults (also with no list).
     pub captions: edit::Captions,
-    /// The list has caption settings of its own; without, it follows the defaults (2i).
+    /// The list has caption settings of its own; without, it follows the defaults.
     pub captions_own: bool,
 }
 
@@ -188,7 +187,7 @@ pub struct SpeakerView {
     pub name: String,
     pub color: String,
     /// Their audio track (0-based) when speakers were told apart by track: the lanes colour it
-    /// and the avatars take its level (2g).
+    /// and the avatars take its level.
     pub track: Option<usize>,
 }
 
@@ -201,7 +200,7 @@ pub struct EditorStatus {
 }
 
 impl EditState {
-    /// `defaults`: the user's caption defaults (2i), for a list without settings of its own.
+    /// `defaults`: the user's caption defaults, for a list without settings of its own.
     pub fn new(
         edit: &Edit,
         skip: bool,
@@ -277,7 +276,7 @@ fn speakers_key(s: &edit::Speakers) -> String {
     key(names.chain(turns))
 }
 
-/// Over the fixed words (5h), spans (5x) and retimed words (2w): what the words' text and times
+/// Over the fixed words, spans and retimed words: what the words' text and times
 /// depend on beside the transcript.
 fn fixes_key(fixes: &[edit::Fix], times: &[edit::Retime]) -> String {
     let times = times.iter().flat_map(|t| {
@@ -357,7 +356,7 @@ mod tests {
         };
         let s = EditState::new(&e, true, Some(FPS), &EditorStatus::default(), &defaults);
         assert_eq!(s.ranges, vec![30, 60]);
-        // No `captions` line: the list follows the defaults (2i).
+        // No `captions` line: the list follows the defaults.
         assert_eq!((s.captions, s.captions_own), (defaults.clone(), false));
         assert_eq!((s.total_frames, s.output_frames), (300, 30));
         assert_eq!(s.summary.unwrap().ranges, 1);

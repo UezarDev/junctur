@@ -1,10 +1,6 @@
-//! The transcription lane (2j's one shared background job) as a queue that can be paused (2k).
-//!
-//! A module rather than the bare mutex 2j had: the page shows who transcribes and who waits, in
-//! the order they will run, and `std::sync::Mutex` hands a released lock to any waiter, so it has
-//! no order to show. Pausing is the lane's, not a run's: the head stops at its next chunk and the
-//! recordings behind it keep waiting, so the machine is the user's again (Uezar wanted the job
-//! paused from any recording; letting the next one start would not give the machine back).
+//! The transcription lane, one shared background job, as an ordered queue that can be paused: the
+//! page shows who waits in order, which a bare mutex cannot. A pause holds the whole lane, so the
+//! machine is the user's again rather than the next recording's.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -13,8 +9,7 @@ use std::sync::{Condvar, Mutex, MutexGuard};
 #[derive(Default)]
 struct State {
     /// Every place on the lane, the head transcribing, the rest in the order they came. Each place
-    /// has its own number: a recording queued twice by mistake must still wait its own turn, not
-    /// pass as the head because it bears the head's name.
+    /// has its own number, so a recording queued twice still waits its own turn.
     queue: VecDeque<(u64, PathBuf)>,
     next: u64,
     paused: bool,

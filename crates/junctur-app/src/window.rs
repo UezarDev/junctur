@@ -1,12 +1,6 @@
-//! The frameless window's one native piece (2i): Windows 11's snap layouts.
-//!
-//! The title bar is drawn by the page, and Windows shows its layout flyout only while the pointer
-//! rests on a native maximise button (`HTMAXBUTTON` from `WM_NCHITTEST`). The bar's button lives
-//! inside WebView2's own child window, which takes the pointer before the frame could answer, so
-//! the page asks for the flyout instead when the pointer rests on its maximise button, and this
-//! sends Win+Z, the shell's own shortcut for it. Rejected: subclassing the window to answer
-//! `HTMAXBUTTON` (the WebView's child gets the mouse first), and a native caption strip above the
-//! WebView (painted on its own, splitting the page in two).
+//! The frameless window's one native piece: Windows 11's snap layouts. The page's maximise button
+//! sits in WebView2's child window, which takes the pointer before the frame could answer
+//! `HTMAXBUTTON`, so the page asks for the flyout and this sends Win+Z, the shell's shortcut.
 
 /// Opens the snap layouts flyout for `window`, only while it is the foreground window: Win+Z goes
 /// to whichever window has the foreground, never to one the user is not in.

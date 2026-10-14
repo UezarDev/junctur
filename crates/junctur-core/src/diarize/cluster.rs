@@ -1,35 +1,16 @@
-//! Grouping speaker embeddings into speakers, in two passes.
-//!
-//! Pass 1 groups windows into many tight clusters (centroid clustering at [`FIRST`]); pass 2 merges
-//! the clusters' centroids, closest pair first, while they are at least [`MERGE`]-similar; clusters
-//! still under a minimum share, or under [`MIN_WINDOWS`], are dropped, and every window goes to its
-//! nearest remaining centroid.
-//!
-//! 1a's one pass (merge at 0.5 as it went, then fold strays) found a single speaker on the 4-track
-//! sample, on the vocal stem and on the mix alike: a running centroid drifts toward a "mean voice"
-//! that every window is close to. Merging only centroids, and only once they are tight, gives three
-//! speakers on both sources, agreeing on 88% of windows (5a's measurement). Agglomerative clustering
-//! over all windows was rejected in 1a and still is: a 30 h stream has tens of thousands of windows,
-//! and their similarity matrix does not fit in memory; pass 1's few hundred centroids do.
+//! Grouping speaker embeddings into speakers: tight clusters at [`FIRST`], then their centroids
+//! merged at [`MERGE`]. Only tight centroids merge, since a running centroid drifts toward a "mean
+//! voice", and only centroids, since a long stream's window similarity matrix does not fit in memory.
 
 /// Pass 1: a window joins the most similar cluster when at least this similar, else starts one.
 /// Tight on purpose: a cluster should hold one voice, even if a voice ends up in several clusters.
 pub const FIRST: f32 = 0.7;
-/// Pass 2: centroids at least this similar are one speaker. On the 4-track sample 0.75-0.8 is a
-/// plateau (three speakers, stem and mix agreeing); 0.7 joins two of them, 0.85 and up splits voices
-/// into five or more.
+/// Pass 2: centroids at least this similar are one speaker. 0.75-0.8 is where the speaker count
+/// holds steady; 0.7 joins two voices, 0.85 and up splits them.
 pub const MERGE: f32 = 0.78;
 
-/// Fewest windows a cluster needs to be a speaker of its own, whatever its share (5u). Clusters
-/// under it fold into their nearest speaker like those under the minimum share. The share alone
-/// vanished on little talk: 3% of the 2-minute clip's 33 windows is under one, so five single
-/// windows (a laugh, one short line) were five people, nine speakers for three. Measured there
-/// against the user's pins: a floor of 2 still split one person in three; 3 gives two speakers.
-/// 3 windows are 4.5 s of one voice, so a few sentences stay a person. Added to the share, never
-/// in place of it: alone, on the 1 h 45 4-track sample, it kept 13 speakers for 3, its clusters of
-/// 3 to 31 windows being pieces of the main voices (0.70-0.78 to them, just under [`MERGE`]). Both
-/// apply at every length; with the 3% share the floor is the higher bar up to 100 windows (2.5 min
-/// of speech) and the share past that.
+/// Fewest windows a cluster needs to be a speaker of its own, on top of the minimum share: on little
+/// talk the share is under one window, so a laugh would be a person. 3 windows are 4.5 s of a voice.
 pub const MIN_WINDOWS: usize = 3;
 
 /// Whether a cluster of `count` of `n` windows is big enough to be a speaker of its own.
@@ -45,8 +26,7 @@ pub fn normalize(v: &mut [f32]) {
 }
 
 /// Eight running sums rather than one, so the compiler can keep them in one vector register: a
-/// single sum must add in order and stays scalar. Labelling a 30 h recording is millions of
-/// 512-number dot products, on every `analyze`, `cut`, enrollment and rename (5b repair pass).
+/// single sum must add in order and stays scalar. Labelling is millions of these dot products.
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     let (ca, cb) = (a.chunks_exact(8), b.chunks_exact(8));
     let tail: f32 = ca
@@ -71,10 +51,8 @@ fn unit(v: &[f32]) -> Vec<f32> {
     u
 }
 
-/// Most groups pass 1 makes. Past it a window that resembles no group joins the nearest one
-/// instead of starting another: pass 2 keeps a k x k similarity matrix and merges in O(k^3) over
-/// all, so k must stay bounded however long the recording. The 4-track sample (1 h 45, 1 425
-/// windows) makes 91, merged in 4 ms; at the cap a merge pass is ~0.3 s.
+/// Most groups pass 1 makes; past it a window that resembles no group joins the nearest one. Pass 2
+/// is O(k^3) over a k x k matrix, so k must stay bounded however long the recording.
 pub const MAX_GROUPS: usize = 400;
 
 /// A cluster: the sum of its members, its unit-length direction (the centroid, kept so a
@@ -169,12 +147,9 @@ fn merge(groups: &mut [Group], threshold: f32) -> (Vec<bool>, Vec<usize>) {
     }
 }
 
-/// Speaker label per embedding, two-pass (module docs). Clusters under `min_share` of the windows
-/// or under [`MIN_WINDOWS`] of them are dropped, and their windows go to the nearest kept centroid
-/// however unlike it they are: 1a left a stray under 0.3 similar as a "minor" speaker of its own,
-/// but a word needs a speaker to be shown under, and a minor one is noise in a transcript or a
-/// caption. When no cluster is big enough (a clip of a few windows), every merged cluster is kept:
-/// a recording with speech has speakers. Labels are dense, ordered by first appearance.
+/// Speaker label per embedding, two-pass (module docs). Clusters under `min_share` or
+/// [`MIN_WINDOWS`] go to the nearest kept centroid however unlike it, as a word needs a speaker to
+/// show under; when none is big enough, all are kept. Labels are dense, by first appearance.
 pub fn two_pass(embeddings: &[Vec<f32>], first: f32, merge_at: f32, min_share: f64) -> Vec<usize> {
     two_pass_capped(embeddings, first, merge_at, min_share, MAX_GROUPS)
 }
@@ -213,7 +188,6 @@ fn two_pass_capped(
         .collect()
 }
 
-/// Passes 1 and 2: the groups left after merging, each with its unit centroid and member count.
 /// Passes 1 and 2: the groups left after merging, each with its unit centroid and member count,
 /// and the group (an index into them) each embedding ended up in.
 fn merged(
@@ -251,19 +225,16 @@ fn nearest<'a>(candidates: impl Iterator<Item = &'a [f32]>, e: &[f32]) -> Option
         .map(|(i, _)| i)
 }
 
-/// A window at least this similar to an enrolled voiceprint is that person's (5b), before any
-/// clustering. Measured on the 4-track sample against the PNGtuber avatars (5b's phase file): a
-/// person's own windows sit at 0.54-0.80 against their print (10th-90th percentile), other people's
-/// at 0.46-0.65 (median-90th); with everyone enrolled 0.5-0.7 gives the same labels, as windows
-/// under it still reach their nearest voice. 0.6 keeps most of a stranger's windows for clustering.
+/// A window at least this similar to an enrolled voiceprint is that person's, before any
+/// clustering. Own windows sit near 0.54-0.80, others' near 0.46-0.65; 0.6 leaves most of a
+/// stranger's windows for clustering.
 pub const VOICE_MATCH: f32 = 0.6;
 /// A cluster of the remaining windows whose centroid is at least this similar to a voiceprint is
-/// that person. Higher than [`VOICE_MATCH`] because a centroid is an average and so much cleaner
-/// than one window: on the sample a person's own windows average to 0.97-0.98 against their print,
-/// while Uezar's brother, the nearest voice to his, averages 0.77 against Uezar's.
+/// that person. Higher than [`VOICE_MATCH`]: a centroid is an average, so much cleaner than one
+/// window (own voice near 0.97, a similar other voice near 0.77).
 pub const CENTROID_MATCH: f32 = 0.85;
 
-/// Speakers per window, with enrolled voices (5b).
+/// Speakers per window, with enrolled voices.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Labels {
     /// Speaker index per window, dense from 0: the enrolled voices heard, in the voices' order,
@@ -273,18 +244,10 @@ pub struct Labels {
     pub voices: Vec<Option<usize>>,
 }
 
-/// Labels windows by enrolled voiceprints first (5b), then 5a's two passes for the rest.
-///
-/// A window at least `threshold` similar to its nearest voice is that voice. The others are
-/// clustered in two passes; a cluster whose centroid is at least `centroid` similar to a voice is
-/// that voice too (a person's quieter windows, clustered together, are still them). The other
-/// clusters under `min_share` of all windows or under [`MIN_WINDOWS`] are dropped, and their
-/// windows go to the nearest kept cluster or voice, as in [`two_pass`]. A voice is never dropped,
-/// however few its windows (5u): what matched a voice, by window or by cluster, is that voice.
-/// When no cluster is big enough and no voice is heard, every cluster is kept, as in
-/// [`two_pass`], rather than a short clip of strangers going to remembered voices it is not like.
-/// With no voices this is exactly [`two_pass`] (the clusters ordered by size). Voiceprints must be
-/// unit length, like the embeddings.
+/// Labels windows `threshold`-similar to an enrolled voiceprint as that voice, then clusters the
+/// rest as [`two_pass`]; a cluster `centroid`-similar to a voice is that voice too. A voice is never
+/// dropped however few its windows; with no voice heard and no cluster big enough, all clusters stay
+/// rather than strangers taking absent voices. Voiceprints must be unit length.
 pub fn label(
     embeddings: &[Vec<f32>],
     voices: &[Vec<f32>],
@@ -295,7 +258,7 @@ pub fn label(
     label_fixed(embeddings, voices, &[], threshold, centroid, min_share)
 }
 
-/// [`label`], with some windows' voice already known (5c): `fixed[i]` is the voice window `i` is
+/// [`label`], with some windows' voice already known: `fixed[i]` is the voice window `i` is
 /// whatever it sounds like (the user pinned those seconds to that person), and it is left out of
 /// matching and clustering, so a pinned window neither joins a cluster nor pulls one toward it.
 /// Windows past the end of `fixed`, or `None` there, are labelled as [`label`] does.
@@ -345,8 +308,7 @@ pub fn label_fixed(
     } else if !rest.is_empty() {
         let (groups, members) = merged(&rest_e, FIRST, MERGE, MAX_GROUPS);
         // A cluster like a voice is that voice as a whole: sending its windows one by one to
-        // their nearest candidate split a person between their voice and someone else's
-        // (the 5b review).
+        // their nearest candidate would split a person between their voice and someone else's.
         let as_voice: Vec<Option<usize>> = groups
             .iter()
             .map(|g| close_voice(&g.unit, centroid))
@@ -357,7 +319,7 @@ pub fn label_fixed(
             .filter(|(g, v)| v.is_none() && big_enough(g.count, n, min_share))
             .map(|(g, _)| g)
             .collect();
-        // No cluster big enough and no voice heard: keep them all, as `two_pass` does (5u repair).
+        // No cluster big enough and no voice heard: keep them all, as `two_pass` does.
         // Folding them into the voices would name strangers after people who are not here.
         let heard = who.iter().any(Option::is_some) || as_voice.iter().any(Option::is_some);
         let kept: Vec<&Group> = if kept.is_empty() && !heard {
@@ -513,7 +475,7 @@ mod tests {
         e.extend(voice(&axis(1), 30, 0.2));
         let l = label(&e, &[], VOICE_MATCH, CENTROID_MATCH, 0.03);
         assert_eq!(l.voices, vec![None, None]);
-        // Speaker 0 is the bigger voice (the second one), like 5a's talk-time order.
+        // Speaker 0 is the bigger voice (the second one): talk-time order.
         assert!(l.windows[..10].iter().all(|&x| x == 1) && l.windows[10..].iter().all(|&x| x == 0));
         assert!(label(&[], &[], VOICE_MATCH, CENTROID_MATCH, 0.03)
             .windows
@@ -540,7 +502,7 @@ mod tests {
 
     #[test]
     fn a_fixed_window_is_its_voice_whatever_it_sounds_like() {
-        // Twenty windows of Ana; the user pinned the last five to Bea (5c).
+        // Twenty windows of Ana; the user pinned the last five to Bea.
         let e = voice(&axis(0), 20, 0.3);
         let prints = vec![unit(&axis(0)), unit(&axis(1))];
         let mut fixed = vec![None; 15];
@@ -601,8 +563,8 @@ mod tests {
 
     #[test]
     fn a_single_window_folds_into_its_nearest_speaker_on_a_short_recording() {
-        // 5u: 31 windows, so the 3% share is under one window and a lone window used to be a
-        // speaker of its own. It is nearest the first voice, unlike enough to be its own cluster.
+        // 31 windows, so the 3% share is under one window: a lone window must not be a speaker of
+        // its own. It is nearest the first voice, unlike enough to be its own cluster.
         let mut e = voice(&axis(0), 15, 0.2);
         e.extend(voice(&axis(1), 15, 0.2));
         e.push(unit(&[0.65, 0.0, 0.76, 0.0, 0.0, 0.0, 0.0, 0.0]));
@@ -657,7 +619,7 @@ mod tests {
     #[test]
     fn the_floor_decides_on_a_short_recording_and_the_share_on_a_long_one() {
         // Three windows of a third voice: at the floor. Beside 40 and 40 (2.5 windows' share)
-        // they are a speaker; beside 200 and 200 they are under 3% and fold, as before 5u.
+        // they are a speaker; beside 200 and 200 they are under 3% and fold.
         for (each, speakers) in [(40, 3), (200, 2)] {
             let mut e = voice(&axis(0), each, 0.2);
             e.extend(voice(&axis(1), each, 0.2));

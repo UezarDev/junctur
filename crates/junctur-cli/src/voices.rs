@@ -1,7 +1,5 @@
-//! `junctur voices`: the voices Junctur remembers (5b), listed, enrolled from a recording, or
-//! forgotten. The app enrolls from a selection in the transcript; this is the same from stretches
-//! given by hand, for scripts and for checking the labelling without the app. `--rehear` is the
-//! app's "Analyse speakers again" (5c): the speakers heard again from the audio, cut at the pins.
+//! `junctur voices`: the remembered voices listed, enrolled from stretches given by hand, or
+//! forgotten. `--rehear` is the app's "Analyse speakers again", cut at the pins.
 
 use junctur_core::pipeline::{self, Found, Project};
 use junctur_core::voices::{self, Voice, Voices};
@@ -52,7 +50,7 @@ pub fn run(a: Args) -> Result<(), String> {
         "--at",
         "--forget",
         "--rehear",
-        // Before 5r it put `--rehear` on the CPU; speakers always are now. Accepted for scripts.
+        // Speakers always run on the CPU; still accepted so older scripts keep working.
         "--cpu",
         "--project",
         "--cache-dir",

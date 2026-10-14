@@ -1,13 +1,6 @@
-//! The remembered voices as the app uses them (5b): the voices file (where the CLI keeps it too),
-//! enrolling from a stretch of the open recording, forgetting, and a rename or recolour of a speaker
-//! that is a remembered person reaching that person's voice. Since 5c the stretch enrolled from is
-//! pinned to the person in that recording, and the speakers can be heard again from the audio on
-//! request ([`rehear`]), the windows cut at those pins.
-//!
-//! Its own module because none of this is the edit list's: the voices are the user's across every
-//! recording, and relabelling reads the project's `speakers.json` and window embeddings, which the
-//! editor never touches. What comes back is the project's new speakers ([`Found`]); the player puts
-//! them into the list in play through the editor, like any other change to it.
+//! The remembered voices as the app uses them: enrolling from a stretch of the open recording,
+//! forgetting, renaming, and hearing the speakers again ([`rehear`]). Apart from the editor because
+//! the voices are the user's across recordings; what comes back is the new speakers ([`Found`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -60,9 +53,8 @@ pub fn list() -> Result<Vec<VoiceView>, String> {
         .collect())
 }
 
-/// One load-change-save of the voices file at a time in this app: two quick changes (an
-/// enrollment and a rename, say) would otherwise both load the old file and the second save would
-/// drop the first change. The CLI is another process and is not held off (rare enough to leave).
+/// One load-change-save of the voices file at a time in this app, or the second save would drop
+/// the first change. The CLI is another process and is not held off.
 static LOCK: Mutex<()> = Mutex::new(());
 
 /// The speakers are being heard again ([`rehear`]): it rewrites the window embeddings and
@@ -88,11 +80,9 @@ impl Drop for Rehearing {
     }
 }
 
-/// Hears `file`'s speakers again from the audio (5c, "Analyse speakers again"), the windows cut at
-/// the seconds pinned to people, labelled with the voices as they are; saves `speakers.json` and
-/// returns the speakers, with the guard that keeps enrolling and forgetting off until the caller
-/// drops it. Slow (the recording is read again: about as long as the speakers stage took), so the
-/// caller runs it off the async runtime.
+/// Hears `file`'s speakers again from the audio ("Analyse speakers again"), the windows cut at the
+/// seconds pinned to people; saves `speakers.json` and returns the speakers with the guard that
+/// keeps enrolling and forgetting off until dropped. Slow, so the caller runs it off the runtime.
 pub fn rehear(file: &str) -> Result<(Found, Rehearing), String> {
     if REHEARING.swap(true, Ordering::SeqCst) {
         return Err("the speakers are already being analysed again".into());
@@ -139,11 +129,9 @@ fn commit(
 }
 
 /// The open recording's speakers labelled with `v`, not saved; `None` when there is nothing to
-/// change: speakers that are tracks, or speakers heard by an older Junctur (before 5b, or before
-/// 5r: maybe on the GPU), which keep their labels until heard again. `renamed`: a remembered
-/// person renamed (from, to), whose pinned seconds (5c) follow the new name, on a recording heard
-/// by an older Junctur too, so a rename never leaves them on a name no voice has. A forgotten
-/// voice's pins are kept either way (ignored until the name is remembered again).
+/// change: speakers that are tracks, or heard by an older Junctur (they keep their labels until
+/// heard again). `renamed` (from, to): the person's pinned seconds follow the new name even then,
+/// so a rename never leaves them on a name no voice has.
 fn labelled(
     file: &str,
     v: &Voices,
@@ -166,7 +154,7 @@ fn labelled(
     Ok(Some((p, found)))
 }
 
-/// Remembers `name`'s voice from source seconds `a..b` of `file` (any length, 5c), pins those
+/// Remembers `name`'s voice from source seconds `a..b` of `file` (any length), pins those
 /// seconds to them and labels its speakers again. Returns the new speakers and a line for the user.
 pub fn enroll(file: &str, name: &str, stretches: &[(f64, f64)]) -> Result<(Found, String), String> {
     let _held = crate::lock::lock(&LOCK);
@@ -186,8 +174,7 @@ pub fn enroll(file: &str, name: &str, stretches: &[(f64, f64)]) -> Result<(Found
 }
 
 /// What the user is told after enrolling: how much was taken and, for a short voice, a hint, never
-/// a refusal (5c: one word is enough to pin those seconds; recognising the person elsewhere wants
-/// more).
+/// a refusal: one word is enough to pin those seconds, recognising the person elsewhere wants more.
 fn enrolled_line(name: &str, before: f64, added: f64, total: f64) -> String {
     let mut line = if before > 0.0 {
         format!("Added {added:.1} s to {name}'s voice ({total:.1} s in all).")

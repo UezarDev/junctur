@@ -1,4 +1,4 @@
-//! Lua literals for the request file (5g). Resolve 21's script state has no `io` and no JSON, so a
+//! Lua literals for the request file. Resolve 21's script state has no `io` and no JSON, so a
 //! request is a Lua chunk, `return { ... }`, that the resident script reads with `loadfile`.
 //! Keys are always written `["key"] =`, so a key that is a Lua keyword (`end`) needs no care.
 

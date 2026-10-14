@@ -1,15 +1,6 @@
 <script lang="ts">
-  // The explanation a setting needs, folded behind an (i) beside it (2t). Settings and the Captions
-  // panel had a paragraph under nearly every control; the small grey prose outweighed the controls
-  // and stopped being read. The words that are still worth having live here instead.
-  //
-  // A real button, not a hover-only mark: Tab reaches it and focus opens it, so the explanation
-  // exists for the keyboard too. It opens on hover, focus and click (click only opens: a mouse click
-  // comes after the hover already opened it), closes `CLOSE_MS` after the pointer leaves unless the
-  // pointer reaches the popup, and at once on blur, Escape or a resize. A scroll moves it with its
-  // trigger and closes it only once the trigger is out of sight: Tab to an (i) half under a panel's
-  // edge scrolls the panel to show it, and that must not shut what focus just opened. The popup
-  // lives in `<body>` (floating.svelte.ts).
+  // A setting's explanation behind an (i) button: a real button so Tab and focus open it too. A
+  // scroll closes it only once the trigger is out of sight, so a Tab that scrolls to it keeps it.
   import { place, portal, release, slot } from "./floating.svelte";
 
   let { label, text }: { label: string; text: string } = $props();

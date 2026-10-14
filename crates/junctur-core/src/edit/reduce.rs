@@ -1,9 +1,5 @@
-//! The first automatic reduction: keep speech, drop the silences between it.
-//!
-//! "Silence" means nobody talking (from the VAD), not a volume threshold, so the ranges come from
-//! speech regions. Each is padded, short pauses are kept so speech is not chopped, and then each
-//! boundary moves to the quietest instant nearby on the speech tracks' energy, so a cut lands in a
-//! real gap rather than on the tail of a breath or a word the VAD trimmed.
+//! The first automatic reduction: keep speech (from the VAD, not a volume threshold), drop the
+//! silences between it, each boundary moved to the quietest instant nearby to land in a real gap.
 
 use super::{CutSettings, Range};
 use crate::vad::Region;
@@ -60,13 +56,10 @@ pub fn snap_boundary(
     Some(env.quietest((target - s.snap).max(a), (target + s.snap).min(b), target))
 }
 
-/// The span a hand edit of a run of words changes: cut (`keep` false) or keep `run` (the run's
-/// first start, its latest end), from a boundary in the pause before it to one in the pause after,
-/// each placed by [`snap_boundary`]. `before` is where earlier speech ends (the latest end of any
-/// earlier word, on any track) and `after` where later speech starts (the earliest later start);
-/// `None` at either end of the transcript, where the neighbour counts as speech both pads away.
-/// Where no pause exists (speech on another track overlaps the run's edge) the boundary is the
-/// run's own edge: a cut removes every track, so that overlapping word is cut there too.
+/// The span a hand edit of a run of words changes (cut, or kept with `keep`), from a boundary placed
+/// by [`snap_boundary`] in the pause before `run` to one in the pause after. `before`/`after` are
+/// where earlier speech ends and later speech starts on any track, `None` at the transcript's ends.
+/// With no pause there the boundary is the run's own edge, since a cut removes every track.
 pub fn word_span(
     before: Option<f64>,
     run: (f64, f64),

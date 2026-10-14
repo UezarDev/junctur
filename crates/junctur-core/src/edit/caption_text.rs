@@ -1,8 +1,6 @@
-//! The caption text options (5j): case, punctuation, censored words and find-and-replace pairs.
-//! They change only what captions show (the SRT, Send to Resolve, the preview), never the
-//! transcript, so turning one off brings the spoken words back; `export::caption_text` applies
-//! them. A module of their own because they are the only list-valued caption settings, and their
-//! checks are about characters the `captions` line and an SRT cannot carry.
+//! The caption text options: case, punctuation, censored words and find-and-replace pairs. They
+//! change only what captions show, never the transcript. Their own module because they are the only
+//! list-valued caption settings, checked for characters the `captions` line and an SRT cannot carry.
 
 use serde::{Deserialize, Serialize};
 

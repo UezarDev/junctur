@@ -15,27 +15,11 @@
 //! window 0 0.820 0.820 14
 //! ```
 //!
-//! `#` lines are comments. `source` takes the rest of the line, so paths need no quoting, and so
-//! does a speaker's name (after its id and the optional `track=<n>` and `color=#RRGGBB`), so
-//! renaming or recolouring a speaker by hand is editing one line. Times are seconds with
-//! millisecond precision. Speaker and turn lines are written only when there are speakers, the
-//! `captions` line only when the list has its own caption settings (2i: without one it follows the
-//! user's defaults, so a line equal to the built-in default is still written), and only then is the
-//! header `junctur-edit 2`
-//! (5a): a list without them is byte-for-byte what an older build wrote and still reads there,
-//! while a list with them tells an older build it is a newer format instead of failing on its
-//! first new line. Both versions read here. A list with `fix` lines (5h: a word's spelling fixed by
-//! hand, `fix <track> <start> <text>`, the text the rest of the line) is version 3 for the same
-//! reason. A fix on a word that is not the first on its track to start in its millisecond (5w:
-//! Whisper gives runs of short words one start) writes which one it is after the start,
-//! `fix <track> <start>+<n> <text>`, and makes the list version 4, which a 5h build would fail on;
-//! a list without one is still version 3. Every version reads here, a `fix` line without `+<n>` as
-//! the first word of its millisecond. A run of words fixed as one text (5x: a sentence retyped) is a
-//! `span <track> <first start>[+<n>] <last start>[+<n>] <text>` line, the words from the first to the
-//! last on that track, and makes the list version 5; without one a list is written as before. A word
-//! retimed by moving a cut's edge (2w) is a `time <track> <start>[+<n>] <new start> <new end>` line,
-//! the word named by its heard start as a fix names it, and makes the list version 6; without one a
-//! list is written as before.
+//! `#` lines are comments. `source` and a speaker's name (after its id and the optional `track=<n>`
+//! and `color=#RRGGBB`) take the rest of the line, so they need no quoting. Times are seconds with
+//! millisecond precision. A word in a `fix`, `span` or `time` line is `<start>`, or `<start>+<n>`
+//! when `n` earlier words on its track start in that millisecond: `fix <track> <word> <text>`,
+//! `span <track> <first> <last> <text>` for words fixed as one, `time <track> <word> <start> <end>`.
 
 use std::fmt::Write;
 use std::path::PathBuf;
@@ -46,10 +30,9 @@ use super::{
     EditList, Fix, Range, Retime, SpeakerName, Speakers, Turn, Window, WordAt,
 };
 
-/// The newest version this build writes (a retimed word, 2w); lists without one are written as 5
-/// with a span of words fixed as one (5x), lists with fixed words but no span as 4 when one is a
-/// later word of its start millisecond (5w), else as 3 (5h), lists without fixed words as 2 (with
-/// speakers or captions) or 1.
+/// The newest version this build writes; it reads 1 to this. A list is written at the lowest
+/// version that holds what it uses, so older builds still read it: 6 with a `time` line, 5 with a
+/// `span`, 4 with a `+<n>` word, 3 with a `fix`, 2 with speakers or captions, else 1.
 pub const FORMAT_VERSION: u32 = 6;
 
 pub fn write(e: &EditList) -> String {
@@ -326,8 +309,8 @@ pub fn parse(text: &str) -> Result<EditList, String> {
                 add_fix(&mut e.fixes, fix).map_err(bad)?;
             }
             "time" => {
-                // Written only into a version 6 list (2w repair): one under an older header is not
-                // a list Junctur wrote, and the build that wrote that version refused the line.
+                // Written only into a version 6 list: one under an older header is not a list
+                // Junctur wrote, and the build that wrote that version refused the line.
                 if read_version < 6 {
                     return Err(bad("a `time` line needs a `junctur-edit 6` list"));
                 }
@@ -413,7 +396,7 @@ pub fn parse(text: &str) -> Result<EditList, String> {
     Ok(e)
 }
 
-/// A word as a `fix` or `span` line names it: `<start>` or `<start>+<n>` (5w), a bare start being
+/// A word as a `fix` or `span` line names it: `<start>` or `<start>+<n>`, a bare start being
 /// the millisecond's first word. Split at the last `+` so an exponent's sign (`1e+1`) stays the
 /// start's.
 fn word_at(t: &str) -> Option<WordAt> {
@@ -426,7 +409,7 @@ fn word_at(t: &str) -> Option<WordAt> {
 }
 
 /// `fix` added to the list read so far, refused when it shares a word with a fix already there: a
-/// second line for one word, or a span over a fixed word or another span (5x), would give the word two
+/// second line for one word, or a span over a fixed word or another span, would give the word two
 /// texts.
 fn add_fix(fixes: &mut Vec<Fix>, fix: Fix) -> Result<(), &'static str> {
     match fixes.iter().find(|f| f.overlaps(&fix)) {
@@ -544,7 +527,7 @@ mod tests {
             "{text}"
         );
         assert_eq!(parse(&text).unwrap(), c);
-        // Own settings equal to the built-in default are still the list's own (2i): written, and
+        // Own settings equal to the built-in default are still the list's own: written, and
         // read back as set rather than as following the user's defaults.
         let own = EditList {
             captions: Some(Captions::default()),
@@ -580,7 +563,7 @@ mod tests {
         assert!(parse(&format!("{head}captions maybe\n")).is_err());
         assert!(parse(&format!("{head}captions on chars=500\n")).is_err());
         assert!(parse(&format!("{head}captions on shadow=3\n")).is_err());
-        // 5g made `size` a setting: 3 % is in range, 1 % is not.
+        // `size`: 3 % is in range, 1 % is not.
         assert!(parse(&format!("{head}captions on size=3\n")).is_ok());
         assert!(parse(&format!("{head}captions on size=1\n")).is_err());
         assert!(parse(&format!("{head}captions on bold=yes\n")).is_err());
@@ -589,7 +572,7 @@ mod tests {
 
     #[test]
     fn caption_switches_and_styles_round_trip() {
-        // Each written only when on, after 5a's settings; off by hand reads as off.
+        // Each written only when on, after the cue settings; off by hand reads as off.
         let c = EditList {
             captions: Some(Captions {
                 preview: true,
@@ -705,7 +688,7 @@ mod tests {
 
     #[test]
     fn a_later_word_of_one_millisecond_is_written_with_its_place_as_version_4() {
-        // 5w: "en" and "él" both start at 54.944; each word its own fix.
+        // "en" and "él" both start at 54.944; each word its own fix.
         let e = EditList {
             fixes: vec![
                 Fix {
@@ -735,8 +718,8 @@ mod tests {
         assert_eq!(back.fixes, [e.fixes[1].clone(), e.fixes[0].clone()]);
         assert!(!back.fixes[0].same_word(&back.fixes[1]));
         assert_eq!(back.to_text(), text);
-        // A 5h list's bare line names the first word of its millisecond and is written back byte
-        // for byte, still version 3.
+        // A bare line names the first word of its millisecond and is written back byte for byte,
+        // still version 3.
         let old = EditList {
             fixes: vec![Fix {
                 track: 0,
@@ -761,7 +744,7 @@ mod tests {
 
     #[test]
     fn a_span_is_its_own_line_and_makes_the_list_version_5() {
-        // 5x: a run of words fixed as one text.
+        // A run of words fixed as one text.
         let at = |start, nth| WordAt { start, nth };
         let e = EditList {
             fixes: vec![
@@ -791,7 +774,7 @@ mod tests {
         let back = parse(&text).unwrap();
         assert_eq!(back.fixes, [e.fixes[1].clone(), e.fixes[0].clone()]);
         assert_eq!(back.to_text(), text);
-        // Without a span the list is what 5w wrote.
+        // Without a span the list is written at the older version.
         let plain = EditList {
             fixes: vec![e.fixes[1].clone()],
             ..sample()
@@ -823,7 +806,7 @@ mod tests {
 
     #[test]
     fn a_retimed_word_is_a_time_line_and_makes_the_list_version_6() {
-        // 2w: a word's start and end moved with a cut's edge, named by its heard start.
+        // A word's start and end moved with a cut's edge, named by its heard start.
         let t = |track, start, nth, from, to| Retime {
             track,
             start,
@@ -881,7 +864,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(ok.times.len(), 2);
-        // Two tracks' words of one millisecond keep their order through a round trip (2w repair).
+        // Two tracks' words of one millisecond keep their order through a round trip.
         let one_ms = EditList {
             times: vec![t(1, 5.0001, 0, 5.0, 5.2), t(0, 5.0004, 0, 5.0, 5.3)],
             ..sample()
@@ -892,8 +875,8 @@ mod tests {
             "{text}"
         );
         assert_eq!(parse(&text).unwrap().to_text(), text);
-        // A `time` line under an older header is refused (2w repair), and so is a version this
-        // build does not know (as a 5x build refuses this version 6).
+        // A `time` line under an older header is refused, and so is a version this build does
+        // not know.
         assert!(parse("junctur-edit 5\nsource x.mp4\ntime 0 2.000 2.1 2.3\n").is_err());
         assert!(parse("junctur-edit 7\nsource x.mp4\n").is_err());
     }

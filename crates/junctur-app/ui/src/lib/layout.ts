@@ -1,21 +1,12 @@
 /**
- * Where everything in the editor goes (2g), from the window, the side panel, the picture's shape and
- * how many tracks and speakers there are. Pure, so App.svelte only places what this returns and
- * tells mpv the margins.
- *
- * The left column holds the video area, the play bar under it and the track lanes under that (B).
- * Landscape gives the picture the column's width when it can and the lanes the rest, each track
- * lane between ROW_MIN and ROW_MAX; when the lanes need less than that leaves, the video area takes
- * the extra (the picture is then pillarboxed) instead of the lanes growing. Portrait (the picture
- * taller than wide, P4) keeps the lanes thin and puts the mixer strips and the large avatars in
- * the space mpv leaves beside the picture: mpv centres the picture in what the margins leave, so
- * nothing but the right and bottom margins is ever sent.
+ * Where everything in the editor goes, from the window, side panel, picture shape and track and
+ * speaker counts. Pure, so App.svelte only places what this returns and tells mpv the margins.
  */
 
 import type { Captions } from "./api";
 import { LINE } from "./captionStyle";
 
-/** The title bar's height (2i): TitleBar.svelte is drawn this tall and the editor is laid out in
+/** The title bar's height: TitleBar.svelte is drawn this tall and the editor is laid out in
  * the window below it, so the two cannot disagree. */
 export const TITLE = 34;
 export const BAR = 52;
@@ -132,12 +123,10 @@ export function layout(i: Input): Layout {
   };
 }
 
-/** The two bars over the picture (2r): the range toolbar (ActionBar) and review's. One size each in
- * every state, so no label, timecode or button text moves anything (2g to 2o sized them by their
- * contents); the components draw themselves at exactly these, so `floatAt` and the box agree. */
+/** The two bars over the picture: the range toolbar (ActionBar) and review's. One size each in
+ * every state, so no text moves anything; the components draw themselves at exactly these. */
 export const TOOLS = { w: 344, h: 84 };
-// Review is four rows since 2s (the clip's edges and their steppers got one): 156 = 2 x 10 padding,
-// 2 border, rows of 20, 26, 36 and 28, three 8px gaps.
+// Review: 156 = 2 x 10 padding, 2 border, rows of 20, 26, 36 and 28, three 8px gaps.
 export const REVIEW = { w: 440, h: 156 };
 /** The bars' inset from the picture's bottom-right corner, their gap from a caption block, and the
  * least room kept to the video area's edges. */
@@ -151,19 +140,13 @@ const GLYPH = 0.5;
 const GAP = 0.3;
 const BESIDE_COLUMN = 0.3;
 
-/** What places the caption blocks on the picture (5g's settings, and how many speakers could talk at
- * once); the bars are given null with the preview off. */
+/** What places the caption blocks on the picture (the layout settings, and how many speakers could
+ * talk at once); the bars are given null with the preview off. */
 export type CaptionBand = Pick<Captions, "position" | "size" | "lines" | "chars" | "layout" | "protagonist"> & { speakers: number };
 
 /**
- * How far the bottom caption blocks reach on a picture `w` by `h`, as the engine places them
- * (`export/layout.rs`): `right`, their right-most edge in picture widths, and `top`, the top of
- * what is stacked at the bottom in picture heights. A full line of `chars` characters is the
- * widest a block gets (glyph `GLYPH` ems). Two people talking at once are allowed for: stacked,
- * the second block sits on the first (`GAP` ems apart); top and bottom, the second goes to the top,
- * so only a third stacks at the bottom; side by side, the blocks sit across the picture's width,
- * so they reach its right edge, each in a column its words are wrapped again to (more lines).
- * Three or more stacked at once can still reach above `top`.
+ * How far the bottom caption blocks reach on a picture `w` by `h`, as the engine places them:
+ * `right` in picture widths and `top` in picture heights, allowing for two people at once.
  */
 export function captionReach(c: CaptionBand, w: number, h: number): { right: number; top: number } {
   const em = c.size / 100;
@@ -185,14 +168,9 @@ export function captionReach(c: CaptionBand, w: number, h: number): { right: num
 }
 
 /**
- * Where a floating bar of `size` goes (2r): its box's top-left in the editor's coordinates and the
- * scale it is drawn at. The box sits in the picture's bottom-right corner (2n had it over the lanes,
- * where it hid the cuts). With the captions preview on, a box that would reach over the bottom
- * caption blocks (`captionReach`: a default 42-character line spans about the middle half of a 16:9
- * picture, to 0.77 of its width, so the corner alone clears it only on a very wide picture) rises to sit just above them. It depends only on the layout and the
- * settings, never on a caption showing, so it never jumps while playing. It always stays inside the
- * video area `bounds` (never over the play bar or past the window's edge): a picture narrower than
- * the box moves it left only as far as needed, and an area smaller than the box draws it smaller.
+ * Where a floating bar of `size` goes: its top-left and draw scale. It sits in the picture's
+ * bottom-right corner, rising above the bottom caption blocks when the preview is on, and stays
+ * inside `bounds`. It depends only on layout and settings, so it never jumps while playing.
  */
 export function floatAt(
   picture: Rect,

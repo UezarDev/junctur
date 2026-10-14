@@ -1,23 +1,8 @@
-//! Captions as an SRT file on the edited timeline, each cue in its speaker's colour (5a).
-//!
-//! SRT because it is the one format checked to bring per-cue colour into DaVinci Resolve: Uezar
-//! imported a test file with `<font color>` per cue and the colours came through; the same test as
-//! WebVTT (`::cue` classes) did not. Premiere Pro is unverified; reports say its import gives every
-//! caption its default style. Only what an SRT carries into Resolve is written: text, timing,
-//! colour, and bold, italic (5d) or underline (5f). Each line gets its own `<font>` tag, since a tag spanning a line break is the case
-//! importers disagree on.
-//!
-//! One SRT holds one Resolve subtitle track, and a track shows one caption at a time: Uezar's
-//! import of 26 overlapping pairs in one file came in without overlaps (5b). 5b answered with a file
-//! per speaker, one track each; Uezar wanted one track (5e). So when people talk at once, one cue
-//! holds them all ([`Part`]): each speaker's words on their own line(s) in their colour, a line break
-//! between speakers, the caption settings' line limit per speaker, and the cue lasting until the
-//! last of them stops. Cues never overlap.
-//!
-//! Times are output times: a kept word is mapped through the kept ranges on the frame grid
-//! ([`frame_ranges`]), exactly as the renderer and the FCPXML lay the ranges end to end, so a cue
-//! lands on the same frames in the render and in Resolve's timeline. A range-by-range sum of
-//! seconds would drift by up to a frame per cut, seconds over a long edit.
+//! Captions as an SRT file on the edited timeline, each cue in its speaker's colour: SRT is the
+//! format whose per-cue colour comes through into DaVinci Resolve. A Resolve subtitle track shows
+//! one caption at a time, so cues never overlap and people talking at once share a cue, a [`Part`]
+//! each. Times go through the kept ranges on the frame grid ([`frame_ranges`]), as the renderer and
+//! the FCPXML do, so a cue lands on the same frames in the render and in Resolve.
 
 use std::fmt::Write;
 
@@ -34,11 +19,9 @@ const PAUSE_S: f64 = 1.0;
 /// A cue stays at least this long when the next one leaves room, so a lone short word is not
 /// gone before it is read.
 const MIN_S: f64 = 0.8;
-/// No cue is shorter than this: when the next one would start sooner (quick turns, or a stacked
-/// overlap cut at its limits), the next one waits. Shorter than [`MIN_S`] so a quick exchange does
-/// not drift far behind. Not under a word limit (5i): there each cue is a word or a few, quicker
-/// than any floor, and every wait would add to the last until the captions trail the voice by
-/// seconds; a word cue starts when it is said and lasts until the next.
+/// No cue is shorter than this; when the next would start sooner, it waits. Shorter than [`MIN_S`]
+/// so a quick exchange does not drift behind. Not applied under a word limit, where the waits would
+/// add up until the captions trail the voice by seconds.
 const READABLE_S: f64 = 0.5;
 
 /// One speaker's lines in a cue.
@@ -47,14 +30,14 @@ pub struct Part {
     /// Speaker id, 0 for none.
     pub speaker: u32,
     pub lines: Vec<String>,
-    /// What the lines say, unit by unit in order, with when each was said (5l: the word highlight
+    /// What the lines say, unit by unit in order, with when each was said (for the word highlight
     /// in Resolve and the preview). The SRT does not use them.
     #[serde(skip)]
     pub words: Vec<Spoken>,
 }
 
-/// A unit of a caption (a word, or a phrase 5j's find and replace made one) and when it was said,
-/// in output seconds: the words' own times, translated words spread over their sentence (5k).
+/// A unit of a caption (a word, or a phrase find and replace made one) and when it was said, in
+/// output seconds: the words' own times, translated words spread over their sentence.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Spoken {
     pub text: String,
@@ -63,7 +46,7 @@ pub struct Spoken {
 }
 
 /// A caption: one part per speaker talking in it, in the order they started, so more than one only
-/// where people talk at once. Serialized for the app's preview over the picture (5d).
+/// where people talk at once. Serialized for the app's preview over the picture.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Cue {
     /// Output seconds.
@@ -165,30 +148,11 @@ fn clean(text: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The cues for `edit`'s kept words. `words` is every transcript word with the track it was heard
-/// on, in any order; `num/den` is the frame rate the edit is rounded to (the source's).
-///
-/// Each word goes under its one speaker ([`crate::edit::Labeller::of_word`], as the transcript view
-/// shows it), never on two lines: where two people talk over each other on one mixed track the
-/// transcript cannot tell whose word it is, and the same words twice in two colours would read as
-/// a stutter. A word joins the open cue on its speaker's part while it is within [`PAUSE_S`] of
-/// their last word there, fits their `lines` and `words` (5i), and the cue stays within `seconds`. A speaker not yet
-/// in the cue joins it only when talking at once with someone in it ([`Open::at_once`]); otherwise
-/// the cue closes, so plain turn-taking stays one speaker per cue as in 5a, and a stacked cue ends
-/// when the last of the overlapping speakers stops. An overlap longer than the limits allow becomes
-/// several stacked cues, each within them; a speaker still mid-word when one closes keeps their
-/// last line on screen in the next ([`Open::after`]).
-///
-/// Before cutting, the kept words go through the text options ([`caption_text`], 5j): a word is
-/// shown as they make it, and a replaced phrase is one unit, one word for the word limit. Before
-/// those, with `c.translate` set, each sentence with a translation in `translated` is shown
-/// translated ([`translated`], 5k); one without is shown as said, so the preview can show what is
-/// translated so far, and a caller writing a file checks first that none is missing
-/// ([`missing`]).
-///
-/// `c` is the caption settings to cut with, resolved by the caller: the list's own, else the
-/// user's defaults (2i, `config::captions`). Taken apart from `edit`, whose `captions` may be
-/// `None`, so a caller cannot forget the defaults and silently get the built-in ones.
+/// The cues for `edit`'s kept words. `words` is every transcript word with its track, in any
+/// order; `num/den` is the frame rate the edit is rounded to. Each word goes under its one speaker,
+/// who joins an open cue only when talking at once with someone in it ([`Open::at_once`]). A
+/// sentence not yet translated shows as said, so a caller writing a file checks [`missing`] first.
+/// `c` is the resolved caption settings, apart from `edit` so a caller cannot forget the defaults.
 pub fn cues<'a>(
     edit: &EditList,
     c: &Captions,
@@ -218,7 +182,7 @@ pub fn cues<'a>(
             track: first.track,
             start: tl.map(first.start.0, first.start.1),
             end: tl.map(last.end.0, last.end.1),
-            // Its speaker first, then anyone else whose overlap turn holds it (5b).
+            // Its speaker first, then anyone else whose overlap turn holds it.
             speakers: label.speakers_of_word(first.track, first.start.1, last.end.1),
         };
         if open.as_mut().is_some_and(|o| o.take(&said, &text, c)) {
@@ -240,13 +204,9 @@ pub fn cues<'a>(
 }
 
 /// The kept words, in time order, each in its kept range and cleaned (a word left empty is kept
-/// here, so a phrase around it does not match, and dropped as a unit). A word the user fixed
-/// shows as fixed (5h), here and so in the preview, every export, and the sentences translated
-/// (5k), before the text options (5j) and the word limit (5i). The kept words of a span fixed as one
-/// text (5x) give way to the text's own words ([`spread`]), which everything after takes as words.
-/// A word the user retimed by moving a cut's edge (2w) is placed, kept or cut and timed by its new
-/// start and end, here and so everywhere a caption's time comes from: the one place word times are
-/// read on their way to the timeline, as the fixes are for their text.
+/// here, so a phrase around it does not match). Fixes and retimes apply here, the one place word
+/// text and times are read on their way to the timeline; a span fixed as one text gives way to
+/// the text's own words ([`spread`]).
 fn kept<'a>(
     tl: &Timeline,
     edit: &EditList,
@@ -255,11 +215,11 @@ fn kept<'a>(
     let mut fixes = Fixes::new(&edit.fixes);
     let mut times = Times::new(&edit.times);
     // Stable, so words starting together keep the transcript's order, which tells their fixes
-    // apart (5w).
+    // apart.
     let mut words: Vec<(usize, &Word)> = words.into_iter().collect();
     words.sort_by(|a, b| a.1.start.total_cmp(&b.1.start));
     let mut out = Vec::with_capacity(words.len());
-    // Each span's kept words in time order, by the span's place in the list (5x).
+    // Each span's kept words in time order, by the span's place in the list.
     let mut spans: Vec<SpanSaid> = Vec::new();
     // Each span's place in `spans`, by its place in the list.
     let mut at: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
@@ -311,21 +271,18 @@ fn kept<'a>(
     out
 }
 
-/// A span fixed as one text (5x), and its kept words in time order: each one's kept range, start
-/// and end (as retimed, 2w).
+/// A span fixed as one text, and its kept words in time order: each one's kept range, start and
+/// end (as retimed).
 struct SpanSaid<'a> {
     track: usize,
     text: &'a str,
     said: Vec<(usize, f64, f64)>,
 }
 
-/// A span's text (5x) as words on the timeline, over `said`, the span's kept words in time order
-/// with their kept ranges: those words' times end to end (a pause between two of them, or words cut
-/// out of the span, left out) cut into one equal share per word of the text, each share's start and
-/// end placed back on the word it falls in. So the first starts where the span's first kept word does
-/// and the last ends where its last kept word does, every word lands in a kept range (through the
-/// range of the word it falls on, even with a cut through the span), and none is put over a pause.
-/// Words with no length at all leave nothing to share: then every word starts and ends with the first.
+/// A span's text as words on the timeline: the times of `said` (the span's kept words in time
+/// order, with their kept ranges) end to end, pauses left out, cut into one equal share per word
+/// of the text, each share placed back on the word it falls in. So no word lands over a pause or
+/// a cut; with no length at all, every word starts and ends with the first.
 fn spread(track: usize, text: &str, said: &[(usize, f64, f64)]) -> Vec<Shown> {
     let new: Vec<&str> = text.split_whitespace().collect();
     if new.is_empty() || said.is_empty() {
@@ -381,7 +338,7 @@ fn sentence_words(kept: &[Shown], tl: &Timeline, label: &Labeller) -> Vec<Vec<us
     )
 }
 
-/// The sentences captions would translate (5k): the kept words' sentences as said, each with its
+/// The sentences captions would translate: the kept words' sentences as said, each with its
 /// track and start, which find the language it was said in. The words, frame rate and edit are as
 /// for [`cues`]; the caption settings play no part, so changing them never asks for a
 /// translation again, while a cut that changes a sentence's words does.
@@ -448,16 +405,16 @@ impl Said {
 struct OpenPart {
     speaker: u32,
     lines: Vec<String>,
-    /// The units on the lines with their times (5l).
+    /// The units on the lines with their times.
     spoken: Vec<Spoken>,
-    /// Units taken (5i's word limit), one per word or replaced phrase (5j), whatever spaces its
-    /// text holds; `last_words` of them on the last line.
+    /// Units taken for the word limit, one per word or replaced phrase, whatever spaces its text
+    /// holds; `last_words` of them on the last line.
     words: u32,
     last_words: u32,
     /// The track and end of its last word.
     track: usize,
     end: f64,
-    /// Other speakers heard at once with any of its words (5b's overlap stretches).
+    /// Other speakers heard at once with any of its words (from overlap stretches).
     with: Vec<u32>,
 }
 
@@ -628,13 +585,11 @@ fn wrap_onto(mut lines: Vec<String>, w: &str, chars: usize) -> Vec<String> {
     lines
 }
 
-/// Cues in order and never overlapping (Resolve puts subtitles on one track, which cannot hold
-/// two at once), all within the edited timeline's `total` seconds. Each cue lasts at least
-/// `floor` ([`READABLE_S`], or nothing under a word limit): a next cue starting sooner (a quick
-/// turn) waits that long. Then each ends by the next one's start, held to [`MIN_S`] where there is
-/// room, never past the longest a cue may last. A cue pushed past the end of the timeline joins the
-/// one before. Under a word limit nothing is pushed, and cues said at one instant share its time
-/// first ([`share_instants`]), so each keeps its words within the limit.
+/// Cues in order and never overlapping (a Resolve subtitle track holds one at a time), all within
+/// the edited timeline's `total` seconds. Each cue lasts at least `floor`, then ends by the next
+/// one's start, held to [`MIN_S`] where there is room, never past `longest`. A cue pushed past the
+/// end joins the one before. Under a word limit nothing is pushed, and cues said at one instant
+/// share it ([`share_instants`]).
 fn settle(cues: &mut Vec<Cue>, longest: f64, floor: f64, total: f64) {
     cues.sort_by(|a, b| a.start.total_cmp(&b.start));
     if floor == 0.0 {
@@ -654,8 +609,7 @@ fn settle(cues: &mut Vec<Cue>, longest: f64, floor: f64, total: f64) {
         c.end = want.min(next).min(total);
     }
     // A cue pushed past the end of the timeline has no time left; its words go into the cue
-    // before it rather than being lost (a part per speaker, as in any cue). One with no cue
-    // before it goes into the next, ahead of its words: 5i dropped it, words and all (5p).
+    // before it rather than being lost, or into the next when it is the first.
     let mut kept: Vec<Cue> = Vec::with_capacity(cues.len());
     let mut early: Vec<Part> = Vec::new();
     for mut c in cues.drain(..) {
@@ -688,16 +642,10 @@ fn join(parts: &mut Vec<Part>, more: Vec<Part>) {
     }
 }
 
-/// Cues (in order) said at one instant, spread over it in turn, under a word limit (5p).
-///
-/// A cue the word limit closed is followed by one starting at the same instant when two units of
-/// one speaker start together: Whisper gives a word no length now and then, and a long
-/// translation (5k) puts several words where a spoken word ends. Cues cannot overlap, so the
-/// first had no time: 5i left it to join the cue before, past the limit, or dropped it as the
-/// first. Now the cues of one instant split, evenly and in turn, the time their words take (the
-/// minimum hold when none has a length), never past the next cue's start nor the end of the
-/// timeline, so every cue keeps its own time and nothing trails the voice: the next cue starts
-/// where it did. Two speakers at once are not this case; they share one cue, a part each.
+/// Cues (in order) said at one instant, spread over it in turn, under a word limit: Whisper gives
+/// a word no length now and then, and a long translation puts several words where a spoken word
+/// ends. The cues split the time their words take (the minimum hold when none has a length), never
+/// past the next cue's start nor the timeline's end, so each keeps its words within the limit.
 fn share_instants(cues: &mut [Cue], total: f64) {
     let mut i = 0;
     while i < cues.len() {
@@ -728,18 +676,11 @@ fn stamp(s: f64) -> String {
     )
 }
 
-/// The SRT text: CRLF line ends (what Windows tools and Resolve's own export write), each line in
-/// `<font color>` of its part's speaker; a word nobody was heard saying is left white. A cue's parts
-/// follow one another line by line, so a change of speaker is a line break: no blank line between
-/// them, which would end the cue.
-///
-/// Bold and italic (5d) and underline (5f) wrap every line outside its colour,
-/// `<b><i><u><font …>line</font></u></i></b>`: the order Resolve's own SRT export writes (`<b>`
-/// around the whole text), `<u>` innermost so 5d's form is unchanged without it (Uezar's import
-/// found the order makes no difference), each line closed on its own like the colour. Resolve's
-/// import applies all three (5d's research, Uezar's underline test); nothing else is written,
-/// since the rest of what Resolve styles is its subtitle Track Style, which an SRT cannot set.
-/// `c` is resolved by the caller, as for [`cues`].
+/// The SRT text: CRLF line ends (what Resolve's own export writes), each line in `<font color>` of
+/// its part's speaker, closed per line since importers disagree on a tag spanning a break; a word
+/// nobody was heard saying is left white. Parts follow line by line with no blank line between
+/// (it would end the cue). Bold, italic and underline wrap each line outside its colour, in the
+/// order Resolve's own export writes; the rest of a subtitle's look is Resolve's Track Style.
 pub fn write(cues: &[Cue], edit: &EditList, c: &Captions) -> String {
     let tags: Vec<&str> = [("b", c.bold), ("i", c.italic), ("u", c.underline)]
         .into_iter()
@@ -869,7 +810,7 @@ mod tests {
 
     #[test]
     fn a_retimed_word_is_kept_cut_and_timed_by_its_new_time() {
-        // 2w: the kept range ends at 11.0. Whisper put "dos" at 10.2-10.8 and "tres" at 10.9-11.6
+        // The kept range ends at 11.0. Whisper put "dos" at 10.2-10.8 and "tres" at 10.9-11.6
         // ("tres" cut by its middle); the edge moved to 11.4 retimes "dos" to end there and "tres"
         // to start there, so "tres" stays cut and the cue runs to the edge.
         let mut e = edit(&[(10.0, 11.4)], Captions::default());
@@ -906,7 +847,7 @@ mod tests {
 
     #[test]
     fn a_fix_shows_on_its_own_word_of_those_starting_together() {
-        // 5w: Whisper gave "en" and "él" one start; a fix on "él" showed on both. The first is cut
+        // Whisper gave "en" and "él" one start; a fix on "él" stays on "él". The first is cut
         // here (its middle before the kept range) and is still counted.
         let mut e = edit(&[(10.0, 12.0)], Captions::default());
         e.fixes = vec![crate::edit::Fix {
@@ -928,7 +869,7 @@ mod tests {
         assert_eq!(solo(&c), ["en miel hola"]);
     }
 
-    /// The words of a sentence retyped as one span (5x): "the wezar" (10.0-10.6), a pause, "went
+    /// The words of a sentence retyped as one span: "the wezar" (10.0-10.6), a pause, "went
     /// hom" (11.0-11.6), then "ok".
     fn retyped() -> (EditList, Vec<Word>) {
         let mut e = edit(&[(9.0, 13.0)], Captions::default());
@@ -953,7 +894,6 @@ mod tests {
     }
 
     /// The kept words' text and source start and end, with their kept range.
-    /// A kept word's text, start and end.
     type Got = (String, (usize, f64), (usize, f64));
 
     fn said(e: &EditList, w: &[(usize, Word)]) -> Vec<Got> {
@@ -970,7 +910,7 @@ mod tests {
 
     #[test]
     fn a_span_shows_its_own_words_spread_over_the_words_it_replaces() {
-        // 5x: 1.2 s of speech (the pause between "wezar" and "went" left out), 0.4 s a word; the
+        // 1.2 s of speech (the pause between "wezar" and "went" left out), 0.4 s a word; the
         // span keeps its start (10.0) and end (11.6).
         let (e, w) = retyped();
         let w: Vec<(usize, Word)> = w.into_iter().map(|w| (0, w)).collect();
@@ -981,7 +921,7 @@ mod tests {
         for (g, (a, b)) in got.iter().zip(want) {
             assert!(close(g.1, (0, a)) && close(g.2, (0, b)), "{got:?}");
         }
-        // Words per caption (5i) count the new words; one at a time, each in its own share.
+        // Words per caption count the new words; one at a time, each in its own share.
         let one = Captions {
             words: 1,
             ..Captions::default()
@@ -989,7 +929,7 @@ mod tests {
         let c = cues(&e, &one, w.iter().map(|(t, w)| (*t, w)), 30, 1, None);
         assert_eq!(solo(&c), ["Uezar", "went", "home.", "ok"]);
         assert!((c[1].start - 1.4).abs() < 1e-9, "{c:?}");
-        // And the text options (5j) take them as words.
+        // And the text options take them as words.
         let upper = Captions {
             case: crate::edit::Case::Upper,
             ..Captions::default()
@@ -1000,7 +940,7 @@ mod tests {
 
     #[test]
     fn a_span_with_a_cut_through_it_spreads_over_its_kept_words() {
-        // 5x: "wezar" cut (kept 9-10.3 and 10.9-13): 0.8 s of the span's speech left, 0.267 s a
+        // "wezar" cut (kept 9-10.3 and 10.9-13): 0.8 s of the span's speech left, 0.267 s a
         // word; the first word starts in the first range and ends in the second.
         let (mut e, w) = retyped();
         e.keep = vec![
@@ -1031,7 +971,7 @@ mod tests {
 
     #[test]
     fn a_span_of_words_with_no_length_and_another_tracks_words_inside_it() {
-        // 5x: words Whisper gave no length leave nothing to share: every new word at the start.
+        // Words Whisper gave no length leave nothing to share: every new word at the start.
         let (e, _) = retyped();
         let flat: Vec<(usize, Word)> = [(10.0, "the"), (10.5, "wezar"), (11.4, "hom")]
             .into_iter()
@@ -1053,7 +993,7 @@ mod tests {
 
     #[test]
     fn a_fixed_word_is_translated_as_fixed() {
-        // The sentences sent to translation (5k) read the fix (5h), as the captions do.
+        // The sentences sent to translation read the fix, as the captions do.
         let mut e = two_tracks(Captions::default());
         e.fixes = vec![crate::edit::Fix {
             track: 0,
@@ -1104,7 +1044,7 @@ mod tests {
     #[test]
     fn each_unit_keeps_when_it_was_said_on_the_edited_timeline() {
         use crate::edit::Replace;
-        // Kept 10-12 and 30-33 at 30 fps: output 0-2 then 2-5 (5l's word highlight reads these).
+        // Kept 10-12 and 30-33 at 30 fps: output 0-2 then 2-5.
         let c = Captions {
             replace: vec![Replace {
                 from: "qué tal".into(),
@@ -1211,7 +1151,7 @@ mod tests {
             );
             cues(&e, &own(&e), w.iter().map(|w| (0, w)), 30, 1, None)
         };
-        // No limit: as before 5i, one cue.
+        // No limit: one cue.
         assert_eq!(solo(&with(0)), vec!["a b c d e f g"]);
         assert_eq!(solo(&with(3)), vec!["a b c", "d e f", "g"]);
         // One at a time: each word its own cue, starting when it is said, not pushed behind.
@@ -1227,8 +1167,8 @@ mod tests {
 
     #[test]
     fn finished_cues_refuse_untranslated_and_cut_as_the_srt_does() {
-        // The SRT and the send to Resolve cut through `finished_cues` (5q): refused while a
-        // sentence is not translated, then the very cues the preview cuts with every translation.
+        // The SRT and the send to Resolve cut through `finished_cues`: refused while a sentence
+        // is not translated, then the very cues the preview cuts with every translation.
         use crate::export::finished_cues;
         let w = [word(0.0, 0.4, "Hola."), word(10.5, 11.0, "Adiós.")];
         let words: Vec<(usize, &Word)> = w.iter().map(|w| (0, w)).collect();
@@ -1419,7 +1359,7 @@ mod tests {
 
     #[test]
     fn two_speakers_starting_a_word_at_once_share_one_cue_within_the_limit() {
-        // 5p's report: two tracks, both 0.0-0.5 s, one word at a time. The second speaker has no
+        // Two tracks, both 0.0-0.5 s, one word at a time. The second speaker has no
         // part yet and talks at once, so it joins the cue as its own part: no second cue at the
         // same instant, and each part holds one word.
         let e = two_tracks(Captions {
@@ -1435,8 +1375,8 @@ mod tests {
     #[test]
     fn under_a_word_limit_words_said_at_one_instant_share_its_time() {
         // Whisper gives a word no length now and then ("a" at 1.0-1.0), so the next starts at the
-        // same instant. Each keeps its own cue, in turn, within the limit: first in the
-        // recording, where it used to be dropped, and after another, where it used to join it.
+        // same instant. Each keeps its own cue, in turn, within the limit, whether first in the
+        // recording or after another.
         let e = edit(
             &[(0.0, 40.0)],
             Captions {
@@ -1649,7 +1589,7 @@ mod tests {
         // Speaker 2 is on screen without a gap from "sí" until "claro" ends.
         assert!((c[0].end - c[1].start).abs() < 1e-9, "{c:?}");
         assert!(c[1].end >= 1.7 - 1e-9, "{c:?}");
-        // The carried line keeps its word's time (5l), and every part's units are its lines' words.
+        // The carried line keeps its word's time, and every part's units are its lines' words.
         assert_eq!(
             units(&c[1].parts[1]),
             [("sí".into(), 0.5, 1.3), ("claro".into(), 1.4, 1.7)]

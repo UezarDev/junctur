@@ -1,6 +1,5 @@
-// The caption settings' groups (2t): each `CaptionRules` part's heading and (i), in the order both
-// the Captions panel and Settings' caption defaults show them, so the two screens cannot drift.
-// The panel puts its own sections (Speakers, Export, Remembered voices) between these.
+// Each `CaptionRules` part's heading and (i), in the order the Captions panel and Settings' caption
+// defaults both show them, so the two screens cannot drift.
 
 export type CaptionPart = "switches" | "style" | "motion" | "overlap" | "text" | "cut" | "resolve";
 

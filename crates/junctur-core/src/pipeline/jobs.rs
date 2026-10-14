@@ -11,7 +11,7 @@ use crate::Result;
 /// The file in a project folder.
 pub(crate) const FILE: &str = "jobs.json";
 
-/// Stage names, in run order. The edit list comes before the transcript (2j): it needs none of it
+/// Stage names, in run order. The edit list comes before the transcript: it needs none of it
 /// but the word counts, filled in once the transcript is whole.
 pub const STAGES: [&str; 5] = ["tracks", "speech", "speakers", "edit", "transcribe"];
 
@@ -46,7 +46,7 @@ impl Jobs {
             .ok()
             .and_then(|b| serde_json::from_slice::<Jobs>(&b).ok())
             .map(|mut j| {
-                // A file written before 2j lists `transcribe` before `edit`: run order now.
+                // An older file may list `transcribe` before `edit`: put in run order.
                 // Stable, and names this version does not know go last.
                 let order = |n: &str| STAGES.iter().position(|&x| x == n).unwrap_or(usize::MAX);
                 j.stages.sort_by_key(|s| order(&s.name));
@@ -70,12 +70,9 @@ impl Jobs {
         self.stages.iter().find(|s| s.name == name)
     }
 
-    /// Records stage `name`'s state in `dir`'s `jobs.json`, and takes the file as it now is.
-    ///
-    /// Read, changed and written back under one process-wide lock (2m), never this copy written
-    /// whole: a run's second half and 5c's speakers heard again each hold a copy loaded at their
-    /// start, and the speakers' write would put back `transcribe: running` after the
-    /// transcription had finished (the panel showing it running, a resume on the next open).
+    /// Records stage `name`'s state in `dir`'s `jobs.json`, and takes the file as it now is. Read,
+    /// changed and written under one lock, never this copy whole: another holder's stale copy would
+    /// put back a stage's old state over a newer one.
     pub fn set(
         &mut self,
         dir: &Path,
@@ -91,8 +88,8 @@ impl Jobs {
 
     fn put(&mut self, name: &str, state: StageState, seconds: Option<f64>, note: Option<String>) {
         if !self.stages.iter().any(|s| s.name == name) {
-            // A stage added after this project's `jobs.json` was written (5a's `speakers`): put it
-            // in run order, or its state would be dropped on every run.
+            // A stage added after this project's `jobs.json` was written: put it in run order, or
+            // its state would be dropped on every run.
             let order = |n: &str| STAGES.iter().position(|&x| x == n);
             let at = self
                 .stages
@@ -119,7 +116,7 @@ impl Jobs {
     }
 
     /// Run one stage, recording it as running, then done (with its time) or failed. The stage
-    /// logs through the same `log`. A stage that panics is recorded failed on the way out (2m),
+    /// logs through the same `log`. A stage that panics is recorded failed on the way out,
     /// not left `running` as if the run had been killed.
     pub fn stage<T>(
         &mut self,
@@ -129,7 +126,7 @@ impl Jobs {
         f: impl FnOnce(&mut dyn FnMut(&str)) -> Result<T>,
     ) -> Result<T> {
         // Recorded before the line is logged, so a caller reading `jobs.json` on it sees the stage
-        // running (the app's progress, 2d).
+        // running (the app's progress).
         self.set(dir, name, StageState::Running, None, None)?;
         log(&format!("stage {name} ..."));
         let t0 = Instant::now();
@@ -158,7 +155,7 @@ impl Jobs {
     }
 }
 
-/// One change to `jobs.json` at a time in this process (2m: see [`Jobs::set`]).
+/// One change to `jobs.json` at a time in this process (see [`Jobs::set`]).
 static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Loads `dir`'s `jobs.json`, records one stage's state in it and writes it back whole, under
@@ -288,7 +285,7 @@ mod tests {
         j.set(&dir, "speakers", StageState::Done, Some(2.0), None)
             .unwrap();
         let back = Jobs::load(&dir);
-        // Also put in today's order: the file had `transcribe` before `edit` (before 2j).
+        // Also put in run order: the file had `transcribe` before `edit`.
         let names: Vec<&str> = back.stages.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, STAGES);
         assert_eq!(back.get("speakers").unwrap().state, StageState::Done);

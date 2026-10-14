@@ -1,17 +1,7 @@
-//! An edit list on the frame grid: its kept ranges as whole frames, rounded exactly as FCPXML and
-//! the renderer round them (`edit::frame_ranges`), and the mapping between source time and output
-//! (edited) time. Every lookup is a binary search, since a 30 h recording has thousands of ranges
-//! and the mapping runs on every position update.
-//!
-//! Output *seconds* are mpv's EDL timeline (see `edl`): each segment as the EDL spells it, its
-//! start and length rounded to the EDL's decimals, and segment starts summed from those lengths in
-//! order, as mpv sums them. Computing them from exact frame times instead drifts from mpv by the
-//! rounding of every earlier length (milliseconds after thousands of ranges, enough to name the
-//! wrong frame). Within a segment, mpv shows frame `a + k` at `segment start + k/fps + β`, where
-//! β is 0 to ~0.1 ms depending on how the source's time base rounds the EDL's biased start (0 on
-//! OBS's 1/30 files, measured; ~0.13 ms on a 1/15360 one), so offsets count from the range's
-//! first frame and any β in that band names the same frame. Output *frames* are exact integers,
-//! and they are what the clocks show.
+//! An edit list on the frame grid (rounded as FCPXML and the renderer round it) and the mapping
+//! between source and output time, by binary search since it runs on every position update.
+//! Output seconds are summed from the EDL's rounded lengths as mpv sums them, or they drift from
+//! mpv by a frame after thousands of ranges; output frames are exact and are what the clocks show.
 
 use junctur_core::edit::{frame_ranges, frames_ceil, Range};
 use serde::Serialize;
@@ -40,10 +30,8 @@ impl Fps {
     }
 }
 
-/// How far before its first frame an EDL segment starts. mpv keeps frames with `start <= pts <
-/// start + length`; starting exactly on the frame lets float rounding drop it (or let the frame
-/// after the range in), so every boundary sits a hair before its frame. Far below a frame, and
-/// ~5 audio samples at 48 kHz.
+/// How far before its first frame an EDL segment starts: starting exactly on the frame lets float
+/// rounding drop it, or let the frame after the range in. About 5 audio samples at 48 kHz.
 pub const EDL_BIAS: f64 = 1e-4;
 
 /// Decimals the EDL writes seconds with.
@@ -309,10 +297,8 @@ mod tests {
         assert_eq!(fps.frame_at(fps.seconds(1234)), 1234);
     }
 
-    /// What mpv does with the EDL: segment `i` starts in its timeline at the sum of the rounded
-    /// lengths before it, and frame `a + k` shows at `start_i + k/fps + β` with β from 0 to the
-    /// bias. Over 10 000 ranges of 10 frames at 30000/1001 (every length rounded), every range's
-    /// first and last frame must map back to the same source frame and the exact output frame.
+    /// mpv shows frame `a + k` at the sum of the rounded lengths before it plus `k/fps + β`, β from
+    /// 0 to the bias: every range's first and last frame must map back to the same frame.
     #[test]
     fn agrees_with_mpv_timeline_over_ten_thousand_ranges() {
         let fps = Fps {

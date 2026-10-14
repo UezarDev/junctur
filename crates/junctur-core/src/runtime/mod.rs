@@ -108,8 +108,8 @@ pub fn open_with_threads(
 }
 
 /// Open `model` on the CPU and on nothing else, `threads` per operator (every core when `None`).
-/// The only way the Tracks, Speech and Speakers stages open a model (5r: Uezar, "GPU only for the
-/// transcribing part"; CAM++ on ONNX Runtime's CUDA provider made a speaker of every sentence).
+/// The only way the Tracks, Speech and Speakers stages open a model: only transcription uses the
+/// GPU, and CAM++ on ONNX Runtime's CUDA provider makes a speaker of every sentence.
 pub fn open_on_cpu(model: &Path, threads: Option<usize>) -> Result<Session> {
     let threads =
         threads.unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));

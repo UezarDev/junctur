@@ -1,18 +1,6 @@
 <script lang="ts">
-  // The caption settings' fields (2i): moved out of the Captions panel so Settings edits the
-  // defaults with the very same fields. Every field of `Captions` is here once, in parts the panel
-  // places between its own sections (`switches`: export and preview, 5d; `style`: bold and italic,
-  // 5d, underline, 5f; `look`: font, size, position, outline, 5g; `overlap`: layout and
-  // protagonist, 5g; `motion`: the word highlight and the animation, 5l; `resolve`: the Text+
-  // template, 5g, picked from the Fusion Titles in Resolve's media pool with its look kept or not,
-  // 5m; `cut`: how cues are cut, 5a, and the word
-  // limit, 5i; `text`: case, punctuation, censoring and replacements, 5j, in `CaptionText`)
-  // and Settings places under the same headings (2t; `all` shows every part at once); a field
-  // added to `Captions` goes into one part and shows in both. Each is a `Field`, its explanation
-  // behind an (i) rather than in a `title` (2t). Number fields commit on change, inside the engine's limits (core
-  // edit/captions.rs); anything else snaps back to `value`. `names` (the recording's
-  // speakers, in the panel) are offered as protagonists; any name can be
-  // typed, so Settings' default can name a remembered voice.
+  // The caption settings' fields, shared so Settings edits the defaults with the very same fields.
+  // Every `Captions` field is in one part, which the panel and Settings each place under a heading.
   import { resolveTemplates, type CaptionAnimation, type CaptionLayout, type Captions } from "./api";
   import CaptionText from "./CaptionText.svelte";
   import Field from "./Field.svelte";
@@ -93,11 +81,8 @@
     onChange({ ...value, [key]: WHOLE.has(key) ? Math.round(v) : v });
   }
 
-  // The template picker (5m): the Fusion Titles in the open Resolve project's media pool, asked
-  // of the Junctur script in Resolve the first time the list is opened and again on Refresh; never
-  // on its own, since every ask waits on Resolve (seconds when the script is not running). Its
-  // failure shows under the list rather than as the app's error: opening the list with Resolve
-  // closed is ordinary. `null` until asked.
+  // The template picker: the Fusion Titles in the open Resolve project's media pool, asked only when
+  // the list is opened or refreshed, since every ask waits on Resolve. `null` until asked.
   let titles = $state<string[] | null>(null);
   let fetching = $state(false);
   let fetchError = $state<string | null>(null);
@@ -114,8 +99,7 @@
     }
   }
   // The picked template is always the second entry, so the selected option stays the same element
-  // when the list arrives; marked when Resolve's list came back without it (a name typed before
-  // 5m, a default from Settings, a title in another project).
+  // when the list arrives; marked when Resolve's list came back without it.
   const others = $derived((titles ?? []).filter((t) => t !== value.template));
   const missing = $derived(titles !== null && !!value.template && !titles.includes(value.template));
 

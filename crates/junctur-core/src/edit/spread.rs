@@ -1,15 +1,5 @@
-//! A fix reaching every word heard alike, and following its word into a new transcription (5aa).
-//!
-//! Uezar fixed one "Bane" to "Vayne" and the other "Bane" stayed: a fix is one word ([`super::fixes`]),
-//! and nothing looked for the words Whisper heard the same way. [`spread`] does: every other run of
-//! words whose heard text is the fixed one's, case and the punctuation around each word aside, gets the
-//! same fix, as an ordinary `fix` or `span` line the user can take away on its own. [`carry`] moves the
-//! fixes onto the words of a new transcription of the recording (the Correct button hears it again with
-//! the word list), where the old keys name other words or none.
-//!
-//! A module of its own rather than more of `fixes.rs`: that is what a fix is and how one word reads it;
-//! this is work over a whole transcript (an index of what every word sounds like, a scan per track),
-//! used by the app on every fix and by the pipeline after a re-transcription.
+//! Spreads a fix to every word heard alike, and carries fixes onto the words of a new transcription.
+//! Apart from `fixes.rs` because it works over a whole transcript, not one word.
 
 use std::collections::{HashMap, HashSet};
 
@@ -352,7 +342,7 @@ pub fn spread_with(
                     text: t,
                 }
             };
-            // A fix whose words the transcript no longer has (5h: left in the list, shown on no word)
+            // A fix whose words the transcript no longer has (left in the list, shown on no word)
             // can still lie inside this run's keys; the list would not read back with both.
             if fixes
                 .iter()
@@ -380,7 +370,7 @@ pub fn spread_with(
     out
 }
 
-/// "Undo those" (5aa): each fix of `added` (a [`spread`]'s, `heard` beside it) still as it was in
+/// "Undo those": each fix of `added` (a [`spread`]'s, `heard` beside it) still as it was in
 /// `fixes` is made to say what its words were heard as, a fix of the heard text. Not taken away: a
 /// word the user kept as heard is fixed as far as a later spread goes (the Correct button's, or the
 /// one after a re-transcription, which would otherwise give it the fix again), and [`carry`] keeps it
@@ -409,7 +399,7 @@ fn as_heard(c: &Carried) -> bool {
     check_span(&c.heard.join(" ")).ok() == check_span(&c.fix.text).ok()
 }
 
-/// A fix as the transcript about to be replaced has it (5aa): the words it is on, as heard, and when
+/// A fix as the transcript about to be replaced has it: the words it is on, as heard, and when
 /// they were said.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Carried {
@@ -423,8 +413,8 @@ pub struct Carried {
 
 /// Every fix of `fixes` whose words `words` (the transcript about to be replaced, in [`Fixes`]' order)
 /// has, with those words: what [`carry`] moves onto the new transcript's words. A fix on no word of it
-/// is not taken: it shows on nothing now, or it was made on the new words while they came in (2j: the
-/// editor shows a re-transcription's words as they come), and [`carry`] leaves it as it is.
+/// is not taken: it shows on nothing now, or it was made on the new words while they came in, and
+/// [`carry`] leaves it as it is.
 pub fn snapshot(fixes: &[Fix], words: &[(usize, &Word)]) -> Vec<Carried> {
     let likes = likes(words);
     let heard = read(words, &likes);
@@ -448,9 +438,7 @@ pub fn snapshot(fixes: &[Fix], words: &[(usize, &Word)]) -> Vec<Carried> {
 }
 
 /// How far around a word's old time [`carry`] looks for it among the new words, in seconds: a
-/// re-transcription moves word starts by a few tenths, and now and then most of a second (on
-/// Uezar's recording, heard again with the word list: a "Bane" from 104.76 s to 103.94 s, "para el
-/// reto." 0.4 s earlier).
+/// re-transcription moves word starts by a few tenths, and now and then most of a second.
 const NEAR: f64 = 1.0;
 
 /// The longest a word lasts, in seconds, for [`carry`]'s search by start: Whisper's words are inside a
@@ -470,14 +458,10 @@ pub struct CarryReport {
 }
 
 /// Moves the fixes `carried` names, where the list still has them as they were, onto `words` (the new
-/// transcript, in [`Fixes`]' order). A word fix goes to the nearest new word on its track within
-/// [`NEAR`] of its old time that reads as the heard word or as the fix; a span over the new words on its
-/// track whose middle falls in its old time. When those words now say exactly what the fix says, the fix
-/// is not needed and goes; when there are none, it is dropped (the report names it) rather than put on
-/// whatever word is there now. A fix of the heard text ([`keep_heard`]) stays on its word as it now
-/// reads. A fix not in `carried` stays as it is, and a carried fix is never put over a word another
-/// fix covers, nor written with a text a fix may not have (5ad). A transcript with no words at all
-/// moves nothing: that run heard nothing, and the caller says so.
+/// transcript, in [`Fixes`]' order): a word fix to the nearest new word on its track within [`NEAR`]
+/// that reads as heard or as the fix, a span over the new words whose middle falls in its old time.
+/// One now heard as fixed goes; one with no words, over another fix or too long is set aside, never
+/// put on whatever word is there now. A transcript with no words at all moves nothing.
 pub fn carry(fixes: &mut Vec<Fix>, carried: &[Carried], words: &[(usize, &Word)]) -> CarryReport {
     let mut report = CarryReport::default();
     let likes = likes(words);
@@ -498,8 +482,7 @@ pub fn carry(fixes: &mut Vec<Fix>, carried: &[Carried], words: &[(usize, &Word)]
     for c in ours {
         let gone = |r: &mut CarryReport| r.gone.push(c.clone());
         // A track the new transcript has no word on (heard as nothing this time): set aside like
-        // any fix with no word to go to (5ad). 5aa's repair left these on their old keys, where
-        // they showed on nothing and were never listed.
+        // any fix with no word to go to, not left on an old key where it shows on nothing.
         let Some(on) = tracks.get(&c.fix.track) else {
             gone(&mut report);
             continue;
@@ -540,10 +523,10 @@ pub fn carry(fixes: &mut Vec<Fix>, carried: &[Carried], words: &[(usize, &Word)]
             };
             let h = &heard[i];
             let kept = as_heard(c);
-            // As a spread writes it (5aa repair): a fix that kept the punctuation it was heard with
+            // As a spread writes it: a fix that kept the punctuation it was heard with
             // takes the new word's own ("Vayne," onto a "Bane." heard now).
             let text = if kept {
-                // As heard now, which a fix may not always hold (5ad: a word over `MAX_FIX`).
+                // As heard now, which a fix may not always hold (a word over `MAX_FIX`).
                 match check_fix(h.text) {
                     Ok(t) if !t.is_empty() => t,
                     _ => {
@@ -601,7 +584,7 @@ pub fn carry(fixes: &mut Vec<Fix>, carried: &[Carried], words: &[(usize, &Word)]
                 continue;
             }
             // Kept as heard: the new words as said, which can be longer than a span's text may be
-            // (5ad: past `MAX_SPAN` the list would not have read back). Set aside then.
+            // (past `MAX_SPAN` the list would not read back). Set aside then.
             let text = if kept {
                 match check_span(&said.join(" ")) {
                     Ok(t) if !t.is_empty() => t,
@@ -619,7 +602,7 @@ pub fn carry(fixes: &mut Vec<Fix>, carried: &[Carried], words: &[(usize, &Word)]
             );
             let through = (inside.len() > 1).then_some(b.at);
             // A sentence now heard as one word is not made a one-word fix of several words: a
-            // spread would put that sentence on every word heard like it (5aa repair). Set aside.
+            // spread would put that sentence on every word heard like it. Set aside.
             if through.is_none()
                 && (text.split_whitespace().count() > 1 || check_fix(&text).is_err())
             {
@@ -648,7 +631,7 @@ pub fn carry(fixes: &mut Vec<Fix>, carried: &[Carried], words: &[(usize, &Word)]
     report
 }
 
-/// A retimed word (2w) as the transcript about to be replaced has it (5ad): what [`carry_times`]
+/// A retimed word as the transcript about to be replaced has it: what [`carry_times`]
 /// moves onto the new transcript's words, as [`carry`] moves the fixes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CarriedTime {
@@ -712,14 +695,9 @@ pub struct TimesReport {
 }
 
 /// Moves the retimes `carried` names, where the list still has them as they were, onto `words` (the
-/// new transcript, in [`Fixes`]' order), as [`carry`] moves a word fix (5ad: a re-transcription left
-/// every `time` line on its old key, so a word the user had pulled out of a cut was halved by it
-/// again, or another word starting in that millisecond took its time). The word: the nearest new word
-/// on its track within [`NEAR`] of its old start that reads as it was heard or as its fix, none
-/// another retime is on. The side the user moved (a start or end that was not Whisper's) stays where
-/// they put it, at the cut's edge; the other side is the new word's own. No such word, or the two
-/// sides crossing: set aside. The new word heard just so: not needed. A retime not in `carried` stays
-/// as it is, and a transcript with no words at all moves nothing.
+/// new transcript, in [`Fixes`]' order), as [`carry`] moves a word fix: an old key would name another
+/// word. The side the user moved stays at the cut's edge, the other is the new word's own. No such
+/// word, or the sides crossing: set aside. The new word heard just so: not needed.
 pub fn carry_times(
     times: &mut Vec<Retime>,
     carried: &[CarriedTime],
@@ -806,7 +784,7 @@ pub fn carry_times(
     report
 }
 
-/// A span's words heard again (5aa): the run of new words on its track, none of them fixed, whose
+/// A span's words heard again: the run of new words on its track, none of them fixed, whose
 /// likenesses are its old words', starting within [`NEAR`] of where they did, the nearest such run.
 fn again(c: &Carried, on: &[usize], heard: &[Heard], taken: &[bool]) -> Option<Vec<usize>> {
     let like: Vec<String> = c.heard.iter().map(|h| likeness(h)).collect();
@@ -885,7 +863,7 @@ mod tests {
         ws.iter().map(|(t, w)| (*t, w)).collect()
     }
 
-    /// Uezar's recording: "Bane" heard twice (once with a comma), and once on the other track.
+    /// "Bane" heard twice (once with a comma), and once on the other track.
     fn banes() -> Vec<(usize, Word)> {
         vec![
             (0, word(1.0, " Bane,")),
@@ -1152,7 +1130,7 @@ mod tests {
 
     #[test]
     fn a_spread_never_lays_a_fix_over_one_whose_word_is_gone() {
-        // 5aa repair: a fix left on no word (5h: a word re-transcribed away) inside the keys a
+        // A fix left on no word (a word re-transcribed away) inside the keys a
         // spread span would cover; with both the list would not read back.
         let ws = vec![
             (0, word(1.0, " the")),
@@ -1181,7 +1159,7 @@ mod tests {
 
     #[test]
     fn a_carried_fix_takes_its_new_words_punctuation_and_keeps_its_shape() {
-        // 5aa repair: "Vayne," onto a "Bane." heard now is "Vayne.", as a spread would write it.
+        // "Vayne," onto a "Bane." heard now is "Vayne.", as a spread would write it.
         let old = vec![
             (0, word(1.0, " Bane,")),
             (0, word(3.0, " the")),
@@ -1205,8 +1183,7 @@ mod tests {
         let r = carry(&mut f, &carried, &refs(&new));
         assert_eq!(f[0].text, "Vayne.");
         // A sentence is not made a one-word fix (a spread would copy it onto every such word):
-        // set aside. And the track with no words sets its fix aside too (5ad: it was left on its
-        // old key, shown on nothing and never listed).
+        // set aside. And the track with no words sets its fix aside too.
         let gone: Vec<&str> = r.gone.iter().map(|g| g.fix.text.as_str()).collect();
         assert_eq!(gone, ["Uezar went", "Hola,"]);
         assert_eq!(f.len(), 1);
@@ -1220,8 +1197,8 @@ mod tests {
 
     #[test]
     fn a_fix_kept_as_heard_is_never_carried_longer_than_a_fix_may_be() {
-        // 5ad: a span kept as heard took the new words as said, unchecked; past `MAX_SPAN` the list
-        // would not read back. Likewise a word heard now longer than `MAX_FIX`. Set aside.
+        // A span kept as heard past `MAX_SPAN`, or a word heard now longer than `MAX_FIX`, would not
+        // read back: set aside.
         let run = |w: &str| -> Vec<(usize, Word)> {
             (0..100)
                 .map(|i| (0, word(1.0 + i as f64 * 0.1, w)))
@@ -1253,7 +1230,7 @@ mod tests {
 
     #[test]
     fn a_retimed_word_follows_its_word_into_a_new_transcription() {
-        // 5ad: a word pulled out of a cut by moving the cut's edge (2w) keeps that edge after
+        // A word pulled out of a cut by moving the cut's edge keeps that edge after
         // Correct: its `time` line moves onto the new word, the side the user moved kept.
         let old = vec![
             (0, word(1.0, " Bane,")),
@@ -1320,9 +1297,8 @@ mod tests {
 
     #[test]
     fn a_word_kept_as_heard_stays_so_after_a_new_transcription() {
-        // 5aa: "Undo those" left the second "nuevo" as heard (Uezar's recording: one "nuevo" was a
-        // mishearing of "gordo", the other was right). A new transcription keeps that on its word,
-        // as it now reads, so the spread after it does not reach it.
+        // "Undo those" left the second "nuevo" as heard. A new transcription keeps that on its
+        // word, as it now reads, so the spread after it does not reach it.
         let old = vec![(0, word(1.0, " nuevo")), (0, word(4.0, " nuevo"))];
         let mut f = vec![fix(0, 1.0, "gordo"), fix(0, 4.0, "nuevo")];
         let carried = snapshot(&f, &refs(&old));

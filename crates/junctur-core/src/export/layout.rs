@@ -1,14 +1,8 @@
-//! Where each speaker's caption sits in the picture (5g): the preview over the picture and the Text+
-//! clips sent to Resolve both place captions from here, so what the editor shows is what Resolve
-//! gets. The SRT does not use it: a subtitle track has one position for every caption (5d), so it
-//! keeps 5e's one block, first speaker first.
-//!
-//! With the word highlight on (5l) each block also says where each unit of it sits on its lines and
-//! when it was said, so the preview and the Resolve send light the same word at the same time.
-//!
-//! Positions are the centre of each speaker's block as fractions of the picture, x across from
-//! the left and y up from the bottom (Fusion's `Center`). Heights are in picture heights: a block
-//! is `lines × size × LINE` tall, the size being the font's em.
+//! Where each speaker's caption sits in the picture: the preview and the Text+ clips sent to
+//! Resolve both place captions from here, so the editor shows what Resolve gets. Positions are
+//! block centres as fractions of the picture, x from the left and y up from the bottom (Fusion's
+//! `Center`); heights are in picture heights, a block `lines × size × LINE` tall. The SRT does not
+//! use it: a subtitle track has one position for every caption.
 
 use serde::Serialize;
 
@@ -31,7 +25,7 @@ pub struct PlacedPart {
     /// Centre of the block, fractions of the picture: x from the left, y from the bottom.
     pub x: f64,
     pub y: f64,
-    /// Where each word sits on `lines` and when it is lit (5l), only with the highlight on.
+    /// Where each word sits on `lines` and when it is lit, only with the highlight on.
     pub words: Vec<WordSpan>,
 }
 
@@ -198,13 +192,10 @@ pub fn is_lua_space(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\x0B' | '\x0C' | '\r')
 }
 
-/// Where `words` sit on `lines`, a span per word as the animated caption counts words (its text
-/// split at whitespace): a unit of several words (a phrase 5j's find and replace made one, or one
-/// re-wrapped over two lines) has a span for each, splitting the unit's time evenly in turn, since
-/// the macro lights one word at a time and re-counts its words from the text whenever the text is
-/// set (its `UpdateTextContent`). The pieces are walked through the lines' own, so a re-wrap (side
-/// by side) is followed. Nothing when they do not line up, which they always should: no highlight
-/// rather than the wrong word lit.
+/// Where `words` sit on `lines`, a span per word as the animated caption counts words (split at
+/// whitespace): a unit of several words gets a span each, sharing its time evenly in turn, since
+/// the macro lights one word at a time. Nothing when they do not line up: no highlight rather
+/// than the wrong word lit.
 fn spans(lines: &[String], words: &[Spoken]) -> Vec<WordSpan> {
     // Every piece of the lines, as (line, from, to, text).
     let mut pieces = Vec::new();

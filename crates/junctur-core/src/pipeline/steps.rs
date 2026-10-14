@@ -1,9 +1,6 @@
-//! How far each track has got through the running stage (2h), for a caller that draws progress
-//! bars. The stages below the pipeline report in their own terms (a track and the seconds behind
-//! them); this is where those become one shape with the track's length beside them.
-//!
-//! Its own channel rather than log lines: lines are for people, and one per track per read would
-//! flood the CLI. A caller that wants none passes [`none`].
+//! How far each track has got through the running stage, with the track's length beside it, for a
+//! caller that draws progress bars. Its own channel rather than log lines: one line per track per
+//! read would flood the CLI. A caller that wants none passes [`none`].
 
 use serde::Serialize;
 

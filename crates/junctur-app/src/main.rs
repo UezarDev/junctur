@@ -39,23 +39,17 @@ use player::Player;
 const BACKGROUND: Color = Color(16, 17, 20, 0);
 
 fn main() {
-    // 2f: settings, voices and recent recordings a Claude-launched run saved in a hidden copy of the
-    // config folder (a file pointed elsewhere by its variable, as in launch checks, is not taken).
+    // Settings, voices and recent recordings an automated run saved in a hidden copy of the config
+    // folder (a file pointed elsewhere by its variable, as in launch checks, is not taken).
     let [config, voices] = junctur_core::config::FILES;
     junctur_core::config::adopt_hidden(&[config, voices, ("recent.json", recent::ENV)]);
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            // Built here rather than in tauri.conf.json so the player can attach to it before the
-            // page asks for anything. Alpha 0 makes only the WebView transparent, so the video
-            // under it shows through; the window itself stays opaque (tao fills it with the RGB).
-            // Rejected: `.transparent(true)`, which makes the whole window see-through (DWM
-            // blur-behind): the desktop showed through, and the GL surface never did.
-            // Frameless (2i): the page draws the title bar (`TitleBar.svelte`); Tauri keeps the
-            // edges resizable, and mpv keeps the picture below the bar. No shadow: Tauri's
-            // undecorated shadow keeps a hidden frame around the client area, and with it every
-            // launch check's capture of the window came back blank, page and picture alike;
-            // without it the page shows as it does in a decorated window.
+            // Built here so the player can attach before the page asks for anything. Alpha 0 makes
+            // only the WebView transparent (not `.transparent(true)`, which shows the desktop
+            // through). Frameless: the page draws the title bar. No shadow: its hidden frame made
+            // captures of the window come back blank.
             let test = testmode::seconds();
             let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
                 .title("Junctur")

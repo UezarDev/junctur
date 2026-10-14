@@ -1,17 +1,6 @@
-//! Captions in another language than the one spoken (5k), made on this machine.
-//!
-//! What is translated is caption text, a sentence at a time ([`crate::export::srt::sentences`]: the
-//! kept words of one speaker up to a sentence end, a pause or a word limit), never the audio and
-//! never the transcript: the translated words are spread over the time their sentence was said, so
-//! timing, speakers and cuts carry over, and the transcript and the edit list keep the words as
-//! spoken. Rejected: Whisper's own translate task, which only writes English and is a decoding of
-//! the audio, so it would mean transcribing the recording a second time, its words not the
-//! transcript's ones the cuts are made on.
-//!
-//! One local model for every pair of languages, run through ONNX Runtime like the speech models
-//! ([`model`]), fetched on first use. Translations are kept in the project folder ([`cache`]) and
-//! made in [`run`], which the CLI calls before writing captions and the app runs in the background;
-//! cue cutting only looks them up, so the preview never waits on the model.
+//! Captions translated on this machine, a caption sentence at a time over the time it was said, so
+//! timing, speakers and cuts carry over (not the audio: cuts are made on the transcript's words).
+//! Made ahead in [`run`] and kept in [`cache`]; cue cutting only looks them up, never waiting.
 
 mod cache;
 mod languages;
@@ -57,21 +46,14 @@ pub struct Done {
 /// preview picks it up.
 const SAVE_EVERY: Duration = Duration::from_secs(3);
 
-/// Sentences decoded together ([`model::Model::translate_batch`]): measured on CPU, 8 at a time
-/// take 0.29 s a sentence against 1.21 s one by one.
+/// Sentences decoded together ([`model::Model::translate_batch`]): on CPU about four times faster a
+/// sentence than one by one.
 const BATCH: usize = 8;
 
-/// Translates into `to` every sentence of `sentences` the project's translations lack (or hold
-/// from another language than it is heard in now), saving them in `project` as it goes.
-/// `segments` (the transcript's) say which language each was said in. `progress` hears `(done, to
-/// do)` as sentences are done; `stop` set ends it after the batch in hand, or a model download
-/// under way. The model is opened only when a sentence needs it. What was done is saved even when
-/// the model fails part way.
-///
-/// Only what is known is kept: a sentence whose language cannot be told (no segment on its track)
-/// and one the model gives nothing usable for, even on a second try, are left untranslated and
-/// counted ([`Done::unknown`], [`Done::failed`]), so a later run tries them again. A translations
-/// file that is there but does not read is an error, never written over.
+/// Translates into `to` every sentence the project's translations lack (or hold from another
+/// language than `segments` now say it was heard in), saving as it goes, even when the model fails.
+/// `stop` ends it after the batch in hand; sentences of unknown language or failed twice are left
+/// for a later run ([`Done::unknown`], [`Done::failed`]). An unreadable translations file errors.
 pub fn run(
     project: &Path,
     cache_dir: &Path,

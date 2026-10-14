@@ -32,7 +32,7 @@ export interface PlayerState {
   /** The picture as shown (rotation applied); null without video. */
   width: number | null;
   height: number | null;
-  /** Width over height: below 1 the editor lays out for portrait (2g). */
+  /** Width over height: below 1 the editor lays out for portrait. */
   aspect: number | null;
 }
 
@@ -67,9 +67,9 @@ export interface EditState {
   speakers: Speaker[];
   /** Changes when the words' speaker labels would (turns changed on disk), not on a rename. */
   speakersKey: string;
-  /** Changes when the list's fixed words do (5h): the words' text is fetched again. */
+  /** Changes when the list's fixed words do: the words' text is fetched again. */
   fixesKey: string;
-  /** Caption settings: the edit list's `captions` line, else the user's defaults (2i). */
+  /** Caption settings: the edit list's `captions` line, else the user's defaults. */
   captions: Captions;
   /** The list has its own caption settings; without, it follows the defaults. */
   captionsOwn: boolean;
@@ -121,19 +121,19 @@ export interface RecordingInfo {
 export interface Captions {
   /** Export: a render writes the SRT beside the video. */
   on: boolean;
-  /** Show the captions over the picture as it plays (5d). */
+  /** Show the captions over the picture as it plays. */
   preview: boolean;
   chars: number;
   lines: number;
-  /** Most words per speaker in a caption, 0 for no limit, 1 for one word at a time (5i). */
+  /** Most words per speaker in a caption, 0 for no limit, 1 for one word at a time. */
   words: number;
   seconds: number;
-  /** Every caption bold / italic in the SRT (5d: Resolve's import applies both). */
+  /** Every caption bold / italic in the SRT (Resolve's import applies both). */
   bold: boolean;
   italic: boolean;
-  /** Every caption underlined (5f: Uezar's import showed Resolve underlines in the speaker's colour). */
+  /** Every caption underlined (Resolve's import underlines in the speaker's colour). */
   underline: boolean;
-  /** 5g's look, for the Resolve Text+ send and the preview; the SRT ignores it. */
+  /** The look, for the Resolve Text+ send and the preview; the SRT ignores it. */
   font: string;
   /** Text height in % of the picture height. */
   size: number;
@@ -149,12 +149,12 @@ export interface Captions {
   protagonist: string;
   /** A Fusion Title's clip name in Resolve's media pool; empty for Junctur's own Text+. */
   template: string;
-  /** 5m: with a template of the user's, keep its own look; Junctur sets only text, timing and colour. */
+  /** With a template of the user's, keep its own look; Junctur sets only text, timing and colour. */
   keepLook: boolean;
-  /** 5n: what a send does with clips Junctur did not place in its captions' way; "ask" unless this
+  /** What a send does with clips Junctur did not place in its captions' way; "ask" unless this
    * recording remembered a choice. Never a default (Settings saves it as "ask"). */
   existingClips: ExistingClips;
-  /** 5j's text options: what every caption output shows, never the transcript. */
+  /** Text options: what every caption output shows, never the transcript. */
   case: CaptionCase;
   /** Punctuation kept (true) or removed. */
   punctuation: boolean;
@@ -163,9 +163,9 @@ export interface Captions {
   censorStyle: CensorStyle;
   /** Find and replace, whole words or phrases, case aside; an empty `to` removes them. */
   replace: { from: string; to: string }[];
-  /** The language captions are shown in (5k), a code of `translationLanguages`; empty for as spoken. */
+  /** The language captions are shown in, a code of `translationLanguages`; empty for as spoken. */
   translate: string;
-  /** 5l, Resolve and the preview only: the word being said lit up, word by word. */
+  /** Resolve and the preview only: the word being said lit up, word by word. */
   highlight: boolean;
   /** `#RRGGBB`; empty for the speaker's own colour (the caption then white). */
   highlightColor: string;
@@ -180,23 +180,22 @@ export type CaptionAnimation = "none" | "fade" | "pop" | "slide";
 export type CaptionCase = "asSpoken" | "upper" | "lower" | "title";
 export type CensorStyle = "middle" | "whole";
 
-/** 5n: clips Junctur did not place where its captions go in Resolve: ask, delete them, leave
+/** Clips Junctur did not place where its captions go in Resolve: ask, delete them, leave
  * those captions out, or put the speaker's new captions on a track beside. */
 export type ExistingClips = "ask" | "replace" | "skip" | "newTrack";
 
 export type CaptionLayout = "stacked" | "side" | "topBottom";
 
 /** A caption as the SRT export cuts it (junctur-core export/srt.rs), output seconds; one part per
- * speaker talking in it, so several only where people talk at once (5e), each placed where the
- * Resolve send puts it (5g, export/layout.rs): the centre as fractions of the picture, x from the
- * left, y from the bottom. */
+ * speaker talking in it, each placed where the Resolve send puts it (export/layout.rs): the centre
+ * as fractions of the picture, x from the left, y from the bottom. */
 export interface Cue {
   start: number;
   end: number;
   parts: { speaker: number; lines: string[]; x: number; y: number; words: WordSpan[] }[];
 }
 
-/** Where a word of a caption sits on its lines and when it is lit (5l, export/layout.rs), only with
+/** Where a word of a caption sits on its lines and when it is lit (export/layout.rs), only with
  * the highlight on: `from..to` in characters (code points) of line `line`, a word as the animated
  * caption counts them (a phrase made one by find and replace is a word each, sharing its time). */
 export interface WordSpan {
@@ -217,20 +216,20 @@ export interface Sent {
   firstError: string | null;
   /** Text+ inputs the template did not take (a user's own title may lack some). */
   unstyled: string[];
-  /** The timeline the send made (5z). */
+  /** The timeline the send made. */
   timeline: string;
-  /** 5n: clips Junctur did not place where new captions go; when not 0 no caption was placed and
-   * the user is asked. `blocked`: the captions they are in the way of. A send's captions go on the
-   * timeline it has just made (5z), whose caption tracks are new, so a send does not meet these. */
+  /** Clips Junctur did not place where new captions go; when not 0 no caption was placed and the
+   * user is asked. `blocked`: the captions they are in the way of. A send's own new timeline never
+   * meets these. */
   inTheWay: number;
   blocked: number;
-  /** 5n: what the choice did: clips deleted, captions left out, speakers put on a track beside. */
+  /** What the choice did: clips deleted, captions left out, speakers put on a track beside. */
   replacedClips: number;
   skipped: number;
   newTracks: number;
   /** Whether it replaced one of that name. */
   replaced: boolean;
-  /** Whether only the captions were updated on the timeline already there (5ab). */
+  /** Whether only the captions were updated on the timeline already there. */
   updated: boolean;
   /** What went wrong making it without stopping the send (an old timeline not deleted), or on an
    * update a cut that no longer matches the edit's. */
@@ -243,7 +242,7 @@ export interface ModelChoice {
   key: string;
   /** The readable name ("Fast"). */
   name: string;
-  /** The line under it in the picker (2v). */
+  /** The line under it in the picker. */
   summary: string;
   /** Which icon the picker draws. */
   family: "auto" | "turbo" | "large";
@@ -252,14 +251,14 @@ export interface ModelChoice {
   note: string;
 }
 
-/** What the Settings dialog edits (2i), kept in junctur/config.json. */
+/** What the Settings dialog edits, kept in junctur/config.json. */
 export interface Settings {
   whisperModel: string;
   /** The caption settings a recording without its own starts from. */
   captions: Captions;
-  /** The word list Whisper is told (5h), first entries first. */
+  /** The word list Whisper is told, first entries first. */
   words: string[];
-  /** The transcript flags words Whisper was less sure of than this many percent (5o); 0 for none. */
+  /** The transcript flags words Whisper was less sure of than this many percent; 0 for none. */
   flagBelow: number;
 }
 
@@ -272,7 +271,7 @@ export interface SettingsView {
   error: string | null;
 }
 
-/** A voice Junctur remembers (5b), used to name speakers in every recording. */
+/** A voice Junctur remembers, used to name speakers in every recording. */
 export interface Voice {
   name: string;
   color: string;
@@ -280,10 +279,10 @@ export interface Voice {
   seconds: number;
 }
 
-/** What a caption export wrote: one file since 5e. */
+/** What a caption export wrote. */
 export interface Exported {
   cues: number;
-  /** Speaker files beside it from an earlier export (5b wrote one per speaker). */
+  /** Per-speaker files beside it from an older export. */
   stale: string[];
 }
 
@@ -296,18 +295,18 @@ export interface TranscriptView {
   speaker: number[];
   /** Someone else saying the word too (two people at once), 0 for none. */
   also: number[];
-  /** How sure Whisper was of each word (5o), whole percent; 255 when it is never flagged (an older
+  /** How sure Whisper was of each word, whole percent; 255 when it is never flagged (an older
    * transcript, or a word the user fixed or confirmed). */
   sure: number[];
-  /** The audio track each word was heard on (5x). */
+  /** The audio track each word was heard on. */
   track: number[];
-  /** The span fixed as one text each word is in (5x), 1-based into `spans`, 0 for none; such a
+  /** The span fixed as one text each word is in, 1-based into `spans`, 0 for none; such a
    * word's `text` is what was heard. */
   span: number[];
   /** Each span's text. */
   spans: string[];
-  /** 2w repair: each word's start as heard, in ms, sent only when some word is retimed (else
-   * `start` is it): words starting together (5w) are grouped by it, as fixes name them. */
+  /** Each word's start as heard, in ms, sent only when some word is retimed (else `start` is it):
+   * words starting together are grouped by it, as fixes name them. */
   heard?: number[];
 }
 
@@ -326,7 +325,7 @@ export interface Opened {
   file: string;
   project: ProjectStatus | null;
   projectError: string | null;
-  /** Its analysis, when one is waiting, running or ran in this session (2d). */
+  /** Its analysis, when one is waiting, running or ran in this session. */
   analysis: Progress | null;
   /** Why its analysis is out of date with the settings now; empty when it is not. */
   outdated: string[];
@@ -355,11 +354,11 @@ export interface MixTrack {
   role: Role | null;
   /** The track this one is a copy of. */
   copyOf: number | null;
-  /** Soloed (2g): while any track is, only the soloed ones are heard. Not remembered. */
+  /** Soloed: while any track is, only the soloed ones are heard. Not remembered. */
   solo: boolean;
 }
 
-/** Every track plays at once (2e); where the mutes came from. */
+/** Every track plays at once; where the mutes came from. */
 export interface MixerState {
   tracks: MixTrack[];
   /** `provisional`: no roles yet, track 1 only; `roles`: their defaults; `remembered`: the user's. */
@@ -367,10 +366,10 @@ export interface MixerState {
 }
 
 /** `queued`: behind another recording's first steps; `waiting`: its edit list is made (editable) and its
- * transcription waits for another recording's (2j). */
+ * transcription waits for another recording's. */
 export type Phase = "queued" | "running" | "waiting" | "done" | "failed";
 
-/** How far one track has got through one stage (junctur-core pipeline/steps.rs, 2h): `at` seconds
+/** How far one track has got through one stage (junctur-core pipeline/steps.rs): `at` seconds
  * of the track's `of` are behind it. */
 export interface Step {
   stage: string;
@@ -390,13 +389,13 @@ export interface Progress {
   project: ProjectStatus | null;
   /** Per track, the latest stage it reported; only the running stage's are current (lib/steps.ts). */
   steps: Step[];
-  /** The run's edit list is made: it can be edited while the rest runs (2j). */
+  /** The run's edit list is made: it can be edited while the rest runs. */
   listed: boolean;
-  /** While transcribing: every word before this many seconds is in, on every track (2j). */
+  /** While transcribing: every word before this many seconds is in, on every track. */
   transcribed: number | null;
 }
 
-/** The transcription lane, whichever recording is open (src/analysis.rs, 2k). */
+/** The transcription lane, whichever recording is open (src/analysis.rs). */
 export interface Transcription {
   /** Pause was asked for: the transcribing recording stops after its chunk, the rest wait. */
   paused: boolean;
@@ -416,37 +415,37 @@ export const startupFile = () => invoke<string | null>("startup_file");
 export const playerState = () => invoke<PlayerState>("player_state");
 export const openFile = (path: string) => invoke<Opened>("open_file", { path });
 /** The recording the player has open, as `openFile` gave it, without opening it again: for a page
- * that started over while the app went on (2q: a reload). */
+ * that started over while the app went on. */
 export const currentRecording = () => invoke<Opened | null>("current_recording");
 export const recent = () => invoke<Recent[]>("recent");
 export const forgetRecent = (path: string) => invoke<void>("forget_recent", { path });
 export const analysis = (path: string) => invoke<Progress | null>("analysis", { path });
 /**
- * Analyses `path` again (5s): the user's edit list is kept, with the speakers matched again against
+ * Analyses `path` again: the user's edit list is kept, with the speakers matched again against
  * the remembered voices. With `fresh` the list is re-cut instead; then, without `replace`, a list with
  * the user's edits starts nothing.
  */
 export const reanalyse = (path: string, fresh: boolean, replace: boolean) =>
   invoke<Reanalysed>("reanalyse", { path, fresh, replace });
 export const transcription = () => invoke<Transcription>("transcription");
-/** Pauses or resumes the transcription lane, from any recording (2k). */
+/** Pauses or resumes the transcription lane, from any recording. */
 export const pauseTranscription = (paused: boolean) =>
   invoke<Transcription>("pause_transcription", { paused });
 export const togglePause = () => invoke<void>("toggle_pause");
 /** Resolves to the source time the seek lands on (inside a cut while skipping: the next range). */
 export const seek = (seconds: number, exact: boolean) =>
   invoke<number>("seek", { seconds, exact });
-/** 2o: plays source seconds `start` to `end` on a loop from `start`. The first call puts the player
+/** Plays source seconds `start` to `end` on a loop from `start`. The first call puts the player
  * in review (the whole file plays, Skip cuts off and refused) until `endReview`, which also puts
  * the speed to 1x and Skip cuts back; opening or closing a recording ends it too. `pauseReview`
  * stops the loop and pauses, still in review. */
 export const playBetween = (start: number, end: number) => invoke<void>("play_between", { start, end });
-/** 2s: plays from source second `at`, unpaused (after a cut's edge is dragged, from just before it).
+/** Plays from source second `at`, unpaused (after a cut's edge is dragged, from just before it).
  * Refused in review. */
 export const playFrom = (at: number) => invoke<void>("play_from", { at });
 export const pauseReview = () => invoke<void>("pause_review");
 export const endReview = () => invoke<void>("end_review");
-/** Playback speed, 0.25 to 4 (2o). */
+/** Playback speed, 0.25 to 4. */
 export const setSpeed = (speed: number) => invoke<void>("set_speed", { speed });
 export const mixer = () => invoke<MixerState>("mixer");
 /** Mutes or unmutes track `track` (0-based) in the preview; remembered for the recording. */
@@ -456,13 +455,13 @@ export const setSkip = (on: boolean) => invoke<void>("set_skip", { on });
 export const editState = () => invoke<EditState>("edit_state");
 export const transcript = () => invoke<TranscriptView | null>("transcript");
 /** Cuts (`keep` false) or keeps every run of words (`[first, last]` each), snapped into the pauses
- * around them, as one undo step (2p). */
+ * around them, as one undo step. */
 export const editWords = (runs: [number, number][], keep: boolean) =>
   invoke<void>("edit_words", { runs, keep });
 /** Cuts or keeps source frames `[start, end)` exactly. */
 export const editFrames = (start: number, end: number, keep: boolean) =>
   invoke<void>("edit_frames", { start, end, keep });
-/** 2w: moves a cut's edge, at frame `from` (one end of `[start, end)`), to the other end by that
+/** Moves a cut's edge, at frame `from` (one end of `[start, end)`), to the other end by that
  * frame edit, and the words beside the edge with it, as one undo step. An edit that moves no edge
  * of the list (review's clips are not always its ranges) is the frame edit alone. */
 export const moveEdge = (step: { start: number; end: number; keep: boolean }, from: number) =>
@@ -470,7 +469,7 @@ export const moveEdge = (step: { start: number; end: number; keep: boolean }, fr
 /** Renames speaker `id` in the edit list (saved at once, not an undo step). */
 export const renameSpeaker = (id: number, name: string) =>
   invoke<void>("rename_speaker", { id, name });
-/** A word fix as the edit list holds it (5h, 5w, 5x): handed back to `keepHeard` as it came. */
+/** A word fix as the edit list holds it: handed back to `keepHeard` as it came. */
 export interface Fix {
   track: number;
   start: number;
@@ -478,7 +477,7 @@ export interface Fix {
   through?: { start: number; nth: number };
   text: string;
 }
-/** What a fix did besides itself (5aa): the entries the word list gained, and the fixes also made on
+/** What a fix did besides itself: the entries the word list gained, and the fixes also made on
  * the words heard like it with what each was heard as ("Also fixed N other places", whose Undo is
  * `keepHeard(others, heard)`). */
 export interface Fixed {
@@ -486,28 +485,28 @@ export interface Fixed {
   others: Fix[];
   heard: string[];
 }
-/** Fixes the spelling of word `index` (5h; empty or the heard text again removes the fix), and every
- * other word heard like it (5aa). Saved at once, not an undo step. */
+/** Fixes the spelling of word `index` (empty or the heard text again removes the fix), and every
+ * other word heard like it. Saved at once, not an undo step. */
 export const fixWord = (index: number, text: string) => invoke<Fixed>("fix_word", { index, text });
-/** Marks word `index` as checked (5o): it keeps what Whisper heard and is no longer flagged. Saved at
+/** Marks word `index` as checked: it keeps what Whisper heard and is no longer flagged. Saved at
  * once, not an undo step. */
 export const confirmWord = (index: number) => invoke<void>("confirm_word", { index });
-/** Fixes words `first..=last` as one text (5x; empty or the heard words again clears their fixes),
- * and the same words heard elsewhere (5aa). Refused, saying why, across two voice tracks or two
+/** Fixes words `first..=last` as one text (empty or the heard words again clears their fixes),
+ * and the same words heard elsewhere. Refused, saying why, across two voice tracks or two
  * people. Saved at once, not an undo step. */
 export const fixWords = (first: number, last: number, text: string) =>
   invoke<Fixed>("fix_words", { first, last, text });
-/** Takes back fixes a fix made on other words (5aa), those still as made: the words keep what they
+/** Takes back fixes a fix made on other words, those still as made: the words keep what they
  * were heard as, and no later spread or Correct gives them the fix again. */
 export const keepHeard = (others: Fix[], heard: string[]) => invoke<number>("keep_heard", { others, heard });
-/** A fix a re-transcription could not put on any word (5aa): Whisper hears something else there now. */
+/** A fix a re-transcription could not put on any word: Whisper hears something else there now. */
 export interface SetAside {
   track: number;
   /** Source seconds. */
   at: number;
   heard: string;
   text: string;
-  /** A word time set by moving a cut's edge (5ad), not a fix: the start and end it was given. */
+  /** A word time set by moving a cut's edge, not a fix: the start and end it was given. */
   retimed?: [number, number];
   /** Its track has no words in the new transcript at all: not heard, rather than heard otherwise. */
   silent?: boolean;
@@ -516,9 +515,9 @@ export interface SetAside {
 }
 /** The open recording's fixes set aside by a re-transcription, until `forgetFixesSetAside`. */
 export const fixesSetAside = () => invoke<SetAside[]>("fixes_set_aside");
-/** Forgets `seen`, as `fixesSetAside` gave them: any set aside since stay listed (5ad). */
+/** Forgets `seen`, as `fixesSetAside` gave them: any set aside since stay listed. */
 export const forgetFixesSetAside = (seen: SetAside[]) => invoke<void>("forget_fixes_set_aside", { seen });
-/** What the Correct button started (5aa). */
+/** What the Correct button started. */
 export interface Corrected {
   progress: Progress;
   /** The fixes made on words heard like a fixed one, and what each was heard as. */
@@ -527,30 +526,30 @@ export interface Corrected {
   /** Heard texts fixed two ways, left as heard. */
   unclear: string[];
 }
-/** The Correct button (5aa): every fix given to the words heard like it, then the open recording's
+/** The Correct button: every fix given to the words heard like it, then the open recording's
  * speakers heard again and its words transcribed again with the word list, the user's edits kept. */
 export const correct = () => invoke<Corrected>("correct");
 /** Sets speaker `id`'s caption colour (`#RRGGBB`). */
 export const recolorSpeaker = (id: number, color: string) =>
   invoke<void>("recolor_speaker", { id, color });
 export const setCaptions = (captions: Captions) => invoke<void>("set_captions", { captions });
-/** Writes the captions as one SRT at `path`, people talking at once stacked in one caption (5e). */
+/** Writes the captions as one SRT at `path`, people talking at once stacked in one caption. */
 export const exportCaptions = (path: string) => invoke<Exported>("export_captions", { path });
-/** The captions as the export cuts them, for the preview over the picture (5d), placed on a
- * picture `aspect` (height over width) in shape (5g). */
+/** The captions as the export cuts them, for the preview over the picture, placed on a
+ * picture `aspect` (height over width) in shape. */
 export const captionCues = (aspect: number) => invoke<Cue[]>("caption_cues", { aspect });
-/** What to do when Resolve already has the timeline a send makes (5z): make another beside it,
- * update only the captions on it (5ab), or replace it. */
+/** What to do when Resolve already has the timeline a send makes: make another beside it,
+ * update only the captions on it, or replace it. */
 export type TimelineAnswer = "new" | "update" | "replace";
 /** What a send came to (junctur-core resolve/mod.rs): sent, or held back because Resolve already
  * has a timeline called `name` (nothing changed; send again with an answer). */
 export type SendOutcome = { kind: "exists"; name: string } | ({ kind: "sent" } & Sent);
 /** Sends the edit into DaVinci Resolve as a timeline of its own, captions on it as Text+ clips,
- * through the Junctur script there (5z, 5g). `existing` (5n) answers, for this send, a send that
- * found clips Junctur did not place in the captions' way. */
+ * through the Junctur script there. `existing` answers, for this send, a send that found clips
+ * Junctur did not place in the captions' way. */
 export const sendToResolve = (answer: TimelineAnswer | null = null, existing?: ExistingClips) =>
   invoke<SendOutcome>("send_to_resolve", { answer, existing: existing ?? null });
-/** A caption translation run in the background (5k, src/translation.rs). */
+/** A caption translation run in the background (src/translation.rs). */
 export interface TranslationRun {
   /** The recording, as opened. */
   file: string;
@@ -581,15 +580,15 @@ export const translationStatus = () => invoke<TranslationStatus>("translation_st
 let languages: Promise<Language[]> | null = null;
 /** The languages captions can be translated into, by name; asked once. */
 export const translationLanguages = () => (languages ??= invoke<Language[]>("translation_languages"));
-/** The Fusion Titles in the open Resolve project's media pool by clip name (5m), Junctur's own left out. */
+/** The Fusion Titles in the open Resolve project's media pool by clip name, Junctur's own left out. */
 export const resolveTemplates = () => invoke<string[]>("resolve_templates");
 export const voices = () => invoke<Voice[]>("voices");
-/** Remembers `name`'s voice from every run of words (`[first, last]` each, 2p: one enrolment) and
+/** Remembers `name`'s voice from every run of words (`[first, last]` each, one enrolment) and
  * relabels the speakers; resolves to a line for the user. */
 export const enrollVoice = (runs: [number, number][], name: string) =>
   invoke<string>("enroll_voice", { runs, name });
 export const forgetVoice = (name: string) => invoke<void>("forget_voice", { name });
-/** Hears the open recording's speakers again from the audio, cut at the seconds pinned to people (5c). Slow. */
+/** Hears the open recording's speakers again from the audio, cut at the seconds pinned to people. Slow. */
 export const reanalyzeSpeakers = () => invoke<void>("reanalyze_speakers");
 export const undo = () => invoke<void>("undo");
 export const redo = () => invoke<void>("redo");
@@ -614,7 +613,7 @@ export const recentInfo = (path: string) => invoke<RecordingInfo>("recent_info",
 export const thumbnail = (path: string) => invoke<ArrayBuffer>("thumbnail", { path });
 /** Opens the open recording's project folder in the file manager. */
 export const reveal = () => invoke<void>("reveal");
-/** Closes the open recording: back to the start window (2i). */
+/** Closes the open recording: back to the start window. */
 export const closeFile = () => invoke<void>("close_file");
 export const settings = () => invoke<SettingsView>("settings");
 /** Writes the settings to junctur/config.json; never analyses anything. */
@@ -622,7 +621,7 @@ export const saveSettings = (settings: Settings) => invoke<SettingsView>("save_s
 /** The Captions panel's "Save as default". */
 export const saveCaptionDefaults = (captions: Captions) =>
   invoke<SettingsView>("save_caption_defaults", { captions });
-/** Why `path`'s analysis is out of date with the settings now (2d's notice). */
+/** Why `path`'s analysis is out of date with the settings now. */
 export const outdated = (path: string) => invoke<string[]>("outdated", { path });
 /** Windows' snap layouts for the window (the pointer resting on the title bar's maximise button). */
 export const snapLayouts = () => invoke<void>("snap_layouts");

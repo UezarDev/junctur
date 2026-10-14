@@ -1,9 +1,6 @@
 //! Embedded video on Windows: mpv's render API drawing through OpenGL onto a native child window
-//! under the transparent WebView.
-//!
-//! A dedicated render thread owns the GL context and mpv's render context, as render.h asks: it
-//! sleeps until mpv's update callback or a resize wakes it, draws, and swaps. The UI thread only
-//! creates and resizes the surface window.
+//! under the transparent WebView. A render thread owns both contexts, as render.h asks; the UI
+//! thread only creates and resizes the surface window.
 
 mod gl;
 mod surface;

@@ -1,9 +1,5 @@
-//! Hand edits to the kept ranges: cut a span out, or keep a span. Used by the app's editor, where
-//! every edit is written straight back to the file.
-//!
-//! Results sit on the file's millisecond grid, so the list in memory is exactly what a re-read of
-//! the file gives (anything finer would be rounded on write, and two writes of "the same" list
-//! could name different frames).
+//! Hand edits to the kept ranges: cut a span out, or keep a span. Results sit on the file's
+//! millisecond grid, so the list in memory is exactly what a re-read of the file gives.
 
 use super::Range;
 

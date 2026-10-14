@@ -1,14 +1,8 @@
-//! The order of a send's requests (5z), apart from the mailbox so it is tested with a stand-in:
-//! `check` (changes nothing), then, unless the user has to be asked, `build` (the new timeline),
-//! `place` (its captions) and, for Replace, `finish` (the old timeline deleted, the new one given
-//! its name). The old timeline goes last, once the new one has its captions, so a send that fails
-//! part way never costs it; and once a timeline has been made, every error says what is in Resolve.
-//! Replace does not finish either when captions were asked for and none landed on the new one
-//! (every one refused), or when 5n's `place` stopped to ask about clips in the way.
-//! "Update captions only" (5ab) is `check`, `open` (the timeline there made current, nothing
-//! changed) and `place`: 5g's tagged captions restyled, removed or placed, nothing else touched.
-//! That is where 5n's clips in the way can be met: the user's own clips on Junctur's tracks of a
-//! timeline already there; `place` then asks, and the answer is sent again as an update.
+//! The order of a send's requests, apart from the mailbox so it is tested with a stand-in: `check`,
+//! then unless the user has to be asked `build`, `place` and, for Replace, `finish` (old timeline
+//! deleted, new one named). The old timeline goes last, so a send that fails part way never costs
+//! it. "Update captions only" is `check`, `open` (makes the timeline current) and `place`, which
+//! may ask about the user's clips on Junctur's tracks; the answer is sent again as an update.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -31,15 +25,13 @@ pub trait Link {
     fn write_timeline(&mut self, edit: &EditList) -> Result<PathBuf, String>;
 }
 
-/// What a send says when the script running in Resolve is older than this Junctur: a 5g script
-/// answers `check` as unknown, and one that knows `check` but is older than
-/// [`reply::SCRIPT`] would ignore what `place` asks of it now (5l's highlight, 5m's kept look,
-/// 5n's question before placing over the user's clips).
+/// What a send says when the script running in Resolve is older than this Junctur: an old script
+/// answers `check` as unknown, and one older than [`reply::SCRIPT`] would ignore fields `place`
+/// sends.
 pub const OLD_SCRIPT: &str = "The Junctur script running in Resolve is from an older Junctur: in \
      Resolve choose Workspace > Scripts > Junctur again, then send again";
 
-/// `check` is the first request a 5z script knows, `open` the first a 5ab one does: an older script
-/// calls them unknown.
+/// An older script calls `check` or `open` an unknown request.
 pub fn older(e: String) -> String {
     if e.starts_with("unknown request") {
         OLD_SCRIPT.into()
@@ -64,7 +56,7 @@ pub fn run(
         return Err(NO_CAPTIONS.into());
     }
     let names = link.request("check", vec![]).map_err(older)?;
-    // Before anything is written or made: the version 5n checked in `info`, now in `check`.
+    // Before anything is written or made: the script's version, as `check` reports it.
     if !reply::script_is_current(&names) {
         return Err(OLD_SCRIPT.into());
     }
@@ -84,7 +76,7 @@ pub fn run(
             ("source", edit.source.to_string_lossy().into_owned().into()),
             ("captions", (!cues.is_empty()).into()),
             ("template", job::template(c).into()),
-            // The animated caption (5l) when the highlight or an animation is on.
+            // The animated caption when the highlight or an animation is on.
             ("animated", c.animated().into()),
         ],
     )?;
@@ -106,7 +98,7 @@ pub fn run(
         reply::sent(&done, made)
     };
     if replace && !cues.is_empty() {
-        // 5n asking first placed nothing and waits for the user's answer: the old timeline stays
+        // Asking first placed nothing and waits for the user's answer: the old timeline stays
         // until a send has its captions on the new one.
         if sent.in_the_way > 0 {
             sent.note = Some(format!(
@@ -152,7 +144,7 @@ pub fn run(
     Ok(Outcome::Sent(sent))
 }
 
-/// Lays `cues` out for the timeline's shape and has the script place them on it (5g).
+/// Lays `cues` out for the timeline's shape and has the script place them on it.
 fn place(
     link: &mut impl Link,
     cues: &[Cue],
@@ -166,7 +158,7 @@ fn place(
     link.request("place", job.to_lua())
 }
 
-/// "Update captions only" (5ab) on the one timeline called `name`: made current by `open`, which
+/// "Update captions only" on the one timeline called `name`: made current by `open`, which
 /// changes nothing on it, then `place`, which touches only the clips tagged for this recording
 /// and the `Junctur …` tracks. Its cut is never rebuilt; when it no longer matches the edit's, the
 /// result says so (the captions follow Junctur's cut).
@@ -183,7 +175,7 @@ fn update(
             vec![
                 ("name", name.into()),
                 ("template", job::template(c).into()),
-                // The animated caption (5l), looked up as `build` looks it up.
+                // The animated caption, looked up as `build` looks it up.
                 ("animated", c.animated().into()),
             ],
         )
@@ -211,7 +203,7 @@ fn update(
 /// sent for (`junctur.lua`); it refuses before touching anything.
 const SWITCHED: &str = "The open timeline in Resolve changed";
 
-/// An update's `place` that failed, said as far as it is known (5ab): a timeline switched meanwhile
+/// An update's `place` that failed, said as far as it is known: a timeline switched meanwhile
 /// was left alone; anything else (a timeout above all) may have stopped part way through the
 /// captions. Either way nothing but Junctur's captions was touched.
 fn placing_failed(made: &str, e: String) -> String {
@@ -265,7 +257,7 @@ mod tests {
         fn built(self, name: &str) -> Self {
             self.answered("build", name, None)
         }
-        /// The timeline already there, as `open` (5ab) finds it, its cut ending at `cut_end`.
+        /// The timeline already there, as `open` finds it, its cut ending at `cut_end`.
         fn opened(self, name: &str, cut_end: &str) -> Self {
             self.answered("open", name, Some(cut_end))
         }
@@ -397,7 +389,7 @@ mod tests {
         assert_eq!(f.field("build", "name"), Some("rec (Junctur) 2"));
         assert_eq!(f.field("build", "replace"), Some("false"));
         assert_eq!(f.field("build", "file"), Some(r"C:\J\timeline.fcpxml"));
-        // 5l's animated caption is asked for only with the highlight or an animation on.
+        // The animated caption is asked for only with the highlight or an animation on.
         assert_eq!(f.field("build", "animated"), Some("false"));
         assert_eq!(f.field("place", "timeline"), Some("T-9"));
         assert_eq!(
@@ -534,7 +526,7 @@ mod tests {
                 && e.contains("no Text+"),
             "{e}"
         );
-        // 5n asking (clips in the way): nothing placed, the user to answer; no finish either.
+        // Asking (clips in the way): nothing placed, the user to answer; no finish either.
         let mut f = Fake::new(&["rec (Junctur)"]).built("rec (Junctur) (new)");
         f.answers.insert(
             "place",
@@ -553,7 +545,7 @@ mod tests {
         assert_eq!(f.kinds(), ["check", "build", "place"]);
         assert_eq!((s.in_the_way, s.replaced), (2, false));
         assert!(s.note.unwrap().contains("which is untouched"));
-        // Some captions placed and some failed: Replace finishes, as 5z decided.
+        // Some captions placed and some failed: Replace finishes.
         let mut f = Fake::new(&["rec (Junctur)"]).built("rec (Junctur) (new)");
         f.answers.insert(
             "place",
@@ -594,8 +586,8 @@ mod tests {
         let mut f = Fake::default();
         let e = run(&mut f, &cues(), &edit(), &Captions::default(), None).unwrap_err();
         assert_eq!(e, OLD_SCRIPT);
-        // A script that knows `check` but is older than this Junctur (a 5z one from before the
-        // caption rounds met it, or none said): refused before anything is written or made.
+        // A script that knows `check` but is older than this Junctur, or says no version: refused
+        // before anything is written or made.
         for old in [None, Some("5n")] {
             let mut f = Fake::new(&[]).built("rec (Junctur)");
             if let Some(Ok(check)) = f.answers.get_mut("check") {
@@ -627,8 +619,8 @@ mod tests {
 
     #[test]
     fn an_update_meeting_clips_in_the_way_asks_and_the_answer_is_an_update_again() {
-        // 5n on 5ab's update: the timeline there has the user's clips on Junctur's tracks, so
-        // `place` (asking) places nothing and counts them; nothing is built or finished.
+        // On an update the timeline there has the user's clips on Junctur's tracks, so `place`
+        // (asking) places nothing and counts them; nothing is built or finished.
         let mut f = Fake::new(&["rec (Junctur)"]).opened("rec (Junctur)", "120");
         f.answers.insert(
             "place",
@@ -735,7 +727,7 @@ mod tests {
         let e = update(&mut f, &cues()).unwrap_err();
         assert!(e.contains("which to update"), "{e}");
         assert_eq!((f.kinds(), f.written), (vec!["check"], 0));
-        // A 5z script, which knows check but not open.
+        // An older script, which knows check but not open.
         let mut f = Fake::new(&["rec (Junctur)"]);
         assert_eq!(update(&mut f, &cues()).unwrap_err(), OLD_SCRIPT);
         assert_eq!(f.kinds(), ["check", "open"]);

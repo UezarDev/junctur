@@ -1,21 +1,6 @@
-//! The player: one mpv instance, its embedded video output, and an event thread that turns mpv's
-//! events into [`PlayerState`] updates for the frontend (`player-state`).
-//!
-//! A recording plays in one of two forms: the whole file, or only the edit list's kept ranges as an
-//! mpv EDL (see `cuts`). Which one is the user's skip toggle, while there is an edit list keeping
-//! something; switching forms, or an edit list that changes what plays, reloads at the same source
-//! position.
-//!
-//! The parts that commands and the edit-list watch share live in [`Core`], behind an `Arc`, so the
-//! watch reaches the player directly (through a `Weak`) instead of through the app's player lock.
-//!
-//! Edits (`editor`) reach playback the way a changed file does, through [`Core::take`], but
-//! directly: the app never waits for its own save to come back through the watch. Locks are taken
-//! in the order editor, ctl, state, mixer (state and mixer are never held together).
-//!
-//! Every audio track plays at once, each with a meter and a mute (2e, `mixer`): each load carries
-//! the mixer's filter graphs, a mute is sent to the playing graph in place, and the event thread
-//! reads the meters while playing.
+//! The player: one mpv instance, its embedded video, and an event thread turning mpv's events into
+//! [`PlayerState`]; it plays the whole file or only the kept ranges (an EDL, see `cuts`).
+//! Locks are taken in the order editor, ctl, state, mixer (state and mixer never together).
 
 use std::collections::VecDeque;
 use std::ops::Deref;
@@ -134,7 +119,7 @@ struct Ctl {
     edit: Edit,
     /// The user's toggle; on by default.
     skip: bool,
-    /// In review (2o): the toggle as it was before review set it off.
+    /// In review: the toggle as it was before review set it off.
     review: Option<bool>,
     /// The form of the last load asked for: what plays once in-flight loads land.
     requested: Form,
@@ -175,7 +160,7 @@ fn notice(e: &Edited) -> Option<String> {
         ),
         _ => None,
     };
-    // 2p repair: a several-stretch edit that left short stretches out says so.
+    // A several-stretch edit that left short stretches out says so.
     let skipped = match e.skipped {
         0 => None,
         1 => Some("1 selected stretch is shorter than a frame and was left out".to_string()),
@@ -189,7 +174,7 @@ fn notice(e: &Edited) -> Option<String> {
     }
 }
 
-/// Whether `play_from` can start at source second `at` (2s): a time mpv can seek to, never NaN, an
+/// Whether `play_from` can start at source second `at`: a time mpv can seek to, never NaN, an
 /// infinity or before the start, which would reach mpv as text it refuses or reads otherwise.
 fn playable(at: f64) -> Result<(), String> {
     if at.is_finite() && at >= 0.0 {
@@ -222,7 +207,7 @@ impl Deref for Player {
     }
 }
 
-/// What a word fix did besides itself (5h, 5aa): the entries the word list is to learn (the caller
+/// What a word fix did besides itself: the entries the word list is to learn (the caller
 /// saves them, `settings::learn`), and the fixes it also made on the words heard like it.
 #[derive(Debug, Default)]
 pub struct FixDone {
@@ -232,7 +217,7 @@ pub struct FixDone {
     pub heard: Vec<String>,
 }
 
-/// The words `words` heard, as a fix's new words are compared with them (5aa: the word list learns
+/// The words `words` heard, as a fix's new words are compared with them (the word list learns
 /// only words the recording never heard).
 fn heard(words: &Words) -> wordlist::Heard {
     wordlist::Heard::new(words.list.iter().map(|w| w.text.as_str()))
@@ -250,13 +235,13 @@ pub struct Core {
     mixer: Arc<Mutex<Mixer>>,
     /// Held while `mutes.json` is written, so writes land in the order of the clicks.
     saving: Mutex<()>,
-    /// The user's caption defaults (2i), for an edit list without settings of its own.
+    /// The user's caption defaults, for an edit list without settings of its own.
     caption_defaults: Mutex<Captions>,
-    /// The open recording's translations (5k) as last read, and the file's size and time then:
-    /// read again only when the background run has written it since.
+    /// The open recording's translations as last read, and the file's size and time then: read
+    /// again only when the background run has written it since.
     translations: Mutex<Option<(PathBuf, Stamp, Arc<Translations>)>>,
-    /// The partial transcript as read so far while the recording transcribes (2j): each landed
-    /// piece parses only the chunks added since.
+    /// The partial transcript as read so far while the recording transcribes: each landed piece
+    /// parses only the chunks added since.
     so_far: Mutex<transcribe::SoFar>,
 }
 
@@ -379,7 +364,7 @@ impl Player {
         let mut ed = lock(&self.editor);
         ed.reset(edit_path.clone());
         let mut c = lock(&self.ctl);
-        // A review of the recording before ends with it (2o), its skip toggle back for this one; the
+        // A review of the recording before ends with it, its skip toggle back for this one; the
         // load below clears the loop again anyway, so a failure here does not stop the open.
         let _ = self.leave_review(&mut c);
         c.file = Some(path.to_string());
@@ -449,21 +434,20 @@ impl Drop for Player {
     }
 }
 
-/// An edit refused because another recording was opened while it was asked for (2m).
+/// An edit refused because another recording was opened while it was asked for.
 pub const OPENED_MEANWHILE: &str = "another recording was opened meanwhile: nothing was changed";
 
-/// A word edit refused because the words it names changed between reading them and saving (5ad: a
-/// finished re-transcription landing there would have put the fix on the old word's place in a
-/// list whose fixes were just carried onto the new words).
+/// A word edit refused because the words it names changed between reading them and saving (a
+/// finished re-transcription would get the fix on the old word's place).
 pub const WORDS_CHANGED: &str =
     "the transcript changed meanwhile: nothing was changed, try again on the words shown now";
 
 /// The editor's words were let go while a word edit was asked for (a piece of a running
-/// transcription landed, 2j): the edit reads them again and retries ([`Core::retrying`]).
+/// transcription landed): the edit reads them again and retries ([`Core::retrying`]).
 const WORDS_LET_GO: &str = "the editor's words were read again meanwhile";
 
 /// Whether `now` has `then`'s words `first..=last` as they were: the same track, heard times, text
-/// and place in their millisecond (5ad repair). A piece of a running transcription only adds words
+/// and place in their millisecond. A piece of a running transcription only adds words
 /// after the ones already there, so it never changes them; a finished re-transcription does.
 fn same_target(now: &Words, then: &Words, first: usize, last: usize) -> bool {
     (first..=last).all(|i| match (now.list.get(i), then.list.get(i)) {
@@ -478,9 +462,9 @@ fn same_target(now: &Words, then: &Words, first: usize, last: usize) -> bool {
     })
 }
 
-/// `ed`'s words still have words `first..=last` of `words`, the ones a word edit read ([`same_target`]).
-/// Not the same words read at all (5ad's first try compared them by pointer, so every piece of a
-/// running transcription landing in between refused the fix Uezar was making while it ran).
+/// `ed`'s words still have words `first..=last` of `words`, the ones a word edit read
+/// ([`same_target`]). Not compared by pointer: a piece of a running transcription landing in
+/// between would refuse every fix made while it runs.
 fn same_words(ed: &Editor, words: &Arc<Words>, first: usize, last: usize) -> Result<(), String> {
     match &ed.words {
         Some(w) if Arc::ptr_eq(w, words) || same_target(w, words, first, last) => Ok(()),
@@ -505,13 +489,9 @@ impl Core {
         }
     }
 
-    /// Takes the edit list on disk when someone other than the app changed it (the watch, and
-    /// every edit before it applies, so an outside change inside the watch's settle time is played
-    /// and edited on, not overwritten unseen). The app's own last save is skipped. A list that
-    /// parses and keeps other ranges than the one in play ends the undo history, which holds kept
-    /// ranges only: one that changed only the rest (2j: the run's word counts landing) keeps it.
-    /// One that does not parse keeps the ranges in play (`cuts::merge`) and says why in the edit
-    /// state. `by` names the caller in the log line an outside change leaves.
+    /// Takes the edit list on disk when someone other than the app changed it (called by the watch
+    /// and before every edit, so an outside change is never overwritten unseen). New kept ranges or
+    /// word times end the undo history; a list that does not parse keeps the ranges in play.
     fn sync(&self, ed: &mut Editor, by: &str) -> Result<(), String> {
         let (file, path, fps) = {
             let c = lock(&self.ctl);
@@ -534,16 +514,15 @@ impl Core {
         if new_list.is_some() && new_list != in_play {
             eprintln!("junctur-app: edit.junctur changed on disk, taken ({by})");
         }
-        // The history holds the ranges and the retimed words (2w): an outside change to either
-        // would be undone over.
-        // Compared as the file writes them, so a list read back equals the one saved.
+        // The history holds the ranges and the retimed words: an outside change to either would be
+        // undone over. Compared as the file writes them, so a list read back equals the one saved.
         let undone = |l: &EditList| {
             let times: Vec<_> = l.times.iter().map(edit_key).collect();
             (l.keep.clone(), times)
         };
         if new_list.is_some() && new_list.map(undone) != in_play.map(undone) {
             ed.changed_elsewhere();
-            // A first list (the app's own analysis just wrote it, 2d) had no history to clear.
+            // A first list (the app's own analysis just wrote it) had no history to clear.
             let notice =
                 c.edit.list.is_some().then(|| {
                     "edit.junctur changed on disk: took it, undo history cleared".to_string()
@@ -590,7 +569,7 @@ impl Core {
         self.change(file, |ed, list, fps| ed.edit(list, step, fps))
     }
 
-    /// Moves a cut's edge (2w): frame edit `frames` (start, end, keep) moving edge `from`, and the
+    /// Moves a cut's edge: frame edit `frames` (start, end, keep) moving edge `from`, and the
     /// words beside it with it, as one undo step. See [`Editor::move_edge`].
     pub fn move_edge(
         &self,
@@ -603,7 +582,7 @@ impl Core {
     }
 
     /// Cuts (`keep` false) or keeps every run of transcript words in `runs` (`first..=last` each)
-    /// as one undo step (2p: a selection of several stretches). See [`Editor::edit_all`].
+    /// as one undo step. See [`Editor::edit_all`].
     pub fn edit_words(
         &self,
         file: Option<&str>,
@@ -619,7 +598,7 @@ impl Core {
     }
 
     /// Renames speaker `id` in the edit list and saves it (first taking any outside change). A
-    /// speaker that is a remembered person renames the person (5b), in every recording.
+    /// speaker that is a remembered person renames the person, in every recording.
     pub fn rename_speaker(&self, file: Option<&str>, id: u32, name: &str) -> Result<(), String> {
         let name = junctur_core::edit::check_name(name)?;
         match file.map(|f| voices::rename(f, id, name)) {
@@ -630,7 +609,7 @@ impl Core {
     }
 
     /// Sets speaker `id`'s caption colour in the edit list and saves it; a remembered person's
-    /// colour is theirs in every recording (5b).
+    /// colour is theirs in every recording.
     pub fn recolor_speaker(&self, file: Option<&str>, id: u32, color: &str) -> Result<(), String> {
         match file.map(|f| voices::recolor(f, id, color)) {
             Some(Ok(Some(found))) => self.respeak(file, &found),
@@ -639,11 +618,9 @@ impl Core {
         }
     }
 
-    /// Remembers `name`'s voice from the runs of transcript words in `runs` (`first..=last` each)
-    /// of the open recording (5b; 2p: several runs, one selection of all of someone's lines, are
-    /// one enrolment and one line back) and labels its speakers again; returns a line for the user.
-    /// Works from the windows the speakers stage kept, so nothing is decoded and it takes a moment
-    /// at most.
+    /// Remembers `name`'s voice from the runs of transcript words in `runs` (`first..=last` each,
+    /// one enrolment) and labels the speakers again; returns a line for the user. Works from the
+    /// windows the speakers stage kept, so nothing is decoded.
     pub fn enroll_voice(
         &self,
         file: Option<&str>,
@@ -677,14 +654,9 @@ impl Core {
         Ok(line)
     }
 
-    /// Hears the open recording's speakers again from the audio (5c), the windows cut at the
-    /// seconds pinned to people, and puts them into the list in play. Slow: the caller keeps it off
-    /// the async runtime.
-    ///
-    /// The recording open when it ends may not be the one heard (another was opened meanwhile):
-    /// the speakers go into the list in play only when that list is the heard recording's, checked
-    /// under the editor's lock; otherwise into its edit list on disk. The re-hearing guard is held
-    /// until then, so no enrollment slips in between.
+    /// Hears the open recording's speakers again from the audio, cut at the seconds pinned to
+    /// people. Slow. The speakers go into the list in play only if it is still the heard
+    /// recording's (else its list on disk), the re-hearing guard held so no enrollment slips in.
     pub fn reanalyze_speakers(&self, file: Option<&str>) -> Result<(), String> {
         let file = file.ok_or("no recording is open")?;
         let (found, _rehearing) = voices::rehear(file)?;
@@ -720,13 +692,9 @@ impl Core {
         lock(&self.ctl).file.clone()
     }
 
-    /// An analysis of `file` (absolute) ended (2d), or wrote its edit list (2j). If it is the open
-    /// recording, the words and envelope read so far are dropped (a re-analysis may have replaced
-    /// them) and the edit list on disk is taken now rather than at the watch's next poll. The
-    /// words are read again up to `through` ([`Self::transcribed`]): `None` once the transcript is
-    /// whole; while a run's transcription is to come or failed part way, the words so far, never
-    /// an older run's `transcript.json`, which the new words would replace under the page's word
-    /// indices (2j repair).
+    /// An analysis of `file` (absolute) ended or wrote its edit list: if it is open, the words and
+    /// envelope are dropped and the list on disk taken now. Words are read again up to `through`
+    /// ([`Self::transcribed`]), never an older `transcript.json` under the new word indices.
     pub fn analysed(&self, file: &Path, through: Option<f64>) {
         if !self.is_open(file) {
             return;
@@ -740,8 +708,8 @@ impl Core {
         self.reload_edit();
     }
 
-    /// `file` (absolute) is transcribed up to `through` seconds on every track (2j: a piece
-    /// landed): if it is the open recording, its words are read again, up to there, when next
+    /// `file` (absolute) is transcribed up to `through` seconds on every track (a piece landed):
+    /// if it is the open recording, its words are read again, up to there, when next
     /// asked for. `None`: the finished transcript's.
     pub fn transcribed(&self, file: &Path, through: Option<f64>) {
         if !self.is_open(file) {
@@ -766,10 +734,8 @@ impl Core {
         })
     }
 
-    /// Closes the recording (2i: back to the start window). mpv stops and idles, and what was kept
-    /// for the recording goes: loads not begun, the edit list and its watch, the editor's history
-    /// and words, the mutes. Edits are saved as they are made, so nothing is lost. An analysis of it
-    /// is not the player's and goes on (see `analysis`).
+    /// Closes the recording: mpv idles and what was kept for it goes (loads, list, watch, history,
+    /// mutes). Edits are saved as made, so nothing is lost; an analysis of it goes on.
     pub fn close(&self) -> Result<(), String> {
         let mut ed = lock(&self.editor);
         ed.reset(None);
@@ -802,8 +768,8 @@ impl Core {
         stopped.and(left)
     }
 
-    /// Fixes the spelling of transcript word `index` (5h) in the edit list and saves it, the words
-    /// heard like it included (5aa); returns what the word list is to learn and the fixes made on
+    /// Fixes the spelling of transcript word `index` in the edit list and saves it, the words
+    /// heard like it included; returns what the word list is to learn and the fixes made on
     /// those other words. Not an undo step, like a rename.
     pub fn fix_word(
         &self,
@@ -863,7 +829,7 @@ impl Core {
         Ok(done)
     }
 
-    /// Marks transcript word `index` as checked (5o) in the edit list and saves it, so it is no longer
+    /// Marks transcript word `index` as checked in the edit list and saves it, so it is no longer
     /// flagged. Not an undo step, like a fix.
     pub fn confirm_word(&self, file: Option<&str>, index: usize) -> Result<(), String> {
         self.retrying(|| self.confirm_word_once(file, index))
@@ -885,11 +851,9 @@ impl Core {
         })
     }
 
-    /// Fixes transcript words `first..=last` as one text (5x) in the edit list and saves it, the same
-    /// words heard elsewhere included (5aa); returns what the word list is to learn and the fixes
-    /// made elsewhere. Refused, saying why, for a run across two tracks, or a new text over two
-    /// people's words ([`Words::retyped`]; clearing never is). One word is [`Self::fix_word`]'s fix.
-    /// Not an undo step.
+    /// Fixes transcript words `first..=last` as one text, the same words heard elsewhere included;
+    /// returns what the word list is to learn and the fixes made elsewhere. Refused across two
+    /// tracks or two people's words ([`Words::retyped`]). Not an undo step.
     pub fn fix_words(
         &self,
         file: Option<&str>,
@@ -945,8 +909,8 @@ impl Core {
         Ok(done)
     }
 
-    /// Gives every word heard like a fixed one the same fix and saves (5aa: the Correct button's
-    /// first step); what was added and the heard texts two fixes disagree on.
+    /// Gives every word heard like a fixed one the same fix and saves (the Correct button's first
+    /// step); what was added and the heard texts two fixes disagree on.
     pub fn spread_fixes(&self, file: Option<&str>) -> Result<Spread, String> {
         self.prepare();
         let mut out = Spread::default();
@@ -958,7 +922,7 @@ impl Core {
         Ok(out)
     }
 
-    /// Takes back the fixes a fix also made elsewhere, those still as they were (5aa: the note's
+    /// Takes back the fixes a fix also made elsewhere, those still as they were (the note's
     /// Undo): their words keep what they were heard as, and no later spread reaches them. Saved.
     pub fn keep_heard(
         &self,
@@ -980,10 +944,8 @@ impl Core {
         self.change(file, |ed, list, _| ed.set_captions(list, captions))
     }
 
-    /// Writes the captions of the list in play to `out` as one SRT (5a, 5e), on the edited timeline
-    /// at the frame rate the player rounds to; translated (5k) when set, refused while the
-    /// translation is not all made. Read and written outside the locks once the words and the
-    /// list are in hand.
+    /// Writes the captions of the list in play to `out` as one SRT on the edited timeline;
+    /// translated when set, refused while the translation is not all made.
     pub fn export_captions(&self, out: &Path) -> Result<CaptionFiles, String> {
         let (list, captions, words, fps) = self.caption_source()?;
         let tracked: Vec<_> = words
@@ -997,28 +959,15 @@ impl Core {
             .map_err(|e| format!("writing {}: {e}", out.display()))
     }
 
-    /// The captions of the list in play as the SRT export cuts them (5d's preview over the
-    /// picture), each speaker placed as the Resolve send places them (5g) on a picture `aspect`
-    /// (height over width) in shape: the same cues on the same output timeline, so the preview
-    /// shows what Resolve will, cue for cue. Translated captions (5k) show what is translated so
-    /// far, the rest as said.
+    /// The captions as the SRT export cuts them, for the preview, placed as the Resolve send places
+    /// them on a picture `aspect` (height over width); translations so far, the rest as said.
     pub fn caption_cues(&self, aspect: f64) -> Result<Vec<Placed>, String> {
         let (list, captions, cues) = self.cut_captions(false, |_| Ok(()))?;
         Ok(layout::place(&cues, &list, &captions, aspect))
     }
 
-    /// Sends the list in play into DaVinci Resolve (5z): the edit as a timeline of its own (the
-    /// recording, every audio track, cut as the list says) with its captions on it as Text+ clips
-    /// (5g), laid out for that timeline's shape, through the Junctur script running there. When the
-    /// project already has the timeline and `answer` does not say what to do, nothing is changed
-    /// and the outcome says so; answered Update (5ab), only the captions on that timeline are
-    /// updated. Blocks until Resolve answers (minutes for a long recording), so the
-    /// command runs it off the async runtime. Refused, like the export, while translated captions
-    /// are not all translated (5k); a recording with no transcript sends its timeline alone. The
-    /// captions are cut as the preview and the SRT cut them (5q). `existing`: what to do this once
-    /// with clips Junctur did not place in the captions' way (5n), the user's answer when the send
-    /// before asked; else the recording's remembered choice, or asking (on the fresh timeline 5z
-    /// makes, its caption tracks are new, so nothing is in their way).
+    /// Sends the list in play into DaVinci Resolve as a timeline with Text+ captions; blocks until
+    /// Resolve answers. `existing` overrides, this once, the choice on clips in the captions' way.
     pub fn send_to_resolve(
         &self,
         answer: Option<resolve::Answer>,
@@ -1036,12 +985,9 @@ impl Core {
         resolve::send(&cues, &list, &captions, answer)
     }
 
-    /// The list in play, its caption settings and its cues as the SRT export cuts them: the one
-    /// cut the preview and the send share, so the preview shows what Resolve gets (5q; the send
-    /// had a copy of its own that could drift). `finished`: the send's cut, refused while the
-    /// translation is not all made (`export::finished_cues`, as the SRT); else with what is
-    /// translated so far (5k), what the preview lays out. `adjust` sets or checks the settings
-    /// before cutting.
+    /// The list in play, its caption settings and its cues: the one cut the preview and the send
+    /// share, so the preview shows what Resolve gets. `finished` refuses an unfinished translation;
+    /// `adjust` sets or checks the settings before cutting.
     fn cut_captions(
         &self,
         finished: bool,
@@ -1053,7 +999,7 @@ impl Core {
         Ok((list, captions, cues))
     }
 
-    /// [`Self::cut_captions`]' cut of `words`, apart so a send without a transcript (5z) shares it.
+    /// [`Self::cut_captions`]' cut of `words`, apart so a send without a transcript shares it.
     fn cut(
         &self,
         list: &EditList,
@@ -1084,9 +1030,8 @@ impl Core {
         })
     }
 
-    /// The open recording's translations (5k), from its project folder: the background run writes
-    /// them as it goes, so the file is read again when its size or time moved, and otherwise
-    /// kept, as the preview asks for them on every change of the captions.
+    /// The open recording's translations, read again only when the file's size or time moved: the
+    /// background run writes them as it goes, and the preview asks on every caption change.
     fn translations(&self) -> Arc<Translations> {
         let Some(dir) = lock(&self.editor).project_dir().map(PathBuf::from) else {
             return Arc::default();
@@ -1105,7 +1050,7 @@ impl Core {
         t
     }
 
-    /// What translating the captions of the list in play needs (5k): its sentences as said, the
+    /// What translating the captions of the list in play needs: its sentences as said, the
     /// transcript's segments (the language each was said in) and where to keep the result.
     /// While the recording transcribes, the sentences so far.
     pub fn translation_job(&self) -> Result<translation::Job, String> {
@@ -1137,8 +1082,8 @@ impl Core {
         })
     }
 
-    /// How many of the list in play's caption sentences have no translation yet, of how many
-    /// (5k); `(0, 0)` when its captions are not translated.
+    /// How many of the list in play's caption sentences have no translation yet, of how many;
+    /// `(0, 0)` when its captions are not translated.
     pub fn untranslated(&self) -> Result<(usize, usize), String> {
         let (list, captions, words, fps) = self.caption_source()?;
         if captions.translate.is_empty() {
@@ -1151,7 +1096,7 @@ impl Core {
     }
 
     /// What a caption file is cut from: the list in play, its caption settings (its own, else the
-    /// defaults it shows, 2i, so export and preview agree with the panel), the words the editor
+    /// defaults it shows, so export and preview agree with the panel), the words the editor
     /// holds (an `Arc`, not a copy; each lock is held only to take its part) and the frame rate.
     fn caption_source(&self) -> Result<(Arc<EditList>, Captions, Arc<Words>, Fps), String> {
         let (list, captions, words, fps) = self.edit_source()?;
@@ -1161,7 +1106,7 @@ impl Core {
     }
 
     /// The list in play, its caption settings, its words when there is a transcript, and the
-    /// frame rate: what a send to Resolve needs (5z), which goes without captions too.
+    /// frame rate: what a send to Resolve needs, which goes without captions too.
     fn edit_source(&self) -> Result<EditSource, String> {
         self.prepare();
         let words = lock(&self.editor).words.clone();
@@ -1177,19 +1122,16 @@ impl Core {
         Ok((list, captions, words, fps))
     }
 
-    /// Takes any outside change on disk, lets `f` change and save the list in play, and plays
-    /// the result.
-    /// `file`: the recording the command was let edit ([`crate::commands::App::editable`], 2m);
-    /// when another has been opened since, nothing is changed ([`OPENED_MEANWHILE`]), as the
-    /// edit would land on a recording whose runs it does not hold off.
+    /// Takes any outside change on disk, lets `f` change and save the list in play, and plays the
+    /// result. `file`: the recording the command was let edit; when another is open since, nothing
+    /// is changed ([`OPENED_MEANWHILE`]), as its runs are not held off.
     fn change(
         &self,
         file: Option<&str>,
         f: impl FnOnce(&mut Editor, &EditList, Fps) -> Result<Option<Edited>, String>,
     ) -> Result<(), String> {
-        // From reading what is on disk to saving over it, so word counts the app's own analysis
-        // writes (`edit::amend`, 2j) never land between and get saved over. Taken before the
-        // editor: the watch takes the editor alone, and an amend this alone.
+        // From reading what is on disk to saving over it, so word counts the analysis writes
+        // (`edit::amend`) never land between. Taken before the editor, which the watch takes alone.
         let _writing = junctur_core::edit::hold();
         let mut ed = lock(&self.editor);
         let synced = self.sync(&mut ed, "before an edit");
@@ -1227,8 +1169,8 @@ impl Core {
 
     /// Reads the transcript and the speech envelope, if not yet in the editor, outside its lock
     /// (a 30 h transcript or envelope is tens of MB) so the watch and other edits are not held up.
-    /// While the recording transcribes (2j) the words are the ones so far, up to where every track
-    /// is done ([`Words::so_far`], read on from the last piece by `transcribe::SoFar`).
+    /// While the recording transcribes the words are the ones so far, up to where every track is
+    /// done ([`Words::so_far`]).
     fn prepare(&self) {
         let (dir, words, env, through) = {
             let ed = lock(&self.editor);
@@ -1276,8 +1218,8 @@ impl Core {
     }
 
     /// Keeps the right-hand `right`, bottom `bottom` and top `top` shares of the window (0..1) free
-    /// of video, for the side panel, the play bar and track lanes under the picture (2g) and the
-    /// title bar above it (2i); mpv centres the picture in what is left.
+    /// of video, for the side panel, the play bar and track lanes under the picture and the title
+    /// bar above it; mpv centres the picture in what is left.
     pub fn set_video_margins(&self, right: f64, bottom: f64, top: f64) -> Result<(), String> {
         let share = |x: f64| {
             if x.is_finite() {
@@ -1296,13 +1238,13 @@ impl Core {
         )
     }
 
-    /// The margins mpv has now, right, bottom and top (test mode; the top one is the title bar, 2i).
+    /// The margins mpv has now, right, bottom and top (test mode).
     pub fn video_margins(&self) -> [Option<String>; 3] {
         ["right", "bottom", "top"]
             .map(|side| self.mpv.get_string(&format!("video-margin-ratio-{side}")))
     }
 
-    /// The edit list's speaker turns, for the Speakers lane (2g).
+    /// The edit list's speaker turns, for the Speakers lane.
     pub fn turns(&self) -> TurnsView {
         let list = lock(&self.ctl).edit.list.clone();
         list.map_or_else(TurnsView::default, |l| TurnsView::new(&l.speakers))
@@ -1341,7 +1283,7 @@ impl Core {
         EditState::new(&c.edit, c.skip, c.fps, &c.status, &defaults)
     }
 
-    /// New caption defaults from Settings (2i): a list without its own settings shows them at once.
+    /// New caption defaults from Settings: a list without its own settings shows them at once.
     pub fn set_caption_defaults(&self, captions: Captions) {
         *lock(&self.caption_defaults) = captions;
         self.emit_edit(&lock(&self.ctl));
@@ -1351,13 +1293,9 @@ impl Core {
         self.mpv.command(&["cycle", "pause"])
     }
 
-    /// Plays source seconds `start` to `end` over and over (2o's review of one clip): mpv's own
-    /// A-B loop, so it turns back on the exact frame and also at the end of the file, where
-    /// `keep-open` would otherwise pause. The loop is in source time and a cut clip is what is being
-    /// judged, so the first call puts the player in review: the whole file plays (the skip toggle
-    /// is remembered and set off, loading the whole file at `start` when only the kept ranges were
-    /// playing) until `end_review`, or until a recording opens or closes. Under the control lock, so
-    /// a review's start and end, and an open or close, never cross.
+    /// Loops source seconds `start` to `end` with mpv's A-B loop (exact frame, and past
+    /// `keep-open`'s pause at the end). The loop is in source time, so the first call enters
+    /// review: the whole file plays until `end_review` or an open or close.
     pub fn play_between(&self, start: f64, end: f64) -> Result<(), String> {
         if !(start.is_finite() && end.is_finite() && start >= 0.0 && end > start) {
             return Err(format!("no clip from {start} to {end}"));
@@ -1385,11 +1323,8 @@ impl Core {
         self.mpv.set_string("pause", "no")
     }
 
-    /// Plays from source second `at` (2s: after a cut's edge is dragged, from just before it, so
-    /// the move is heard). With the whole file playing it is an exact seek; with only the kept
-    /// ranges playing they are loaded again from there, because the edit that moved the edge has
-    /// just sent a load of the new ranges and a seek sent while a load begins is lost (see
-    /// `play_between`). Refused in review, whose loop is its own (the lanes offer no edges then).
+    /// Plays from source second `at`. Over the kept ranges they are loaded again from there, since
+    /// a seek sent while the edge move's load begins is lost. Refused in review.
     pub fn play_from(&self, at: f64) -> Result<(), String> {
         playable(at)?;
         let mut c = lock(&self.ctl);
@@ -1410,13 +1345,13 @@ impl Core {
         }
     }
 
-    /// Stops `play_between`'s loop and pauses, staying in review (2o: past the last clip).
+    /// Stops `play_between`'s loop and pauses, staying in review (past the last clip).
     pub fn pause_review(&self) -> Result<(), String> {
         clear_loop(&self.mpv)?;
         self.mpv.set_string("pause", "yes")
     }
 
-    /// Leaves review (2o): no loop, speed 1x, the skip toggle as it was before. Nothing to do when
+    /// Leaves review: no loop, speed 1x, the skip toggle as it was before. Nothing to do when
     /// not reviewing (an open or close already ended it).
     pub fn end_review(&self) -> Result<(), String> {
         let mut c = lock(&self.ctl);
@@ -1441,7 +1376,7 @@ impl Core {
         Ok(())
     }
 
-    /// Playback speed (2o: review's speed control), with mpv's pitch correction.
+    /// Playback speed (review's speed control), with mpv's pitch correction.
     pub fn set_speed(&self, speed: f64) -> Result<(), String> {
         if !speed_ok(speed) {
             return Err(format!("no playback speed {speed}"));
@@ -1500,7 +1435,7 @@ impl Core {
         }
     }
 
-    /// Solos or unsolos audio track `track` (0-based) at once (2g). Playback only and not remembered.
+    /// Solos or unsolos audio track `track` (0-based) at once. Playback only and not remembered.
     pub fn set_solo(&self, track: usize, on: bool) -> Result<(), String> {
         {
             let mut m = lock(&self.mixer);
@@ -1511,7 +1446,7 @@ impl Core {
         Ok(())
     }
 
-    /// The analysis of `file` (absolute) has its `tracks` stage done (2d): the mixer takes the
+    /// The analysis of `file` (absolute) has its `tracks` stage done: the mixer takes the
     /// roles it left, on a first analysis or a re-analysis that changed them, moving only the
     /// mutes the user never set, and tells the page when anything changed.
     pub fn tracks_known(&self, file: &Path) {
@@ -1572,9 +1507,9 @@ impl Core {
         };
         self.mpv
             .set_string("pause", if paused { "yes" } else { "no" })?;
-        // A review's loop (2o) was set in the times of the load it was set for.
+        // A review's loop was set in the times of the load it was set for.
         clear_loop(&self.mpv)?;
-        // The playlist index (-1: none) comes before per-file options since mpv 0.38. The mixer's
+        // The playlist index (-1: none) comes before per-file options (mpv 0.38 on). The mixer's
         // graphs go with each load, with the mutes as they are now.
         let mut options = format!("start={start:.6}");
         if let Some(m) = lock(&self.mixer).load_options() {
@@ -1641,13 +1576,13 @@ fn send_weights(mpv: &Mpv, m: &Mixer) {
     }
 }
 
-/// Clears mpv's A-B loop (2o: review's loop of one clip).
+/// Clears mpv's A-B loop (review's loop of one clip).
 fn clear_loop(mpv: &Mpv) -> Result<(), String> {
     mpv.set_string("ab-loop-a", "no")?;
     mpv.set_string("ab-loop-b", "no")
 }
 
-/// The speeds the player takes (2o): review offers 1x to 2x; mpv's pitch correction holds voices
+/// The speeds the player takes: review offers 1x to 2x; mpv's pitch correction holds voices
 /// natural well past that, and outside a quarter to four times nothing is judged by ear.
 fn speed_ok(speed: f64) -> bool {
     (0.25..=4.0).contains(&speed)
@@ -1791,7 +1726,7 @@ fn event_loop(events: &mut Events, shared: &Shared) {
             Event::StartFile { entry } => {
                 // The state starts under the loads lock (taken before the state's, as `close`
                 // takes them): a close between taking the load and starting it would otherwise put
-                // a recording up with no file open (2i).
+                // a recording up with no file open.
                 let mut loads = lock(&shared.loads);
                 let Some(load) = loads.started(*entry) else {
                     eprintln!(
@@ -1831,9 +1766,8 @@ fn event_loop(events: &mut Events, shared: &Shared) {
     }
 }
 
-/// A retimed word as the edit list writes it (2w repair): track, heard start, nth, new start and
-/// end, all to the millisecond, so the history's comparison with the file is not thrown by a last
-/// bit.
+/// A retimed word as the edit list writes it, all to the millisecond, so the history's comparison
+/// with the file is not thrown by a last bit.
 fn edit_key(t: &junctur_core::edit::Retime) -> (usize, i64, usize, i64, i64) {
     let ms = |s: f64| (s * 1000.0).round() as i64;
     (t.track, ms(t.start), t.nth, ms(t.from), ms(t.to))
@@ -1843,7 +1777,7 @@ fn edit_key(t: &junctur_core::edit::Retime) -> (usize, i64, usize, i64, i64) {
 mod tests {
     #[test]
     fn a_word_edit_is_refused_only_when_its_own_words_changed() {
-        // 5ad repair: a piece of a running transcription landing while a word is fixed adds words
+        // A piece of a running transcription landing while a word is fixed adds words
         // after it and must not refuse the fix; a re-transcription that moved the word must.
         use super::{same_target, Words};
         use junctur_core::transcribe::Word;
