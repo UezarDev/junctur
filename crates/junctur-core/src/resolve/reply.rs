@@ -101,8 +101,10 @@ pub struct Sent {
     pub timeline: String,
     /// Whether it replaced a timeline of that name (5z).
     pub replaced: bool,
+    /// Whether only the captions were updated on a timeline already there (5ab), its cut untouched.
+    pub updated: bool,
     /// What went wrong making the timeline without stopping the send: an old timeline Resolve
-    /// would not delete or a name it would not take.
+    /// would not delete or a name it would not take; on an update, a cut that no longer matches.
     pub note: Option<String>,
 }
 
@@ -166,6 +168,7 @@ pub fn sent(a: &HashMap<String, String>, timeline: &str) -> Sent {
             .unwrap_or_default(),
         timeline: timeline.to_string(),
         replaced: false,
+        updated: false,
         note: None,
     }
 }
