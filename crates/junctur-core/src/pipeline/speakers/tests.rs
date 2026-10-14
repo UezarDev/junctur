@@ -1,3 +1,4 @@
+use super::embeddings::EMBEDDINGS_FILE;
 use super::*;
 use crate::pipeline::SpeechTrack;
 use crate::test_support::scratch;

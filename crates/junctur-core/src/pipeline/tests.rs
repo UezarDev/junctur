@@ -39,7 +39,7 @@ fn tracks_speech_and_speakers_open_their_models_on_the_cpu_only() {
         "diarize",
         "vad.rs",
         "pipeline/speech.rs",
-        "pipeline/speakers.rs",
+        "pipeline/speakers",
     ] {
         stages.extend(code_under(rel));
     }
