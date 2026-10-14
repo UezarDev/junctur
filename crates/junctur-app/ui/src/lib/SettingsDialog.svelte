@@ -5,9 +5,15 @@
   // the transcript flags for checking (5o) and the
   // caption defaults a recording without its own starts from. Saving never analyses anything; App.svelte asks again whether the open
   // recording is out of date, and 2d's notice in Properties offers the re-analysis.
+  // Laid out as the Captions panel is (2t): the same sections, explanations behind (i)s.
   import { onMount } from "svelte";
   import * as api from "./api";
   import CaptionRules from "./CaptionRules.svelte";
+  import Field from "./Field.svelte";
+  import InfoTip from "./InfoTip.svelte";
+  import Section from "./Section.svelte";
+  import { CAPTION_SECTIONS } from "./captionSections";
+  import { slot } from "./floating.svelte";
 
   let { onClose, onSaved }: { onClose: () => void; onSaved: (v: api.SettingsView) => void } = $props();
 
@@ -32,6 +38,10 @@
     void api.uiLog("settings open");
   });
 
+  function onChange(c: api.Captions) {
+    if (draft) draft.captions = c;
+  }
+
   async function save() {
     if (!draft) return;
     saving = true;
@@ -51,10 +61,11 @@
 
 <svelte:window
   onkeydown={(e) => {
-    if (e.code === "Escape") {
-      e.stopPropagation();
-      onClose();
-    }
+    if (e.code !== "Escape") return;
+    e.stopPropagation();
+    // An open (i) takes Escape first: closing the dialog would lose the draft.
+    if (slot.open) slot.open = null;
+    else onClose();
   }}
 />
 
@@ -62,48 +73,71 @@
   <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <h2 id="settings-title">Settings</h2>
     {#if view?.error}
-      <p class="bad">The settings file could not be read ({view.error}). Saving replaces it.</p>
+      <p class="status bad">The settings file could not be read ({view.error}). Saving replaces it.</p>
     {/if}
     {#if draft && view}
-      <h3>Transcription</h3>
-      <label class="field">
-        <span>Whisper model</span>
-        <select bind:value={draft.whisperModel}>
-          {#each view.models as m (m.key)}<option value={m.key}>{m.label}</option>{/each}
-        </select>
-      </label>
-      {#if model}<p class="note">{model.note}</p>{/if}
-      <p class="note">
-        Used by the next analysis. Recordings already transcribed keep their transcript until you re-analyse
-        them (Properties says when one was made with another model).
-      </p>
-      <label class="words">
-        <span>Word list</span>
-        <textarea rows="5" spellcheck="false" bind:value={wordsText} placeholder="Uezar&#10;Tsunheto"></textarea>
-      </label>
-      <p class="note">
-        Names and terms Whisper should spell this way, one per line, told to it before every stretch it hears. Used by
-        the next transcription; recordings already transcribed are not redone. A word you fix in the transcript (double-click
-        it) is added at the top on its own. When the list is too long for Whisper the first entries win.
-      </p>
-      <label class="field">
-        <span>Flag words Whisper was less sure of than</span>
-        <span><input class="pct" type="number" min="0" max="100" step="1" bind:value={draft.flagBelow} /> %</span>
-      </label>
-      <p class="note">
-        Underlined in the transcript to check: fix one by double-clicking it, or mark it right. 0 flags none. Only
-        recordings transcribed since this came in have it.
-      </p>
+      <Section title="Transcription">
+        <Field
+          label="Whisper model"
+          info={`${model ? `${model.note} ` : ""}Used by the next analysis; recordings already transcribed keep their transcript until re-analysed (Properties says when one was made with another model).`}
+        >
+          {#snippet children(id)}
+            <!-- A function binding: TypeScript does not carry the {#if draft} into the snippet. -->
+            <select
+              {id}
+              bind:value={() => draft?.whisperModel ?? "", (v) => draft && (draft.whisperModel = v)}
+            >
+              {#each view?.models ?? [] as m (m.key)}<option value={m.key}>{m.label}</option>{/each}
+            </select>
+          {/snippet}
+        </Field>
+        <Field
+          kind="stack"
+          label="Word list"
+          info="Names and terms Whisper should spell this way, one per line. Used by the next transcription. A word you fix in the transcript is added at the top; when the list is too long, the first entries win."
+        >
+          {#snippet children(id)}
+            <textarea {id} rows="5" spellcheck="false" bind:value={wordsText} placeholder="Uezar&#10;Tsunheto"></textarea>
+          {/snippet}
+        </Field>
+        <Field
+          label="Flag words below (%)"
+          info="Words Whisper was less sure of than this are underlined in the transcript to check: fix one by double-clicking it, or mark it right. 0 flags none. Only recordings transcribed since this came in have it."
+        >
+          {#snippet children(id)}
+            <input
+              {id}
+              type="number"
+              min="0"
+              max="100"
+              step="1"
+              bind:value={() => draft?.flagBelow ?? 0, (v) => draft && (draft.flagBelow = v)}
+            />
+          {/snippet}
+        </Field>
+      </Section>
 
-      <h3>Caption defaults</h3>
-      <p class="note">What a recording starts from until its captions are set in its Captions tab.</p>
-      <CaptionRules value={draft.captions} onChange={(c) => draft && (draft.captions = c)} onError={(e) => (error = e)} />
+      <div class="group">
+        <h3>Caption defaults</h3>
+        <InfoTip
+          label="Caption defaults"
+          text="What a recording starts from until its captions are set in its Captions tab."
+        />
+      </div>
+      {#each CAPTION_SECTIONS as s (s.part)}
+        <Section title={s.title} info={s.info}>
+          <CaptionRules value={draft.captions} part={s.part} {onChange} onError={(e) => (error = e)} />
+          {#if s.part === "style"}
+            <CaptionRules value={draft.captions} part="look" {onChange} onError={(e) => (error = e)} />
+          {/if}
+        </Section>
+      {/each}
 
-      {#if view.path}<p class="note path">Saved in {view.path}</p>{/if}
+      {#if view.path}<p class="status path">Saved in {view.path}</p>{/if}
     {:else if !error}
-      <p class="note">Reading the settings…</p>
+      <p class="status">Reading the settings…</p>
     {/if}
-    {#if error}<p class="bad">{error}</p>{/if}
+    {#if error}<p class="status bad">{error}</p>{/if}
     <div class="actions">
       <button onclick={onClose}>Cancel</button>
       <button class="primary" onclick={save} disabled={!draft || saving}>{saving ? "Saving…" : "Save"}</button>
@@ -122,10 +156,10 @@
     background: rgba(0, 0, 0, 0.55);
   }
   .dialog {
-    width: min(460px, calc(100% - 32px));
+    width: min(520px, calc(100% - 32px));
     max-height: calc(100% - 32px);
     overflow-y: auto;
-    padding: 16px 20px;
+    padding: 18px 22px;
     background: var(--panel-solid);
     border: 1px solid var(--line);
     border-radius: 10px;
@@ -137,47 +171,25 @@
     margin: 0 0 4px;
     font-size: 16px;
   }
-  h3 {
-    margin: 16px 0 6px;
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-  .field {
+  /* "Caption defaults" holds several sections, so it reads one step above their headings. */
+  .group {
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    gap: 12px;
-    margin: 6px 0;
+    gap: 6px;
+    margin: 28px 0 0;
   }
-  .pct {
-    width: 56px;
+  .group h3 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
   }
-  .words {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    margin: 10px 0 4px;
-  }
-  .words textarea {
-    resize: vertical;
-    font: inherit;
-  }
-  .note {
-    margin: 4px 0;
-    color: var(--muted);
-    font-size: 12px;
-    line-height: 1.5;
+  /* The Whisper model's labels are long ("Automatic (large-v3-turbo)"); the dialog has the room. */
+  .dialog {
+    --control-width: 240px;
   }
   .path {
-    margin-top: 14px;
+    margin-top: 18px;
     word-break: break-all;
-  }
-  .bad {
-    color: var(--bad);
-    font-size: 12px;
   }
   .actions {
     display: flex;

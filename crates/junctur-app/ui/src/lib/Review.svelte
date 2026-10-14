@@ -3,15 +3,20 @@
   // Tinder", buttons rather than swipes). The clips are review.ts's, frozen as it starts; each
   // plays from its start on mpv's own loop until it is decided. Keep and Remove are one whole-clip
   // frame edit each, the same undoable edit the range toolbar's Cut range / Keep cut makes, then
-  // the next clip plays; Back and Skip move without deciding. It sits in the range toolbar's one
-  // place over the lanes (2n), which hides while it shows. A cut clip is what is being judged, so
+  // the next clip plays; Back and Skip move without deciding (Enter or K keeps, Backspace or Delete
+  // removes, 2r). It is one box of one size (layout.ts `REVIEW`, a little bigger than the range
+  // toolbar's) in the toolbar's corner of the picture, which hides while it shows (2r; 2o had it
+  // over the lanes, sized by its contents and wrapping). A cut clip is what is being judged, so
   // review plays the whole file: the player (`play_between`) turns Skip cuts off for it and
   // `end_review` puts it back as it was and the speed back to 1x (there is no other speed control).
-  // App hands it the keys first.
+  // App hands it the keys first. Since 2s the clip's two edges have steppers (◀ ▶ a frame, shift
+  // ten), the cut that split a word moved where it sits: the frozen clips move with them (review.ts
+  // `moveEdge`) and the loop plays the moved clip again from its start.
   import { onMount, untrack } from "svelte";
   import * as api from "./api";
-  import { clips, holding, now, SPEEDS, type Clip } from "./review";
+  import { clips, holding, moveEdge, now, SPEEDS, type Clip } from "./review";
   import { clock, timecode, toFrame, toSeconds } from "./time";
+  import { REVIEW } from "./layout";
 
   let {
     player,
@@ -22,8 +27,8 @@
   }: {
     player: api.PlayerState | null;
     edit: api.EditState | null;
-    /** Where to sit, as ActionBar's `at`. */
-    at: { x: number; min: number; max: number; bottom: number };
+    /** Where the box's top-left goes (layout.ts `floatAt`). */
+    at: { left: number; top: number; scale: number };
     onDone: () => void;
     onError: (message: string) => void;
   } = $props();
@@ -32,19 +37,19 @@
   // the last one.
   const start = untrack(() => edit);
   const fps = start?.fps ?? null;
-  const list: Clip[] = start && fps ? clips(start) : [];
+  // Replaced (never changed in place) when an edge moves (2s).
+  const first: Clip[] = start && fps ? clips(start) : [];
+  let list = $state.raw(first);
   const total = start?.totalFrames ?? 0;
   const from = untrack(() => player?.frame ?? (fps && player?.position != null ? toFrame(player.position, fps) : 0));
-  let index = $state(holding(list, from));
+  let index = $state(holding(first, from));
   let speed = $state(1);
   // An edit or a move on its way: a second click waits for it, so two decisions never cross.
   let busy = $state(false);
-  let width = $state(0);
 
   const clip = $derived(index < list.length ? list[index] : null);
   const live = $derived(clip && edit ? now(edit, clip) : null);
   const changed = $derived(clip && live ? (clip.kept ? live !== "kept" : live !== "cut") : false);
-  const left = $derived(Math.round(Math.min(Math.max(at.x - width / 2, at.min), Math.max(at.min, at.max - width))));
   // The recording under review: another one opening (or a close) ends it.
   const path = untrack(() => player?.path ?? null);
   let gone = false;
@@ -98,6 +103,23 @@
       await go(list.indexOf(c) + 1);
     });
   }
+  // Moves the clip's `edge` a frame (shift: ten) earlier (-1) or later (2s), in the frozen list and,
+  // when it changes anything, in the live one, then plays the clip again: the loop restarts from
+  // its start and runs to its new end. Read against the engine's list, as `decide` is.
+  function move(edge: "start" | "end", dir: number, e: MouseEvent) {
+    const by = dir * (e.shiftKey ? 10 : 1);
+    press(e, () =>
+      step(async () => {
+        const m = moveEdge(list, index, edge, by, await api.editState());
+        if (!m) return;
+        // The clips move only once the edit is made: one refused leaves review's list and the
+        // live one agreeing, so a later Keep or Remove acts on frames that are really there.
+        if (m.frames) await api.editFrames(m.frames.start, m.frames.end, m.frames.keep);
+        list = m.list;
+        await play(list[index]);
+      }),
+    );
+  }
   const back = () => step(() => go(index - 1));
   const skip = () => step(() => go(index + 1));
   const undo = () => step(api.undo);
@@ -110,6 +132,12 @@
   function press(e: MouseEvent, f: () => void) {
     (e.currentTarget as HTMLElement).blur();
     f();
+  }
+
+  let root = $state<HTMLElement | null>(null);
+  function focused(): boolean {
+    const f = document.activeElement;
+    return f instanceof HTMLButtonElement && !!root?.contains(f);
   }
 
   /** A key while reviewing: true when review took it. Undo and redo are review's too (they wait
@@ -126,14 +154,22 @@
     }
     if (ctrl || e.altKey) return false;
     switch (e.code) {
+      // A held key decides once (2r): holding Enter must not keep clip after clip.
+      case "Enter":
+      case "NumpadEnter":
+        // A review button reached with Tab takes its own Enter (Done ends review, Back goes back);
+        // focus anywhere else (the play bar's Review button after the click that started it) keeps.
+        if (focused()) return false;
+        if (!e.repeat) decide(true);
+        return true;
       case "KeyK":
       case "ArrowRight":
-        decide(true);
+        if (!e.repeat) decide(true);
         return true;
-      case "Delete":
       case "Backspace":
+      case "Delete":
       case "ArrowLeft":
-        decide(false);
+        if (!e.repeat) decide(false);
         return true;
       case "ArrowUp":
         back();
@@ -176,23 +212,37 @@
   });
 </script>
 
-<div class="float" style:left="{left}px" style:bottom="{at.bottom}px" bind:clientWidth={width}>
-  <div class="bar" role="group" aria-label="Review clips">
-    <span class="where mono">{Math.min(index + 1, list.length)} of {list.length}</span>
+<div bind:this={root} class="float" role="group" aria-label="Review clips" style:left="{at.left}px" style:top="{at.top}px" style:width="{REVIEW.w}px" style:height="{REVIEW.h}px" style:transform={at.scale < 1 ? `scale(${at.scale})` : undefined}>
+  <div class="row info">
     {#if clip && fps}
+      <span class="where mono" title="Clip {index + 1} of {list.length}">{index + 1} of {list.length}</span>
       <span class="kind" class:cut={!clip.kept}>{clip.kept ? `Range ${clip.index}` : "Cut"}</span>
-      {#if changed}<span class="now">now {live === "partly" ? "partly kept" : live}</span>{/if}
-      <span class="mono">{timecode(clip.start, fps)} – {timecode(clip.end, fps)}</span>
-      <span class="len mono">{length(clip)}</span>
+      <span class="len mono" title={length(clip)}>{length(clip)}</span>
     {:else}
       <span class="all">{list.length ? `All ${list.length} clips reviewed` : "No clips to review"}</span>
     {/if}
+  </div>
+  <div class="row edges">
+    {#if clip && fps}
+      <button class="n" disabled={busy || index === 0} onclick={(e) => move("start", -1, e)} title="Start one frame earlier (shift: 10)" aria-label="Start one frame earlier">◀</button>
+      <span class="tc mono">{timecode(clip.start, fps)}</span>
+      <button class="n" disabled={busy || index === 0} onclick={(e) => move("start", 1, e)} title="Start one frame later (shift: 10)" aria-label="Start one frame later">▶</button>
+      <span class="dash">–</span>
+      <button class="n" disabled={busy || index === list.length - 1} onclick={(e) => move("end", -1, e)} title="End one frame earlier (shift: 10)" aria-label="End one frame earlier">◀</button>
+      <span class="tc mono">{timecode(clip.end, fps)}</span>
+      <button class="n" disabled={busy || index === list.length - 1} onclick={(e) => move("end", 1, e)} title="End one frame later (shift: 10)" aria-label="End one frame later">▶</button>
+    {/if}
+  </div>
+  <div class="row decide">
     <button disabled={busy || index === 0} onclick={(e) => press(e, back)} title="The clip before (up arrow)">Back</button>
-    <button class="remove" disabled={busy || !clip} onclick={(e) => press(e, () => decide(false))} title="Cut this clip and go on (left arrow, Delete)"
+    <button class="remove" disabled={busy || !clip} onclick={(e) => press(e, () => decide(false))} title="Cut this clip and go on (Backspace, Delete, left arrow)"
       >Remove</button
     >
-    <button class="keep" disabled={busy || !clip} onclick={(e) => press(e, () => decide(true))} title="Keep this clip and go on (right arrow, K)">Keep</button>
+    <button class="keep" disabled={busy || !clip} onclick={(e) => press(e, () => decide(true))} title="Keep this clip and go on (Enter, K, right arrow)">Keep</button>
     <button disabled={busy || !clip} onclick={(e) => press(e, skip)} title="The next clip, deciding nothing (down arrow)">Skip</button>
+  </div>
+  <div class="row more">
+    <span class="now" title={changed ? `This clip is now ${live === "partly" ? "partly kept" : live}` : undefined}>{changed ? `now ${live === "partly" ? "partly kept" : live}` : ""}</span>
     <span class="speeds" role="group" aria-label="Playback speed">
       {#each SPEEDS as x, i (x)}
         <button class:on={speed === x} aria-pressed={speed === x} onclick={(e) => press(e, () => setSpeed(x))} title="Play at {x}x ({i + 1})">{x}x</button>
@@ -200,53 +250,115 @@
     </span>
     <button class="i" disabled={busy || !edit?.canUndo} onclick={(e) => press(e, undo)} title="Undo (Ctrl+Z)" aria-label="Undo">↶</button>
     <button class="i" disabled={busy || !edit?.canRedo} onclick={(e) => press(e, redo)} title="Redo (Ctrl+Y)" aria-label="Redo">↷</button>
-    <button onclick={onDone} title="Leave review (Esc, R)">Done</button>
+    <button class="done" onclick={onDone} title="Leave review (Esc, R)">Done</button>
   </div>
 </div>
 
 <style>
+  /* Drawn at exactly REVIEW's size (border and padding inside), which floatAt places by. */
   .float {
     position: absolute;
     z-index: 5;
-    max-width: 90vw;
-  }
-  .bar {
+    /* floatAt's scale, in a video area smaller than the box, from the corner it places. */
+    transform-origin: top left;
+    box-sizing: border-box;
     display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 6px;
-    padding: 5px 7px;
-    border-radius: 8px;
-    background: rgba(28, 29, 34, 0.96);
+    flex-direction: column;
+    justify-content: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-radius: 18px;
+    background: rgba(28, 29, 34, 0.94);
     border: 1px solid var(--accent);
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5);
     white-space: nowrap;
+    font-size: 14px;
   }
-  .where {
-    padding: 0 4px;
-    color: var(--muted);
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  /* Nothing here may push the box wider (2r repair): the count and the length give way, with an
+     ellipsis and the whole in their title; the kind and the times keep their room. */
+  .info {
+    height: 20px;
+  }
+  .info > span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .kind {
+    flex-shrink: 0;
+  }
+  /* The clip's edges and their steppers (2s), centred; as the range toolbar's. */
+  .edges {
+    height: 26px;
+    justify-content: center;
+    gap: 6px;
+  }
+  .n {
+    width: 28px;
+    height: 24px;
+    padding: 0;
+    font-size: 11px;
+  }
+  .dash {
+    color: var(--muted);
+  }
+  /* 11 figures: room for 10:00:00:00, so the hours never move the steppers. */
+  .tc {
+    width: 11ch;
+    text-align: center;
+    font-size: 13px;
+  }
+  .decide {
+    height: 36px;
+  }
+  .more {
+    height: 28px;
+    gap: 6px;
+  }
+  /* Room for "123 of 456". */
+  .where {
+    flex: 0 1 10ch;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  /* Room for "Range 999". */
+  .kind {
+    width: 84px;
     color: var(--good);
+    font-weight: 600;
   }
   .kind.cut {
     color: var(--bad);
   }
-  .now,
-  .len,
-  .all {
+  .len {
+    flex: 1 1 0;
+    text-align: right;
     color: var(--muted);
     font-size: 12px;
   }
-  .mono {
-    font-size: 12px;
+  .all {
+    flex: 1;
+    text-align: center;
+    color: var(--muted);
   }
   button {
-    padding: 3px 9px;
+    border-radius: 999px;
+    padding: 3px 12px;
   }
-  .keep,
-  .remove {
-    padding: 4px 16px;
+  .decide button {
+    height: 36px;
+    width: 68px;
+    padding: 0;
+  }
+  .decide .keep,
+  .decide .remove {
+    width: 120px;
+    font-size: 15px;
     font-weight: 600;
   }
   .keep:not(:disabled) {
@@ -257,12 +369,21 @@
     border-color: var(--bad);
     color: var(--bad);
   }
+  .now {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--muted);
+    font-size: 12px;
+  }
   .speeds {
     display: inline-flex;
-    gap: 2px;
+    gap: 3px;
   }
   .speeds button {
-    padding: 3px 6px;
+    width: 40px;
+    padding: 3px 0;
     font-size: 12px;
   }
   .speeds .on {
@@ -270,6 +391,11 @@
     color: var(--accent);
   }
   .i {
-    padding: 2px 8px;
+    width: 34px;
+    padding: 3px 0;
+  }
+  .done {
+    width: 60px;
+    padding: 3px 0;
   }
 </style>

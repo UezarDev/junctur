@@ -3,6 +3,8 @@
 :root {
   --panel: rgba(16, 17, 20, 0.82);
   --panel-solid: #101114;
+  /* A popup over a panel (2t): opaque, a step lighter than the panel it sits on. */
+  --raised: #1b1d22;
   --line: rgba(255, 255, 255, 0.1);
   --text: #e8e6e3;
   --muted: #9a978f;
@@ -54,4 +56,19 @@ select option {
 .mono {
   font-family: "Cascadia Mono", Consolas, monospace;
   font-variant-numeric: tabular-nums;
+}
+
+/* A visible status or result line beside settings (2t): progress, results, empty states, errors.
+   Explanations go behind an (i) instead (InfoTip.svelte). */
+.status {
+  margin: 6px 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.status.good {
+  color: var(--good);
+}
+.status.bad {
+  color: var(--bad);
 }

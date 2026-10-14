@@ -354,6 +354,12 @@ pub async fn play_between(app: State<'_, App>, start: f64, end: f64) -> Result<(
     app.with(|p| p.play_between(start, end))
 }
 
+/// Plays from source second `at` (2s: from just before a dragged cut edge, so the move is heard).
+#[tauri::command]
+pub async fn play_from(app: State<'_, App>, at: f64) -> Result<(), String> {
+    app.with(|p| p.play_from(at))
+}
+
 /// Stops the loop and pauses, still in review (past the last clip).
 #[tauri::command]
 pub async fn pause_review(app: State<'_, App>) -> Result<(), String> {
@@ -737,9 +743,9 @@ pub async fn reveal(app: State<'_, App>) -> Result<(), String> {
         .map_err(|e| format!("opening {dir}: {e}"))
 }
 
-/// Closes the open recording (2i: File > Close recording, back to the start window). Its
-/// waveform read stops; an analysis of it goes on (runs are not the player's), and reopening the
-/// recording shows where it is.
+/// Closes the open recording, back to the start window (2i; 2u: File > Back to recordings and the
+/// title bar's back arrow). Its waveform read stops; an analysis of it goes on (runs are not the
+/// player's), and reopening the recording shows where it is.
 #[tauri::command]
 pub async fn close_file(app: State<'_, App>) -> Result<(), String> {
     // The player first: an open on its way checks it after starting its waveforms (`open_file`).

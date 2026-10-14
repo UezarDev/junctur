@@ -4,7 +4,9 @@
 
 use std::path::Path;
 
-use junctur_core::edit::{word_span, CutSettings, Envelope, Fix, Fixes, Speakers};
+use junctur_core::edit::{
+    same_millisecond, word_span, CutSettings, Envelope, Fix, Fixes, Speakers,
+};
 use junctur_core::transcribe::{self, Word};
 use serde::Serialize;
 
@@ -77,6 +79,20 @@ impl Words {
             ends_by,
             until: None,
         }
+    }
+
+    /// Which of the words heard on its track starting in its millisecond word `i` is, 0 for the
+    /// first (5w): what names it in a fix, with its track and start. The list is sorted by start, so
+    /// those words sit together just before it (other tracks' words among them).
+    pub fn nth(&self, i: usize) -> usize {
+        let Some(w) = self.list.get(i) else {
+            return 0;
+        };
+        (0..i)
+            .rev()
+            .take_while(|&j| same_millisecond(self.list[j].start, w.start))
+            .filter(|&j| self.tracks[j] == self.tracks[i])
+            .count()
     }
 
     /// The source seconds words `first..=last` are said in: the first one's start to the latest
@@ -152,7 +168,7 @@ fn percent(p: f32) -> u8 {
 impl TranscriptView {
     pub fn new(words: &Words, speakers: &Speakers, fixes: &[Fix]) -> Self {
         let ms = |s: f64| (s.max(0.0) * 1000.0).round() as u64;
-        let fixed = Fixes::new(fixes);
+        let mut fixed = Fixes::new(fixes);
         let w = &words.list;
         let label = speakers.labeller();
         let (speaker, also) = w
@@ -166,20 +182,22 @@ impl TranscriptView {
                 )
             })
             .unzip();
-        let sure = w
+        // One pass, each word read once: `Fixes` counts the words of a millisecond as they are read
+        // (5w), so a word read twice, or one skipped, would give the next one another's fix.
+        let (text, sure) = w
             .iter()
             .zip(&words.tracks)
-            .map(|(w, &t)| match w.p_min {
-                Some(p) if fixed.of(t, w).is_none() => percent(p),
-                _ => NOT_FLAGGED,
+            .map(|(w, &t)| {
+                let fix = fixed.of(t, w);
+                let sure = match (w.p_min, fix) {
+                    (Some(p), None) => percent(p),
+                    _ => NOT_FLAGGED,
+                };
+                (fix.unwrap_or(&w.text).trim().to_string(), sure)
             })
-            .collect();
+            .unzip();
         Self {
-            text: w
-                .iter()
-                .zip(&words.tracks)
-                .map(|(w, &t)| fixed.text(t, w).trim().to_string())
-                .collect(),
+            text,
             start: w.iter().map(|w| ms(w.start)).collect(),
             end: w.iter().map(|w| ms(w.end)).collect(),
             speaker,
@@ -283,6 +301,7 @@ mod tests {
         let fix = Fix {
             track: 0,
             start: 10.5,
+            nth: 0,
             text: "Uezar".into(),
         };
         let v = TranscriptView::new(&sample(), &Speakers::default(), &[fix]);
@@ -310,6 +329,7 @@ mod tests {
         let fix = |start: f64, text: &str| Fix {
             track: 0,
             start,
+            nth: 0,
             text: text.into(),
         };
         // "Tsunejo" fixed, "bien" confirmed (its own text): neither is flagged any more.
@@ -328,6 +348,57 @@ mod tests {
         assert_eq!(percent(0.3499), 34);
         assert_eq!(percent(0.2499), 24);
         assert_eq!((percent(-0.1), percent(1.5)), (0, 100));
+    }
+
+    #[test]
+    fn a_fix_shows_on_its_own_word_of_those_starting_together() {
+        // 5w: "en" and "él" start at one millisecond (the 2026-06-15 recording); a fix on "él"
+        // showed on "en" too. Another track's word at that moment is counted on its own track.
+        let w = Words::from_tracked(vec![
+            (0, word(54.174, 54.944, "manada")),
+            (0, word(54.944, 54.944, "en")),
+            (1, word(54.944, 55.2, "yes")),
+            (0, word(54.9441, 54.944, "él")),
+            (0, word(55.5, 55.8, "y")),
+        ]);
+        assert_eq!(
+            (0..5).map(|i| w.nth(i)).collect::<Vec<_>>(),
+            [0, 0, 0, 1, 0]
+        );
+        let fix = Fix {
+            track: 0,
+            start: 54.944,
+            nth: w.nth(3),
+            text: "miel".into(),
+        };
+        let v = TranscriptView::new(&w, &Speakers::default(), &[fix]);
+        assert_eq!(v.text, ["manada", "en", "yes", "miel", "y"]);
+    }
+
+    /// 5o with 5w: a confirmation (a fix line with the heard text) of one of the words starting in one
+    /// millisecond unflags that word alone, whatever words before it carry no probability, and the
+    /// words after it read their own text.
+    #[test]
+    fn a_confirmed_word_of_those_starting_together_is_the_only_one_unflagged() {
+        let at = |start: f64, p: Option<f32>, text: &str| Word {
+            p_min: p,
+            ..word(start, start + 0.2, text)
+        };
+        let w = Words::from_words(vec![
+            at(54.944, None, "en"),
+            at(54.944, Some(0.2), "él"),
+            at(54.944, Some(0.3), "la"),
+            at(55.5, Some(0.1), "y"),
+        ]);
+        let confirm = Fix {
+            track: 0,
+            start: 54.944,
+            nth: w.nth(1),
+            text: "él".into(),
+        };
+        let v = TranscriptView::new(&w, &Speakers::default(), &[confirm]);
+        assert_eq!(v.sure, vec![NOT_FLAGGED, NOT_FLAGGED, 30, 10]);
+        assert_eq!(v.text, ["en", "él", "la", "y"]);
     }
 
     #[test]
