@@ -270,18 +270,38 @@ pub fn label_fixed(
     centroid: f32,
     min_share: f64,
 ) -> Labels {
-    #[derive(Clone, Copy, PartialEq)]
-    enum Who {
-        Voice(usize),
-        Cluster(usize),
-    }
     let n = embeddings.len();
-    let close_voice = |e: &[f32], threshold: f32| {
-        nearest(voices.iter().map(Vec::as_slice), e).filter(|&v| dot(&voices[v], e) >= threshold)
-    };
-    // Windows like a voice are that voice; the rest (by index into `rest`) are clustered.
-    let mut who: Vec<Option<Who>> = Vec::with_capacity(n);
-    let mut rest: Vec<(usize, &Vec<f32>)> = Vec::new();
+    let (mut who, rest) = match_voices(embeddings, voices, fixed, threshold);
+    cluster_rest(&mut who, &rest, voices, centroid, min_share, n);
+    let who: Vec<Who> = who.into_iter().map(|w| w.expect("labelled")).collect();
+    dense_order(&who, voices.len())
+}
+
+/// Who a window is in [`label_fixed`]: an enrolled voice, or a cluster of the rest.
+#[derive(Clone, Copy, PartialEq)]
+enum Who {
+    Voice(usize),
+    Cluster(usize),
+}
+
+/// The windows left to cluster, each with its index.
+type Rest<'a> = Vec<(usize, &'a Vec<f32>)>;
+
+/// The voice nearest `e`, when it is at least `threshold` alike.
+fn close_voice(voices: &[Vec<f32>], e: &[f32], threshold: f32) -> Option<usize> {
+    nearest(voices.iter().map(Vec::as_slice), e).filter(|&v| dot(&voices[v], e) >= threshold)
+}
+
+/// Windows like a voice (or pinned to one in `fixed`) are that voice; the rest, with their index,
+/// are left for [`cluster_rest`].
+fn match_voices<'a>(
+    embeddings: &'a [Vec<f32>],
+    voices: &[Vec<f32>],
+    fixed: &[Option<usize>],
+    threshold: f32,
+) -> (Vec<Option<Who>>, Rest<'a>) {
+    let mut who: Vec<Option<Who>> = Vec::with_capacity(embeddings.len());
+    let mut rest: Rest = Vec::new();
     for (i, e) in embeddings.iter().enumerate() {
         if let Some(v) = fixed
             .get(i)
@@ -292,7 +312,7 @@ pub fn label_fixed(
             who.push(Some(Who::Voice(v)));
             continue;
         }
-        match close_voice(e, threshold) {
+        match close_voice(voices, e, threshold) {
             Some(v) => who.push(Some(Who::Voice(v))),
             None => {
                 who.push(None);
@@ -300,6 +320,20 @@ pub fn label_fixed(
             }
         }
     }
+    (who, rest)
+}
+
+/// Labels the windows `rest` names in `who`: clustered as [`two_pass`] with no voices, else merged
+/// into clusters that are a voice as a whole, kept clusters, or the nearest voice. `n` is every
+/// window, for a cluster's share.
+fn cluster_rest(
+    who: &mut [Option<Who>],
+    rest: &[(usize, &Vec<f32>)],
+    voices: &[Vec<f32>],
+    centroid: f32,
+    min_share: f64,
+    n: usize,
+) {
     let rest_e: Vec<Vec<f32>> = rest.iter().map(|(_, e)| (*e).clone()).collect();
     if voices.is_empty() {
         for ((i, _), c) in rest.iter().zip(two_pass(&rest_e, FIRST, MERGE, min_share)) {
@@ -311,7 +345,7 @@ pub fn label_fixed(
         // their nearest candidate would split a person between their voice and someone else's.
         let as_voice: Vec<Option<usize>> = groups
             .iter()
-            .map(|g| close_voice(&g.unit, centroid))
+            .map(|g| close_voice(voices, &g.unit, centroid))
             .collect();
         let kept: Vec<&Group> = groups
             .iter()
@@ -346,17 +380,20 @@ pub fn label_fixed(
             });
         }
     }
-    let who: Vec<Who> = who.into_iter().map(|w| w.expect("labelled")).collect();
-    // Dense speaker ids: the voices heard in their order, then clusters by size.
+}
+
+/// Dense speaker ids for `who`: the voices heard in their order (of `voices` enrolled), then
+/// clusters by size.
+fn dense_order(who: &[Who], voices: usize) -> Labels {
     let mut counts: std::collections::HashMap<usize, usize> = Default::default();
-    for w in &who {
+    for w in who {
         if let Who::Cluster(c) = w {
             *counts.entry(*c).or_default() += 1;
         }
     }
     let mut clusters: Vec<(usize, usize)> = counts.into_iter().collect();
     clusters.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    let order: Vec<Who> = (0..voices.len())
+    let order: Vec<Who> = (0..voices)
         .map(Who::Voice)
         .filter(|v| who.contains(v))
         .chain(clusters.iter().map(|&(c, _)| Who::Cluster(c)))

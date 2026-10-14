@@ -28,15 +28,64 @@ pub(super) struct Shared {
     pub(super) trace: Option<Arc<Trace>>,
 }
 
+/// When the state goes to the page: a change other than the position at once, positions at most
+/// every [`POSITION_EVERY`]. A held-back position is sent once its interval is up, so the last one
+/// (a seek while paused) is never lost.
+pub(super) struct Pacer {
+    last_sent: Instant,
+    held: bool,
+}
+
+impl Pacer {
+    pub(super) fn new(now: Instant) -> Self {
+        Self {
+            last_sent: now - POSITION_EVERY,
+            held: false,
+        }
+    }
+
+    /// How long until a held-back position is due at `now`; `None` with none held.
+    pub(super) fn due_in(&self, now: Instant) -> Option<Duration> {
+        self.held
+            .then(|| POSITION_EVERY.saturating_sub(now.duration_since(self.last_sent)))
+    }
+
+    /// A wait ended at `now` with no event: whether the held-back position goes now.
+    pub(super) fn idle(&mut self, now: Instant) -> bool {
+        let due = self.held && now.duration_since(self.last_sent) >= POSITION_EVERY;
+        if due {
+            self.held = false;
+        }
+        due
+    }
+
+    /// The state changed by `change` at `now`: whether it goes now (else a position is held).
+    pub(super) fn changed(&mut self, change: Change, now: Instant) -> bool {
+        let due = match change {
+            Change::None => false,
+            Change::Position => now.duration_since(self.last_sent) >= POSITION_EVERY,
+            Change::Other => true,
+        };
+        if due {
+            self.held = false;
+        } else if change == Change::Position {
+            self.held = true;
+        }
+        due
+    }
+
+    /// The state was sent at `now`.
+    pub(super) fn sent(&mut self, now: Instant) {
+        self.last_sent = now;
+    }
+}
+
 pub(super) fn event_loop(events: &mut Events, shared: &Shared) {
     let state = &shared.state;
-    let mut last_sent = Instant::now() - POSITION_EVERY;
+    let mut pacer = Pacer::new(Instant::now());
     let mut meters = Meters::new();
-    // A held-back position is sent once its interval is up, so the last one (a seek while
-    // paused) is never lost.
-    let mut held = false;
-    let send = |last_sent: &mut Instant| {
-        *last_sent = Instant::now();
+    let send = |pacer: &mut Pacer| {
+        pacer.sent(Instant::now());
         let snapshot = lock(state).clone();
         let _ = shared.app.emit(STATE_EVENT, snapshot);
     };
@@ -47,14 +96,11 @@ pub(super) fn event_loop(events: &mut Events, shared: &Shared) {
             s.path.is_some() && !s.paused
         };
         // Wake for a held-back position or the meters, whichever is due first.
-        let timeout = [
-            held.then(|| POSITION_EVERY.saturating_sub(last_sent.elapsed())),
-            meters.due_in(playing),
-        ]
-        .into_iter()
-        .flatten()
-        .min()
-        .map_or(-1.0, |d| d.as_secs_f64());
+        let timeout = [pacer.due_in(Instant::now()), meters.due_in(playing)]
+            .into_iter()
+            .flatten()
+            .min()
+            .map_or(-1.0, |d| d.as_secs_f64());
         let event = events.wait(timeout);
         if meters.due_in(playing).is_some_and(|d| d.is_zero()) {
             let reading = if playing { meter(&shared.mpv) } else { None };
@@ -63,9 +109,8 @@ pub(super) fn event_loop(events: &mut Events, shared: &Shared) {
             }
         }
         let Some(event) = event else {
-            if held && last_sent.elapsed() >= POSITION_EVERY {
-                held = false;
-                send(&mut last_sent);
+            if pacer.idle(Instant::now()) {
+                send(&mut pacer);
             }
             continue;
         };
@@ -113,16 +158,8 @@ pub(super) fn event_loop(events: &mut Events, shared: &Shared) {
                 change
             }
         };
-        let due = match change {
-            Change::None => false,
-            Change::Position => last_sent.elapsed() >= POSITION_EVERY,
-            Change::Other => true,
-        };
-        if due {
-            held = false;
-            send(&mut last_sent);
-        } else if change == Change::Position {
-            held = true;
+        if pacer.changed(change, Instant::now()) {
+            send(&mut pacer);
         }
     }
 }

@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use super::embeddings::{heard_embeddings, HEARD_BY_AN_OLDER_JUNCTUR};
-use super::{outside, Found, Method};
+use super::{outside, Found, Method, Pin};
 use crate::diarize::{self, Overlap, CENTROID_MATCH, MINOR_SHARE, VOICE_MATCH};
 use crate::edit::{Person, Turn};
 use crate::voices::Voice;
@@ -41,18 +41,7 @@ pub fn label(found: &Found, embeddings: &[Vec<f32>], voices: &[Voice]) -> Found 
         return found.clone();
     };
     let prints: Vec<Vec<f32>> = voices.iter().map(|v| v.print.clone()).collect();
-    // Pins of the voices here, by voice index; pins are sorted and never overlap.
-    let pins: Vec<(f64, f64, usize)> = found
-        .pins
-        .iter()
-        .filter_map(|p| {
-            let name = p.name.to_lowercase();
-            voices
-                .iter()
-                .position(|v| v.name.to_lowercase() == name)
-                .map(|v| (p.start, p.end, v))
-        })
-        .collect();
+    let pins = voice_pins(&found.pins, voices);
     let spans: Vec<(f64, f64)> = pins.iter().map(|&(a, b, _)| (a, b)).collect();
     let fixed: Vec<Option<usize>> = heard
         .windows
@@ -105,27 +94,8 @@ pub fn label(found: &Found, embeddings: &[Vec<f32>], voices: &[Voice]) -> Found 
         }))
         .collect();
     turns.sort_by(|a, b| a.start.total_cmp(&b.start));
-    let base = turns.clone();
-    for o in &heard.overlaps {
-        let pair = match (who(&o.a, &base), who(&o.b, &base)) {
-            (Some(a), Some(b)) if a != b => Some((a, b)),
-            // One of the two is known (or both came out as one person): the other is whoever
-            // else talks nearest to the stretch, as the one cutting in or being cut in on.
-            (Some(x), _) | (_, Some(x)) => neighbour(o, x, &base).map(|y| (x, y)),
-            // Neither talks alone in the window: whoever the windows say talks there, and the
-            // nearest other speaker.
-            (None, None) => covering(o, &base).and_then(|x| neighbour(o, x, &base).map(|y| (x, y))),
-        };
-        for speaker in pair.into_iter().flat_map(|(a, b)| [a, b]) {
-            for (start, end) in outside(o.start, o.end, &spans) {
-                turns.push(Turn {
-                    start,
-                    end,
-                    speaker,
-                });
-            }
-        }
-    }
+    let both = overlap_turns(&heard.overlaps, &turns, &spans);
+    turns.extend(both);
     turns.sort_by(|a, b| a.start.total_cmp(&b.start));
     let mut known = found.known.clone();
     add_known(&mut known, found.people.iter().flatten().map(|p| &p.name));
@@ -149,6 +119,47 @@ pub fn label(found: &Found, embeddings: &[Vec<f32>], voices: &[Voice]) -> Found 
         heard: found.heard.clone(),
         pins: found.pins.clone(),
     }
+}
+
+/// The pins of the voices in `voices`, as (start, end, voice index); pins are sorted and never
+/// overlap.
+fn voice_pins(pins: &[Pin], voices: &[Voice]) -> Vec<(f64, f64, usize)> {
+    pins.iter()
+        .filter_map(|p| {
+            let name = p.name.to_lowercase();
+            voices
+                .iter()
+                .position(|v| v.name.to_lowercase() == name)
+                .map(|v| (p.start, p.end, v))
+        })
+        .collect()
+}
+
+/// A turn for each of the two people in every overlap stretch, outside the pins `spans`, the two
+/// found from `base` (the window and pin turns: sorted, never overlapping).
+fn overlap_turns(overlaps: &[Overlap], base: &[Turn], spans: &[(f64, f64)]) -> Vec<Turn> {
+    let mut turns = Vec::new();
+    for o in overlaps {
+        let pair = match (who(&o.a, base), who(&o.b, base)) {
+            (Some(a), Some(b)) if a != b => Some((a, b)),
+            // One of the two is known (or both came out as one person): the other is whoever
+            // else talks nearest to the stretch, as the one cutting in or being cut in on.
+            (Some(x), _) | (_, Some(x)) => neighbour(o, x, base).map(|y| (x, y)),
+            // Neither talks alone in the window: whoever the windows say talks there, and the
+            // nearest other speaker.
+            (None, None) => covering(o, base).and_then(|x| neighbour(o, x, base).map(|y| (x, y))),
+        };
+        for speaker in pair.into_iter().flat_map(|(a, b)| [a, b]) {
+            for (start, end) in outside(o.start, o.end, spans) {
+                turns.push(Turn {
+                    start,
+                    end,
+                    speaker,
+                });
+            }
+        }
+    }
+    turns
 }
 
 /// The speaker whose `turns` (from windows: sorted, never overlapping) cover most of `spans`, when

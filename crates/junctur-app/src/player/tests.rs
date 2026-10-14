@@ -32,6 +32,7 @@ fn a_word_edit_is_refused_only_when_its_own_words_changed() {
     assert!(!same_target(&crowded, &first, 0, 0));
 }
 
+use super::events::Pacer;
 use super::meters::Meters;
 use super::playback::{playable, speed_ok, Loads};
 use super::*;
@@ -95,4 +96,31 @@ fn meters_fall_silent_once_when_paused_or_stalled() {
     assert!(m.due_in(false).is_some(), "one more tick for the silence");
     assert_eq!(m.take(None, false, 1, at(550)), Some(vec![None]));
     assert_eq!(m.due_in(false), None);
+}
+
+#[test]
+fn positions_are_paced_and_the_last_one_is_never_lost() {
+    use crate::state::Change;
+    let t0 = Instant::now();
+    let at = |ms: u64| t0 + Duration::from_millis(ms);
+    let mut p = Pacer::new(at(0));
+    // The first position goes at once; one 30 ms later is held back.
+    assert!(p.changed(Change::Position, at(0)));
+    p.sent(at(0));
+    assert!(!p.changed(Change::Position, at(30)));
+    assert_eq!(p.due_in(at(30)), Some(Duration::from_millis(70)));
+    // Nothing more comes: the held one goes once its interval is up, and only then.
+    assert!(!p.idle(at(60)));
+    assert!(p.idle(at(100)));
+    p.sent(at(100));
+    assert_eq!(p.due_in(at(100)), None);
+    assert!(!p.idle(at(300)), "nothing held");
+    // Any other change goes at once and takes a held position with it.
+    assert!(!p.changed(Change::Position, at(150)));
+    assert!(p.changed(Change::Other, at(160)));
+    p.sent(at(160));
+    assert_eq!(p.due_in(at(160)), None);
+    // No change sends nothing and holds nothing.
+    assert!(!p.changed(Change::None, at(400)));
+    assert_eq!(p.due_in(at(400)), None);
 }
