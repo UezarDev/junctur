@@ -1,8 +1,9 @@
 //! The SRT text of the cues.
 
+use std::fmt::Write;
+
 use super::Cue;
 use crate::edit::{Captions, EditList};
-use std::fmt::Write;
 
 /// `HH:MM:SS,mmm`.
 pub(super) fn stamp(s: f64) -> String {

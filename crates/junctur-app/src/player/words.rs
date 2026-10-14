@@ -1,12 +1,12 @@
 //! Word fixes: one word or a run retyped, a word confirmed, fixes spread or taken back, each
 //! refused when the words it was asked on changed meanwhile.
 
-use super::Core;
 use std::sync::Arc;
 
 use junctur_core::edit::{Fix, Spread};
 use junctur_core::wordlist;
 
+use super::Core;
 use crate::editor::{Editor, Words};
 use crate::lock::lock;
 

@@ -1,14 +1,14 @@
 //! The event thread: mpv's events turned into [`PlayerState`], positions sent a few times a second
 //! and the meters on a tick of their own.
 
-use super::meters::{meter, send_weights, Levels, Meters};
-use super::playback::Loads;
-use super::{LEVELS_EVENT, STATE_EVENT};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter};
 
+use super::meters::{meter, send_weights, Levels, Meters};
+use super::playback::Loads;
+use super::{LEVELS_EVENT, STATE_EVENT};
 use crate::lock::lock;
 use crate::mixer::Mixer;
 use crate::mpv::{Event, Events, Mpv};

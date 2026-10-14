@@ -1,7 +1,6 @@
 //! Captions of the list in play: the SRT export, the preview's cues and the Resolve send cut from
 //! the same words, and the translations they read.
 
-use super::{Core, Stamp};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -13,6 +12,7 @@ use junctur_core::resolve;
 use junctur_core::transcribe;
 use junctur_core::translate::Translations;
 
+use super::{Core, Stamp};
 use crate::cuts::Fps;
 use crate::editor::Words;
 use crate::lock::lock;

@@ -1,14 +1,14 @@
 //! The `edit` stage's list: drafted from the cached analysis, and written only when what it
 //! replaces is not the user's or has been backed up.
 
-use super::{
-    not_analysed, speakers_for, speech, tracks_options, Found, KeepList, Project, Speech,
-    StageState, EDIT_FILE,
-};
 use std::cell::OnceCell;
 use std::path::Path;
 use std::time::Instant;
 
+use super::{
+    not_analysed, speakers_for, speech, tracks_options, Found, KeepList, Project, Speech,
+    StageState, EDIT_FILE,
+};
 use crate::edit::{self, CutSettings, EditList, Speakers};
 use crate::tracks::{self, TrackReport};
 use crate::transcribe::{self, Transcript};

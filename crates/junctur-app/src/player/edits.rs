@@ -1,14 +1,14 @@
 //! The edit list in play: outside changes taken from disk, the user's edits applied, saved and
 //! handed to playback, and the transcript and envelope the editor reads them against.
 
-use super::{same_form, Core, Ctl, EditSource, OPENED_MEANWHILE};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use junctur_core::edit::{EditList, Speakers};
-use junctur_core::pipeline::{self};
+use junctur_core::pipeline;
 use junctur_core::transcribe;
 
+use super::{same_form, Core, Ctl, EditSource, OPENED_MEANWHILE};
 use crate::cuts::{self, Edit, EditState, EditorStatus, Fps};
 use crate::editor::{Edited, Editor, Op, Step, TranscriptView, Words};
 use crate::lock::lock;

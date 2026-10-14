@@ -1,9 +1,9 @@
 //! What mpv plays and where: loads matched to the entries mpv starts, seeking, review's loop and
 //! speed, the skip toggle and the video margins.
 
-use super::{same_form, Core, Ctl};
 use std::collections::VecDeque;
 
+use super::{same_form, Core, Ctl};
 use crate::cuts::{edl, Form, Load};
 use crate::lock::lock;
 use crate::mpv::Mpv;

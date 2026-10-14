@@ -1,12 +1,12 @@
 //! The mixer side of playback: mutes and solo sent to the graph playing, track roles taken once
 //! known, and the meters the event thread sends.
 
-use super::Core;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use junctur_core::pipeline::{self};
+use junctur_core::pipeline;
 
+use super::Core;
 use crate::lock::lock;
 use crate::mixer::{self, Mixer, MixerState};
 use crate::mpv::Mpv;

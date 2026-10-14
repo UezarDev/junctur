@@ -1,13 +1,13 @@
 //! Speakers in the list in play: renamed, recoloured, a voice remembered or forgotten, heard again,
 //! and their turns for the Speakers lane.
 
-use super::{Core, OPENED_MEANWHILE};
 use std::path::Path;
 
 use junctur_core::edit::Speakers;
 use junctur_core::pipeline::{self, Found};
 use serde::Serialize;
 
+use super::{Core, OPENED_MEANWHILE};
 use crate::lock::lock;
 use crate::voices;
 

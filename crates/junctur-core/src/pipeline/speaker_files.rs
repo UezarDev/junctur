@@ -1,13 +1,13 @@
 //! The project's speakers file outside a run: enrolling a voice, hearing or labelling the speakers
 //! again, and putting them into the edit list.
 
+use std::path::{Path, PathBuf};
+
 use super::{
     not_analysed, speakers, speakers_stage, steps, Found, Method, PipelineOptions, Project,
 };
-use std::path::{Path, PathBuf};
-
 use crate::edit::{self, EditList, Speakers};
-use crate::tracks::{self};
+use crate::tracks;
 use crate::voices::{Voice, Voices};
 use crate::Result;
 
