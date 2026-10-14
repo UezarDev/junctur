@@ -102,9 +102,10 @@
   // the send never waits on a dialog that is gone; once the send is over, the keys go back to its
   // button. A send that finds clips Junctur did not place where its captions go (5n) places none
   // and comes back with them counted: `inTheWay` holds the question until the user picks or
-  // cancels. That happens on Update captions only, which places on the timeline already there (a
-  // timeline a send makes has new caption tracks); the answer is sent again with the same answer
-  // to the pop-up, so it updates that timeline rather than making another.
+  // cancels. That happens only on Update captions only, which places on the timeline already there
+  // (a timeline a send makes is never asked about, 5v: the engine puts anything in the way there on
+  // a new track); the answer is sent again with the same answer to the pop-up, so it updates that
+  // timeline rather than making another.
   let sending = $state(false);
   let sendButton = $state<HTMLButtonElement | undefined>();
   let sentLines = $state<string[] | null>(null);
@@ -197,8 +198,7 @@
         choice = "newTrack";
         remember = false;
         inTheWay = { clips: r.inTheWay, captions: r.blocked, answer: used };
-        // On Replace, the timeline made beside the old one, kept until captions land; on an update,
-        // a cut that no longer matches the edit's.
+        // An update's note: a cut that no longer matches the edit's.
         sentLines = r.note ? [r.note] : null;
         return false;
       }
@@ -438,7 +438,7 @@
 
       <Section
         title="Remembered voices"
-        info="Select words only one person says in the transcript and choose Remember voice…: every recording then names that speaker the same, in the same colour. Half a minute from a few places makes a voice recognisable; remember the same name again to add more."
+        info="Select words only one person says in the transcript and pick their name (or New name…) in the bar below it: they are relabelled at once, the words picked stay theirs, and every recording then names that speaker the same, in the same colour. Half a minute from a few places makes a voice recognisable; remember the same name again to add more."
       >
         {#if voiceList.length === 0}<p class="status">None yet.</p>{/if}
         {#each voiceList as v (v.name)}
