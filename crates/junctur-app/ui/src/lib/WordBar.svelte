@@ -17,6 +17,7 @@
   // A component of its own rather than more of TranscriptPanel: the panel is the virtual word list
   // and its pointer handling; this is the actions on what it selected, with its own fetch of the
   // remembered voices and its own busy state while an enrolment runs.
+  import { onDestroy, untrack } from "svelte";
   import * as api from "./api";
   import * as sel from "./selection";
   import { shownText, type Words } from "./transcript";
@@ -79,26 +80,43 @@
 
   const runs = $derived(sel.pairs(selection));
 
-  // Fix text (5x). The field is for the stretch it was opened on: another selection closes it.
+  // Fix text (5x). The field is for the stretch it was opened on. Leaving it saves what was typed,
+  // as 5t's one-word field does on leaving: another selection (a Shift+click extending it), the
+  // selection cleared, the bar gone (5x repair: the draft was dropped). Escape, and the field's own
+  // ×, leave the text as it was, as 5t's Escape does.
   let draft = $state("");
   let shown = "";
   let openFor: string | null = null;
+  // The stretch the open field is for (plain: read by the teardown, after the props have moved on).
+  let openRun: { first: number; last: number } | null = null;
   let saving = $state(false);
   const one = $derived(runs.length === 1 ? { first: runs[0][0], last: runs[0][1] } : null);
   $effect(() => {
     const at = one ? `${one.first}-${one.last}` : null;
     if (!retyping) {
       openFor = null;
-    } else if (!at) {
-      retyping = false;
-    } else if (openFor == null) {
+      openRun = null;
+    } else if (openFor == null && at) {
       openFor = at;
+      openRun = one;
       shown = shownText(words, one!);
       draft = shown;
-    } else if (openFor !== at) {
+    } else if (openFor !== at || !at) {
+      untrack(leave);
       retyping = false;
     }
   });
+
+  /** Saves what the open field holds for its own stretch, if it changed, and forgets the field. */
+  function leave() {
+    const run = openRun;
+    openRun = null;
+    openFor = null;
+    if (!run || draft.trim() === shown.trim()) return;
+    const text = draft;
+    api.fixWords(run.first, run.last, text).then(onLearned, (e) => onError(String(e)));
+  }
+  onDestroy(leave);
 
   async function saveText() {
     if (!one || saving) return;
@@ -109,6 +127,7 @@
     saving = true;
     try {
       onLearned(await api.fixWords(one.first, one.last, draft));
+      openRun = null;
       retyping = false;
     } catch (e) {
       onError(String(e));
@@ -191,12 +210,23 @@
         onkeydown={(e) => {
           e.stopPropagation();
           if (e.key === "Enter") void saveText();
-          if (e.key === "Escape") retyping = false;
+          if (e.key === "Escape") {
+            openRun = null;
+            retyping = false;
+          }
         }}
         aria-label="What the selected words say"
       />
       <button disabled={saving} onclick={() => void saveText()}>Save</button>
-      <button class="x" onclick={() => (retyping = false)} title="Leave the text as it was (Esc)" aria-label="Cancel">×</button>
+      <button
+        class="x"
+        onclick={() => {
+          openRun = null;
+          retyping = false;
+        }}
+        title="Leave the text as it was (Esc)"
+        aria-label="Cancel">×</button
+      >
     </div>
   {/if}
   <div class="row people" aria-label="Who says these words">

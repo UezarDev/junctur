@@ -852,7 +852,9 @@ mod tests {
             .unwrap()
             .unwrap()
             .list;
-        let run = words.retyped(0, 2, &Default::default()).unwrap();
+        let run = words
+            .retyped(0, 2, "Uezar left.", &Default::default())
+            .unwrap();
         let l2 = e
             .fix_words(&l1, &run, "Uezar left.")
             .unwrap()

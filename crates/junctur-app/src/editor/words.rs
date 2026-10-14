@@ -99,12 +99,15 @@ impl Words {
     /// first and last words as a fix names them, and what the run's words on that track were heard
     /// as. Words of another track among them (someone else's "yeah" between a sentence's words, on
     /// separate voice tracks) are not part of it. Refused, saying why, when the first and last are on
-    /// two tracks, or when the track's words in it are two people's: a caption gives each speaker
-    /// their own part, and one text cannot be shared out between them.
+    /// two tracks, or when `text` is a new text and the track's words in it are two people's: a
+    /// caption gives each speaker their own part, and one text cannot be shared out between them.
+    /// Clearing (`text` empty or the heard words again) is never refused for the speakers (5x repair):
+    /// a span set before a respeak gave its words to two people must still be taken away.
     pub fn retyped(
         &self,
         first: usize,
         last: usize,
+        text: &str,
         speakers: &Speakers,
     ) -> Result<Retyped, String> {
         let (first, last) = (first.min(last), first.max(last));
@@ -118,21 +121,27 @@ impl Words {
         let label = speakers.labeller();
         let name = |id: u32| speakers.name(id).unwrap_or("someone").to_string();
         let mut who: Option<u32> = None;
+        let mut two: Option<(u32, u32)> = None;
         let mut heard: Vec<&str> = Vec::new();
         for i in (first..=last).filter(|&i| self.tracks[i] == track) {
             let w = &self.list[i];
             heard.push(w.text.trim());
             match (who, label.of_word(track, w.start, w.end)) {
-                (Some(a), Some(b)) if a != b => {
-                    return Err(format!(
-                        "These words are said by two people ({} and {}): fix each one's words on their own.",
-                        name(a),
-                        name(b)
-                    ))
-                }
+                (Some(a), Some(b)) if a != b && two.is_none() => two = Some((a, b)),
                 (None, Some(b)) => who = Some(b),
                 _ => {}
             }
+        }
+        let heard = heard.join(" ");
+        let new = junctur_core::edit::check_span(text).unwrap_or_default();
+        let clearing =
+            new.is_empty() || new == junctur_core::edit::check_span(&heard).unwrap_or_default();
+        if let (Some((a, b)), false) = (two, clearing) {
+            return Err(format!(
+                "These words are said by two people ({} and {}): fix each one's words on their own.",
+                name(a),
+                name(b)
+            ));
         }
         let at = |i: usize| WordAt {
             start: self.list[i].start,
@@ -142,7 +151,7 @@ impl Words {
             track,
             first: at(first),
             last: at(last),
-            heard: heard.join(" "),
+            heard,
         })
     }
 
@@ -237,22 +246,18 @@ impl TranscriptView {
             .unzip();
         let mut text = Vec::with_capacity(w.len());
         let mut span = Vec::with_capacity(w.len());
-        // Each span's place in `fixes`, by its id here.
-        let mut ids: Vec<usize> = Vec::new();
+        // Each span's id here (1-based), by its place in `fixes`.
+        let mut ids: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
         let mut spans: Vec<String> = Vec::new();
         for (w, &t) in w.iter().zip(&words.tracks) {
             let (shown, id) = match fixed.of(t, w) {
                 Some(Fixed::Word(fix)) => (fix, 0),
                 Some(Fixed::Span { index, text }) => {
-                    let id = match ids.iter().position(|&i| i == index) {
-                        Some(at) => at,
-                        None => {
-                            ids.push(index);
-                            spans.push(text.to_string());
-                            ids.len() - 1
-                        }
-                    };
-                    (w.text.as_str(), id as u32 + 1)
+                    let id = *ids.entry(index).or_insert_with(|| {
+                        spans.push(text.to_string());
+                        spans.len() as u32
+                    });
+                    (w.text.as_str(), id)
                 }
                 None => (w.text.as_str(), 0),
             };
@@ -411,7 +416,7 @@ mod tests {
             (0, word(3.0, 3.4, "went")),
             (0, word(4.0, 4.4, "ok")),
         ]);
-        let r = w.retyped(4, 1, &Speakers::default()).unwrap();
+        let r = w.retyped(4, 1, "x", &Speakers::default()).unwrap();
         assert_eq!(r.track, 0);
         assert_eq!(r.heard, "the wezar went");
         assert_eq!((r.first.start, r.last.start), (2.0, 3.0));
@@ -428,8 +433,8 @@ mod tests {
         assert_eq!(v.spans, ["Uezar left"]);
         assert_eq!(v.track, [0, 0, 0, 1, 0, 0]);
         // Refused: starting and ending on two tracks; two people's words.
-        assert!(w.retyped(1, 3, &Speakers::default()).is_err());
-        assert!(w.retyped(0, 9, &Speakers::default()).is_err());
+        assert!(w.retyped(1, 3, "x", &Speakers::default()).is_err());
+        assert!(w.retyped(0, 9, "x", &Speakers::default()).is_err());
         use junctur_core::edit::Turn;
         let turn = |start, end, speaker| Turn {
             start,
@@ -441,10 +446,14 @@ mod tests {
             &[None, None],
             None,
         );
-        let why = w.retyped(0, 2, &two).unwrap_err();
+        let why = w.retyped(0, 2, "So Uezar", &two).unwrap_err();
         assert!(why.contains("two people"), "{why}");
+        // Clearing is never refused for the speakers (5x repair): a span set before a respeak gave
+        // its words to two people can still be taken away, by an empty text or the heard words.
+        assert!(w.retyped(0, 2, "", &two).is_ok());
+        assert!(w.retyped(0, 2, " so  the wezar", &two).is_ok());
         assert!(
-            w.retyped(1, 4, &two).is_ok(),
+            w.retyped(1, 4, "x", &two).is_ok(),
             "one person's words, and track 1's are not counted"
         );
         // A same-start group (5w) is a run like any other.
@@ -452,7 +461,7 @@ mod tests {
             (0, word(54.944, 54.944, "en")),
             (0, word(54.944, 55.0, "él")),
         ]);
-        let r = g.retyped(0, 1, &Speakers::default()).unwrap();
+        let r = g.retyped(0, 1, "x", &Speakers::default()).unwrap();
         assert_eq!((r.first.nth, r.last.nth), (0, 1));
     }
 

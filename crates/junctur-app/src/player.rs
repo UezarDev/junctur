@@ -732,7 +732,7 @@ impl Core {
 
     /// Fixes transcript words `first..=last` as one text (5x) in the edit list and saves it; returns
     /// the heard text and the fixed one, for the word list. Refused, saying why, for a run across two
-    /// tracks or two people ([`Words::retyped`]). One word is [`Self::fix_word`]'s fix. Not an undo
+    /// tracks, or a new text over two people's words ([`Words::retyped`]; clearing never is). One word is [`Self::fix_word`]'s fix. Not an undo
     /// step.
     pub fn fix_words(
         &self,
@@ -752,8 +752,8 @@ impl Core {
             .as_deref()
             .map(|l| l.speakers.clone())
             .unwrap_or_default();
-        let run = words.retyped(first, last, &speakers)?;
         let fixed = junctur_core::edit::check_span(text)?;
+        let run = words.retyped(first, last, &fixed, &speakers)?;
         self.change(file, |ed, list, _| ed.fix_words(list, &run, &fixed))?;
         Ok((run.heard, fixed))
     }

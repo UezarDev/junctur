@@ -204,15 +204,25 @@
   // named the field just closed. Its teardown then finished it a second time: Escape's draft was
   // saved after all, Enter saved twice, and a field replaced by another word's closed that one too.
   let fixOpen: number | null = null;
-  // The word bar's field for several words (5x), opened from here by a double-click.
+  // The word bar's field for several words (5x), opened from here by a double-click. Closed whenever
+  // the selection stops being words (5x repair): the bar is gone then, and a field left marked open
+  // would come back unasked with the next word clicked.
   let retyping = $state(false);
+  $effect(() => {
+    if (selection?.kind !== "words") retyping = false;
+  });
   // The selection before a press, for a double-click inside a selection of several words: the
-  // double-click's first press had already replaced it with the one word pressed. Kept over the
-  // second press of a double-click, which is a press on the same word soon after (a pointerdown's
-  // `detail` is always 0 in WebView2, so it cannot count the clicks).
+  // double-click's first press had already replaced it with the one word pressed. `pending` is the
+  // selection as each press found it; the click after a first press (`detail` 1) keeps it, the
+  // second click of a double-click (`detail` 2) does not, so the double-click reads the selection
+  // from before its first press. The click counts the clicks with the system's own double-click
+  // time (5x repair: a 600 ms guess of ours was shorter than Windows allows); a pointerdown's
+  // `detail` is always 0 in WebView2, so the press itself cannot.
   let beforePress: sel.Selection | null = null;
-  let lastPress = { i: -1, at: 0 };
-  const DOUBLE_MS = 600;
+  let pending: sel.Selection | null = null;
+  function clicked(e: MouseEvent) {
+    if (e.detail <= 1) beforePress = pending;
+  }
   function startFix(e: MouseEvent) {
     // Not `e.target` (5t): `down` captures the pointer on the scroller, and Chromium (WebView2) then
     // sends the clicks and the double-click to the scroller, so the target never was a word and the
@@ -364,10 +374,8 @@
 
   function down(e: PointerEvent) {
     pressed = false;
+    pending = selection;
     const i = wordUnder(e.target);
-    const now = performance.now();
-    if (i !== lastPress.i || now - lastPress.at > DOUBLE_MS) beforePress = selection;
-    lastPress = { i, at: now };
     if (i < 0 || e.button !== 0) return;
     e.preventDefault();
     // The press seeks to the word on release (`up`), and the follow would then scroll a word in the
@@ -465,7 +473,7 @@
       <span class="muted">{words.text.length.toLocaleString()} words</span>
     {/if}
   </header>
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
   <div
     class="scroll"
     bind:this={scroller}
@@ -474,6 +482,7 @@
     onpointerdown={down}
     onpointermove={move}
     onpointerup={up}
+    onclick={clicked}
     ondblclick={startFix}
   >
     {#if loading}

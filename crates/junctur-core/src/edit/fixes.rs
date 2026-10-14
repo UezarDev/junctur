@@ -307,9 +307,10 @@ impl<'a> Fixes<'a> {
         self.by_word.get(&(track, k.0, k.1)).map(|t| Fixed::Word(t))
     }
 
-    /// What the next word, `w` heard on `track`, says on its own: its fix, else what Whisper heard. A
-    /// word in a span reads as heard: the span's text stands for all its words, which a caller
-    /// showing it takes from [`Self::of`].
+    /// What the next word, `w` heard on `track`, says on its own, for the tests: its fix, else what
+    /// Whisper heard; a word in a span reads as heard. Callers showing words take [`Self::of`], which
+    /// tells a span apart (5x repair: no caller is left to read a span's words as heard by mistake).
+    #[cfg(test)]
     pub fn text<'w>(&mut self, track: usize, w: &'w Word) -> &'w str
     where
         'a: 'w,

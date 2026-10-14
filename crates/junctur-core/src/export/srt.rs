@@ -244,6 +244,8 @@ fn kept<'a>(
     let mut out = Vec::with_capacity(words.len());
     // Each span's kept words in time order, by the span's place in the list (5x).
     let mut spans: Vec<SpanSaid> = Vec::new();
+    // Each span's place in `spans`, by its place in the list.
+    let mut at: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
     for (track, w) in words {
         // Read before a cut word is dropped: `Fixes` counts every word.
         let fixed = fixes.of(track, w);
@@ -252,14 +254,16 @@ fn kept<'a>(
         };
         let text = match fixed {
             Some(Fixed::Span { index, text }) => {
-                match spans.iter_mut().find(|s| s.index == index) {
-                    Some(s) => s.said.push((r, w)),
-                    None => spans.push(SpanSaid {
-                        index,
-                        track,
-                        text,
-                        said: vec![(r, w)],
-                    }),
+                match at.get(&index) {
+                    Some(&k) => spans[k].said.push((r, w)),
+                    None => {
+                        at.insert(index, spans.len());
+                        spans.push(SpanSaid {
+                            track,
+                            text,
+                            said: vec![(r, w)],
+                        });
+                    }
                 }
                 continue;
             }
@@ -286,8 +290,6 @@ fn kept<'a>(
 
 /// A span fixed as one text (5x), and its kept words in time order with their kept ranges.
 struct SpanSaid<'a> {
-    /// Its place in the edit list's fixes.
-    index: usize,
     track: usize,
     text: &'a str,
     said: Vec<(usize, &'a Word)>,
