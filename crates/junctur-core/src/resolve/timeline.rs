@@ -302,6 +302,7 @@ mod tests {
             speakers: Default::default(),
             captions: None,
             fixes: Vec::new(),
+            times: Vec::new(),
             windows: Vec::new(),
         };
         // 15 s at 24 fps is 360 frames; Resolve's end one frame either way is the same cut.

@@ -1011,6 +1011,7 @@ mod tests {
             end,
             text: text.into(),
             p: 1.0,
+            p_min: None,
         };
         e.words = Some(Arc::new(Words::from_words(vec![
             w(9.5, 9.95, "pre"),
@@ -1099,6 +1100,7 @@ mod tests {
             end,
             text: "w".into(),
             p: 1.0,
+            p_min: None,
         };
         e.words = Some(Arc::new(Words::from_words(vec![
             w(14.0, 15.0),
@@ -1140,6 +1142,7 @@ mod tests {
             end,
             text: "w".into(),
             p: 1.0,
+            p_min: None,
         };
         e.words = Some(Arc::new(Words::from_words(vec![
             w(10.2, 10.8),
@@ -1168,6 +1171,7 @@ mod tests {
             end: 10.9,
             text: "z".into(),
             p: 1.0,
+            p_min: None,
         }])));
         let l = list(vec![r(10.0, 11.0)]);
         let l1 = e

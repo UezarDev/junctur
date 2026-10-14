@@ -631,7 +631,7 @@ mod tests {
             sure(Some(0.2), 12.0, "bien"),
         ]);
         let none = Speakers::default();
-        let v = TranscriptView::new(&w, &none, &[]);
+        let v = TranscriptView::new(&w, &none, &[], &[]);
         assert_eq!(v.sure, vec![39, 100, NOT_FLAGGED, 5, 20]);
         let fix = |start: f64, text: &str| Fix {
             track: 0,
@@ -641,7 +641,7 @@ mod tests {
             text: text.into(),
         };
         // "Tsunejo" fixed, "bien" confirmed (its own text): neither is flagged any more.
-        let v = TranscriptView::new(&w, &none, &[fix(11.5, "Tsunheto"), fix(12.0, "bien")]);
+        let v = TranscriptView::new(&w, &none, &[fix(11.5, "Tsunheto"), fix(12.0, "bien")], &[]);
         assert_eq!(v.sure, vec![39, 100, NOT_FLAGGED, NOT_FLAGGED, NOT_FLAGGED]);
         assert_eq!(v.text[3..], ["Tsunheto", "bien"]);
         // 5x: a span retyped over "uno" to "viejo" vouches for every word in it; the words after it
@@ -653,7 +653,7 @@ mod tests {
             }),
             ..fix(10.0, "one old")
         };
-        let v = TranscriptView::new(&w, &none, &[span]);
+        let v = TranscriptView::new(&w, &none, &[span], &[]);
         assert_eq!(v.sure, vec![NOT_FLAGGED, NOT_FLAGGED, NOT_FLAGGED, 5, 20]);
         assert_eq!(v.span, vec![1, 1, 1, 0, 0]);
         assert_eq!(v.spans, ["one old"]);
@@ -719,7 +719,7 @@ mod tests {
             through: None,
             text: "él".into(),
         };
-        let v = TranscriptView::new(&w, &Speakers::default(), &[confirm]);
+        let v = TranscriptView::new(&w, &Speakers::default(), &[confirm], &[]);
         assert_eq!(v.sure, vec![NOT_FLAGGED, NOT_FLAGGED, 30, 10]);
         assert_eq!(v.text, ["en", "él", "la", "y"]);
     }

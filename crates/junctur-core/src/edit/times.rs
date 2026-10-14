@@ -172,6 +172,7 @@ mod tests {
             end,
             text: "w".into(),
             p: 1.0,
+            p_min: None,
         }
     }
 
