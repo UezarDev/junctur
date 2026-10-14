@@ -7,11 +7,15 @@
   // to edit.junctur at once). Double-click a word to fix its spelling (5h): saved to edit.junctur at
   // once, shown here, in the caption preview and the SRT, and added to the word list Whisper is told
   // (the header says so for a moment, 5t).
-  // A selection of words shows its actions at the bottom (WordBar, 2p): Cut, Keep, and the people
-  // with names as one-click buttons. Ctrl+click or Ctrl+drag adds another stretch to it.
+  // A selection of words shows its actions at the bottom (WordBar, 2p): Cut, Keep, Fix text (5x),
+  // and the people with names as one-click buttons. Ctrl+click or Ctrl+drag adds another stretch to
+  // it. Several words fixed as one text (5x: a sentence retyped) show as that text, selected and lit
+  // whole; a double-click inside a selection of several words, on such a text, or on a word starting
+  // in the same millisecond as its neighbours (5w) opens the word bar's field for all of them.
   // Words Whisper was unsure of are underlined (5o) and stepped through from the header; "Looks
   // right", which confirms the one flagged word selected, is among the word actions at the bottom
-  // (2p's place for them). A fixed or confirmed word is not flagged (the core decides, `words.sure`).
+  // (2p's place for them). A fixed or confirmed word, or one in a retyped text, is not flagged (the
+  // core decides, `words.sure`).
   import { onMount } from "svelte";
   import { SvelteSet } from "svelte/reactivity";
   import * as api from "./api";
@@ -22,7 +26,9 @@
     pack,
     stamp,
     stepFrom,
+    together,
     tokens,
+    widen,
     wordAt,
     type Stretch,
     type Token,
@@ -126,7 +132,8 @@
     switch (t.kind) {
       case "word":
       case "cutword":
-        return 0; // measured per transcript, in `wordWidth`
+      case "spanword":
+        return 0; // measured per transcript, in `wordWidth` and `spanWidth`
       case "cut": {
         // The wider of the two labels (open or closed), the padding, and the keep button.
         const label = Math.max(measure(foldLabel(t, true), SMALL), measure(foldLabel(t, false), SMALL));
@@ -151,9 +158,13 @@
   const wordWidth = $derived(
     words ? timed("widths", () => Float64Array.from(words!.text, (t) => measure(t, FONT) + SPACE)) : null,
   );
+  // Per transcript: each span text's words' widths (5x).
+  const spanWidth = $derived(
+    words ? words.spanWords.map((ws) => ws.map((t) => measure(t, FONT) + SPACE)) : [],
+  );
   // Per edit: which words are kept, the folds.
   const toks = $derived(
-    words && wordWidth ? timed("tokens", () => tokens(words!, wordWidth!, edit, markWidth)) : null,
+    words && wordWidth ? timed("tokens", () => tokens(words!, wordWidth!, edit, markWidth, spanWidth)) : null,
   );
   // Per resize or fold toggle: rows only.
   const laid = $derived(
@@ -202,6 +213,25 @@
   // named the field just closed. Its teardown then finished it a second time: Escape's draft was
   // saved after all, Enter saved twice, and a field replaced by another word's closed that one too.
   let fixOpen: number | null = null;
+  // The word bar's field for several words (5x), opened from here by a double-click. Closed whenever
+  // the selection stops being words (5x repair): the bar is gone then, and a field left marked open
+  // would come back unasked with the next word clicked.
+  let retyping = $state(false);
+  $effect(() => {
+    if (selection?.kind !== "words") retyping = false;
+  });
+  // The selection before a press, for a double-click inside a selection of several words: the
+  // double-click's first press had already replaced it with the one word pressed. `pending` is the
+  // selection as each press found it; the click after a first press (`detail` 1) keeps it, the
+  // second click of a double-click (`detail` 2) does not, so the double-click reads the selection
+  // from before its first press. The click counts the clicks with the system's own double-click
+  // time (5x repair: a 600 ms guess of ours was shorter than Windows allows); a pointerdown's
+  // `detail` is always 0 in WebView2, so the press itself cannot.
+  let beforePress: sel.Selection | null = null;
+  let pending: sel.Selection | null = null;
+  function clicked(e: MouseEvent) {
+    if (e.detail <= 1) beforePress = pending;
+  }
   function startFix(e: MouseEvent) {
     // Not `e.target` (5t): `down` captures the pointer on the scroller, and Chromium (WebView2) then
     // sends the clicks and the double-click to the scroller, so the target never was a word and the
@@ -211,6 +241,24 @@
     if (!el || el.classList.contains("cutword") || !words) return;
     const i = Number(el.dataset.i);
     if (i === fixing) return;
+    // Several words, one field in the word bar (5x): a span fixed as one text, a selection of
+    // several words holding this one, or the words starting with it in one millisecond on its track.
+    const s = words.span[i];
+    const prior = sel.runs(beforePress);
+    const run = s
+      ? { first: words.spanFirst[s - 1], last: words.spanLast[s - 1] }
+      : prior.length === 1 && prior[0].last > prior[0].first && sel.has(prior, i)
+        ? prior[0]
+        : together(words, i);
+    if (run) {
+      if (fixing != null) finishFix(true);
+      // Whole spans: a group or selection reaching into one takes all of it, so the span is
+      // retyped, not cut short by the save (which takes away every fix it touches).
+      const whole = widen(words, run);
+      onSelect(sel.words(whole.first, whole.last));
+      retyping = true;
+      return;
+    }
     // Another word's field still open (the press on this word kept it from blurring): what was
     // typed there is saved first, as leaving it does (5t repair: it was lost, or saved as this
     // word's text, when this word's draft replaced it before its field went away).
@@ -242,16 +290,18 @@
   }
 
   // A fix whose spelling joined the word list (5h's `settings::learn`) says so for a moment in the
-  // header (5t): before, nothing showed the list had changed until Settings was opened.
+  // header (5t): before, nothing showed the list had changed until Settings was opened. A retyped
+  // sentence (5x) names every word it added.
   const LEARNED_MS = 4000;
   let learned = $state<string | null>(null);
   let learnedTimer = 0;
   // Cleared when the panel goes: `fixWord` can answer after that (5t repair), and a timer set then
   // would outlive the panel.
   let mounted = false;
-  function tellLearned(entry: string) {
-    if (!mounted) return;
-    learned = entry;
+  function tellLearned(entries: string | string[]) {
+    const all = typeof entries === "string" ? [entries] : entries;
+    if (!mounted || !all.length) return;
+    learned = all.map((e) => `"${e}"`).join(", ");
     clearTimeout(learnedTimer);
     learnedTimer = window.setTimeout(() => (learned = null), LEARNED_MS);
   }
@@ -266,6 +316,8 @@
   });
 
   const current = $derived(words && player?.position != null ? wordAt(words, player.position * 1000) : -1);
+  // The span the playhead is in (5x), lit whole.
+  const currentSpan = $derived(words && current >= 0 ? (words.span[current] ?? 0) : 0);
   // The selected words, sorted and joined, for drawing; the latest run, for Shift+click.
   const joined = $derived(sel.runs(selection));
   const latest = $derived(sel.latest(selection));
@@ -358,8 +410,17 @@
     return el ? Number(el.dataset.i) : -1;
   }
 
+  // Selecting a run that reaches into a span takes the whole span (5x).
+  function pick(s: sel.Selection | null) {
+    if (s?.kind === "words" && words) {
+      const w = words;
+      onSelect({ kind: "words", runs: s.runs.map((r) => widen(w, r)) });
+    } else onSelect(s);
+  }
+
   function down(e: PointerEvent) {
     pressed = false;
+    pending = selection;
     const i = wordUnder(e.target);
     if (i < 0 || e.button !== 0) return;
     e.preventDefault();
@@ -374,19 +435,19 @@
       base = selection?.kind === "words" ? selection : null;
       anchor = i;
       if (sel.has(joined, i)) unpick = true;
-      else onSelect(sel.adding(base, sel.run(i, i)));
+      else pick(sel.adding(base, sel.run(i, i)));
     } else if (e.shiftKey && latest && selection?.kind === "words") {
       // The anchor only counts while it is an end of the latest stretch (the timeline may have
       // replaced it).
       const from = anchor === latest.first || anchor === latest.last ? anchor : latest.first;
       anchor = from;
       base = { kind: "words", runs: selection.runs.slice(0, -1) };
-      onSelect(sel.adding(base, sel.run(from, i)));
+      pick(sel.adding(base, sel.run(from, i)));
       moved = true;
     } else {
       anchor = i;
       base = null;
-      onSelect(sel.words(i, i));
+      pick(sel.words(i, i));
     }
     pressed = true;
     scroller.setPointerCapture(e.pointerId);
@@ -398,14 +459,20 @@
     const i = wordUnder(document.elementFromPoint(e.clientX, e.clientY));
     if (i >= 0 && (i !== anchor || moved)) {
       moved = true;
-      onSelect(sel.adding(base, sel.run(anchor, i)));
+      pick(sel.adding(base, sel.run(anchor, i)));
     }
   }
 
   function up() {
     if (!pressed) return;
     pressed = false;
-    if (!moved && unpick) onSelect(sel.without(selection, anchor));
+    if (!moved && unpick) {
+      // A span is taken out whole (5x).
+      const r = words ? widen(words, { first: anchor, last: anchor }) : { first: anchor, last: anchor };
+      let left = selection;
+      for (let j = r.first; j <= r.last; j++) left = sel.without(left, j);
+      onSelect(left);
+    }
     else if (!moved && !adding && words && anchor >= 0) {
       const i = anchor;
       call(() => api.seek(words!.start[i] / 1000, true));
@@ -454,12 +521,12 @@
       </span>
     {/if}
     {#if learned}
-      <span class="muted learned" role="status">"{learned}" added to the word list</span>
+      <span class="muted learned" role="status">{learned} added to the word list</span>
     {:else if words}
       <span class="muted">{words.text.length.toLocaleString()} words</span>
     {/if}
   </header>
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
   <div
     class="scroll"
     bind:this={scroller}
@@ -468,6 +535,7 @@
     onpointerdown={down}
     onpointermove={move}
     onpointerup={up}
+    onclick={clicked}
     ondblclick={startFix}
   >
     {#if loading}
@@ -547,6 +615,14 @@
                       : "Double-click to fix the spelling"}
                   data-i={t.i}>{words.text[t.i]}</span
                 >
+              {:else if t.kind === "spanword"}
+                <span
+                  class="w fixed"
+                  class:cur={currentSpan === t.s}
+                  class:sel={sel.has(joined, t.i)}
+                  title="Fixed as one text: double-click to change it"
+                  data-i={t.i}>{words.spanWords[t.s - 1][t.k]}</span
+                >
               {:else if t.kind === "cutword"}
                 <span
                   class="w cutword"
@@ -584,7 +660,16 @@
     {/if}
   </div>
   {#if selection?.kind === "words" && words && edit?.editable && !reviewing}
-    <WordBar {edit} {selection} {onSelect} {onError} onLooksRight={checking >= 0 ? looksRight : null} />
+    <WordBar
+      {edit}
+      {words}
+      {selection}
+      {onSelect}
+      {onError}
+      bind:retyping
+      onLearned={tellLearned}
+      onLooksRight={checking >= 0 ? looksRight : null}
+    />
   {/if}
 </section>
 
@@ -654,6 +739,10 @@
   }
   .w.sel {
     background: rgba(242, 179, 61, 0.28);
+  }
+  .w.fixed {
+    text-decoration: underline dotted rgba(255, 255, 255, 0.35);
+    text-underline-offset: 3px;
   }
   .w.cur {
     color: #101114;

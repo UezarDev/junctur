@@ -1,14 +1,15 @@
--- Junctur's bridge inside DaVinci Resolve (phase 5g). SPDX-License-Identifier: GPL-3.0-or-later
+-- Junctur's bridge inside DaVinci Resolve (phases 5g, 5z). SPDX-License-Identifier: GPL-3.0-or-later
 --
 -- Junctur installs this into Resolve's Scripts folder. Run it once per Resolve session
 -- (Workspace > Scripts > Junctur) and leave it running: when Junctur's "Send to Resolve" writes a
--- request into its mailbox, this places or restyles the captions as Text+ clips. With the word
--- highlight or an animation on (phase 5l) the clips are auto-subs' animated caption, a Fusion
--- macro round a Text+, driven through the macro's own helpers as auto-subs drives it. Junctur's
--- template picker (phase 5m) asks for the Fusion Titles in the media pool; with a template's own
--- look kept, only the text, timing and speaker colour are set on it. Clips Junctur did not place
--- that sit where new captions go (phase 5n) are asked about before anything changes, then
--- replaced, skipped round, or left with the captions put on a track beside.
+-- request into its mailbox, this makes the edited timeline from Junctur's FCPXML (5z) and places
+-- or restyles the captions on it as Text+ clips. With the word highlight or an animation on (phase
+-- 5l) the clips are auto-subs' animated caption, a Fusion macro round a Text+, driven through the
+-- macro's own helpers as auto-subs drives it. Junctur's template picker (phase 5m) asks for the
+-- Fusion Titles in the media pool; with a template's own look kept, only the text, timing and
+-- speaker colour are set on it. Clips Junctur did not place that sit where new captions go (phase
+-- 5n) are asked about before anything changes, then replaced, skipped round, or left with the
+-- captions put on a track beside.
 --
 -- Resolve 21 runs scripts with no io, require or os.execute, so a request is a Lua chunk read with
 -- loadfile and the only way back is Fusion's prefs (SetPrefs + SavePrefs writes Fusion.prefs,
@@ -26,9 +27,11 @@ local TEMPLATE_NAME = "Junctur Caption"
 local ANIMATED_NAME = "Junctur Animated Caption"
 -- The animated caption's macro tool in a clip's comp: a clip with it is driven as the macro.
 local MACRO = "AutoSubs"
--- Told to Junctur in `info`, so it can tell a script too old for what it asks (5m; 5n asks before
--- placing over clips it did not place, which a 5m script would not).
-local SCRIPT = "5n"
+-- Told to Junctur in `check` (5z; `info` before), so it can tell a script too old for what it asks
+-- (5m; 5n asks before placing over clips it did not place, which a 5m script would not; 5z makes
+-- the timeline, and a 5z script from before the caption rounds met it would place without 5l's
+-- highlight, 5m's kept look or 5n's question).
+local SCRIPT = "5z"
 
 -- Plain global lookups, not rawget(_G, ...): Resolve's script runner hands a script its own
 -- environment, which holds these.
@@ -90,12 +93,13 @@ local function is_title(clip)
     return ok and tostring(kind or ""):lower() == "fusion title"
 end
 
+-- Calls f(clip, its folder) for every clip under folder until f says stop.
 local function each_clip(folder, f)
     for _, sub in ipairs(list(folder:GetSubFolderList())) do
         if each_clip(sub, f) then return true end
     end
     for _, clip in ipairs(list(folder:GetClipList())) do
-        if f(clip) then return true end
+        if f(clip, folder) then return true end
     end
 end
 
@@ -233,7 +237,7 @@ local function template(pool, name, animated)
     return want
 end
 
--- Resolve's id for the timeline, else its name: `place` checks it is the one `info` saw.
+-- Resolve's id for the timeline, else its name: `place` checks it is the one `build` made.
 local function timeline_id(timeline)
     local ok, id = pcall(function() return timeline:GetUniqueId() end)
     if ok and type(id) == "string" and id ~= "" then return id end
@@ -420,11 +424,9 @@ end
 
 local handlers = {}
 
-function handlers.info(req)
-    local project, timeline = current()
-    if not project then return { error = timeline } end
-    local clip, err = template(project:GetMediaPool(), req.template or "", req.animated == true)
-    if not clip then return { error = err } end
+-- What `place` needs to know of the timeline the captions go on, and of the template (`build`
+-- answers it for the timeline it made, 5z; `info` did for the open one before).
+local function describe(timeline, clip)
     return {
         name = timeline:GetName(),
         id = timeline_id(timeline),
@@ -433,9 +435,8 @@ function handlers.info(req)
         ["end"] = timeline:GetEndFrame(),
         width = timeline:GetSetting("timelineResolutionWidth"),
         height = timeline:GetSetting("timelineResolutionHeight"),
-        template = clip:GetClipProperty("Clip Name"),
-        templateFps = clip:GetClipProperty("FPS") or "",
-        script = SCRIPT,
+        template = clip and clip:GetClipProperty("Clip Name") or "",
+        templateFps = clip and clip:GetClipProperty("FPS") or "",
     }
 end
 
@@ -457,6 +458,189 @@ function handlers.templates()
     end)
     out.count = n
     return out
+end
+
+-- The project's timelines, or nil and why: a count Resolve will not give is an error, never taken
+-- as "no timelines", so Junctur never decides on a guess.
+local function project_timelines(project)
+    local ok, n = pcall(function() return project:GetTimelineCount() end)
+    n = ok and tonumber(n)
+    if not n then return nil, "Resolve did not say which timelines the project has" end
+    local out = {}
+    for i = 1, n do
+        local got, t = pcall(function() return project:GetTimelineByIndex(i) end)
+        if not (got and t) then return nil, "Resolve did not give the project's timeline " .. i end
+        out[#out + 1] = t
+    end
+    return out
+end
+
+-- Timeline names compared as Junctur compares them (resolve/timeline.rs): ASCII spaces round them
+-- dropped and ASCII letters' case ignored; any other byte must match exactly.
+local function norm_name(s)
+    s = tostring(s or ""):gsub("^[ \t\n\r\f]+", ""):gsub("[ \t\n\r\f]+$", "")
+    return (s:gsub("[A-Z]", function(c) return string.char(c:byte() + 32) end))
+end
+
+local function same_name(a, b) return norm_name(a) == norm_name(b) end
+
+-- The project's timelines called `name`, leaving out `except`; nil and why when Resolve will not
+-- list them.
+local function timelines_named(project, name, except)
+    local all, err = project_timelines(project)
+    if not all then return nil, err end
+    local out = {}
+    for _, t in ipairs(all) do
+        if t ~= except and same_name(t:GetName(), name) then out[#out + 1] = t end
+    end
+    return out
+end
+
+local function no_project()
+    return { error = "No project is open in Resolve: open the one to send to" }
+end
+
+-- 5z: the open project's timeline names, so Junctur can ask before a send would meet one, and
+-- this script's version (5n's check, moved here from `info`).
+function handlers.check(req)
+    local project = resolve:GetProjectManager():GetCurrentProject()
+    if not project then return no_project() end
+    local all, err = project_timelines(project)
+    if not all then return { error = err } end
+    local out = {}
+    for k, t in ipairs(all) do out["timeline" .. k] = t:GetName() end
+    out.timelines = #all
+    -- The first request of a send: Junctur refuses a script older than it needs before anything.
+    out.script = SCRIPT
+    return out
+end
+
+-- Paths as Resolve and Windows may write them: slashes and ASCII case aside, the same file. Any
+-- other byte must match exactly; a path that then does not match is only a miss, and the build
+-- has Resolve import the recording instead.
+local function same_path(a, b)
+    local function norm(s)
+        s = tostring(s or ""):gsub("\\", "/")
+        return (s:gsub("[A-Z]", function(c) return string.char(c:byte() + 32) end))
+    end
+    return norm(a) == norm(b)
+end
+
+-- Whether a media pool clip is the whole recording as imported: a plain video or audio clip with
+-- no in or out of its own. A sub-clip, a marked clip, a timeline or a title could link the edit
+-- to a part of the recording or to something else.
+local PLAIN = { ["Video + Audio"] = true, ["Video"] = true, ["Audio"] = true }
+local function master(c)
+    local function prop(k)
+        local ok, v = pcall(function() return c:GetClipProperty(k) end)
+        return ok and v or nil
+    end
+    if not PLAIN[prop("Type") or ""] then return false end
+    if (prop("In") or "") ~= "" or (prop("Out") or "") ~= "" then return false end
+    local ok, marks = pcall(function() return c:GetMarkInOut() end)
+    if ok and type(marks) == "table" then
+        for _, kind in pairs(marks) do
+            if type(kind) == "table" and (kind["in"] ~= nil or kind.out ~= nil) then return false end
+        end
+    end
+    return true
+end
+
+-- 5z: makes the edit's timeline from Junctur's FCPXML (req.file) and makes it the current one,
+-- leaving every other timeline as it is. The recording already in the media pool is linked to
+-- rather than imported again. With `replace` the timeline of that name stays until `finish`, so
+-- whatever fails before then (the import, the captions) never costs it: the new one is made under
+-- a free name beside it.
+function handlers.build(req)
+    local project = resolve:GetProjectManager():GetCurrentProject()
+    if not project then return no_project() end
+    local pool = project:GetMediaPool()
+    local olds, err = timelines_named(project, req.name)
+    if not olds then return { error = err } end
+    if #olds > 0 and not req.replace then
+        return { error = "Resolve now has a timeline called \"" .. req.name
+            .. "\" (made since Junctur looked): nothing was changed, send again" }
+    end
+    if #olds > 1 then
+        return { error = "Resolve has " .. #olds .. " timelines called \"" .. req.name
+            .. "\", so Junctur cannot tell which to replace: nothing was changed. Rename or delete "
+            .. "all but one, or choose Create new timeline" }
+    end
+    local clip
+    if req.captions then
+        -- The animated caption (5l) when the highlight or an animation is on and no template of
+        -- the user's is named; a named one is looked up among the Fusion Titles (5m).
+        clip, err = template(pool, req.template or "", req.animated == true)
+        if not clip then return { error = err .. " (nothing was changed on the timelines)" } end
+    end
+    local as = req.name
+    if #olds > 0 then
+        local k = 1
+        repeat
+            as = req.name .. " (new" .. (k > 1 and " " .. k or "") .. ")"
+            k = k + 1
+            local taken
+            taken, err = timelines_named(project, as)
+            if not taken then return { error = err } end
+        until #taken == 0
+    end
+    local media, folder
+    each_clip(pool:GetRootFolder(), function(c, f)
+        local ok, p = pcall(function() return c:GetClipProperty("File Path") end)
+        if ok and p and p ~= "" and same_path(p, req.source) and master(c) then
+            media, folder = c, f
+            return true
+        end
+    end)
+    local function import(opts)
+        opts.timelineName = as
+        local ok, t = pcall(function() return pool:ImportTimelineFromFile(req.file, opts) end)
+        if ok and t then return t end
+    end
+    local made = media and import({ importSourceClips = false, sourceClipsFolders = { folder } })
+    made = made or import({ importSourceClips = true })
+    if not made then
+        return { error = "Resolve could not make the timeline from Junctur's FCPXML (" .. req.file
+            .. "): nothing was changed on the timelines" }
+    end
+    pcall(function() project:SetCurrentTimeline(made) end)
+    return describe(made, clip)
+end
+
+-- 5z, Replace, once the captions are on the new timeline: deletes the one it replaces and gives
+-- the new one its name. Anything Resolve refuses leaves both and says so.
+function handlers.finish(req)
+    local project = resolve:GetProjectManager():GetCurrentProject()
+    if not project then return no_project() end
+    local all, err = project_timelines(project)
+    if not all then return { error = err } end
+    local made
+    for _, t in ipairs(all) do
+        if timeline_id(t) == req.made then made = t end
+    end
+    if not made then
+        return { error = "The timeline Junctur made is no longer in the project: nothing was replaced" }
+    end
+    local olds
+    olds, err = timelines_named(project, req.name, made)
+    if not olds then return { error = err } end
+    local keep = "\"" .. tostring(made:GetName()) .. "\" was made beside it"
+    if #olds ~= 1 then
+        return { replaced = false, name = made:GetName(), note = "Resolve now has " .. #olds
+            .. " timelines called \"" .. req.name .. "\", so none was replaced: " .. keep }
+    end
+    local ok, gone = pcall(function() return project:GetMediaPool():DeleteTimelines({ olds[1] }) end)
+    if not (ok and gone) then
+        return { replaced = false, name = made:GetName(),
+            note = "Resolve did not delete the old \"" .. req.name .. "\": " .. keep }
+    end
+    local note = ""
+    local named = pcall(function() return made:SetName(req.name) end)
+    if not named or not same_name(made:GetName(), req.name) then
+        note = "The old \"" .. req.name .. "\" was deleted, but Resolve did not rename the new one: it is \""
+            .. tostring(made:GetName()) .. "\""
+    end
+    return { replaced = true, name = made:GetName(), note = note }
 end
 
 -- The items on video track `i` by their first frame.

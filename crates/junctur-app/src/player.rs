@@ -29,6 +29,7 @@ use junctur_core::export::layout::{self, Placed};
 use junctur_core::export::srt;
 use junctur_core::export::{self, CaptionFiles};
 use junctur_core::pipeline::{self, Found};
+use junctur_core::resolve;
 use junctur_core::transcribe;
 use junctur_core::translate::Translations;
 use serde::Serialize;
@@ -43,6 +44,9 @@ use crate::state::{Change, PlayerState, OBSERVED};
 use crate::trace::Trace;
 use crate::translation;
 use crate::voices;
+
+/// The list in play, its caption settings, its words if transcribed, and the frame rate.
+type EditSource = (Arc<EditList>, Captions, Option<Arc<Words>>, Fps);
 
 pub const STATE_EVENT: &str = "player-state";
 pub const EDIT_EVENT: &str = "edit-state";
@@ -755,6 +759,34 @@ impl Core {
         self.change(file, |ed, list, _| ed.confirm_word(list, track, word, nth))
     }
 
+    /// Fixes transcript words `first..=last` as one text (5x) in the edit list and saves it; returns
+    /// the heard text and the fixed one, for the word list. Refused, saying why, for a run across two
+    /// tracks, or a new text over two people's words ([`Words::retyped`]; clearing never is). One word is [`Self::fix_word`]'s fix. Not an undo
+    /// step.
+    pub fn fix_words(
+        &self,
+        file: Option<&str>,
+        first: usize,
+        last: usize,
+        text: &str,
+    ) -> Result<(String, String), String> {
+        self.prepare();
+        let words = lock(&self.editor)
+            .words
+            .clone()
+            .ok_or("this recording has no transcript")?;
+        let speakers = lock(&self.ctl)
+            .edit
+            .list
+            .as_deref()
+            .map(|l| l.speakers.clone())
+            .unwrap_or_default();
+        let fixed = junctur_core::edit::check_span(text)?;
+        let run = words.retyped(first, last, &fixed, &speakers)?;
+        self.change(file, |ed, list, _| ed.fix_words(list, &run, &fixed))?;
+        Ok((run.heard, fixed))
+    }
+
     /// Sets the edit list's caption settings and saves them.
     pub fn set_captions(&self, file: Option<&str>, captions: Captions) -> Result<(), String> {
         self.change(file, |ed, list, _| ed.set_captions(list, captions))
@@ -787,24 +819,32 @@ impl Core {
         Ok(layout::place(&cues, &list, &captions, aspect))
     }
 
-    /// Sends the captions of the list in play into DaVinci Resolve as Text+ clips (5g), laid out
-    /// for the Resolve timeline's shape, to the Junctur script running there. Blocks until Resolve
-    /// answers (minutes for a long recording), so the command runs it off the async runtime.
-    /// Refused, like the export, while translated captions are not all translated (5k).
-    /// `existing`: what to do this once with clips Junctur did not place in the captions' way
-    /// (5n), the user's answer when the send before asked; else the recording's remembered
-    /// choice, or asking.
+    /// Sends the list in play into DaVinci Resolve (5z): the edit as a timeline of its own (the
+    /// recording, every audio track, cut as the list says) with its captions on it as Text+ clips
+    /// (5g), laid out for that timeline's shape, through the Junctur script running there. When the
+    /// project already has the timeline and `answer` does not say what to do, nothing is changed
+    /// and the outcome says so. Blocks until Resolve answers (minutes for a long recording), so the
+    /// command runs it off the async runtime. Refused, like the export, while translated captions
+    /// are not all translated (5k); a recording with no transcript sends its timeline alone. The
+    /// captions are cut as the preview and the SRT cut them (5q). `existing`: what to do this once
+    /// with clips Junctur did not place in the captions' way (5n), the user's answer when the send
+    /// before asked; else the recording's remembered choice, or asking (on the fresh timeline 5z
+    /// makes, its caption tracks are new, so nothing is in their way).
     pub fn send_to_resolve(
         &self,
+        answer: Option<resolve::Answer>,
         existing: Option<ExistingClips>,
-    ) -> Result<junctur_core::resolve::Sent, String> {
-        let (list, captions, cues) = self.cut_captions(true, |c| {
-            if let Some(e) = existing {
-                c.existing_clips = e;
-            }
-            c.check()
-        })?;
-        junctur_core::resolve::send(&cues, &list, &captions)
+    ) -> Result<resolve::Outcome, String> {
+        let (list, mut captions, words, fps) = self.edit_source()?;
+        if let Some(e) = existing {
+            captions.existing_clips = e;
+        }
+        captions.check()?;
+        let cues = match words {
+            Some(words) => self.cut(&list, &captions, &words, fps, true)?,
+            None => Vec::new(),
+        };
+        resolve::send(&cues, &list, &captions, answer)
     }
 
     /// The list in play, its caption settings and its cues as the SRT export cuts them: the one
@@ -820,6 +860,19 @@ impl Core {
     ) -> Result<(Arc<EditList>, Captions, Vec<srt::Cue>), String> {
         let (list, mut captions, words, fps) = self.caption_source()?;
         adjust(&mut captions)?;
+        let cues = self.cut(&list, &captions, &words, fps, finished)?;
+        Ok((list, captions, cues))
+    }
+
+    /// [`Self::cut_captions`]' cut of `words`, apart so a send without a transcript (5z) shares it.
+    fn cut(
+        &self,
+        list: &EditList,
+        captions: &Captions,
+        words: &Words,
+        fps: Fps,
+        finished: bool,
+    ) -> Result<Vec<srt::Cue>, String> {
         let tracked: Vec<_> = words
             .tracks
             .iter()
@@ -827,20 +880,19 @@ impl Core {
             .zip(words.list.iter())
             .collect();
         let tr = self.translations();
-        let cues = if finished {
-            export::finished_cues(&list, &captions, &tracked, fps.num, fps.den, &tr)
+        Ok(if finished {
+            export::finished_cues(list, captions, &tracked, fps.num, fps.den, &tr)
                 .map_err(|e| e.to_string())?
         } else {
             srt::cues(
-                &list,
-                &captions,
+                list,
+                captions,
                 tracked.iter().copied(),
                 fps.num,
                 fps.den,
                 Some(&*tr),
             )
-        };
-        Ok((list, captions, cues))
+        })
     }
 
     /// The open recording's translations (5k), from its project folder: the background run writes
@@ -913,11 +965,17 @@ impl Core {
     /// defaults it shows, 2i, so export and preview agree with the panel), the words the editor
     /// holds (an `Arc`, not a copy; each lock is held only to take its part) and the frame rate.
     fn caption_source(&self) -> Result<(Arc<EditList>, Captions, Arc<Words>, Fps), String> {
+        let (list, captions, words, fps) = self.edit_source()?;
+        let words =
+            words.ok_or("captions need a transcript: run the pipeline on this recording")?;
+        Ok((list, captions, words, fps))
+    }
+
+    /// The list in play, its caption settings, its words when there is a transcript, and the
+    /// frame rate: what a send to Resolve needs (5z), which goes without captions too.
+    fn edit_source(&self) -> Result<EditSource, String> {
         self.prepare();
-        let words = lock(&self.editor)
-            .words
-            .clone()
-            .ok_or("captions need a transcript: run the pipeline on this recording")?;
+        let words = lock(&self.editor).words.clone();
         let (list, fps) = {
             let c = lock(&self.ctl);
             let list = c.edit.list.clone().ok_or("no edit list yet")?;

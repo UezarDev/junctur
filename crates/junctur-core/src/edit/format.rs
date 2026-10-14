@@ -30,27 +30,31 @@
 //! Whisper gives runs of short words one start) writes which one it is after the start,
 //! `fix <track> <start>+<n> <text>`, and makes the list version 4, which a 5h build would fail on;
 //! a list without one is still version 3. Every version reads here, a `fix` line without `+<n>` as
-//! the first word of its millisecond.
+//! the first word of its millisecond. A run of words fixed as one text (5x: a sentence retyped) is a
+//! `span <track> <first start>[+<n>] <last start>[+<n>] <text>` line, the words from the first to the
+//! last on that track, and makes the list version 5; without one a list is written as before.
 
 use std::fmt::Write;
 use std::path::PathBuf;
 
 use super::captions_line;
 use super::{
-    check_fix, default_color, default_name, fixes, parse_color, CutSettings, EditList, Fix, Range,
-    SpeakerName, Speakers, Turn, Window,
+    check_fix, check_span, default_color, default_name, fixes, parse_color, CutSettings, EditList,
+    Fix, Range, SpeakerName, Speakers, Turn, Window, WordAt,
 };
 
-/// The newest version this build writes (a fixed word sharing its start millisecond with an earlier
-/// one, 5w); lists with fixed words but none of those are written as 3 (5h), lists without fixed
-/// words as 2 (with speakers or captions) or 1.
-pub const FORMAT_VERSION: u32 = 4;
+/// The newest version this build writes (a span of words fixed as one, 5x); lists with fixed words
+/// but no span are written as 4 when one is a later word of its start millisecond (5w), else as 3
+/// (5h), lists without fixed words as 2 (with speakers or captions) or 1.
+pub const FORMAT_VERSION: u32 = 5;
 
 pub fn write(e: &EditList) -> String {
     let s = &e.settings;
     let mut out = String::new();
-    let version = if e.fixes.iter().any(|f| f.nth > 0) {
+    let version = if e.fixes.iter().any(Fix::is_span) {
         FORMAT_VERSION
+    } else if e.fixes.iter().any(|f| f.nth > 0) {
+        4
     } else if !e.fixes.is_empty() {
         3
     } else if e.speakers.is_empty() && e.captions.is_none() {
@@ -106,21 +110,34 @@ pub fn write(e: &EditList) -> String {
             out,
             "# fix <track> <start>[+<n>] <text>: a word's spelling, fixed by hand (+n: the n-th later word starting in that millisecond)"
         );
-        let mut fixes = e.fixes.clone();
-        fixes::sort(&mut fixes);
-        for f in &fixes {
-            let nth = if f.nth > 0 {
-                format!("+{}", f.nth)
+        if e.fixes.iter().any(Fix::is_span) {
+            let _ = writeln!(
+                out,
+                "# span <track> <first start>[+<n>] <last start>[+<n>] <text>: the words from first to last, shown as one text"
+            );
+        }
+        let at = |start: f64, nth: usize| {
+            let nth = if nth > 0 {
+                format!("+{nth}")
             } else {
                 String::new()
             };
-            let _ = writeln!(
-                out,
-                "fix {} {}{nth} {}",
-                f.track,
-                fixes::written(f.start),
-                f.text
-            );
+            format!("{}{nth}", fixes::written(start))
+        };
+        let mut fixes = e.fixes.clone();
+        fixes::sort(&mut fixes);
+        for f in &fixes {
+            let first = at(f.start, f.nth);
+            let _ = match f.through {
+                Some(last) => writeln!(
+                    out,
+                    "span {} {first} {} {}",
+                    f.track,
+                    at(last.start, last.nth),
+                    f.text
+                ),
+                None => writeln!(out, "fix {} {first} {}", f.track, f.text),
+            };
         }
     }
     let _ = writeln!(out, "# window <start> <score> <speech share> <words>");
@@ -244,33 +261,49 @@ pub fn parse(text: &str) -> Result<EditList, String> {
             "fix" => {
                 let mut parts = rest.splitn(3, ' ');
                 let track = parts.next().and_then(|t| t.parse::<usize>().ok());
-                // `<start>+<n>` (5w); a bare start is the millisecond's first word. Split at the
-                // last `+` so an exponent's sign (`1e+1`) stays the start's.
-                let at = parts.next().map(|t| match t.rsplit_once('+') {
-                    Some((s, n)) if !s.ends_with(['e', 'E']) && !s.is_empty() => {
-                        (s, n.parse::<usize>().ok())
-                    }
-                    _ => (t, Some(0)),
-                });
-                let start = at.and_then(|(s, _)| s.parse::<f64>().ok());
-                let nth = at.and_then(|(_, n)| n);
+                let at = parts.next().and_then(word_at);
                 let text = check_fix(parts.next().unwrap_or("")).map_err(|why| bad(&why))?;
-                let (Some(track), Some(start), Some(nth)) = (track, start, nth) else {
-                    return Err(bad("expected `fix <track> <start>[+<n>] <text>`"));
+                let expected = "expected `fix <track> <start>[+<n>] <text>`";
+                let (Some(track), Some(at)) = (track, at) else {
+                    return Err(bad(expected));
                 };
-                if text.is_empty() || !start.is_finite() {
-                    return Err(bad("expected `fix <track> <start>[+<n>] <text>`"));
+                if text.is_empty() {
+                    return Err(bad(expected));
                 }
                 let fix = Fix {
                     track,
-                    start,
-                    nth,
+                    start: at.start,
+                    nth: at.nth,
+                    through: None,
                     text,
                 };
-                if e.fixes.iter().any(|f| f.same_word(&fix)) {
-                    return Err(bad("a second `fix` line for this word"));
+                add_fix(&mut e.fixes, fix).map_err(bad)?;
+            }
+            "span" => {
+                let expected =
+                    "expected `span <track> <first start>[+<n>] <last start>[+<n>] <text>`";
+                let mut parts = rest.splitn(4, ' ');
+                let track = parts.next().and_then(|t| t.parse::<usize>().ok());
+                let first = parts.next().and_then(word_at);
+                let last = parts.next().and_then(word_at);
+                let text = check_span(parts.next().unwrap_or("")).map_err(|why| bad(&why))?;
+                let (Some(track), Some(first), Some(last)) = (track, first, last) else {
+                    return Err(bad(expected));
+                };
+                if text.is_empty() {
+                    return Err(bad(expected));
                 }
-                e.fixes.push(fix);
+                if !fixes::after(&last, &first) {
+                    return Err(bad("a span's last word is to come after its first"));
+                }
+                let fix = Fix {
+                    track,
+                    start: first.start,
+                    nth: first.nth,
+                    through: Some(last),
+                    text,
+                };
+                add_fix(&mut e.fixes, fix).map_err(bad)?;
             }
             "turn" => match nums()?[..] {
                 [start, end, id] if end > start && id >= 1.0 && id.fract() == 0.0 => {
@@ -321,6 +354,32 @@ pub fn parse(text: &str) -> Result<EditList, String> {
     }
     e.keep = merged;
     Ok(e)
+}
+
+/// A word as a `fix` or `span` line names it: `<start>` or `<start>+<n>` (5w), a bare start being
+/// the millisecond's first word. Split at the last `+` so an exponent's sign (`1e+1`) stays the
+/// start's.
+fn word_at(t: &str) -> Option<WordAt> {
+    let (start, nth) = match t.rsplit_once('+') {
+        Some((s, n)) if !s.ends_with(['e', 'E']) && !s.is_empty() => (s, n.parse::<usize>().ok()?),
+        _ => (t, 0),
+    };
+    let start = start.parse::<f64>().ok().filter(|s| s.is_finite())?;
+    Some(WordAt { start, nth })
+}
+
+/// `fix` added to the list read so far, refused when it shares a word with a fix already there: a
+/// second line for one word, or a span over a fixed word or another span (5x), would give the word two
+/// texts.
+fn add_fix(fixes: &mut Vec<Fix>, fix: Fix) -> Result<(), &'static str> {
+    match fixes.iter().find(|f| f.overlaps(&fix)) {
+        Some(f) if !f.is_span() && !fix.is_span() => Err("a second `fix` line for this word"),
+        Some(_) => Err("a `span` over words another `fix` or `span` line fixes"),
+        None => {
+            fixes.push(fix);
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -528,12 +587,14 @@ mod tests {
                     track: 0,
                     start: 2.5,
                     nth: 0,
+                    through: None,
                     text: "Tsun Heto,".into(),
                 },
                 Fix {
                     track: 1,
                     start: 1.25,
                     nth: 0,
+                    through: None,
                     text: "Uezar".into(),
                 },
             ],
@@ -557,6 +618,7 @@ mod tests {
                 track: 0,
                 start: 12.3125,
                 nth: 0,
+                through: None,
                 text: "Uezar".into(),
             }],
             ..sample()
@@ -592,12 +654,14 @@ mod tests {
                     track: 0,
                     start: 54.944,
                     nth: 1,
+                    through: None,
                     text: "miel".into(),
                 },
                 Fix {
                     track: 0,
                     start: 54.944,
                     nth: 0,
+                    through: None,
                     text: "de".into(),
                 },
             ],
@@ -620,6 +684,7 @@ mod tests {
                 track: 0,
                 start: 54.944,
                 nth: 0,
+                through: None,
                 text: "mel".into(),
             }],
             ..sample()
@@ -634,6 +699,68 @@ mod tests {
         let e = parse("junctur-edit 4\nsource x.mp4\nfix 0 1e+1 Ana\nfix 0 1E+1+2 Bo\n").unwrap();
         assert_eq!((e.fixes[0].start, e.fixes[0].nth), (10.0, 0));
         assert_eq!((e.fixes[1].start, e.fixes[1].nth), (10.0, 2));
+    }
+
+    #[test]
+    fn a_span_is_its_own_line_and_makes_the_list_version_5() {
+        // 5x: a run of words fixed as one text.
+        let at = |start, nth| WordAt { start, nth };
+        let e = EditList {
+            fixes: vec![
+                Fix {
+                    track: 1,
+                    start: 54.944,
+                    nth: 1,
+                    through: Some(at(56.0, 2)),
+                    text: "Uezar went home.".into(),
+                },
+                Fix {
+                    track: 0,
+                    start: 2.5,
+                    nth: 0,
+                    through: None,
+                    text: "Ana".into(),
+                },
+            ],
+            ..sample()
+        };
+        let text = e.to_text();
+        assert!(text.starts_with("junctur-edit 5\n"), "{text}");
+        assert!(
+            text.contains("fix 0 2.500 Ana\nspan 1 54.944+1 56.000+2 Uezar went home.\n"),
+            "{text}"
+        );
+        let back = parse(&text).unwrap();
+        assert_eq!(back.fixes, [e.fixes[1].clone(), e.fixes[0].clone()]);
+        assert_eq!(back.to_text(), text);
+        // Without a span the list is what 5w wrote.
+        let plain = EditList {
+            fixes: vec![e.fixes[1].clone()],
+            ..sample()
+        };
+        assert!(plain.to_text().starts_with("junctur-edit 3\n"));
+        assert!(!plain.to_text().contains("span"));
+        // Refused: a span whose last word is not after its first, one over a fixed word or another
+        // span, a missing text or word.
+        let head = "junctur-edit 5\nsource x.mp4\n";
+        for bad in [
+            "span 0 3.000 2.000 x\n",
+            "span 0 2.000 2.000 x\n",
+            "span 0 2.000+1 2.000 x\n",
+            "fix 0 2.500 Ana\nspan 0 2.000 3.000 x\n",
+            "span 0 2.000 3.000 x\nfix 0 3.000 Ana\n",
+            "span 0 2.000 3.000 x\nspan 0 3.000 4.000 y\n",
+            "span 0 2.000 3.000\n",
+            "span 0 2.000 x y\n",
+        ] {
+            assert!(parse(&format!("{head}{bad}")).is_err(), "{bad}");
+        }
+        // Touching but not sharing a word, or on another track, is fine.
+        let ok = parse(&format!(
+            "{head}span 0 2.000 3.000 x\nspan 0 3.000+1 4.000 y\nspan 1 2.000 4.000 z\nfix 0 4.001 w\n"
+        ))
+        .unwrap();
+        assert_eq!(ok.fixes.len(), 4);
     }
 
     #[test]

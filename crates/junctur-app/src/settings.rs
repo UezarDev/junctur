@@ -216,6 +216,31 @@ pub fn learn(heard: &str, fixed: &str) -> Result<Option<String>, String> {
     Ok(Some(entry))
 }
 
+/// Adds what retyping words heard as `heard` as `fixed` teaches (5x, [`wordlist::learned_all`]) at the
+/// top of the word list, in the order typed, and saves it once; the entries added (none already
+/// there). A config file that cannot be read is not replaced from here.
+pub fn learn_all(heard: &str, fixed: &str) -> Result<Vec<String>, String> {
+    let entries = wordlist::learned_all(heard, fixed);
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    let _one = config_lock();
+    let mut c = config::load().map_err(|e| e.to_string())?;
+    // Last first, so the first typed ends up on top.
+    let mut added: Vec<String> = entries
+        .iter()
+        .rev()
+        .filter(|e| wordlist::add_first(&mut c.words, e))
+        .cloned()
+        .collect();
+    if added.is_empty() {
+        return Ok(added);
+    }
+    config::save(&c).map_err(|e| e.to_string())?;
+    added.reverse();
+    Ok(added)
+}
+
 /// The caption defaults the player starts with; the built-in ones when the file cannot be read
 /// (Settings says why).
 pub fn caption_defaults() -> Captions {

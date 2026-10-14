@@ -25,7 +25,10 @@ pub use caption_text::{Case, CensorStyle, Replace};
 pub use captions::{
     default_color, parse_color, title_name, Animation, Captions, ExistingClips, Layout,
 };
-pub use fixes::{check_fix, confirm_fix, same_millisecond, set_fix, Fix, Fixes, MAX_FIX};
+pub use fixes::{
+    check_fix, check_span, confirm_fix, same_millisecond, set_fix, set_span, Fix, Fixed, Fixes,
+    WordAt, MAX_FIX, MAX_SPAN,
+};
 pub use format::{parse, FORMAT_VERSION};
 pub use frames::{frame_ranges, frame_span, frames_ceil, frames_floor};
 pub use reduce::{keep_ranges, snap_boundary, word_span, Envelope, ENVELOPE_HOP};
@@ -100,7 +103,8 @@ pub struct EditList {
     /// no `captions` line, and then it follows the user's defaults (2i, `config::captions`), which
     /// the caller resolves before cutting cues.
     pub captions: Option<Captions>,
-    /// Words the user fixed (5h), in time order: shown in place of what Whisper heard.
+    /// Words the user fixed (5h), and runs of words fixed as one text (5x), in time order: shown in
+    /// place of what Whisper heard.
     pub fixes: Vec<Fix>,
     pub windows: Vec<Window>,
 }

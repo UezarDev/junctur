@@ -8,6 +8,11 @@
  *
  * Where the speaker changes (5a) the next row is the speaker's name, a row of its own: rows have
  * one height, so a name row needs no width accounting and never shares a line with words.
+ *
+ * A span of words fixed as one text (5x) shows as that text's own words, one token each
+ * (`spanword`), where its first kept word is, so a retyped sentence wraps over rows as speech does
+ * (one token holding it all could not: a row is one fixed height and clips what overflows). Its
+ * other kept words make no token; its cut words fold as any cut word, showing what was heard.
  */
 import type { EditState, TranscriptView } from "./api";
 import { msOf } from "./time";
@@ -23,9 +28,28 @@ export interface Words {
   also: Uint32Array;
   /** How sure Whisper was of each word, whole percent; 255 for never flagged (5o). */
   sure: Uint8Array;
+  /** The audio track each word was heard on (5x). */
+  track: Uint32Array;
+  /** The span fixed as one text each word is in, 1-based, 0 for none (5x). */
+  span: Uint32Array;
+  /** Per span (id - 1): its text, that text's words, and its first and last word. */
+  spans: string[];
+  spanWords: string[][];
+  spanFirst: Int32Array;
+  spanLast: Int32Array;
 }
 
 export function words(v: TranscriptView): Words {
+  const spans = v.spans ?? [];
+  const span = Uint32Array.from(v.span ?? []);
+  const spanFirst = new Int32Array(spans.length).fill(-1);
+  const spanLast = new Int32Array(spans.length).fill(-1);
+  for (let i = 0; i < span.length; i++) {
+    const s = span[i] - 1;
+    if (s < 0) continue;
+    if (spanFirst[s] < 0) spanFirst[s] = i;
+    spanLast[s] = i;
+  }
   return {
     text: v.text,
     start: Float64Array.from(v.start),
@@ -33,6 +57,12 @@ export function words(v: TranscriptView): Words {
     speaker: Uint32Array.from(v.speaker ?? []),
     also: Uint32Array.from(v.also ?? []),
     sure: sureOf(v),
+    track: Uint32Array.from(v.track ?? []),
+    span,
+    spans,
+    spanWords: spans.map((t) => t.split(/\s+/).filter((x) => x)),
+    spanFirst,
+    spanLast,
   };
 }
 
@@ -70,6 +100,47 @@ export function stepFrom(list: number[], from: number, back: boolean): number {
   return lo < list.length ? list[lo] : -1;
 }
 
+/** `r` reaching over the whole of any span it starts or ends in (5x): a span is selected whole. */
+export function widen(w: Words, r: { first: number; last: number }): { first: number; last: number } {
+  const a = (w.span[r.first] ?? 0) - 1;
+  const b = (w.span[r.last] ?? 0) - 1;
+  return {
+    first: a >= 0 ? Math.min(r.first, w.spanFirst[a]) : r.first,
+    last: b >= 0 ? Math.max(r.last, w.spanLast[b]) : r.last,
+  };
+}
+
+/** The words on word `i`'s track starting in its millisecond, when there are several (5w's same-start
+ * words, opened as one field in 5x); `null` for a word alone in its millisecond. Sorted by start, so
+ * they sit together (another track's words among them are left out of the count). */
+export function together(w: Words, i: number): { first: number; last: number } | null {
+  let first = i;
+  let last = i;
+  for (let j = i - 1; j >= 0 && w.start[j] === w.start[i]; j--) if (w.track[j] === w.track[i]) first = j;
+  for (let j = i + 1; j < w.start.length && w.start[j] === w.start[i]; j++) if (w.track[j] === w.track[i]) last = j;
+  return last > first ? { first, last } : null;
+}
+
+/** What words `first..=last` show now on the track of the first (5x: a fix field's starting text): a
+ * span's text once, a fixed word as fixed, the rest as heard. */
+export function shownText(w: Words, r: { first: number; last: number }): string {
+  const track = w.track[r.first];
+  const out: string[] = [];
+  let lastSpan = 0;
+  for (let i = r.first; i <= r.last && i < w.text.length; i++) {
+    if (w.track[i] !== track) continue;
+    const s = w.span[i];
+    if (s) {
+      if (s !== lastSpan) out.push(w.spans[s - 1]);
+      lastSpan = s;
+    } else {
+      out.push(w.text[i]);
+      lastSpan = 0;
+    }
+  }
+  return out.filter((t) => t).join(" ");
+}
+
 /** A stretch of source frames, `[start, end)`. */
 export interface Stretch {
   start: number;
@@ -78,6 +149,9 @@ export interface Stretch {
 
 export type Token =
   | { kind: "word"; i: number }
+  /** Word `k` of span `s`'s text (5x, `s` 1-based), shown at its first kept word `i`; `words` (on
+   * the first only) are the span's kept words, which it stands for. */
+  | { kind: "spanword"; s: number; k: number; i: number; words: number[] }
   /** The header of cut words `first..=last`, all in the cut stretch `frames`. */
   | { kind: "cut"; first: number; last: number; frames: Stretch }
   /** One cut word, shown while its fold (keyed by the fold's first word) is open. */
@@ -137,13 +211,15 @@ function find(stretches: Stretch[], frame: number): number {
 
 /**
  * Tokens for `w` against the edit state. A word is kept when the frame at its middle is.
- * `wordWidth` is per word (measured once per transcript); `markWidth` measures folds and gaps.
+ * `wordWidth` is per word (measured once per transcript), `spanWidth` per span text's word (5x);
+ * `markWidth` measures folds and gaps.
  */
 export function tokens(
   w: Words,
   wordWidth: Float64Array,
   edit: EditState | null,
   markWidth: (t: Token) => number,
+  spanWidth: number[][] = [],
 ): Tokens {
   const n = w.text.length;
   const kept = new Uint8Array(n).fill(1);
@@ -172,8 +248,16 @@ export function tokens(
     list.push(t);
     at.push(a);
     end.push(b);
-    width.push(t.kind === "word" || t.kind === "cutword" ? wordWidth[t.i] : markWidth(t));
+    width.push(
+      t.kind === "word" || t.kind === "cutword"
+        ? wordWidth[t.i]
+        : t.kind === "spanword"
+          ? (spanWidth[t.s - 1]?.[t.k] ?? 0)
+          : markWidth(t),
+    );
   };
+  // Spans already shown, by id (5x).
+  const shownSpan = new Uint8Array(w.spans.length + 1);
   let g = 0;
   const gapsUntil = (t: number) => {
     while (g < stretches.length && ms(stretches[g].start) <= t) {
@@ -185,7 +269,17 @@ export function tokens(
   for (let i = 0; i < n; ) {
     gapsUntil(w.start[i]);
     if (kept[i]) {
-      push({ kind: "word", i }, w.start[i], w.end[i]);
+      const s = w.span[i] ?? 0;
+      if (!s) push({ kind: "word", i }, w.start[i], w.end[i]);
+      else if (!shownSpan[s]) {
+        shownSpan[s] = 1;
+        const last = w.spanLast[s - 1];
+        const said: number[] = [];
+        for (let j = i; j <= last; j++) if (w.span[j] === s && kept[j]) said.push(j);
+        const texts = w.spanWords[s - 1] ?? [];
+        for (let k = 0; k < texts.length; k++)
+          push({ kind: "spanword", s, k, i, words: k === 0 ? said : [] }, w.start[i], w.end[last]);
+      }
       i++;
       continue;
     }
@@ -210,6 +304,7 @@ function speakerOf(tok: Token, speaker: Uint32Array): number {
   switch (tok.kind) {
     case "word":
     case "cutword":
+    case "spanword":
       return speaker[tok.i] ?? 0;
     case "cut":
       return speaker[tok.first] ?? 0;
@@ -255,6 +350,7 @@ export function pack(
     used += t.width[k];
     lastEnd = Math.max(lastEnd, t.end[k]);
     if (tok.kind === "word" || tok.kind === "cutword") rowOf[tok.i] = rows.length - 1;
+    else if (tok.kind === "spanword") for (const j of tok.words) rowOf[j] = rows.length - 1;
     else if (tok.kind === "cut") rowOf.fill(rows.length - 1, tok.first, tok.last + 1);
   }
   return { rows, rowOf };

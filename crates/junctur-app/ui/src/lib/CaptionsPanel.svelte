@@ -5,7 +5,8 @@
   // at once (the `captions` and `speaker` lines), so it is readable and survives a re-cut. An SRT
   // carries only text, timing, colour, bold, italic and underline into DaVinci Resolve (5d, 5f); the
   // font, size, position, outline and where people talking at once go (5g) reach it through "Send to
-  // Resolve", Text+ clips placed by the Junctur script running in Resolve, and drive the preview.
+  // Resolve", Text+ clips placed by the Junctur script running in Resolve on the timeline the send makes
+  // of the edit (5z), and drive the preview.
   // Export writes one file
   // (5e): a Resolve subtitle track shows one caption at a time, so people talking at once share one
   // caption, a line each; 5b's per-speaker files left beside it are listed. The remembered voices
@@ -17,7 +18,7 @@
   // its own settings follows the user's defaults, and "Save as default" makes this recording's the
   // defaults. Each group is a `Section`; what used to be a paragraph under it is its (i) (2t), and
   // only status and results show as text.
-  import { save } from "@tauri-apps/plugin-dialog";
+  import { message, save } from "@tauri-apps/plugin-dialog";
   import * as api from "./api";
   import { captionFace, captionFont } from "./captionStyle";
   import CaptionRules from "./CaptionRules.svelte";
@@ -91,9 +92,12 @@
     call(() => api.setCaptions({ ...captions, ...change }));
   }
 
-  // Send to Resolve (5g): one at a time; the reply says what landed. A send that finds clips
-  // Junctur did not place where its captions go (5n) changes nothing and comes back with them
-  // counted: `inTheWay` holds the question until the user picks or cancels.
+  // Send to Resolve (5g, 5z): one at a time; the reply says what landed. The send makes the edit's
+  // own timeline; when the project already has one of that name nothing is changed until the
+  // pop-up is answered, and Cancel (or closing it) sends nothing. A send that finds clips Junctur
+  // did not place where its captions go (5n) places none and comes back with them counted:
+  // `inTheWay` holds the question until the user picks or cancels. The timeline a send makes has
+  // new caption tracks, so since 5z a send does not meet such clips.
   let sending = $state(false);
   let sentLines = $state<string[] | null>(null);
   let inTheWay = $state<{ clips: number; captions: number } | null>(null);
@@ -140,13 +144,37 @@
   }
   // Resolves to whether the send went through (not refused, not stopped to ask). `sending` is set
   // before the first await, so a second click while one is on its way does nothing.
+  const CREATE = "Create new timeline (recommended)";
+  const REPLACE = "Replace";
   async function sendResolve(existing?: api.ExistingClips): Promise<boolean> {
     if (sending) return false;
     sending = true;
     sentLines = null;
     inTheWay = null;
     try {
-      const r = await api.sendToResolve(existing);
+      let r = await api.sendToResolve(null, existing);
+      if (r.kind === "exists") {
+        const pick = await message(
+          `Resolve already has a timeline called "${r.name}". Create new timeline makes "${r.name} 2" (or the next free number) beside it and leaves it as it is. Replace deletes "${r.name}" and makes it again from this edit.`,
+          {
+            title: "This timeline is already in Resolve",
+            kind: "warning",
+            buttons: { yes: CREATE, no: REPLACE, cancel: "Cancel" },
+          },
+        );
+        // The plugin answers with the label pressed; anything else (Cancel, the dialog closed) sends nothing.
+        const answer = pick === CREATE ? "new" : pick === REPLACE ? "replace" : null;
+        if (!answer) {
+          sentLines = ["Nothing was sent."];
+          return false;
+        }
+        r = await api.sendToResolve(answer, existing);
+      }
+      // An answered send never asks again; if it did, say so rather than end without a word.
+      if (r.kind !== "sent") {
+        onError(`Resolve still has a timeline called "${r.name}" and nothing was sent: send again.`);
+        return false;
+      }
       if (r.inTheWay > 0) {
         choice = "newTrack";
         remember = false;
@@ -158,9 +186,16 @@
       const MOTION = ["word highlight", "animation"];
       const motion = r.unstyled.filter((u) => MOTION.includes(u));
       const inputs = r.unstyled.filter((u) => !MOTION.includes(u));
+      const captioned = r.placed + r.restyled + r.failed + r.skipped > 0;
       sentLines = [
-        `On "${r.timeline}": ${n(r.placed, "placed")}, ${n(r.restyled, "updated")}, ${n(r.removed, "removed")}.`,
-        ...(r.replaced > 0 ? [`${n(r.replaced, r.replaced === 1 ? "clip of yours replaced" : "clips of yours replaced")}.`] : []),
+        `Timeline "${r.timeline}" made in Resolve${r.replaced ? ", replacing the old one" : ""}.`,
+        ...(r.note ? [r.note] : []),
+        ...(captioned
+          ? [`Captions: ${n(r.placed, "placed")}, ${n(r.restyled, "updated")}, ${n(r.removed, "removed")}.`]
+          : []),
+        ...(r.replacedClips > 0
+          ? [`${n(r.replacedClips, r.replacedClips === 1 ? "clip of yours replaced" : "clips of yours replaced")}.`]
+          : []),
         ...(r.skipped > 0 ? [`${n(r.skipped, "skipped")}, where your clips are.`] : []),
         ...(r.newTracks > 0
           ? [`${n(r.newTracks, r.newTracks === 1 ? "speaker's" : "speakers'")} new captions on a track beside theirs ("… (2)").`]
@@ -337,8 +372,8 @@
               {inTheWay.clips.toLocaleString()}
               {inTheWay.clips === 1 ? "clip" : "clips"} Junctur did not place
               {inTheWay.clips === 1 ? "is" : "are"} where {inTheWay.captions.toLocaleString()}
-              {inTheWay.captions === 1 ? "caption goes" : "captions go"}, on Junctur's tracks. Nothing was changed
-              in Resolve.
+              {inTheWay.captions === 1 ? "caption goes" : "captions go"}, on Junctur's tracks. No caption was
+              placed.
             </p>
             {#each CHOICES as c (c.value)}
               <span class="choice">

@@ -9,6 +9,12 @@
 //! CLI, where word indices are not. And by which of the words starting in that millisecond on that
 //! track it is (5w): Whisper gives runs of short words one start ("en" and "él" both at 54.944), and
 //! a fix keyed by the millisecond alone showed on all of them and could not be taken from one.
+//!
+//! A fix can also cover a run of words (5x: a whole sentence retyped as one edit), a span from its
+//! first word to its last on one track. Which words it covers is a comparison of keys, not a lookup
+//! of words: a track's words in key order (millisecond, then `nth`) are its words in time order, so a
+//! word is in a span when its key lies between the span's ends, whatever words the transcript holds
+//! now (a re-transcribed word that moved, a last word that is gone).
 
 use std::collections::HashMap;
 
@@ -16,19 +22,40 @@ use serde::{Deserialize, Serialize};
 
 use crate::transcribe::Word;
 
-/// Longest fixed text, in characters: a word or a short phrase.
+/// Longest fixed text of one word, in characters: a word or a short phrase.
 pub const MAX_FIX: usize = 100;
 
-/// One fixed word.
+/// Longest fixed text of a span (5x), in characters: a sentence or a few.
+pub const MAX_SPAN: usize = 1000;
+
+/// A word as a fix names it, its track aside: its start and which of that millisecond's words it is.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct WordAt {
+    /// In source seconds, as the transcript has it.
+    pub start: f64,
+    /// 0 for the first word on its track starting in that millisecond (5w).
+    pub nth: usize,
+}
+
+impl WordAt {
+    fn key(&self) -> (i64, usize) {
+        (millis(self.start), self.nth)
+    }
+}
+
+/// One fixed word, or a span of words fixed as one (5x).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Fix {
     /// The audio track (0-based) it was heard on.
     pub track: usize,
-    /// Its start in source seconds, as the transcript has it.
+    /// Its start in source seconds, as the transcript has it (a span's: its first word's).
     pub start: f64,
     /// Which of the words heard on `track` starting in that millisecond it is, 0 for the first, in
     /// time order with ties in transcript order (5w; [`Fixes`] counts it).
     pub nth: usize,
+    /// A span's last word (5x), on the same track; `None` for one word.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub through: Option<WordAt>,
     /// What it says.
     pub text: String,
 }
@@ -38,9 +65,27 @@ impl Fix {
         key(self.track, self.start, self.nth)
     }
 
+    /// Its first and last words' keys on its track.
+    fn ends(&self) -> ((i64, usize), (i64, usize)) {
+        let first = (millis(self.start), self.nth);
+        (first, self.through.map_or(first, |t| t.key()))
+    }
+
     /// Both name the same word.
     pub fn same_word(&self, other: &Fix) -> bool {
         self.key() == other.key()
+    }
+
+    /// Both cover a word in common (5x: a span and a fix inside it, or two spans).
+    pub fn overlaps(&self, other: &Fix) -> bool {
+        let (a, b) = self.ends();
+        let (c, d) = other.ends();
+        self.track == other.track && a <= d && c <= b
+    }
+
+    /// A span of words rather than one (5x).
+    pub fn is_span(&self) -> bool {
+        self.through.is_some()
     }
 }
 
@@ -73,23 +118,38 @@ pub(super) fn written(start: f64) -> String {
     format!("{sign}{}.{:03}", ms / 1000, ms % 1000)
 }
 
+/// Whether `a` comes after `b` as words on one track do (5x: a span's last word before its first).
+pub(super) fn after(a: &WordAt, b: &WordAt) -> bool {
+    a.key() > b.key()
+}
+
 /// `text` as a fix keeps it: trimmed, on one line (the list's line ends it), runs of space as one, at
 /// most [`MAX_FIX`] characters. Empty means no fix.
 pub fn check_fix(text: &str) -> Result<String, String> {
+    check_text(text, MAX_FIX, "a fixed word")
+}
+
+/// As [`check_fix`], for a span's text: at most [`MAX_SPAN`] characters (5x).
+pub fn check_span(text: &str) -> Result<String, String> {
+    check_text(text, MAX_SPAN, "a fixed text")
+}
+
+fn check_text(text: &str, max: usize, what: &str) -> Result<String, String> {
     let one: String = text
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
     let one = one.split_whitespace().collect::<Vec<_>>().join(" ");
-    if one.chars().count() > MAX_FIX {
-        return Err(format!("a fixed word is at most {MAX_FIX} characters"));
+    if one.chars().count() > max {
+        return Err(format!("{what} is at most {max} characters"));
     }
     Ok(one)
 }
 
 /// Sets the fix of the word heard as `heard` on `track` at `start`, the `nth` starting in that
 /// millisecond, to `text` (through [`check_fix`]); empty text, or the heard text again, removes it.
-/// No other word's fix changes. Kept in time order. Whether anything changed.
+/// No other word's fix changes, but a span holding this word goes (5x): one word cannot show two
+/// texts. Kept in time order. Whether anything changed.
 pub fn set_fix(
     fixes: &mut Vec<Fix>,
     track: usize,
@@ -98,26 +158,57 @@ pub fn set_fix(
     heard: &str,
     text: &str,
 ) -> Result<bool, String> {
-    let text = check_fix(text)?;
-    let heard = check_fix(heard).unwrap_or_default();
-    let k = key(track, start, nth);
-    let at = fixes.iter().position(|f| f.key() == k);
+    let at = WordAt { start, nth };
+    set_span(fixes, track, at, at, heard, text)
+}
+
+/// Sets the text of the words heard on `track` from `first` to `last` (5x), heard as `heard` (the
+/// words joined by spaces), to `text` (through [`check_span`], or [`check_fix`] for one word): every
+/// fix on the track touching those words goes, the fixes of single words inside them and a span
+/// overlapping them, and one fix takes their place unless `text` is empty or the heard text again
+/// (so an empty text clears the words' fixes). `first == last` is a one-word fix. Kept in time
+/// order. Whether anything changed.
+pub fn set_span(
+    fixes: &mut Vec<Fix>,
+    track: usize,
+    first: WordAt,
+    last: WordAt,
+    heard: &str,
+    text: &str,
+) -> Result<bool, String> {
+    if after(&first, &last) {
+        return Err("a fixed text's last word comes before its first".into());
+    }
+    let one = first.key() == last.key();
+    let text = if one {
+        check_fix(text)?
+    } else {
+        check_span(text)?
+    };
+    let heard = check_span(heard).unwrap_or_default();
+    let new = Fix {
+        track,
+        start: first.start,
+        nth: first.nth,
+        through: (!one).then_some(last),
+        text,
+    };
     let before = fixes.clone();
-    match at {
-        Some(i) if text.is_empty() || text == heard => {
-            fixes.remove(i);
+    // The fix already there for exactly these words keeps its own start (a re-read word's start may
+    // differ from the list's in the last bits), so setting it again changes nothing.
+    let same = fixes
+        .iter()
+        .position(|f| f.track == track && f.ends() == new.ends());
+    fixes.retain(|f| !f.overlaps(&new));
+    if !new.text.is_empty() && new.text != heard {
+        match same {
+            Some(i) => fixes.push(Fix {
+                text: new.text,
+                ..before[i].clone()
+            }),
+            None => fixes.push(new),
         }
-        Some(i) => fixes[i].text = text,
-        None if text.is_empty() || text == heard => {}
-        None => {
-            fixes.push(Fix {
-                track,
-                start,
-                nth,
-                text,
-            });
-            sort(fixes);
-        }
+        sort(fixes);
     }
     Ok(*fixes != before)
 }
@@ -126,10 +217,11 @@ pub fn set_fix(
 /// as checked by the user (5o): a fix line with the heard text, so every fix line means "the user
 /// vouched for this word" and the transcript panel flags none of them. Not a line kind of its own: an
 /// older build reads it as a fix that changes nothing, where a new kind would need a format version
-/// it refuses. A word with a fix already is left as it is. Whether anything changed. Being a fix
-/// line, it goes the way of one: the heard text (or nothing) typed into the fix field takes it away
-/// ([`set_fix`]) and the word is flagged again, on purpose, so there is one rule for what that field
-/// does whatever the line was made by.
+/// it refuses. A word with a fix already is left as it is, and so is a word inside a span (5x): the
+/// span is the user's text for it. Whether anything changed. Being a fix line, it goes the way of
+/// one: the heard text (or nothing) typed into the fix field takes it away ([`set_fix`]) and the
+/// word is flagged again, on purpose, so there is one rule for what that field does whatever the
+/// line was made by; a span set over it takes it away too, and the span vouches for the word.
 pub fn confirm_fix(
     fixes: &mut Vec<Fix>,
     track: usize,
@@ -137,20 +229,21 @@ pub fn confirm_fix(
     nth: usize,
     heard: &str,
 ) -> Result<bool, String> {
-    let k = key(track, start, nth);
-    if fixes.iter().any(|f| f.key() == k) {
+    let new = Fix {
+        track,
+        start,
+        nth,
+        through: None,
+        text: String::new(),
+    };
+    if fixes.iter().any(|f| f.overlaps(&new)) {
         return Ok(false);
     }
     let text = check_fix(heard)?;
     if text.is_empty() {
         return Err("this word has no text to confirm".into());
     }
-    fixes.push(Fix {
-        track,
-        start,
-        nth,
-        text,
-    });
+    fixes.push(Fix { text, ..new });
     sort(fixes);
     Ok(true)
 }
@@ -165,27 +258,67 @@ pub(super) fn sort(fixes: &mut [Fix]) {
     });
 }
 
+/// What a word shows ([`Fixes::of`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Fixed<'a> {
+    /// The word's own fix.
+    Word(&'a str),
+    /// It is one of the words of span `index` (its place in the slice [`Fixes`] was made from),
+    /// which shows `text` in place of all of them (5x).
+    Span { index: usize, text: &'a str },
+}
+
 /// A list's fixes by word, for reading many words (a 30 h transcript) against a few fixes. Reads the
 /// words themselves to count each one's `nth`: every word of the transcript is to be given, in time
 /// order with ties in transcript order (a stable sort by start of the segments' words, as the editor
 /// and the captions have them), a word to be left out (cut) included.
 pub struct Fixes<'a> {
     by_word: HashMap<Key, &'a str>,
+    /// Per track, its spans in order of their first word (5x).
+    spans: HashMap<usize, Vec<Span<'a>>>,
     /// Per track, the millisecond of the latest word read and how many of its words were read.
     seen: HashMap<usize, (i64, usize)>,
 }
 
+struct Span<'a> {
+    first: (i64, usize),
+    last: (i64, usize),
+    index: usize,
+    text: &'a str,
+}
+
 impl<'a> Fixes<'a> {
     pub fn new(fixes: &'a [Fix]) -> Self {
+        let mut spans: HashMap<usize, Vec<Span<'a>>> = HashMap::new();
+        let mut by_word = HashMap::new();
+        for (index, f) in fixes.iter().enumerate() {
+            if f.is_span() {
+                let (first, last) = f.ends();
+                spans.entry(f.track).or_default().push(Span {
+                    first,
+                    last,
+                    index,
+                    text: &f.text,
+                });
+            } else {
+                by_word.insert(f.key(), f.text.as_str());
+            }
+        }
+        for s in spans.values_mut() {
+            s.sort_by_key(|s| s.first);
+        }
         Self {
-            by_word: fixes.iter().map(|f| (f.key(), f.text.as_str())).collect(),
+            by_word,
+            spans,
             seen: HashMap::new(),
         }
     }
 
-    /// The fixed text of the next word, `w` heard on `track`, if the user fixed it.
-    pub fn of(&mut self, track: usize, w: &Word) -> Option<&'a str> {
-        if self.by_word.is_empty() {
+    /// What the next word, `w` heard on `track`, shows if the user fixed it: its own fix, or the span
+    /// it is in. The span wins: [`set_span`] never leaves both, and a list holding both is refused
+    /// when read.
+    pub fn of(&mut self, track: usize, w: &Word) -> Option<Fixed<'a>> {
+        if self.by_word.is_empty() && self.spans.is_empty() {
             return None;
         }
         let ms = millis(w.start);
@@ -195,15 +328,32 @@ impl<'a> Fixes<'a> {
         } else {
             *seen = (ms, 1);
         }
-        self.by_word.get(&(track, ms, seen.1 - 1)).copied()
+        let k = (ms, seen.1 - 1);
+        if let Some(spans) = self.spans.get(&track) {
+            // The last span starting at or before the word, if the word is not past its end.
+            let i = spans.partition_point(|s| s.first <= k);
+            if let Some(s) = i.checked_sub(1).map(|i| &spans[i]).filter(|s| k <= s.last) {
+                return Some(Fixed::Span {
+                    index: s.index,
+                    text: s.text,
+                });
+            }
+        }
+        self.by_word.get(&(track, k.0, k.1)).map(|t| Fixed::Word(t))
     }
 
-    /// What the next word, `w` heard on `track`, says: its fix, else what Whisper heard.
+    /// What the next word, `w` heard on `track`, says on its own, for the tests: its fix, else what
+    /// Whisper heard; a word in a span reads as heard. Callers showing words take [`Self::of`], which
+    /// tells a span apart (5x repair: no caller is left to read a span's words as heard by mistake).
+    #[cfg(test)]
     pub fn text<'w>(&mut self, track: usize, w: &'w Word) -> &'w str
     where
         'a: 'w,
     {
-        self.of(track, w).unwrap_or(&w.text)
+        match self.of(track, w) {
+            Some(Fixed::Word(t)) => t,
+            _ => &w.text,
+        }
     }
 }
 
@@ -267,6 +417,23 @@ mod tests {
         assert!(confirm_fix(&mut f, 0, 9.0, 0, "  ").is_err());
     }
 
+    /// 5o with 5x: a word inside a span is not confirmed beside it (the span is the user's text for
+    /// it), and a span set over a confirmed word takes the confirmation into it.
+    #[test]
+    fn a_confirmation_and_a_span_never_both_name_a_word() {
+        let at = |start| WordAt { start, nth: 0 };
+        let mut f = Vec::new();
+        assert!(confirm_fix(&mut f, 0, 2.0, 0, "dos").unwrap());
+        assert!(set_span(&mut f, 0, at(1.0), at(3.0), "uno dos tres", "one two three").unwrap());
+        assert_eq!(f.len(), 1, "the confirmation went into the span");
+        assert!(f[0].is_span());
+        assert!(!confirm_fix(&mut f, 0, 2.0, 0, "dos").unwrap());
+        assert_eq!(f.len(), 1, "no confirmation inside a span");
+        // Outside it, on another track or past its end: confirmed as before.
+        assert!(confirm_fix(&mut f, 1, 2.0, 0, "dos").unwrap());
+        assert!(confirm_fix(&mut f, 0, 4.0, 0, "cuatro").unwrap());
+    }
+
     /// 5o with 5w: confirming one of the words starting in one millisecond confirms that word alone,
     /// next to another's fix, and taking it away leaves the other.
     #[test]
@@ -302,6 +469,7 @@ mod tests {
             track: 1,
             start: 312.34,
             nth: 0,
+            through: None,
             text: "Uezar".into(),
         }];
         // A start summed from a chunk's and a token's time, off in the last bits.
@@ -350,6 +518,7 @@ mod tests {
             track: 0,
             start: 54.944,
             nth: 1,
+            through: None,
             text: "miel".into(),
         }];
         let mut by = Fixes::new(&f);
@@ -368,6 +537,7 @@ mod tests {
             track,
             start,
             nth,
+            through: None,
             text: text.into(),
         };
         let f = vec![
@@ -393,5 +563,181 @@ mod tests {
             got,
             ["one-0", "b", "zero-1", "d", "zero-2", "one-2", "next", "h"]
         );
+    }
+
+    fn at(start: f64, nth: usize) -> WordAt {
+        WordAt { start, nth }
+    }
+
+    /// What `ws` show, heard on track 0: a span's text once, on its first word.
+    fn shown(fixes: &[Fix], ws: &[Word]) -> Vec<String> {
+        let mut by = Fixes::new(fixes);
+        let mut seen = Vec::new();
+        let mut out = Vec::new();
+        for w in ws {
+            match by.of(0, w) {
+                Some(Fixed::Span { index, text }) => {
+                    if !seen.contains(&index) {
+                        seen.push(index);
+                        out.push(text.to_string());
+                    }
+                }
+                Some(Fixed::Word(t)) => out.push(t.to_string()),
+                None => out.push(w.text.clone()),
+            }
+        }
+        out
+    }
+
+    fn sentence() -> Vec<Word> {
+        vec![
+            word(1.0, "so"),
+            word(2.0, "the"),
+            word(2.5, "wezar"),
+            word(3.0, "went"),
+            word(3.5, "hom"),
+            word(4.0, "ok"),
+        ]
+    }
+
+    #[test]
+    fn a_span_replaces_the_fixes_inside_it_and_an_empty_text_clears_them() {
+        // 5x: a sentence retyped as one edit; the word fixes inside it go.
+        let ws = sentence();
+        let mut f = Vec::new();
+        set_fix(&mut f, 0, 2.5, 0, "wezar", "Uezar").unwrap();
+        set_fix(&mut f, 0, 3.5, 0, "hom", "home").unwrap();
+        set_fix(&mut f, 0, 4.0, 0, "ok", "okay").unwrap();
+        assert_eq!(
+            shown(&f, &ws),
+            ["so", "the", "Uezar", "went", "home", "okay"]
+        );
+        let heard = "the wezar went hom";
+        assert!(set_span(
+            &mut f,
+            0,
+            at(2.0, 0),
+            at(3.5, 0),
+            heard,
+            " Uezar  went home. "
+        )
+        .unwrap());
+        assert_eq!(shown(&f, &ws), ["so", "Uezar went home.", "okay"]);
+        assert_eq!(f.len(), 2, "the two word fixes inside went: {f:?}");
+        assert_eq!(f[0].through, Some(at(3.5, 0)));
+        // The same text again changes nothing; another replaces it.
+        assert!(!set_span(&mut f, 0, at(2.0, 0), at(3.5, 0), heard, "Uezar went home.").unwrap());
+        assert!(set_span(&mut f, 0, at(2.0, 0), at(3.5, 0), heard, "Uezar left.").unwrap());
+        assert_eq!(shown(&f, &ws), ["so", "Uezar left.", "okay"]);
+        // A span overlapping it takes its place whole.
+        assert!(set_span(
+            &mut f,
+            0,
+            at(1.0, 0),
+            at(2.5, 0),
+            "so the wezar",
+            "So Uezar"
+        )
+        .unwrap());
+        assert_eq!(shown(&f, &ws), ["So Uezar", "went", "hom", "okay"]);
+        // The heard text again, or nothing, clears every fix in the words.
+        assert!(set_span(
+            &mut f,
+            0,
+            at(1.0, 0),
+            at(4.0, 0),
+            "so the wezar went hom ok",
+            ""
+        )
+        .unwrap());
+        assert!(f.is_empty());
+        set_fix(&mut f, 0, 3.0, 0, "went", "left").unwrap();
+        assert!(set_span(&mut f, 0, at(2.0, 0), at(3.5, 0), heard, heard).unwrap());
+        assert!(f.is_empty());
+        // Backwards is refused; too long too; one word is a word fix.
+        assert!(set_span(&mut f, 0, at(3.5, 0), at(2.0, 0), heard, "x").is_err());
+        assert!(set_span(
+            &mut f,
+            0,
+            at(2.0, 0),
+            at(3.5, 0),
+            heard,
+            &"x".repeat(MAX_SPAN + 1)
+        )
+        .is_err());
+        assert!(set_span(
+            &mut f,
+            0,
+            at(2.0, 0),
+            at(3.5, 0),
+            heard,
+            &"x".repeat(MAX_FIX + 1)
+        )
+        .unwrap());
+        assert!(set_span(&mut f, 0, at(2.5, 0), at(2.5, 0), "wezar", "Uezar").unwrap());
+        assert_eq!(
+            f.len(),
+            1,
+            "the word fix took the span holding the word: {f:?}"
+        );
+        assert!(!f[0].is_span());
+    }
+
+    #[test]
+    fn a_word_is_in_a_span_by_its_key_whatever_the_words_now() {
+        // 5x: the span names its first and last words; a word between them is in it, also one the
+        // transcript did not have when it was set, and nothing past its last key is.
+        let span = vec![Fix {
+            track: 0,
+            start: 2.0,
+            nth: 0,
+            through: Some(at(3.5, 0)),
+            text: "Uezar went home.".into(),
+        }];
+        // Re-transcribed: "the" gone, a word at 2.7, two words at 3.5 (the second after the last).
+        let ws = [
+            word(1.0, "so"),
+            word(2.5, "wezar"),
+            word(2.7, "uh"),
+            word(3.5, "hom"),
+            word(3.5, "e"),
+            word(4.0, "ok"),
+        ];
+        assert_eq!(shown(&span, &ws), ["so", "Uezar went home.", "e", "ok"]);
+        // Another track's words are not in it.
+        let mut by = Fixes::new(&span);
+        assert_eq!(by.of(1, &ws[1]), None);
+        assert_eq!(
+            by.text(0, &ws[1]),
+            "wezar",
+            "a span word reads as heard on its own"
+        );
+        // Spans of two tracks, in any order, each on its own.
+        let two = vec![
+            Fix {
+                track: 1,
+                start: 1.0,
+                nth: 0,
+                through: Some(at(4.0, 0)),
+                text: "B".into(),
+            },
+            span[0].clone(),
+        ];
+        let mut by = Fixes::new(&two);
+        assert_eq!(
+            by.of(1, &ws[0]),
+            Some(Fixed::Span {
+                index: 0,
+                text: "B"
+            })
+        );
+        assert_eq!(
+            by.of(0, &ws[1]),
+            Some(Fixed::Span {
+                index: 1,
+                text: "Uezar went home."
+            })
+        );
+        assert_eq!(by.of(0, &ws[5]), None);
     }
 }

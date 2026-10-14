@@ -119,10 +119,14 @@ optional: with `captions on`, `render` also writes the file beside the video.
 Checked in DaVinci Resolve (File > Import > Subtitle keeps the colours); Premiere Pro is unverified and
 likely shows its default caption style. SRT carries no size or position.
 
-The app's Captions panel can also send the captions straight into DaVinci Resolve as Fusion Text+ clips
-("Send to Resolve"), which reaches what an SRT cannot: font, size, height, outline, and where people
+The app's Captions panel can also send the whole edit straight into DaVinci Resolve ("Send to
+Resolve"): a new timeline in the open project, named `<recording> (Junctur)` and made from the same
+FCPXML as `junctur export --fcpxml` (the recording, every audio track, cut as the edit list says), with
+the captions on it as Fusion Text+ clips. If the project already has that timeline, Junctur asks whether
+to create a new one beside it (`<recording> (Junctur) 2`) or replace it; it never replaces one without
+asking. Text+ reaches what an SRT cannot: font, size, height, outline, and where people
 talking at once go (stacked, side by side, or one at the top; a protagonist keeps the normal spot).
-Each speaker gets their own video track in their colour; sending again updates the clips already there.
+Each speaker gets their own video track in their colour.
 Junctur installs a script into Resolve's Scripts folder; start it once per Resolve session with
 Workspace > Scripts > Junctur and leave it running (it works on the free Resolve). The bundled Text+
 template is auto-subs' `caption-bin.drb` (MIT, see `crates/junctur-core/src/resolve/LICENSE-auto-subs`);

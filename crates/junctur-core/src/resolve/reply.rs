@@ -63,7 +63,7 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// The open timeline and the caption template, as the `info` request finds them.
+/// The timeline and the caption template, as the `build` request (5z; `info` before it) finds them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Timeline {
     pub name: String,
@@ -97,18 +97,37 @@ pub struct Sent {
     /// Text+ inputs the template did not take (a user's own title may lack some): those clips are
     /// placed with the template's own value for them.
     pub unstyled: Vec<String>,
-    /// The timeline they went on.
+    /// The timeline they went on: the one the send made (5z).
     pub timeline: String,
     /// Clips Junctur did not place that sit where new captions go on its tracks (5n), found by a
-    /// send asking first: when not zero, nothing was changed in Resolve and the user is asked to
-    /// replace, skip or use a new track. `blocked` is how many captions they are in the way of.
+    /// send asking first: when not zero, no caption was placed and the user is asked to replace,
+    /// skip or use a new track. `blocked` is how many captions they are in the way of. Since 5z a
+    /// send places on the timeline it has just made, whose caption tracks are new, so the app's
+    /// send does not meet these; the script still guards `place` with them.
     pub in_the_way: usize,
     pub blocked: usize,
-    /// What the choice did (5n): those clips deleted, the captions left out, the tracks added
-    /// beside a speaker's for its new captions.
-    pub replaced: usize,
+    /// What the choice did (5n): those clips deleted (`replacedClips`, beside 5z's `replaced`),
+    /// the captions left out, the tracks added beside a speaker's for its new captions.
+    pub replaced_clips: usize,
     pub skipped: usize,
     pub new_tracks: usize,
+    /// Whether it replaced a timeline of that name (5z).
+    pub replaced: bool,
+    /// What went wrong making the timeline without stopping the send: an old timeline Resolve
+    /// would not delete or a name it would not take.
+    pub note: Option<String>,
+}
+
+/// The open project's timeline names, as the `check` request lists them (5z): `timelines` = n,
+/// then `timeline1` … `timelineN`.
+pub fn timeline_names(a: &HashMap<String, String>) -> Vec<String> {
+    let n: usize = a
+        .get("timelines")
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0);
+    (1..=n)
+        .filter_map(|k| a.get(&format!("timeline{k}")).cloned())
+        .collect()
 }
 
 /// The script's own error, if it answered with one.
@@ -160,23 +179,28 @@ pub fn sent(a: &HashMap<String, String>, timeline: &str) -> Sent {
         timeline: timeline.to_string(),
         in_the_way: n("inTheWay"),
         blocked: n("blocked"),
-        replaced: n("replaced"),
+        replaced_clips: n("replaced"),
         skipped: n("skipped"),
         new_tracks: n("newTracks"),
+        replaced: false,
+        note: None,
     }
 }
 
-/// Whether the script answering `info` is this round's or newer (5n): it says which it is
-/// (`script`, 5m on), compared by length then text so "5n" < "5aa". One from before it would ignore
-/// what a send asks of it now (asking before placing over the user's clips).
+/// Whether the script answering `check` (the first request of a send since 5z; `info` before it)
+/// is the one this Junctur needs or newer: it says which it is (`script`, 5m on), compared by
+/// length then text so "5z" < "5aa". One from before it would ignore what a send asks of it now
+/// (5n: asking before placing over the user's clips; 5l: the highlight and animation; 5z: a
+/// `check` answered without 5n's or 5l's handling of `place`).
 pub fn script_is_current(info: &HashMap<String, String>) -> bool {
     let version = |v: &str| (v.len(), v.to_string());
     info.get("script")
         .is_some_and(|v| version(v.trim()) >= version(SCRIPT))
 }
 
-/// The script version this Junctur needs (`junctur.lua`'s `SCRIPT`).
-pub const SCRIPT: &str = "5n";
+/// The script version this Junctur needs (`junctur.lua`'s `SCRIPT`): "5z" since the caption
+/// rounds 5l to 5q and 5z's whole-timeline send met in one script.
+pub const SCRIPT: &str = "5z";
 
 /// The Fusion Titles a `templates` request found in the media pool (5m), in the script's order
 /// (`count`, then `t1..tN`), each trimmed by the rule the script and the send use
@@ -238,7 +262,13 @@ mod tests {
         assert_eq!(s.unstyled, ["Underline", "Thickness2"]);
         // A send before 5n's fields, or one that found nothing in the way: all zero.
         assert_eq!(
-            (s.in_the_way, s.blocked, s.replaced, s.skipped, s.new_tracks),
+            (
+                s.in_the_way,
+                s.blocked,
+                s.replaced_clips,
+                s.skipped,
+                s.new_tracks
+            ),
             (0, 0, 0, 0, 0)
         );
         // Another request's answer, or one cut off mid-write, is not this one's.
@@ -287,7 +317,7 @@ mod tests {
             hex("placed\t5\nreplaced\t1\nskipped\t2\nnewTracks\t1")
         );
         let s = sent(&answer(&text, "4").unwrap(), "Main");
-        assert_eq!((s.replaced, s.skipped, s.new_tracks), (1, 2, 1));
+        assert_eq!((s.replaced_clips, s.skipped, s.new_tracks), (1, 2, 1));
     }
 
     #[test]
@@ -298,15 +328,16 @@ mod tests {
         };
         assert!(!script_is_current(&info(None)));
         assert!(!script_is_current(&info(Some("5m"))));
-        assert!(script_is_current(&info(Some("5n"))));
-        assert!(script_is_current(&info(Some("5o"))));
+        assert!(!script_is_current(&info(Some("5n"))));
+        assert!(!script_is_current(&info(Some("5o"))));
+        assert!(script_is_current(&info(Some("5z"))));
         assert!(script_is_current(&info(Some("5aa"))));
         assert!(!script_is_current(&info(Some(""))));
     }
 
     #[test]
     fn the_script_says_the_version_junctur_needs() {
-        // 5n repair: the version the script answers in `info` and the one Rust asks for are kept
+        // 5n repair: the version the script answers in `check` and the one Rust asks for are kept
         // in two languages; bumping one without the other fails here, not in Resolve.
         let script = include_str!("junctur.lua");
         assert!(
@@ -331,5 +362,19 @@ mod tests {
         let none: HashMap<String, String> = [("count".to_string(), "0".to_string())].into();
         assert!(templates(&none).is_empty());
         assert!(templates(&HashMap::new()).is_empty());
+    }
+
+    #[test]
+    fn the_projects_timelines_as_check_lists_them() {
+        let text = format!(
+            "JuncturReply = \"8:{}\"",
+            hex("timelines\t2\ntimeline1\tMain\ntimeline2\trec (Junctur)")
+        );
+        let a = answer(&text, "8").unwrap();
+        assert_eq!(timeline_names(&a), ["Main", "rec (Junctur)"]);
+        assert!(timeline_names(&HashMap::new()).is_empty());
+        // What a send made, beside the captions' counts: none unless the build says.
+        let s = sent(&a, "rec (Junctur)");
+        assert_eq!((s.replaced, s.note), (false, None));
     }
 }
