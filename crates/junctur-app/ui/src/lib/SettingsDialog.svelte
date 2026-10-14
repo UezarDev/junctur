@@ -2,9 +2,9 @@
   // Settings (2i): a dialog over the editor or the start window, opened from the title bar's gear
   // (or File > Settings…, Ctrl+,). What it edits is junctur/config.json, the file `junctur analyze`
   // reads too (src/settings.rs): the Whisper model, the word list Whisper is told (5h), which words
-  // the transcript flags for checking (5o) and the
-  // caption defaults a recording without its own starts from. Saving never analyses anything; App.svelte asks again whether the open
-  // recording is out of date, and 2d's notice in Properties offers the re-analysis.
+  // the transcript flags for checking (5o) and the caption defaults a recording without its own
+  // starts from. Saving never analyses anything; App.svelte asks again whether the open recording
+  // is out of date, and 2d's notice in Properties offers the re-analysis.
   // Laid out as the Captions panel is (2t): the same sections, explanations behind (i)s.
   import { onMount } from "svelte";
   import * as api from "./api";

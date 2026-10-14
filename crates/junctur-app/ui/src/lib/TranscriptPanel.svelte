@@ -8,7 +8,8 @@
   // once, shown here, in the caption preview and the SRT, and added to the word list Whisper is told
   // (the header says so for a moment, 5t).
   // A selection of words shows its actions at the bottom (WordBar, 2p): Cut, Keep, Fix text (5x),
-  // and the people with names as one-click buttons. Ctrl+click or Ctrl+drag adds another stretch to
+  // and the people with names as one-click buttons; with nothing selected the bar keeps its place
+  // with a hint (5v). Ctrl+click or Ctrl+drag adds another stretch to
   // it. Several words fixed as one text (5x: a sentence retyped) show as that text, selected and lit
   // whole; a double-click inside a selection of several words, on such a text, or on a word starting
   // in the same millisecond as its neighbours (5w) opens the word bar's field for all of them.
@@ -233,6 +234,9 @@
     if (e.detail <= 1) beforePress = pending;
   }
   function startFix(e: MouseEvent) {
+    // With Ctrl (Cmd on macOS) a double-click is two Ctrl+clicks, picking the word and taking it out
+    // again, so it opens no field (5v: the field opened on a word the second press had unpicked).
+    if (MAC ? e.metaKey : e.ctrlKey) return;
     // Not `e.target` (5t): `down` captures the pointer on the scroller, and Chromium (WebView2) then
     // sends the clicks and the double-click to the scroller, so the target never was a word and the
     // field never opened. The element under the pointer, as `move` finds it. Only a kept word: a cut
@@ -291,19 +295,23 @@
 
   // A fix whose spelling joined the word list (5h's `settings::learn`) says so for a moment in the
   // header (5t): before, nothing showed the list had changed until Settings was opened. A retyped
-  // sentence (5x) names every word it added.
+  // sentence (5x) names every word it added. The same place says when Looks right has no flagged
+  // word left to go to (5v).
   const LEARNED_MS = 4000;
   let learned = $state<string | null>(null);
   let learnedTimer = 0;
   // Cleared when the panel goes: `fixWord` can answer after that (5t repair), and a timer set then
   // would outlive the panel.
   let mounted = false;
-  function tellLearned(entries: string | string[]) {
-    const all = typeof entries === "string" ? [entries] : entries;
-    if (!mounted || !all.length) return;
-    learned = all.map((e) => `"${e}"`).join(", ");
+  function tell(text: string) {
+    if (!mounted) return;
+    learned = text;
     clearTimeout(learnedTimer);
     learnedTimer = window.setTimeout(() => (learned = null), LEARNED_MS);
+  }
+  function tellLearned(entries: string | string[]) {
+    const all = typeof entries === "string" ? [entries] : entries;
+    if (all.length) tell(`${all.map((e) => `"${e}"`).join(", ")} added to the word list`);
   }
 
   const first = $derived(Math.max(0, Math.floor(top / ROW) - OVERSCAN));
@@ -348,14 +356,22 @@
       pausedUntil = performance.now() + FOLLOW_PAUSE_MS;
     }
   }
-  // Confirms the selected flagged word (it keeps what Whisper heard) and goes on to the next.
+  // Confirms the selected flagged word (it keeps what Whisper heard) and goes on to the next. With
+  // none after it the header says so and the selection goes (5v: the word stayed selected, now
+  // unflagged, and nothing showed the end had been reached).
   function looksRight() {
     const i = checking;
     if (i < 0) return;
     const next = stepFrom(toCheck, i, false);
+    const left = toCheck.length - 1;
     call(async () => {
       await api.confirmWord(i);
-      goTo(next);
+      if (next >= 0) {
+        goTo(next);
+        return;
+      }
+      onSelect(null);
+      tell(left > 0 ? "No flagged word after this one: ‹ goes back" : "Every flagged word checked");
     });
   }
 
@@ -521,7 +537,7 @@
       </span>
     {/if}
     {#if learned}
-      <span class="muted learned" role="status">{learned} added to the word list</span>
+      <span class="muted learned" role="status">{learned}</span>
     {:else if words}
       <span class="muted">{words.text.length.toLocaleString()} words</span>
     {/if}
@@ -659,15 +675,18 @@
       {/if}
     {/if}
   </div>
-  {#if selection?.kind === "words" && words && edit?.editable && !reviewing}
+  <!-- Kept while nothing is selected (5v): a bar that came with the selection shrank the scroller
+       between a double-click's two presses. -->
+  {#if words && edit?.editable && !reviewing}
     <WordBar
       {edit}
       {words}
-      {selection}
+      selection={selection?.kind === "words" ? selection : null}
       {onSelect}
       {onError}
       bind:retyping
       onLearned={tellLearned}
+      checks={toCheck.length > 0}
       onLooksRight={checking >= 0 ? looksRight : null}
     />
   {/if}
