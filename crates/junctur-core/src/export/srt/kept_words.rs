@@ -177,7 +177,7 @@ pub(super) fn sentence_words(kept: &[Shown], tl: &Timeline, label: &Labeller) ->
 
 /// The sentences captions would translate: the kept words' sentences as said, each with its
 /// track and start, which find the language it was said in. The words, frame rate and edit are as
-/// for [`cues`]; the caption settings play no part, so changing them never asks for a
+/// for [`cues`](super::cues); the caption settings play no part, so changing them never asks for a
 /// translation again, while a cut that changes a sentence's words does.
 pub fn sentences<'a>(
     edit: &EditList,

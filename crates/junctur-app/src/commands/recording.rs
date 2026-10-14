@@ -193,7 +193,7 @@ pub async fn pause_transcription(
         .ok_or_else(|| "the transcription lane was not read".to_string())
 }
 
-/// Analyses `path` again with the settings now ([`Analysis::reanalyse`]); `fresh` re-cuts the
+/// Analyses `path` again with the settings now ([`Analysis::reanalyse`](crate::analysis::Analysis::reanalyse)); `fresh` re-cuts the
 /// list, and without `replace` a list holding the user's edits starts nothing, for the page to ask.
 #[tauri::command]
 pub async fn reanalyse(

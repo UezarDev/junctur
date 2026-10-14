@@ -15,7 +15,7 @@ pub(super) const EMBEDDINGS_FILE: &str = "windows.f32";
 pub(super) const HEARD_BY_AN_OLDER_JUNCTUR: &str = "this recording's speakers were found by an older Junctur: analyse them again first (`junctur analyze`, or \"Analyse speakers again\" in the app)";
 
 /// `windows.f32` in `dir` when it is the one `heard` was written with, by this build's hearing
-/// ([`hearing_key`]): windows from another one, such as GPU-made ones, are never labelled
+/// ([`hearing_key`](super::hearing_key)): windows from another one, such as GPU-made ones, are never labelled
 /// with or taken as a voice sample (a voice remembered from them would match nobody).
 pub(super) fn heard_embeddings(heard: &Heard, dir: &Path) -> Option<Vec<Vec<f32>>> {
     if !heard.is_current() {

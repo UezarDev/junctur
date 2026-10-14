@@ -39,7 +39,7 @@ pub async fn enroll_voice(
 }
 
 /// Hears the open recording's speakers again from the audio, cut at the seconds pinned to people,
-/// on the first-half lane ([`Analysis::exclusive`]) so never beside another speakers stage; it may
+/// on the first-half lane ([`Analysis::exclusive`](crate::analysis::Analysis::exclusive)) so never beside another speakers stage; it may
 /// run beside a transcription, since `jobs.json` changes are made under one lock.
 #[tauri::command]
 pub async fn reanalyze_speakers(app: State<'_, App>) -> Result<(), String> {

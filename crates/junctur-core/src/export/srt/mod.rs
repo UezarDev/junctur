@@ -1,7 +1,7 @@
 //! Captions as an SRT file on the edited timeline, each cue in its speaker's colour: SRT is the
 //! format whose per-cue colour comes through into DaVinci Resolve. A Resolve subtitle track shows
 //! one caption at a time, so cues never overlap and people talking at once share a cue, a [`Part`]
-//! each. Times go through the kept ranges on the frame grid ([`frame_ranges`]), as the renderer and
+//! each. Times go through the kept ranges on the frame grid ([`frame_ranges`](crate::edit::frame_ranges)), as the renderer and
 //! the FCPXML do, so a cue lands on the same frames in the render and in Resolve.
 
 mod file;

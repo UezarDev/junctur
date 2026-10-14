@@ -396,7 +396,7 @@ fn fix_on(run: &[usize], text: &Text, heard: &[Heard]) -> Option<Fix> {
 /// "Undo those": each fix of `added` (a [`spread`]'s, `heard` beside it) still as it was in
 /// `fixes` is made to say what its words were heard as, a fix of the heard text. Not taken away: a
 /// word the user kept as heard is fixed as far as a later spread goes (the Correct button's, or the
-/// one after a re-transcription, which would otherwise give it the fix again), and [`carry`] keeps it
+/// one after a re-transcription, which would otherwise give it the fix again), and [`carry`](super::carry) keeps it
 /// on its word. One the user changed or took away since is theirs and stays as it is. How many.
 pub fn keep_heard(fixes: &mut [Fix], added: &[Fix], heard: &[String]) -> usize {
     let mut n = 0;

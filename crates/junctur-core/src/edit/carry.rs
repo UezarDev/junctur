@@ -436,7 +436,7 @@ fn again(c: &Carried, on: &[usize], heard: &[Heard], taken: &[bool]) -> Option<V
         })
 }
 
-/// A fix of the heard text itself ([`keep_heard`]): the words are right as heard.
+/// A fix of the heard text itself ([`keep_heard`](super::keep_heard)): the words are right as heard.
 fn as_heard(c: &Carried) -> bool {
     check_span(&c.heard.join(" ")).ok() == check_span(&c.fix.text).ok()
 }

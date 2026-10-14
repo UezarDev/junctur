@@ -9,7 +9,7 @@ use super::audio::{self, Group, Heard};
 use super::{piece, plan, Chunk, Languages, Segment, Source, Whisper, Word};
 use crate::{Error, Result};
 
-/// Every chunk of `sources` in the order Whisper hears them: piece by piece ([`PIECE`]), within a
+/// Every chunk of `sources` in the order Whisper hears them: piece by piece ([`PIECE`](super::PIECE)), within a
 /// piece track by track (in `sources`' order), within a track in time. Track by track inside a
 /// piece keeps one decoder per track per piece (`audio::read` starts one per run of a track's
 /// groups); chunk by chunk across tracks would seek for every chunk.
@@ -141,7 +141,7 @@ pub(super) fn prompt_line(p: &crate::wordlist::Prompt) -> Option<String> {
     }
 }
 
-/// Where a run calls [`Reports::between`]: once before Whisper loads, then after each chunk while
+/// Where a run calls [`Reports::between`](super::Reports::between): once before Whisper loads, then after each chunk while
 /// any remain, never after the last (a pause there would only hold the finishing back).
 pub(super) struct Stops<'a> {
     left: usize,

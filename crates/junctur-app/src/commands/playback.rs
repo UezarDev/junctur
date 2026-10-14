@@ -98,7 +98,7 @@ pub async fn waves_state(app: State<'_, App>) -> Result<Option<WavesState>, Stri
 }
 
 /// Each track's peak per column of `[from, to)` seconds, for the lanes to draw, as raw bytes
-/// ([`WavesView::bytes`]; none when no recording is open): asked on every pan, zoom and step of the
+/// ([`WavesView::bytes`](crate::waves::WavesView::bytes); none when no recording is open): asked on every pan, zoom and step of the
 /// read, where a JSON array of numbers would be several times the size and parsed each time.
 #[tauri::command]
 pub async fn waves(
