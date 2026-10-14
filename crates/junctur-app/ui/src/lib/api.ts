@@ -246,6 +246,13 @@ export interface TranscriptView {
   speaker: number[];
   /** Someone else saying the word too (two people at once), 0 for none. */
   also: number[];
+  /** The audio track each word was heard on (5x). */
+  track: number[];
+  /** The span fixed as one text each word is in (5x), 1-based into `spans`, 0 for none; such a
+   * word's `text` is what was heard. */
+  span: number[];
+  /** Each span's text. */
+  spans: string[];
 }
 
 export type StageState = "pending" | "running" | "done" | "failed";
@@ -402,6 +409,11 @@ export const renameSpeaker = (id: number, name: string) =>
 /** Fixes the spelling of word `index` (5h; empty or the heard text again removes the fix); resolves
  * to the entry it added to the word list, if any. Saved at once, not an undo step. */
 export const fixWord = (index: number, text: string) => invoke<string | null>("fix_word", { index, text });
+/** Fixes words `first..=last` as one text (5x; empty or the heard words again clears their fixes);
+ * resolves to the entries it added to the word list. Refused, saying why, across two voice tracks or
+ * two people. Saved at once, not an undo step. */
+export const fixWords = (first: number, last: number, text: string) =>
+  invoke<string[]>("fix_words", { first, last, text });
 /** Sets speaker `id`'s caption colour (`#RRGGBB`). */
 export const recolorSpeaker = (id: number, color: string) =>
   invoke<void>("recolor_speaker", { id, color });

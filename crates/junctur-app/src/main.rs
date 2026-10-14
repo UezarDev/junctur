@@ -133,6 +133,7 @@ fn main() {
             commands::edit_frames,
             commands::rename_speaker,
             commands::fix_word,
+            commands::fix_words,
             commands::recolor_speaker,
             commands::set_captions,
             commands::export_captions,
