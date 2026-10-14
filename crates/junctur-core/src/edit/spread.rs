@@ -13,7 +13,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::fixes::{self, check_fix, check_span, Fix, Fixes, WordAt};
+use super::fixes::{self, check_fix, check_span, Fix, Fixed, Fixes, WordAt};
+use super::times::{self, set_time, to_ms, Retime};
 use crate::transcribe::Word;
 
 /// A word's text as two hearings of the same word compare: trimmed of the punctuation around it,
@@ -414,16 +415,17 @@ pub struct CarryReport {
 /// is not needed and goes; when there are none, it is dropped (the report names it) rather than put on
 /// whatever word is there now. A fix of the heard text ([`keep_heard`]) stays on its word as it now
 /// reads. A fix not in `carried` stays as it is, and a carried fix is never put over a word another
-/// fix covers.
+/// fix covers, nor written with a text a fix may not have (5ad). A transcript with no words at all
+/// moves nothing: that run heard nothing, and the caller says so.
 pub fn carry(fixes: &mut Vec<Fix>, carried: &[Carried], words: &[(usize, &Word)]) -> CarryReport {
     let mut report = CarryReport::default();
     let heard = read(words);
+    if heard.is_empty() {
+        return report;
+    }
     let tracks = by_track(&heard);
-    // A track the new transcript has no word on (heard as nothing, or not transcribed) keeps its
-    // fixes as they are: there is nothing to move them onto, and nothing they could land on wrongly.
     let ours: Vec<&Carried> = carried
         .iter()
-        .filter(|c| tracks.contains_key(&c.fix.track))
         .filter(|c| fixes.iter().any(|f| same(f, &c.fix)))
         .collect();
     if ours.is_empty() {
@@ -432,8 +434,14 @@ pub fn carry(fixes: &mut Vec<Fix>, carried: &[Carried], words: &[(usize, &Word)]
     fixes.retain(|f| !ours.iter().any(|c| same(f, &c.fix)));
     let mut taken = covered(fixes, words);
     for c in ours {
-        let on = &tracks[&c.fix.track];
         let gone = |r: &mut CarryReport| r.gone.push(c.clone());
+        // A track the new transcript has no word on (heard as nothing this time): set aside like
+        // any fix with no word to go to (5ad). 5aa's repair left these on their old keys, where
+        // they showed on nothing and were never listed.
+        let Some(on) = tracks.get(&c.fix.track) else {
+            gone(&mut report);
+            continue;
+        };
         // Where the new words near its old time are: the track's words are in time order, so a
         // binary search, not a scan of a 30 h track per fix under the edit list's writer lock.
         let near = {
@@ -473,7 +481,14 @@ pub fn carry(fixes: &mut Vec<Fix>, carried: &[Carried], words: &[(usize, &Word)]
             // As a spread writes it (5aa repair): a fix that kept the punctuation it was heard with
             // takes the new word's own ("Vayne," onto a "Bane." heard now).
             let text = if kept {
-                h.text.to_string()
+                // As heard now, which a fix may not always hold (5ad: a word over `MAX_FIX`).
+                match check_fix(h.text) {
+                    Ok(t) if !t.is_empty() => t,
+                    _ => {
+                        gone(&mut report);
+                        continue;
+                    }
+                }
             } else {
                 let was = c.heard.first().map_or("", String::as_str);
                 match check_fix(&Text::of(was, &c.fix.text).on(h.text)) {
@@ -523,8 +538,16 @@ pub fn carry(fixes: &mut Vec<Fix>, carried: &[Carried], words: &[(usize, &Word)]
                 report.right += 1;
                 continue;
             }
+            // Kept as heard: the new words as said, which can be longer than a span's text may be
+            // (5ad: past `MAX_SPAN` the list would not have read back). Set aside then.
             let text = if kept {
-                said.join(" ")
+                match check_span(&said.join(" ")) {
+                    Ok(t) if !t.is_empty() => t,
+                    _ => {
+                        gone(&mut report);
+                        continue;
+                    }
+                }
             } else {
                 c.fix.text.clone()
             };
@@ -560,6 +583,162 @@ pub fn carry(fixes: &mut Vec<Fix>, carried: &[Carried], words: &[(usize, &Word)]
         }
     }
     fixes::sort(fixes);
+    report
+}
+
+/// A retimed word (2w) as the transcript about to be replaced has it (5ad): what [`carry_times`]
+/// moves onto the new transcript's words, as [`carry`] moves the fixes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CarriedTime {
+    pub time: Retime,
+    /// Its word as heard.
+    pub heard: String,
+    /// The word fix on it, if any: the new word may be heard as that.
+    pub fixed: Option<String>,
+    /// Its start and end as heard, in source seconds.
+    pub start: f64,
+    pub end: f64,
+}
+
+/// Every retime of `times` whose word `words` (the transcript about to be replaced, in [`Fixes`]'
+/// order) has, with that word and the word fix on it (`fixes` as they are on that transcript). A
+/// retime on no word of it stays where it is ([`carry_times`]), as such a fix does.
+pub fn snapshot_times(
+    times: &[Retime],
+    fixes: &[Fix],
+    words: &[(usize, &Word)],
+) -> Vec<CarriedTime> {
+    if times.is_empty() {
+        return Vec::new();
+    }
+    let by_key: HashMap<(usize, i64, usize), &Retime> = times
+        .iter()
+        .map(|t| ((t.track, fixes::millis(t.start), t.nth), t))
+        .collect();
+    let mut by = Fixes::new(fixes);
+    read(words)
+        .iter()
+        .zip(words)
+        .filter_map(|(h, &(track, w))| {
+            // Every word read, in order: `Fixes::of` counts each one's place in its millisecond.
+            let fixed = match by.of(track, w) {
+                Some(Fixed::Word(t)) => Some(t.to_string()),
+                _ => None,
+            };
+            let t = by_key.get(&(h.track, h.key.0, h.key.1))?;
+            Some(CarriedTime {
+                time: **t,
+                heard: h.text.to_string(),
+                fixed,
+                start: h.start,
+                end: h.end,
+            })
+        })
+        .collect()
+}
+
+/// What [`carry_times`] did.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TimesReport {
+    /// Retimes now on their word in the new transcript.
+    pub kept: usize,
+    /// Retimes no longer needed: the new word is heard with the times the user set.
+    pub right: usize,
+    /// Retimes whose word the new transcript does not have: set aside by the caller, as fixes are.
+    pub gone: Vec<CarriedTime>,
+}
+
+/// Moves the retimes `carried` names, where the list still has them as they were, onto `words` (the
+/// new transcript, in [`Fixes`]' order), as [`carry`] moves a word fix (5ad: a re-transcription left
+/// every `time` line on its old key, so a word the user had pulled out of a cut was halved by it
+/// again, or another word starting in that millisecond took its time). The word: the nearest new word
+/// on its track within [`NEAR`] of its old start that reads as it was heard or as its fix, none
+/// another retime is on. The side the user moved (a start or end that was not Whisper's) stays where
+/// they put it, at the cut's edge; the other side is the new word's own. No such word, or the two
+/// sides crossing: set aside. The new word heard just so: not needed. A retime not in `carried` stays
+/// as it is, and a transcript with no words at all moves nothing.
+pub fn carry_times(
+    times: &mut Vec<Retime>,
+    carried: &[CarriedTime],
+    words: &[(usize, &Word)],
+) -> TimesReport {
+    let mut report = TimesReport::default();
+    let heard = read(words);
+    if heard.is_empty() {
+        return report;
+    }
+    let tracks = by_track(&heard);
+    let ours: Vec<&CarriedTime> = carried.iter().filter(|c| times.contains(&c.time)).collect();
+    if ours.is_empty() {
+        return report;
+    }
+    times.retain(|t| !ours.iter().any(|c| c.time == *t));
+    let key = |h: &Heard| (h.track, h.key.0, h.key.1);
+    let mut taken: HashSet<(usize, i64, usize)> = times
+        .iter()
+        .map(|t| (t.track, fixes::millis(t.start), t.nth))
+        .collect();
+    for c in ours {
+        let gone = |r: &mut TimesReport| r.gone.push(c.clone());
+        let Some(on) = tracks.get(&c.time.track) else {
+            gone(&mut report);
+            continue;
+        };
+        let likes: HashSet<String> = [Some(c.heard.as_str()), c.fixed.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(likeness)
+            .filter(|l| !l.is_empty())
+            .collect();
+        let a = on.partition_point(|&i| heard[i].start < c.start - NEAR);
+        let b = on.partition_point(|&i| heard[i].start <= c.start + NEAR);
+        let best = on[a..b.max(a)]
+            .iter()
+            .copied()
+            .filter(|&i| !taken.contains(&key(&heard[i])) && likes.contains(&heard[i].like))
+            .min_by(|&x, &y| {
+                (heard[x].start - c.start)
+                    .abs()
+                    .total_cmp(&(heard[y].start - c.start).abs())
+            });
+        let Some(i) = best else {
+            gone(&mut report);
+            continue;
+        };
+        let h = &heard[i];
+        let from = if c.time.from == to_ms(c.start) {
+            h.start
+        } else {
+            c.time.from
+        };
+        let to = if c.time.to == to_ms(c.end) {
+            h.end
+        } else {
+            c.time.to
+        };
+        let mut one = Vec::new();
+        if set_time(
+            &mut one,
+            h.track,
+            h.start,
+            h.at.nth,
+            (h.start, h.end),
+            (from, to),
+        )
+        .is_err()
+        {
+            gone(&mut report);
+            continue;
+        }
+        taken.insert(key(h));
+        if one.is_empty() {
+            report.right += 1;
+        } else {
+            times.extend(one);
+            report.kept += 1;
+        }
+    }
+    times::sort(times);
     report
 }
 
@@ -913,16 +1092,117 @@ mod tests {
         let r = carry(&mut f, &carried, &refs(&new));
         assert_eq!(f[0].text, "Vayne.");
         // A sentence is not made a one-word fix (a spread would copy it onto every such word):
-        // set aside.
-        assert_eq!(r.gone.len(), 1);
-        assert_eq!(r.gone[0].fix.text, "Uezar went");
-        // The track with no words keeps its fix as it was.
-        assert_eq!(f.len(), 2);
-        assert_eq!(
-            (f[1].track, f[1].start, f[1].text.as_str()),
-            (1, 5.0, "Hola,")
-        );
+        // set aside. And the track with no words sets its fix aside too (5ad: it was left on its
+        // old key, shown on nothing and never listed).
+        let gone: Vec<&str> = r.gone.iter().map(|g| g.fix.text.as_str()).collect();
+        assert_eq!(gone, ["Uezar went", "Hola,"]);
+        assert_eq!(f.len(), 1);
         assert!(!super::super::fixes::clash(&f));
+        // A transcript with no words at all (a run that heard nothing) moves nothing.
+        let mut g = vec![fix(1, 5.0, "Hola,")];
+        let carried = snapshot(&g, &refs(&old));
+        assert_eq!(carry(&mut g, &carried, &[]), CarryReport::default());
+        assert_eq!(g, [fix(1, 5.0, "Hola,")]);
+    }
+
+    #[test]
+    fn a_fix_kept_as_heard_is_never_carried_longer_than_a_fix_may_be() {
+        // 5ad: a span kept as heard took the new words as said, unchecked; past `MAX_SPAN` the list
+        // would not read back. Likewise a word heard now longer than `MAX_FIX`. Set aside.
+        let run = |w: &str| -> Vec<(usize, Word)> {
+            (0..100)
+                .map(|i| (0, word(1.0 + i as f64 * 0.1, w)))
+                .collect()
+        };
+        let old = run(" palabra");
+        let said: Vec<&str> = old.iter().map(|(_, w)| w.text.trim()).collect();
+        let mut f = vec![Fix {
+            track: 0,
+            start: 1.0,
+            nth: 0,
+            through: Some(at(1.0 + 99.0 * 0.1, 0)),
+            text: said.join(" "),
+        }];
+        assert!(f[0].text.chars().count() <= super::super::MAX_SPAN);
+        let carried = snapshot(&f, &refs(&old));
+        // Heard again as longer words in the same time: as said now it is over a span's limit.
+        let r = carry(&mut f, &carried, &refs(&run(" palabrotas")));
+        assert!(f.is_empty(), "{f:?}");
+        assert_eq!(r.gone.len(), 1);
+        // One word kept as heard, now heard with a run of punctuation past a word fix's limit.
+        let mut g = vec![fix(0, 1.0, "Bane")];
+        let carried = snapshot(&g, &refs(&[(0, word(1.0, " Bane"))]));
+        let loud = format!(" Bane{}", "!".repeat(super::super::MAX_FIX));
+        let r = carry(&mut g, &carried, &refs(&[(0, word(1.0, &loud))]));
+        assert_eq!(r.gone.len(), 1, "{r:?}");
+        assert!(g.is_empty());
+    }
+
+    #[test]
+    fn a_retimed_word_follows_its_word_into_a_new_transcription() {
+        // 5ad: a word pulled out of a cut by moving the cut's edge (2w) keeps that edge after
+        // Correct: its `time` line moves onto the new word, the side the user moved kept.
+        let old = vec![
+            (0, word(1.0, " Bane,")),
+            (0, word(2.0, " said")),
+            (0, word(4.0, " Mel")),
+            (1, word(6.0, " hola")),
+        ];
+        let rt = |track: usize, start: f64, from: f64, to: f64| Retime {
+            track,
+            start,
+            nth: 0,
+            from,
+            to,
+        };
+        let timed = |start: f64, end: f64, text: &str| Word {
+            end,
+            ..word(start, text)
+        };
+        // "Bane," ended at 1.3 as heard, the edge put it at 1.5; "said" started at 2.0, the edge
+        // put it at 1.9, its end Whisper's; "Mel" and "hola" are retimed too.
+        let mut t = vec![
+            rt(0, 1.0, 1.0, 1.5),
+            rt(0, 2.0, 1.9, 2.3),
+            rt(0, 4.0, 4.0, 4.6),
+            rt(1, 6.0, 6.0, 6.5),
+        ];
+        // A fix on "Bane,": the new word may be heard as the fix.
+        let f = vec![fix(0, 1.0, "Vayne,")];
+        let carried = snapshot_times(&t, &f, &refs(&old));
+        assert_eq!(carried.len(), 4);
+        assert_eq!(carried[0].fixed.as_deref(), Some("Vayne,"));
+        // While it ran, the user retimed a new word on their own: it stays.
+        t.push(rt(0, 8.0, 8.0, 8.9));
+        let new = vec![
+            // Heard as the fix now, a little later: the user's end kept, the start the new one.
+            (0, timed(1.1, 1.35, " Vayne,")),
+            // Heard from the edge already, its end as before: not needed.
+            (0, timed(1.9, 2.3, " said")),
+            // Something else where "Mel" was: set aside. Track 1 heard nothing: set aside.
+            (0, word(4.0, " and")),
+            (0, word(8.0, " bien")),
+        ];
+        let r = carry_times(&mut t, &carried, &refs(&new));
+        assert_eq!((r.kept, r.right), (1, 1), "{r:?}");
+        let gone: Vec<&str> = r.gone.iter().map(|g| g.heard.as_str()).collect();
+        assert_eq!(gone, ["Mel", "hola"]);
+        assert_eq!(t, [rt(0, 1.1, 1.1, 1.5), rt(0, 8.0, 8.0, 8.9)]);
+        // Read where the words are: "Vayne," ends where the edge is.
+        let mut times = super::super::Times::new(&t);
+        assert_eq!(times.of(0, &new[0].1), (1.1, 1.5));
+        // Carried again onto the same words: nothing moves.
+        let again = snapshot_times(&t, &f, &refs(&new));
+        let before = t.clone();
+        carry_times(&mut t, &again, &refs(&new));
+        assert_eq!(t, before);
+        // The user's end at 1.5, the new word now starting at 1.6: nothing of it left before the
+        // edge, set aside rather than written backwards.
+        let mut v = vec![rt(0, 1.0, 1.0, 1.5)];
+        let c = snapshot_times(&v, &[], &refs(&old));
+        let r = carry_times(&mut v, &c, &refs(&[(0, timed(1.6, 1.9, " Bane,"))]));
+        assert_eq!(r.gone.len(), 1);
+        assert!(v.is_empty());
     }
 
     #[test]

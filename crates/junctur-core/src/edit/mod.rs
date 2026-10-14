@@ -41,7 +41,8 @@ pub use speakers::{
 };
 pub use splice::{cut_span, keep_span};
 pub use spread::{
-    carry, keep_heard, likeness, snapshot, spread, Carried, CarryReport, Spread, Which,
+    carry, carry_times, keep_heard, likeness, snapshot, snapshot_times, spread, Carried,
+    CarriedTime, CarryReport, Spread, TimesReport, Which,
 };
 pub use times::{set_time, to_ms, Retime, Times};
 
@@ -127,5 +128,18 @@ impl EditList {
 
     pub fn to_text(&self) -> String {
         format::write(self)
+    }
+
+    /// [`Self::to_text`] when [`parse`] reads it back, else the parser's reason (5ad). What every
+    /// writer of an edit list writes ([`save`], [`amend`], the pipeline's re-cut): a list the parser
+    /// refuses opens as a recording whose edits are gone until it is fixed by hand (5aa's carry once
+    /// wrote a kept-as-heard span longer than [`MAX_SPAN`]), so such a list is never written, whatever
+    /// made it.
+    pub fn checked_text(&self) -> Result<String, String> {
+        let text = self.to_text();
+        match parse(&text) {
+            Ok(_) => Ok(text),
+            Err(why) => Err(format!("the edit list would not read back ({why})")),
+        }
     }
 }

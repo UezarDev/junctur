@@ -507,10 +507,17 @@ export interface SetAside {
   at: number;
   heard: string;
   text: string;
+  /** A word time set by moving a cut's edge (5ad), not a fix: the start and end it was given. */
+  retimed?: [number, number];
+  /** Its track has no words in the new transcript at all: not heard, rather than heard otherwise. */
+  silent?: boolean;
+  /** Not a fix: what Correct could not do, in a sentence; the other fields are empty. */
+  note?: string;
 }
 /** The open recording's fixes set aside by a re-transcription, until `forgetFixesSetAside`. */
 export const fixesSetAside = () => invoke<SetAside[]>("fixes_set_aside");
-export const forgetFixesSetAside = () => invoke<void>("forget_fixes_set_aside");
+/** Forgets `seen`, as `fixesSetAside` gave them: any set aside since stay listed (5ad). */
+export const forgetFixesSetAside = (seen: SetAside[]) => invoke<void>("forget_fixes_set_aside", { seen });
 /** What the Correct button started (5aa). */
 export interface Corrected {
   progress: Progress;

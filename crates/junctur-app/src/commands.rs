@@ -588,14 +588,18 @@ pub async fn fixes_set_aside(app: State<'_, App>) -> Result<Vec<SetAside>, Strin
     Ok(pipeline::fixes_set_aside(&p))
 }
 
-/// The user has seen the fixes set aside for the open recording.
+/// The user has seen `seen`, fixes set aside for the open recording as [`fixes_set_aside`] listed
+/// them: those are forgotten, and any a run set aside since stay (5ad).
 #[tauri::command]
-pub async fn forget_fixes_set_aside(app: State<'_, App>) -> Result<(), String> {
+pub async fn forget_fixes_set_aside(
+    app: State<'_, App>,
+    seen: Vec<SetAside>,
+) -> Result<(), String> {
     let Some(file) = app.core()?.file() else {
         return Ok(());
     };
     let p = Project::open(Path::new(&file), None, None).map_err(|e| e.to_string())?;
-    pipeline::forget_fixes_set_aside(&p).map_err(|e| e.to_string())
+    pipeline::forget_fixes_set_aside(&p, &seen).map_err(|e| e.to_string())
 }
 
 /// What the Correct button started (5aa).
