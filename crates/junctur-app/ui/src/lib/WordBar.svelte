@@ -210,7 +210,7 @@
         retyping = !retyping;
       }}
       title={one
-        ? "Retype these words as one text: shown in the transcript and the captions in their place (double-click a selection does this too)"
+        ? "Retype these words as one text: shown in the transcript and the captions in their place (F2; double-click a selection does this too)"
         : "Select one stretch of words to fix its text: one text cannot go in several places"}>Fix text</button
     >
     {#if onLooksRight}

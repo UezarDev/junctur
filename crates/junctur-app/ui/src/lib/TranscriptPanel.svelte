@@ -19,6 +19,8 @@
   // right", which confirms the one flagged word selected, is among the word actions at the bottom
   // (2p's place for them). A fixed or confirmed word, or one in a retyped text, is not flagged (the
   // core decides, `words.sure`).
+  // F2 (5ac) opens the field a double-click would on the word under the pointer, else Fix text for a
+  // selection of words; never while a field is being typed in or a dialog is open.
   import { onMount } from "svelte";
   import { SvelteSet } from "svelte/reactivity";
   import * as api from "./api";
@@ -238,19 +240,28 @@
   function clicked(e: MouseEvent) {
     if (e.detail <= 1) beforePress = pending;
   }
+  // The kept word at a point in this list, or -1. Not `e.target` (5t): `down` captures the pointer on
+  // the scroller, and Chromium (WebView2) then sends the clicks and the double-click to the scroller,
+  // so the target never was a word and the field never opened. The element under the pointer, as
+  // `move` finds it. Only a kept word: a cut word in an open fold has no field, and `fixing` set
+  // without one would hold the follow for good.
+  function keptWordAt(x: number, y: number): number {
+    const el = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-i]");
+    if (!el || el.classList.contains("cutword") || !scroller?.contains(el)) return -1;
+    return Number(el.dataset.i);
+  }
   function startFix(e: MouseEvent) {
-    // Not `e.target` (5t): `down` captures the pointer on the scroller, and Chromium (WebView2) then
-    // sends the clicks and the double-click to the scroller, so the target never was a word and the
-    // field never opened. The element under the pointer, as `move` finds it. Only a kept word: a cut
-    // word in an open fold has no field, and `fixing` set without one would hold the follow for good.
-    const el = document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>("[data-i]");
-    if (!el || el.classList.contains("cutword") || !words) return;
-    const i = Number(el.dataset.i);
-    if (i === fixing) return;
+    const i = keptWordAt(e.clientX, e.clientY);
+    if (i >= 0) fixAt(i, beforePress);
+  }
+  // Opens the field for word `i`: what a double-click on it opens, and F2 over it (5ac). `before` is
+  // the selection the user had made: from before the double-click's first press, or as it is for F2.
+  function fixAt(i: number, before: sel.Selection | null) {
+    if (!words || i === fixing) return;
     // Several words, one field in the word bar (5x): a span fixed as one text, a selection of
     // several words holding this one, or the words starting with it in one millisecond on its track.
     const s = words.span[i];
-    const prior = sel.runs(beforePress);
+    const prior = sel.runs(before);
     const run = s
       ? { first: words.spanFirst[s - 1], last: words.spanLast[s - 1] }
       : prior.length === 1 && prior[0].last > prior[0].first && sel.has(prior, i)
@@ -465,6 +476,41 @@
     ours = -1;
   }
 
+  // F2 (5ac): the word under the pointer gets the field a double-click gives it; with none, a
+  // selection of one stretch gets Fix text, as the word bar's button does. A window listener, so it
+  // works after a click on the picture or the lanes (mpv draws under the transparent page, so the
+  // keyboard stays here). The word is looked up at the pointer's last position when F2 comes, not
+  // remembered on entering it: the list scrolls under a still pointer (the playhead follow), and
+  // neither `pointerenter` nor `:hover` notice that until the pointer moves.
+  let pointer: { x: number; y: number } | null = null;
+  function typing(t: EventTarget | null): boolean {
+    return (
+      t instanceof HTMLInputElement ||
+      t instanceof HTMLSelectElement ||
+      t instanceof HTMLTextAreaElement ||
+      (t instanceof HTMLElement && t.isContentEditable)
+    );
+  }
+  function onF2(e: KeyboardEvent) {
+    if (e.key !== "F2" || e.repeat || e.ctrlKey || e.altKey || e.shiftKey || e.metaKey) return;
+    // A field open or being typed in keeps its keys, and a dialog in the page holds them (Settings;
+    // the Resolve timeline question stops every key before this). Correct's and Re-analyse's
+    // questions are native dialogs, which keep the keyboard from the page.
+    if (fixing != null || retyping || renaming || typing(e.target) || typing(document.activeElement)) return;
+    if (document.querySelector('[aria-modal="true"]')) return;
+    // The Transcript tab hidden (another tab, the panel closed): nothing of it to act on.
+    if (!words || !scroller?.checkVisibility()) return;
+    const i = pointer ? keptWordAt(pointer.x, pointer.y) : -1;
+    if (i >= 0) {
+      e.preventDefault();
+      fixAt(i, selection);
+    } else if (selection?.kind === "words" && edit?.editable && !reviewing && sel.pairs(selection).length === 1) {
+      // The word bar is shown (its conditions below) with Fix text enabled (one stretch).
+      e.preventDefault();
+      retyping = true;
+    }
+  }
+
   async function call(f: () => Promise<unknown>) {
     try {
       await f();
@@ -586,7 +632,15 @@
       else timer = window.setTimeout(() => (width = scroller.clientWidth), RESIZE_SETTLE_MS);
     });
     ro.observe(scroller);
+    const at = (e: PointerEvent) => (pointer = { x: e.clientX, y: e.clientY });
+    const gone = () => (pointer = null);
+    window.addEventListener("pointermove", at, { capture: true, passive: true });
+    document.documentElement.addEventListener("pointerleave", gone);
+    window.addEventListener("keydown", onF2);
     return () => {
+      window.removeEventListener("pointermove", at, { capture: true });
+      document.documentElement.removeEventListener("pointerleave", gone);
+      window.removeEventListener("keydown", onF2);
       clearTimeout(timer);
       mounted = false;
       clearTimeout(learnedTimer);
@@ -720,8 +774,8 @@
                   title={words.also[t.i]
                     ? `${nameOf(words.speaker[t.i])} and ${nameOf(words.also[t.i])} at once`
                     : doubt(t.i)
-                      ? `Whisper was ${words.sure[t.i]} % sure of this word: double-click to fix it, or select it and "Looks right" below`
-                      : "Double-click to fix the spelling"}
+                      ? `Whisper was ${words.sure[t.i]} % sure of this word: double-click or press F2 to fix it, or select it and "Looks right" below`
+                      : "Double-click or press F2 to fix the spelling"}
                   data-i={t.i}>{words.text[t.i]}</span
                 >
               {:else if t.kind === "spanword"}
@@ -729,7 +783,7 @@
                   class="w fixed"
                   class:cur={currentSpan === t.s}
                   class:sel={sel.has(joined, t.i)}
-                  title="Fixed as one text: double-click to change it"
+                  title="Fixed as one text: double-click or press F2 to change it"
                   data-i={t.i}>{words.spanWords[t.s - 1][t.k]}</span
                 >
               {:else if t.kind === "cutword"}

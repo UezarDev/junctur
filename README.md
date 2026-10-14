@@ -175,7 +175,8 @@ words and press Delete to cut them (K keeps), restore a folded cut, or nudge a r
 above the timeline (shift-drag on the timeline selects a stretch). Boundaries snap into the pauses the way
 `junctur cut` places them, every edit is saved to `edit.junctur` at once, Ctrl+Z / Ctrl+Y undo and redo,
 and a list the app did not write itself is first kept as `edit.junctur.bak` (then `.bak2`, ...).
-Double-click a misheard word to fix its spelling: the fix is a `fix` line in `edit.junctur`, shown in the
+Double-click a misheard word, or point at it and press F2, to fix its spelling (F2 with no word under
+the pointer opens Fix text for the words selected): the fix is a `fix` line in `edit.junctur`, shown in the
 transcript, the caption preview and the SRT, and the spelling joins the word list (below). Every other
 place the transcript has the same misheard word (case and punctuation aside) gets the same fix in the
 same save; a line under the panel's header says how many, with Undo those. **Correct**, at the end of
