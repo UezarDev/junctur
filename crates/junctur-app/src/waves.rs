@@ -197,7 +197,7 @@ fn compute(file: &Path, dir: Option<&Path>, shared: &Shared, notify: &Notify) {
     let read = waves::read(file, tracks, duration, &shared.stop, &mut |more| {
         let seconds = {
             let mut w = lock(&shared.waves);
-            w.data.extend_from_slice(more);
+            w.extend(more);
             w.seconds()
         };
         lock(&shared.state).seconds = seconds;

@@ -6,11 +6,11 @@
 pub mod words;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use junctur_core::edit::{
     self, check_name, frame_ranges, frames_ceil, Captions, EditList, Envelope, Fix, Range, Retime,
-    Saved, Spread, Which, WordAt,
+    Saved, Spread, SpreadIndex, Which, WordAt,
 };
 
 use crate::cuts::Fps;
@@ -114,6 +114,10 @@ pub struct Editor {
     /// While the recording transcribes (2j): the words are read up to this many seconds, where
     /// every track is transcribed; `None` reads the finished transcript.
     pub through: Option<f64>,
+    /// What a spread reads of `words` (5aa), kept beside the words it was built from: every fix
+    /// spreads over the same transcript until a piece more of it lands. Weak: words read again
+    /// are not kept alive for it, and a weak pointer is never taken for a later transcript's.
+    spread_index: Option<(Weak<Words>, Arc<SpreadIndex>)>,
 }
 
 impl Editor {
@@ -474,11 +478,20 @@ impl Editor {
     }
 
     /// [`edit::spread`] over the transcript the editor has (none yet: nothing to spread over).
-    fn spread(&self, fixes: &mut Vec<Fix>, which: Which) -> Spread {
-        match &self.words {
-            Some(w) => edit::spread(fixes, &w.in_order(), which),
-            None => Spread::default(),
-        }
+    fn spread(&mut self, fixes: &mut Vec<Fix>, which: Which) -> Spread {
+        let Some(w) = self.words.clone() else {
+            return Spread::default();
+        };
+        let words = w.in_order();
+        let index = match &self.spread_index {
+            Some((of, index)) if Weak::ptr_eq(of, &Arc::downgrade(&w)) => index.clone(),
+            _ => {
+                let index = Arc::new(SpreadIndex::new(&words));
+                self.spread_index = Some((Arc::downgrade(&w), index.clone()));
+                index
+            }
+        };
+        edit::spread_with(fixes, &words, &index, which)
     }
 
     /// Saves `fixes` as the list's, `s` saying what of them a spread added.

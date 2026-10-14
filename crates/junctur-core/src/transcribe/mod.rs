@@ -187,6 +187,82 @@ pub fn so_far(project: &Path) -> Option<Vec<Segment>> {
     Some(segs)
 }
 
+/// [`so_far`] for a reader that asks again as the run appends: only the lines added since its last
+/// read are parsed. What it parsed is checked against the file's start each time (length and hash),
+/// so a partial written afresh (a new run, [`open_partial`]) is read again whole.
+#[derive(Debug, Default)]
+pub struct SoFar {
+    path: std::path::PathBuf,
+    /// Bytes parsed: whole lines, through the last newline read.
+    parsed: usize,
+    hash: u64,
+    /// The parsed chunks in [`sort`]'s order.
+    segs: Vec<Segment>,
+}
+
+impl SoFar {
+    /// What [`so_far`] gives for `project` now.
+    pub fn read(&mut self, project: &Path) -> Option<std::borrow::Cow<'_, [Segment]>> {
+        use std::borrow::Cow;
+        let path = partial_path(project);
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            *self = Self::default();
+            return None;
+        };
+        let same = self.path == path
+            && self.parsed > 0
+            && body.len() >= self.parsed
+            && hash(&body.as_bytes()[..self.parsed]) == self.hash;
+        if !same {
+            *self = Self {
+                path,
+                ..Self::default()
+            };
+            // The header is the first line, and there is no partial without one that reads.
+            let end = body.find('\n').map_or(body.len(), |i| i + 1);
+            serde_json::from_str::<Header>(body[..end].lines().next()?).ok()?;
+            if body[..end].ends_with('\n') {
+                self.parsed = end;
+            }
+        }
+        // Whole lines are kept; a last line without its newline is parsed but read again next time,
+        // as it may still be being written.
+        let rest = &body[self.parsed..];
+        let whole = rest.rfind('\n').map_or(0, |i| i + 1);
+        let new: Vec<Segment> = rest[..whole]
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        if !new.is_empty() {
+            // Stable: the parsed ones, then the new, is the file's order among equal keys.
+            self.segs.extend(new);
+            sort(&mut self.segs);
+        }
+        self.parsed += whole;
+        self.hash = hash(&body.as_bytes()[..self.parsed]);
+        let torn = rest[whole..]
+            .lines()
+            .next()
+            .and_then(|l| serde_json::from_str::<Segment>(l).ok());
+        Some(match torn {
+            Some(seg) => {
+                let mut all = self.segs.clone();
+                all.push(seg);
+                sort(&mut all);
+                Cow::Owned(all)
+            }
+            None => Cow::Borrowed(&self.segs),
+        })
+    }
+}
+
+fn hash(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    h.finish()
+}
+
 /// The finished transcript's order: by start, then track.
 fn sort(segs: &mut [Segment]) {
     segs.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.track.cmp(&b.track)));
@@ -1000,6 +1076,82 @@ mod tests {
             .map(|s| (s.track, s.start))
             .collect();
         assert_eq!(got, vec![(0, 5.0), (1, 5.0), (0, 20.0), (1, 40.0)]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reading_on_as_the_partial_grows_gives_what_reading_it_whole_gives() {
+        let dir = std::env::temp_dir().join(format!("junctur-sofar-on-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // The model tells apart chunks of one track and start, whose order is the file's.
+        let seg = |track, start: f64, model: &str| {
+            serde_json::to_string(&Segment {
+                track,
+                start,
+                end: start + 1.0,
+                lang: "es".into(),
+                model: model.into(),
+                words: vec![],
+            })
+            .unwrap()
+                + "\n"
+        };
+        let head = |model| serde_json::to_string(&header("es+en", model)).unwrap() + "\n";
+        let mut r = SoFar::default();
+        let check = |r: &mut SoFar, body: &str, what: &str| {
+            std::fs::write(partial_path(&dir), body).unwrap();
+            let whole = so_far(&dir);
+            assert_eq!(r.read(&dir).map(|c| c.into_owned()), whole, "{what}");
+            // Asked again with nothing new.
+            assert_eq!(
+                r.read(&dir).map(|c| c.into_owned()),
+                so_far(&dir),
+                "{what}, again"
+            );
+        };
+        assert!(r.read(&dir).is_none(), "no partial");
+        let mut body = head("m");
+        check(&mut r, &body, "a header alone");
+        check(&mut r, body.trim_end(), "a header without its newline");
+        body += &seg(1, 5.0, "a");
+        body += &seg(0, 20.0, "b");
+        check(&mut r, &body, "two chunks");
+        body += &seg(0, 5.0, "c");
+        body += &seg(1, 5.0, "d");
+        check(&mut r, &body, "two more, one starting with one read before");
+        let whole_lines = body.clone();
+        body += r#"{"track":0,"st"#;
+        check(&mut r, &body, "a torn line");
+        body = whole_lines.clone() + seg(2, 1.0, "e").trim_end();
+        check(&mut r, &body, "a last line whole but for its newline");
+        body = whole_lines + &seg(2, 1.0, "e") + &seg(1, 5.0, "f") + "\n" + "junk\n";
+        check(
+            &mut r,
+            &body,
+            "it, finished, then more, a blank line and junk",
+        );
+        // Written afresh by a new run: longer than what was read, a different start.
+        let fresh = head("m2")
+            + &seg(3, 1.0, "g")
+            + &seg(3, 2.0, "h")
+            + &seg(3, 3.0, "i")
+            + &seg(3, 4.0, "j")
+            + &seg(3, 5.0, "k")
+            + &seg(3, 6.0, "l")
+            + &seg(3, 7.0, "n");
+        assert!(fresh.len() > body.len());
+        check(&mut r, &fresh, "a partial written afresh");
+        check(&mut r, &seg(0, 1.0, "x"), "no header");
+        check(&mut r, &head("m"), "a header again");
+        std::fs::write(partial_path(&dir), [0xffu8, b'\n']).unwrap();
+        assert_eq!(
+            r.read(&dir).map(|c| c.into_owned()),
+            so_far(&dir),
+            "not UTF-8"
+        );
+        std::fs::remove_file(partial_path(&dir)).unwrap();
+        assert!(r.read(&dir).is_none(), "gone");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

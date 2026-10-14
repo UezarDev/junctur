@@ -32,12 +32,26 @@ const MAGIC: &[u8; 8] = b"JWAVES1\n";
 /// How much is decoded between two looks at `stop` and two progress calls: 10 s.
 const READ_HOPS: usize = RATE as usize * 10;
 
+/// The smallest block of hops the pyramid keeps a max for: smaller ones are read from the bytes.
+const BLOCK: usize = 8;
+
 /// Every track's peaks so far.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct Waves {
     pub tracks: usize,
-    /// Hop-major: `data[hop * tracks + track]`.
+    /// Hop-major: `data[hop * tracks + track]`. Appended to through [`Waves::extend`], so the
+    /// pyramid follows; hops pushed here directly are read from the bytes.
     pub data: Vec<u8>,
+    /// Each track's max over whole aligned blocks of `BLOCK << level` hops, block-major like
+    /// `data`: a zoomed-out lane reads a column from a few blocks instead of every hop in it.
+    levels: Vec<Vec<u8>>,
+}
+
+/// The peaks are the value: the pyramid is only a faster way to read them.
+impl PartialEq for Waves {
+    fn eq(&self, other: &Self) -> bool {
+        self.tracks == other.tracks && self.data == other.data
+    }
 }
 
 impl Waves {
@@ -45,7 +59,72 @@ impl Waves {
         Self {
             tracks,
             data: Vec::new(),
+            levels: Vec::new(),
         }
+    }
+
+    /// Appends whole hops (hop-major) and the pyramid's blocks they complete.
+    pub fn extend(&mut self, more: &[u8]) {
+        self.data.extend_from_slice(more);
+        self.build();
+    }
+
+    /// Adds every block the hops now complete, level by level.
+    fn build(&mut self) {
+        let t = self.tracks;
+        if t == 0 {
+            return;
+        }
+        let hops = self.hops();
+        let mut level = 0;
+        while hops >= BLOCK << level {
+            if self.levels.len() == level {
+                self.levels.push(Vec::new());
+            }
+            let want = hops / (BLOCK << level);
+            let (below, at) = self.levels.split_at_mut(level);
+            let out = &mut at[0];
+            for b in out.len() / t..want {
+                for k in 0..t {
+                    let peak = match below.last() {
+                        // Each block the max of the two below it.
+                        Some(prev) => prev[2 * b * t + k].max(prev[(2 * b + 1) * t + k]),
+                        None => (b * BLOCK..(b + 1) * BLOCK)
+                            .map(|h| self.data[h * t + k])
+                            .max()
+                            .unwrap_or(0),
+                    };
+                    out.push(peak);
+                }
+            }
+            level += 1;
+        }
+    }
+
+    /// Track `t`'s loudest byte over hops `a..b` (`a < b <= hops`): the largest aligned blocks of
+    /// the pyramid that fit, and single hops where none does.
+    fn peak(&self, t: usize, a: usize, b: usize) -> u8 {
+        let n = self.tracks;
+        let mut peak = 0;
+        let mut h = a;
+        while h < b {
+            let block = (0..self.levels.len()).rev().find(|&l| {
+                let size = BLOCK << l;
+                h.is_multiple_of(size) && h + size <= b && (h / size) < self.levels[l].len() / n
+            });
+            match block {
+                Some(l) => {
+                    let size = BLOCK << l;
+                    peak = peak.max(self.levels[l][(h / size) * n + t]);
+                    h += size;
+                }
+                None => {
+                    peak = peak.max(self.data[h * n + t]);
+                    h += 1;
+                }
+            }
+        }
+        peak
     }
 
     pub fn hops(&self) -> usize {
@@ -81,11 +160,7 @@ impl Waves {
                 break;
             }
             for t in 0..self.tracks {
-                let peak = (a..b)
-                    .map(|h| self.data[h * self.tracks + t])
-                    .max()
-                    .unwrap_or(0);
-                out[t * columns + c] = peak;
+                out[t * columns + c] = self.peak(t, a, b);
             }
         }
         out
@@ -114,10 +189,13 @@ pub fn load(dir: &Path, tracks: usize) -> Option<Waves> {
     }
     let mut data = Vec::new();
     f.read_to_end(&mut data).ok()?;
-    (data.len() % count == 0).then_some(Waves {
-        tracks: count,
-        data,
-    })
+    if data.len() % count != 0 {
+        return None;
+    }
+    let mut w = Waves::new(count);
+    w.data = data;
+    w.build();
+    Some(w)
 }
 
 /// Writes `w` as [`FILE`] in `dir`, atomically (a reader never sees half of it): to a file of its
@@ -248,6 +326,67 @@ mod tests {
         assert_eq!(Waves::new(2).columns(0.0, 1.0, 3), vec![0; 6]);
         assert_eq!(two_tracks().columns(1.0, 1.0, 2), vec![0; 4]);
         assert_eq!(Waves::default().hops(), 0);
+    }
+
+    /// `columns` as it was before the pyramid: every hop of every column read.
+    fn scanned(w: &Waves, from: f64, to: f64, columns: usize) -> Vec<u8> {
+        let flat = Waves {
+            tracks: w.tracks,
+            data: w.data.clone(),
+            levels: Vec::new(),
+        };
+        flat.columns(from, to, columns)
+    }
+
+    #[test]
+    fn the_pyramid_gives_the_columns_every_hop_gives() {
+        // Peaks no pattern lines up with, appended in uneven reads as the decoder hands them over.
+        let mut x: u32 = 12345;
+        let mut next = || {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (x >> 16) as u8
+        };
+        let mut w = Waves::new(3);
+        let mut hops = 0;
+        for read in [1usize, 7, 8, 9, 100, 250, 1000, 3, 4000] {
+            let more: Vec<u8> = (0..read * 3).map(|_| next()).collect();
+            w.extend(&more);
+            hops += read;
+            assert_eq!(w.hops(), hops);
+            let secs = w.seconds();
+            for (from, to, columns) in [
+                (0.0, secs, 1),
+                (0.0, secs, 7),
+                (0.0, secs, 640),
+                (0.013, secs * 0.77, 333),
+                (secs * 0.31, secs * 0.32, 50),
+                (-3.0, secs + 5.0, 999),
+                (0.0, 0.1, 10),
+            ] {
+                assert_eq!(
+                    w.columns(from, to, columns),
+                    scanned(&w, from, to, columns),
+                    "{hops} hops, {from}..{to} over {columns}"
+                );
+            }
+        }
+        assert!(w.levels.len() >= 6, "{} levels", w.levels.len());
+        // Loaded from the folder, the pyramid is built whole, and the file holds the bytes alone.
+        let dir = std::env::temp_dir().join(format!("junctur-waves-pyr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        save(&dir, &w).unwrap();
+        assert_eq!(
+            std::fs::metadata(dir.join(FILE)).unwrap().len() as usize,
+            16 + w.data.len()
+        );
+        let back = load(&dir, 3).unwrap();
+        assert_eq!(back, w);
+        assert_eq!(back.levels, w.levels);
+        assert_eq!(
+            back.columns(0.0, w.seconds(), 800),
+            scanned(&w, 0.0, w.seconds(), 800)
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -255,6 +255,9 @@ pub struct Core {
     /// The open recording's translations (5k) as last read, and the file's size and time then:
     /// read again only when the background run has written it since.
     translations: Mutex<Option<(PathBuf, Stamp, Arc<Translations>)>>,
+    /// The partial transcript as read so far while the recording transcribes (2j): each landed
+    /// piece parses only the chunks added since.
+    so_far: Mutex<transcribe::SoFar>,
 }
 
 /// A file's size and modification time, to tell it was written since.
@@ -319,6 +322,7 @@ impl Player {
             saving: Mutex::new(()),
             caption_defaults: Mutex::new(Captions::default()),
             translations: Mutex::new(None),
+            so_far: Mutex::new(transcribe::SoFar::default()),
             ctl: Mutex::new(Ctl {
                 file: None,
                 edit_path: None,
@@ -1224,7 +1228,7 @@ impl Core {
     /// Reads the transcript and the speech envelope, if not yet in the editor, outside its lock
     /// (a 30 h transcript or envelope is tens of MB) so the watch and other edits are not held up.
     /// While the recording transcribes (2j) the words are the ones so far, up to where every track
-    /// is done ([`Words::load_so_far`]).
+    /// is done ([`Words::so_far`], read on from the last piece by `transcribe::SoFar`).
     fn prepare(&self) {
         let (dir, words, env, through) = {
             let ed = lock(&self.editor);
@@ -1235,7 +1239,11 @@ impl Core {
         };
         let w = words
             .then(|| match through {
-                Some(t) => Some(Words::load_so_far(&dir, t)),
+                Some(t) => {
+                    let mut r = lock(&self.so_far);
+                    let segs = r.read(&dir).unwrap_or_default();
+                    Some(Words::so_far(&segs, t))
+                }
                 None => Words::load(&dir),
             })
             .flatten()

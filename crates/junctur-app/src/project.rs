@@ -2,13 +2,17 @@
 //! (`pipeline::Project::open` with the default cache), with each stage's state and whether the
 //! transcript and edit list exist. The app runs the stages itself in `analysis` (2d).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use junctur_core::ffmpeg;
 use junctur_core::pipeline::{self, Project, StageState, STAGES};
 use junctur_core::transcribe;
 use serde::Serialize;
+
+use crate::lock::lock;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,6 +47,10 @@ pub struct EditSummary {
 /// `None` is the CLI's default cache.
 pub fn status(file: &Path, cache_dir: Option<PathBuf>) -> Result<ProjectStatus, String> {
     let p = Project::open(file, cache_dir, None).map_err(|e| e.to_string())?;
+    Ok(status_of(&p))
+}
+
+fn status_of(p: &Project) -> ProjectStatus {
     let jobs = p.jobs();
     let stages = STAGES
         .iter()
@@ -52,28 +60,56 @@ pub fn status(file: &Path, cache_dir: Option<PathBuf>) -> Result<ProjectStatus, 
         })
         .collect();
     let (edit, edit_error) = if p.edit_path().is_file() {
-        match p.edit() {
-            Ok(e) => (
-                Some(EditSummary {
-                    ranges: e.keep.len(),
-                    kept: e.kept(),
-                    duration: e.duration,
-                }),
-                None,
-            ),
-            Err(e) => (None, Some(e.to_string())),
+        match summary(p) {
+            Ok(e) => (Some(e), None),
+            Err(e) => (None, Some(e)),
         }
     } else {
         (None, None)
     };
-    Ok(ProjectStatus {
+    ProjectStatus {
         dir: p.dir.display().to_string(),
         stages,
         transcript: transcribe::path(&p.dir).is_file(),
         edit,
         edit_error,
         edit_path: p.edit_path(),
-    })
+    }
+}
+
+/// Each edit list's text as last parsed here and what it said: the status is read on every line a
+/// run logs, and parsing a long recording's list each time is the cost, not reading it.
+type Parsed = HashMap<PathBuf, (String, Result<EditSummary, String>)>;
+static PARSED: Mutex<Option<Parsed>> = Mutex::new(None);
+/// More lists than a session opens: past it the cache starts over rather than grow.
+const PARSED_MAX: usize = 64;
+
+/// `p`'s edit list summed up, or why it does not read, as `p.edit()` says it; parsed again only when
+/// its text is not the text parsed last.
+fn summary(p: &Project) -> Result<EditSummary, String> {
+    let path = p.edit_path();
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| junctur_core::Error::from(e).to_string())?;
+    if let Some((t, s)) = lock(&PARSED).as_ref().and_then(|m| m.get(&path)) {
+        if *t == text {
+            return s.clone();
+        }
+    }
+    let s = p
+        .parse_edit(&text)
+        .map(|e| EditSummary {
+            ranges: e.keep.len(),
+            kept: e.kept(),
+            duration: e.duration,
+        })
+        .map_err(|e| e.to_string());
+    let mut held = lock(&PARSED);
+    let m = held.get_or_insert_with(HashMap::new);
+    if m.len() >= PARSED_MAX && !m.contains_key(&path) {
+        m.clear();
+    }
+    m.insert(path, (text, s.clone()));
+    s
 }
 
 /// A recent recording's line on the start window (2g's S): how long it is and where its analysis
@@ -92,7 +128,8 @@ pub struct RecordingInfo {
 /// [`RecordingInfo`] of `file`: its length from the edit list, else the track analysis's cache,
 /// else ffprobe (only for a recording never analysed this far).
 pub fn info(file: &Path, cache_dir: Option<PathBuf>) -> Result<RecordingInfo, String> {
-    let s = status(file, cache_dir.clone())?;
+    let p = Project::open(file, cache_dir, None).map_err(|e| e.to_string())?;
+    let s = status_of(&p);
     let done = s
         .stages
         .iter()
@@ -100,9 +137,7 @@ pub fn info(file: &Path, cache_dir: Option<PathBuf>) -> Result<RecordingInfo, St
         .count();
     let duration = match &s.edit {
         Some(e) => Some(e.duration),
-        None => Project::open(file, cache_dir, None)
-            .ok()
-            .and_then(|p| pipeline::cached_tracks(&p))
+        None => pipeline::cached_tracks(&p)
             .map(|r| r.duration)
             .or_else(|| ffmpeg::probe(file).ok().map(|p| p.duration)),
     };
@@ -223,6 +258,66 @@ mod tests {
         std::fs::write(p.edit_path(), "garbage").unwrap();
         let s = status(&file, Some(d.join("cache"))).unwrap();
         assert_eq!(s.edit, None);
+        assert!(s.edit_error.is_some());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_kept_parse_says_what_parsing_the_list_again_says() {
+        let d = scratch("parsed");
+        let file = d.join("rec.mp4");
+        std::fs::write(&file, b"not a video").unwrap();
+        let p = Project::open(&file, Some(d.join("cache")), None).unwrap();
+        let list = |ends: &[f64]| EditList {
+            source: p.file.clone(),
+            duration: 90.0,
+            settings: CutSettings::default(),
+            keep: ends
+                .iter()
+                .map(|&end| Range {
+                    start: end - 5.0,
+                    end,
+                })
+                .collect(),
+            speakers: Default::default(),
+            captions: Default::default(),
+            fixes: Vec::new(),
+            times: Vec::new(),
+            windows: vec![],
+        };
+        // What the status said before the parse was kept: the list read and parsed afresh.
+        let afresh = || match p.edit() {
+            Ok(e) => (
+                Some(EditSummary {
+                    ranges: e.keep.len(),
+                    kept: e.kept(),
+                    duration: e.duration,
+                }),
+                None,
+            ),
+            Err(e) => (None, Some(e.to_string())),
+        };
+        let texts = [
+            list(&[10.0, 30.0]).to_text(),
+            list(&[10.0, 30.0]).to_text(),
+            // One digit apart: the same length, another summary.
+            list(&[10.0, 40.0]).to_text(),
+            "garbage".to_string(),
+            "junctur-edit 999\n".to_string(),
+            list(&[10.0, 30.0, 50.0]).to_text(),
+            list(&[10.0, 30.0]).to_text(),
+        ];
+        for text in &texts {
+            std::fs::write(p.edit_path(), text).unwrap();
+            for _ in 0..2 {
+                let s = status(&file, Some(d.join("cache"))).unwrap();
+                assert_eq!((s.edit, s.edit_error), afresh(), "{text}");
+            }
+        }
+        // Not UTF-8: refused as reading it refuses it.
+        std::fs::write(p.edit_path(), [0xff, 0xfe, 0x00]).unwrap();
+        let s = status(&file, Some(d.join("cache"))).unwrap();
+        assert_eq!((s.edit, s.edit_error.clone()), afresh());
         assert!(s.edit_error.is_some());
         let _ = std::fs::remove_dir_all(&d);
     }

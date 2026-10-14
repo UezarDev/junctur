@@ -1,7 +1,9 @@
 //! The commands the frontend invokes. Thin: each forwards to the player or the project.
 //!
 //! The player's commands are `async` so Tauri runs them on its async runtime rather than the main
-//! thread: an mpv command blocks until mpv takes it, and a dragged seek bar sends many.
+//! thread: an mpv command blocks until mpv takes it, and a dragged seek bar sends many. Work that
+//! reads or cuts a whole recording goes on to a blocking thread ([`blocking`]), so it never holds one
+//! of the runtime's few workers.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -168,6 +170,16 @@ pub struct Opened {
     pub outdated: Vec<String>,
 }
 
+/// Runs `f` on the async runtime's blocking threads: its result as it is, and a panic in it as the
+/// join error's text.
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Whether the page has had the command line's file (2q).
 static STARTUP_TAKEN: AtomicBool = AtomicBool::new(false);
 
@@ -198,11 +210,12 @@ pub async fn player_state(app: State<'_, App>) -> Result<PlayerState, String> {
 /// no edit list is analysed in the background while it plays (2d); an analysed one is not, but says
 /// when the settings moved since.
 #[tauri::command]
-pub async fn open_file(
-    handle: AppHandle,
-    app: State<'_, App>,
-    path: String,
-) -> Result<Opened, String> {
+pub async fn open_file(handle: AppHandle, path: String) -> Result<Opened, String> {
+    blocking(move || open(&handle, &handle.state::<App>(), path)).await
+}
+
+/// [`open_file`]'s work: the project's status, the player's load and the waveforms' start.
+fn open(handle: &AppHandle, app: &App, path: String) -> Result<Opened, String> {
     let file = Path::new(&path);
     let status = project::status(file, None);
     let edit_path = status.as_ref().ok().map(|s| s.edit_path.clone());
@@ -230,7 +243,7 @@ pub async fn open_file(
             // The file plays even when its analysis cannot start; the panel says why.
             analysis = Some(
                 app.analysis
-                    .start(file, notifier(handle))
+                    .start(file, notifier(handle.clone()))
                     .unwrap_or_else(|e| app.analysis.failed(file, e)),
             );
         } else if !app.analysis.busy(file) {
@@ -456,7 +469,8 @@ pub async fn set_muted(app: State<'_, App>, track: usize, muted: bool) -> Result
 /// player lock: a 30 h transcript takes a moment to parse the first time.
 #[tauri::command]
 pub async fn transcript(app: State<'_, App>) -> Result<Option<TranscriptView>, String> {
-    Ok(app.core()?.transcript())
+    let core = app.core()?;
+    blocking(move || Ok(core.transcript())).await
 }
 
 /// Cuts (`keep` false) or keeps every run of transcript words in `runs` (`[first, last]` each),
@@ -669,7 +683,8 @@ pub struct Exported {
 /// Writes the captions as one SRT to `path`, people talking at once stacked in one caption.
 #[tauri::command]
 pub async fn export_captions(app: State<'_, App>, path: String) -> Result<Exported, String> {
-    let f = app.core()?.export_captions(Path::new(&path))?;
+    let core = app.core()?;
+    let f = blocking(move || core.export_captions(Path::new(&path))).await?;
     Ok(Exported {
         cues: f.cues,
         stale: f.stale.iter().map(|p| p.display().to_string()).collect(),
@@ -681,7 +696,8 @@ pub async fn export_captions(app: State<'_, App>, path: String) -> Result<Export
 /// preview's picture, `aspect` its height over its width.
 #[tauri::command]
 pub async fn caption_cues(app: State<'_, App>, aspect: f64) -> Result<Vec<Placed>, String> {
-    app.core()?.caption_cues(aspect)
+    let core = app.core()?;
+    blocking(move || core.caption_cues(aspect)).await
 }
 
 /// Sends the edit into DaVinci Resolve as a timeline of its own with the captions on it as Text+
@@ -787,7 +803,7 @@ pub async fn enroll_voice(
     name: String,
 ) -> Result<String, String> {
     let e = app.editable()?;
-    e.enroll_voice(e.file(), &runs, &name)
+    blocking(move || e.enroll_voice(e.file(), &runs, &name)).await
 }
 
 /// Hears the open recording's speakers again from the audio, cut at the seconds pinned to people
@@ -868,15 +884,19 @@ pub async fn waves_state(app: State<'_, App>) -> Result<Option<WavesState>, Stri
 /// read, where a JSON array of numbers would be several times the size and parsed each time.
 #[tauri::command]
 pub async fn waves(
-    app: State<'_, App>,
+    handle: AppHandle,
     from: f64,
     to: f64,
     columns: usize,
 ) -> Result<tauri::ipc::Response, String> {
-    let bytes = app
-        .waves
-        .columns(from, to, columns)
-        .map_or_else(Vec::new, |v| v.bytes());
+    let bytes = blocking(move || {
+        Ok(handle
+            .state::<App>()
+            .waves
+            .columns(from, to, columns)
+            .map_or_else(Vec::new, |v| v.bytes()))
+    })
+    .await?;
     Ok(tauri::ipc::Response::new(bytes))
 }
 

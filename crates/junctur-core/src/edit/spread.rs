@@ -45,18 +45,24 @@ struct Heard<'a> {
     at: WordAt,
     key: (i64, usize),
     text: &'a str,
-    like: String,
+    like: &'a str,
     start: f64,
     end: f64,
 }
 
+/// Each word's [`likeness`], in the stream's order.
+fn likes(words: &[(usize, &Word)]) -> Vec<String> {
+    words.iter().map(|(_, w)| likeness(&w.text)).collect()
+}
+
 /// The words in [`Fixes`]' order with each one's place in its millisecond (`nth`), counted per track
-/// as [`Fixes::of`] counts it.
-fn read<'a>(words: &[(usize, &'a Word)]) -> Vec<Heard<'a>> {
+/// as [`Fixes::of`] counts it; `likes` is [`likes`] of them.
+fn read<'a>(words: &[(usize, &'a Word)], likes: &'a [String]) -> Vec<Heard<'a>> {
     let mut seen: HashMap<usize, (i64, usize)> = HashMap::new();
     words
         .iter()
-        .map(|&(track, w)| {
+        .zip(likes)
+        .map(|(&(track, w), like)| {
             let ms = (w.start * 1000.0).round() as i64;
             let s = seen.entry(track).or_insert((ms, 0));
             if s.0 == ms {
@@ -73,7 +79,7 @@ fn read<'a>(words: &[(usize, &'a Word)]) -> Vec<Heard<'a>> {
                 },
                 key: (ms, nth),
                 text: w.text.trim(),
-                like: likeness(&w.text),
+                like,
                 start: w.start,
                 end: w.end,
             }
@@ -89,11 +95,61 @@ fn covered(fixes: &[Fix], words: &[(usize, &Word)]) -> Vec<bool> {
 
 /// Per track, the stream's places of its words, in time order.
 fn by_track(heard: &[Heard]) -> HashMap<usize, Vec<usize>> {
+    tracks_of(heard.iter().map(|h| h.track))
+}
+
+/// [`by_track`] of the words' tracks, in the stream's order.
+fn tracks_of(tracks: impl Iterator<Item = usize>) -> HashMap<usize, Vec<usize>> {
     let mut out: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (i, h) in heard.iter().enumerate() {
-        out.entry(h.track).or_default().push(i);
+    for (i, t) in tracks.enumerate() {
+        out.entry(t).or_default().push(i);
     }
     out
+}
+
+/// What [`spread`] reads of a transcript that the fixes do not change: each word's likeness, its
+/// track's words, its place among them and where each likeness is heard. Built once per transcript
+/// ([`SpreadIndex::new`]) by a caller that spreads fix after fix over the same words.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SpreadIndex {
+    likes: Vec<String>,
+    tracks: HashMap<usize, Vec<usize>>,
+    place: Vec<usize>,
+    starts: HashMap<String, Vec<usize>>,
+}
+
+impl SpreadIndex {
+    /// The index of `words`, the transcript in [`Fixes`]' order.
+    pub fn new(words: &[(usize, &Word)]) -> Self {
+        let likes = likes(words);
+        let tracks = tracks_of(words.iter().map(|&(t, _)| t));
+        // Each word's place in its track's list, to read the words after it.
+        let mut place = vec![0usize; words.len()];
+        for on in tracks.values() {
+            for (k, &i) in on.iter().enumerate() {
+                place[i] = k;
+            }
+        }
+        // Where each likeness is heard, for the first word of a run.
+        let mut starts: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, l) in likes.iter().enumerate() {
+            if !l.is_empty() {
+                starts.entry(l.clone()).or_default().push(i);
+            }
+        }
+        Self {
+            likes,
+            tracks,
+            place,
+            starts,
+        }
+    }
+
+    /// Whether this can be the index of `words`: as many words. Which words is the caller's to
+    /// keep (the app keeps the index beside the words it was built from).
+    fn fits(&self, words: &[(usize, &Word)]) -> bool {
+        self.likes.len() == words.len() && self.place.len() == words.len()
+    }
 }
 
 /// The stream's places of the words `f` names, on its track: one for a word fix, its words for a span.
@@ -175,13 +231,30 @@ pub struct Spread {
 /// "so" made "so," is not a mishearing), a fix whose words are gone, and (with [`Which::All`]) a heard
 /// text two fixes disagree on, which comes back as [`Spread::unclear`]. Kept in the list's order.
 pub fn spread(fixes: &mut Vec<Fix>, words: &[(usize, &Word)], which: Which) -> Spread {
+    if fixes.is_empty() || words.is_empty() {
+        return Spread::default();
+    }
+    spread_with(fixes, words, &SpreadIndex::new(words), which)
+}
+
+/// [`spread`] with `index`, which must be [`SpreadIndex::new`] of these `words` (one of another
+/// length is not used: the index is built again).
+pub fn spread_with(
+    fixes: &mut Vec<Fix>,
+    words: &[(usize, &Word)],
+    index: &SpreadIndex,
+    which: Which,
+) -> Spread {
     let mut out = Spread::default();
     if fixes.is_empty() || words.is_empty() {
         return out;
     }
+    if !index.fits(words) {
+        return spread(fixes, words, which);
+    }
     let mut added: Vec<(Fix, String)> = Vec::new();
-    let heard = read(words);
-    let tracks = by_track(&heard);
+    let heard = read(words, &index.likes);
+    let tracks = &index.tracks;
     let mut taken = covered(fixes, words);
     let sources: Vec<&Fix> = match which {
         Which::All => fixes.iter().collect(),
@@ -199,11 +272,11 @@ pub fn spread(fixes: &mut Vec<Fix>, words: &[(usize, &Word)], which: Which) -> S
     // Each heard run (its words' likenesses) and what it becomes; `None` once two fixes disagree.
     let mut rules: Vec<(Vec<String>, Option<Text>)> = Vec::new();
     for f in sources {
-        let at = words_of(f, &heard, &tracks);
+        let at = words_of(f, &heard, tracks);
         if at.is_empty() {
             continue;
         }
-        let like: Vec<String> = at.iter().map(|&i| heard[i].like.clone()).collect();
+        let like: Vec<String> = at.iter().map(|&i| heard[i].like.to_string()).collect();
         if like.iter().all(String::is_empty) {
             continue;
         }
@@ -231,20 +304,7 @@ pub fn spread(fixes: &mut Vec<Fix>, words: &[(usize, &Word)], which: Which) -> S
             None => rules.push((like, Some(text))),
         }
     }
-    // Where each likeness is heard, for the first word of a run.
-    let mut starts: HashMap<&str, Vec<usize>> = HashMap::new();
-    for (i, h) in heard.iter().enumerate() {
-        if !h.like.is_empty() {
-            starts.entry(h.like.as_str()).or_default().push(i);
-        }
-    }
-    // Each word's place in its track's list, to read the words after it.
-    let mut place = vec![0usize; heard.len()];
-    for on in tracks.values() {
-        for (k, &i) in on.iter().enumerate() {
-            place[i] = k;
-        }
-    }
+    let (starts, place) = (&index.starts, &index.place);
     for (like, text) in &rules {
         let Some(text) = text else {
             out.unclear.push(like.join(" "));
@@ -366,7 +426,8 @@ pub struct Carried {
 /// is not taken: it shows on nothing now, or it was made on the new words while they came in (2j: the
 /// editor shows a re-transcription's words as they come), and [`carry`] leaves it as it is.
 pub fn snapshot(fixes: &[Fix], words: &[(usize, &Word)]) -> Vec<Carried> {
-    let heard = read(words);
+    let likes = likes(words);
+    let heard = read(words, &likes);
     let tracks = by_track(&heard);
     fixes
         .iter()
@@ -419,7 +480,8 @@ pub struct CarryReport {
 /// moves nothing: that run heard nothing, and the caller says so.
 pub fn carry(fixes: &mut Vec<Fix>, carried: &[Carried], words: &[(usize, &Word)]) -> CarryReport {
     let mut report = CarryReport::default();
-    let heard = read(words);
+    let likes = likes(words);
+    let heard = read(words, &likes);
     if heard.is_empty() {
         return report;
     }
@@ -465,7 +527,7 @@ pub fn carry(fixes: &mut Vec<Fix>, carried: &[Carried], words: &[(usize, &Word)]
                     !taken[i]
                         && h.end >= c.from - NEAR
                         && h.start <= c.to + NEAR
-                        && likes.contains(&h.like)
+                        && likes.contains(h.like)
                 })
                 .min_by(|&a, &b| {
                     (heard[a].start - c.from)
@@ -616,7 +678,8 @@ pub fn snapshot_times(
         .map(|t| ((t.track, fixes::millis(t.start), t.nth), t))
         .collect();
     let mut by = Fixes::new(fixes);
-    read(words)
+    let likes = likes(words);
+    read(words, &likes)
         .iter()
         .zip(words)
         .filter_map(|(h, &(track, w))| {
@@ -663,7 +726,8 @@ pub fn carry_times(
     words: &[(usize, &Word)],
 ) -> TimesReport {
     let mut report = TimesReport::default();
-    let heard = read(words);
+    let likes = likes(words);
+    let heard = read(words, &likes);
     if heard.is_empty() {
         return report;
     }
@@ -695,7 +759,7 @@ pub fn carry_times(
         let best = on[a..b.max(a)]
             .iter()
             .copied()
-            .filter(|&i| !taken.contains(&key(&heard[i])) && likes.contains(&heard[i].like))
+            .filter(|&i| !taken.contains(&key(&heard[i])) && likes.contains(heard[i].like))
             .min_by(|&x, &y| {
                 (heard[x].start - c.start)
                     .abs()
@@ -864,6 +928,55 @@ mod tests {
         f[1].text = "bane".into();
         assert_eq!(spread(&mut f, &refs(&ws), Which::All), Spread::default());
         assert_eq!(shown(&f, &ws), ["Vayne,", "is", "bane", "Bane.", "Baneful"]);
+    }
+
+    #[test]
+    fn one_index_kept_for_fix_after_fix_spreads_as_a_fresh_one_does() {
+        let mut ws = banes();
+        ws.extend([
+            (1, word(6.0, " so")),
+            (1, word(6.0, " Bane")),
+            (0, word(7.0, " big")),
+            (0, word(7.5, " bane")),
+            (1, word(8.0, " big")),
+            (1, word(8.5, " Bane!")),
+            (0, word(9.0, "")),
+        ]);
+        let words = refs(&ws);
+        let index = SpreadIndex::new(&words);
+        assert_eq!(index, SpreadIndex::new(&words), "built the same each time");
+        let one = |track, start, nth| Which::Words {
+            track,
+            first: at(start, nth),
+            last: at(start, nth),
+        };
+        let steps = [
+            (fix(0, 1.0, "Vayne,"), one(0, 1.0, 0)),
+            (fix(0, 7.0, "pig"), one(0, 7.0, 0)),
+            (fix(0, 4.0, "Painful"), one(0, 4.0, 0)),
+            (fix(0, 1.5, "is"), Which::All),
+        ];
+        let (mut fresh, mut kept) = (Vec::new(), Vec::new());
+        for (f, which) in steps {
+            fresh.push(f.clone());
+            kept.push(f);
+            fixes::sort(&mut fresh);
+            fixes::sort(&mut kept);
+            let a = spread(&mut fresh, &words, which);
+            let b = spread_with(&mut kept, &words, &index, which);
+            assert_eq!(a, b);
+            assert_eq!(fresh, kept);
+        }
+        assert!(fresh.len() > 4, "the fixes spread: {fresh:?}");
+        // An index of other words (fewer of them) is not used.
+        let fewer = refs(&ws[..3]);
+        let mut f = vec![fix(0, 1.0, "Vayne,")];
+        let mut g = f.clone();
+        assert_eq!(
+            spread_with(&mut f, &fewer, &index, Which::All),
+            spread(&mut g, &fewer, Which::All)
+        );
+        assert_eq!(f, g);
     }
 
     #[test]

@@ -76,10 +76,19 @@ impl Words {
     /// so the next read only adds words at the end and the indices the page holds stay valid. With
     /// no run's chunks yet, none: never the `transcript.json` of an earlier run, whose words the
     /// new ones would replace under those indices (2j repair). The run's end reads the finished
-    /// transcript ([`Self::load`]).
+    /// transcript ([`Self::load`]). The player reads the partial through `transcribe::SoFar`
+    /// instead ([`Self::so_far`]).
+    #[cfg(test)]
     pub fn load_so_far(project_dir: &Path, through: f64) -> Self {
-        let segs = transcribe::so_far(project_dir).unwrap_or_default();
-        let mut w = Self::from_segments(&segs);
+        Self::so_far(
+            &transcribe::so_far(project_dir).unwrap_or_default(),
+            through,
+        )
+    }
+
+    /// [`Self::load_so_far`] from the partial's chunks as read (`transcribe::SoFar`).
+    pub fn so_far(segs: &[transcribe::Segment], through: f64) -> Self {
+        let mut w = Self::from_segments(segs);
         let n = w.list.partition_point(|x| x.start < through);
         w.list.truncate(n);
         w.tracks.truncate(n);

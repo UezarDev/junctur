@@ -203,8 +203,12 @@ impl Project {
     }
 
     pub fn edit(&self) -> Result<EditList> {
-        let text = std::fs::read_to_string(self.edit_path())?;
-        edit::parse(&text).map_err(|e| Error::Edit(format!("{}: {e}", self.edit_path().display())))
+        self.parse_edit(&std::fs::read_to_string(self.edit_path())?)
+    }
+
+    /// `text` read as this project's edit list, refused as [`Self::edit`] refuses it.
+    pub fn parse_edit(&self, text: &str) -> Result<EditList> {
+        edit::parse(text).map_err(|e| Error::Edit(format!("{}: {e}", self.edit_path().display())))
     }
 }
 
