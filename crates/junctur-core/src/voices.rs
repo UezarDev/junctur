@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::diarize::{normalize, EMBEDDINGS_MARK};
-use crate::edit::{check_name, default_color, parse_color};
+use crate::edit::{check_name, default_color, parse_color, PALETTE_SIZE};
 use crate::{models, Error, Result};
 
 /// Names the voices file instead of the default one (tests and the app's test mode).
@@ -16,6 +16,13 @@ pub const ENV: &str = "JUNCTUR_VOICES";
 /// Under this much speech a voiceprint is rough: the app and the CLI say so. Not a floor: the
 /// seconds picked are also pinned to the person in that recording, which holds however rough.
 pub const SHORT_SECONDS: f64 = 3.0;
+/// A sample's least weight in seconds, so even an empty one counts.
+const MIN_SAMPLE_S: f64 = 0.01;
+/// Degrees between generated hues: the golden angle, so no two come close however many there are.
+const GOLDEN_ANGLE: f64 = 137.508;
+/// The generated colours' HSL saturation and lightness: bright enough on dark video.
+const SATURATION: f64 = 0.65;
+const LIGHTNESS: f64 = 0.62;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Voice {
@@ -145,7 +152,7 @@ impl Voices {
             )));
         }
         // A zero-length sample would weigh nothing against a voice built from more.
-        let seconds = seconds.max(0.01);
+        let seconds = seconds.max(MIN_SAMPLE_S);
         let print = voiceprint(embeddings);
         let model = print_model();
         let i = match self.find(&name) {
@@ -175,7 +182,7 @@ impl Voices {
             None => {
                 let taken = |c: &str| self.voices.iter().any(|v| v.color.eq_ignore_ascii_case(c));
                 // One pass over the palette; past it (a ninth person), a colour of their own.
-                let color = (1..=8)
+                let color = (1..=PALETTE_SIZE)
                     .map(default_color)
                     .find(|c| !taken(c))
                     .unwrap_or_else(|| {
@@ -238,8 +245,8 @@ impl Voices {
 /// The `n`th of an endless run of distinct bright colours (golden-angle hues), for people past
 /// the palette.
 fn generated_color(n: usize) -> String {
-    let h = (n as f64 * 137.508) % 360.0;
-    let (s, l) = (0.65, 0.62);
+    let h = (n as f64 * GOLDEN_ANGLE) % 360.0;
+    let (s, l) = (SATURATION, LIGHTNESS);
     let c = (1.0 - (2.0 * l - 1.0f64).abs()) * s;
     let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
     let (r, g, b) = match (h / 60.0) as u32 {

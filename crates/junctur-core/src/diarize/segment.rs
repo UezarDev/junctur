@@ -30,6 +30,11 @@ const MIN_OVERLAP_S: f64 = 0.2;
 const PAIR_P: f32 = 0.2;
 /// Gaps shorter than this inside one pair's stretch are bridged (a syllable's dip).
 const BRIDGE_S: f64 = 0.3;
+/// The powerset classes: 0 none, 1-3 one local speaker, then the pairs 1+2, 1+3, 2+3.
+const CLASSES: usize = 7;
+const FIRST_PAIR: u8 = 4;
+/// A speaker's solo runs bridge gaps under this many frames.
+const SOLO_BRIDGE_FRAMES: f64 = 1.5;
 
 /// A stretch where two local speakers of one window talk at once, with where each of them talks
 /// alone in that window (source seconds), the evidence for who they are.
@@ -69,7 +74,7 @@ impl Segmenter {
         let x = Tensor::from_array(([clips.len(), 1, len], flat))?;
         let res = self.session.run(ort::inputs!["x" => x])?;
         let (shape, y) = res["y"].try_extract_tensor::<f32>()?;
-        let classes = *shape.last().unwrap_or(&7) as usize;
+        let classes = *shape.last().unwrap_or(&(CLASSES as i64)) as usize;
         let frames = y.len() / clips.len() / classes.max(1);
         Ok(y.chunks_exact(frames * classes)
             .map(|w| {
@@ -82,12 +87,13 @@ impl Segmenter {
                         };
                         // The output is log-probabilities: a frame is two people at once when
                         // the pairs together are likely enough, even if one single class wins.
-                        let pairs: f32 = f.iter().skip(4).map(|x| x.exp()).sum();
+                        let first_pair = FIRST_PAIR as usize;
+                        let pairs: f32 = f.iter().skip(first_pair).map(|x| x.exp()).sum();
                         // Under it, nobody or one person: never a pair that won narrowly.
-                        if f.len() == 7 && pairs >= PAIR_P {
-                            best(4..7)
+                        if f.len() == CLASSES && pairs >= PAIR_P {
+                            best(first_pair..CLASSES)
                         } else {
-                            best(0..f.len().min(4))
+                            best(0..f.len().min(first_pair))
                         }
                     })
                     .collect()
@@ -173,9 +179,13 @@ pub fn overlaps(k: usize, classes: &[u8]) -> Vec<Overlap> {
     let start = k as f64 * STEP_S;
     let (lo, hi) = decides(k);
     let mut out = Vec::new();
-    for class in 4..=6u8 {
+    for class in FIRST_PAIR..CLASSES as u8 {
         let (a, b) = pair(class).expect("a pair class");
-        let alone = |who: u8| runs(start, classes, frame_len() * 1.5, |c| c == who + 1);
+        let alone = |who: u8| {
+            runs(start, classes, frame_len() * SOLO_BRIDGE_FRAMES, |c| {
+                c == who + 1
+            })
+        };
         let mut solo: Option<(Spans, Spans)> = None;
         for [s, e] in runs(start, classes, BRIDGE_S, |c| c == class) {
             // Only the part this window decides; another window decides the rest.

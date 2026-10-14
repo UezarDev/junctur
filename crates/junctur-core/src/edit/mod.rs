@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 pub use caption_text::{Case, CensorStyle, Replace};
 pub use captions::{
     default_color, parse_color, title_name, Animation, Captions, ExistingClips, Layout, TextStyle,
+    PALETTE_SIZE,
 };
 pub use carry::{
     carry, carry_times, snapshot, snapshot_times, Carried, CarriedTime, CarryReport, TimesReport,

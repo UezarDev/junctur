@@ -232,7 +232,7 @@ pub fn speech_regions(audio: &Path, cache_dir: &Path) -> Result<Vec<Region>> {
     let mut reader = PcmReader::open(audio, 0, vad::RATE, 1, Span::default())?;
     let mut probs = Vec::new();
     loop {
-        let x = reader.read(vad::RATE as usize * 60)?;
+        let x = reader.read(vad::MINUTE)?;
         if x.is_empty() {
             break;
         }

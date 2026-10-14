@@ -361,8 +361,11 @@ pub fn parse_color(s: &str) -> Option<String> {
         .then(|| format!("#{}", hex.to_ascii_uppercase()))
 }
 
+/// Colours in [`default_color`]'s palette.
+pub const PALETTE_SIZE: u32 = 8;
+
 /// A colour per speaker until the user picks one: distinct on dark video and on each other.
-const PALETTE: [&str; 8] = [
+const PALETTE: [&str; PALETTE_SIZE as usize] = [
     "#F2B33D", "#5FB3F2", "#8BD17C", "#E58BD8", "#F28B5F", "#7FD8D0", "#C9A3F2", "#D8D36F",
 ];
 

@@ -33,7 +33,7 @@ impl Speech {
 }
 
 /// 60 s = 1875 whole VAD frames, so frames never straddle reads.
-const READ: usize = vad::RATE as usize * 60;
+const READ: usize = vad::MINUTE;
 const HOP: usize = (vad::RATE as f64 * ENVELOPE_HOP) as usize;
 
 /// Speech regions on each of `tracks` and the loudest-track envelope. Each track runs on a thread

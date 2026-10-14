@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ffmpeg::PcmReader;
 use crate::runtime;
-use crate::vad::{Region, RATE};
+use crate::vad::{Region, MINUTE, RATE};
 use crate::Result;
 
 pub use cluster::{
@@ -224,7 +224,7 @@ impl<'a, R: Samples> Clips<'a, R> {
         }
         // Only an empty buffer can lie wholly before `a`, and it is compacted above.
         while self.start + self.head < a {
-            let n = (a - self.start - self.head).min(RATE as usize * 60);
+            let n = (a - self.start - self.head).min(MINUTE);
             self.reader.read_into(&mut self.scratch, n)?;
             if self.scratch.is_empty() {
                 break;
@@ -509,7 +509,7 @@ mod tests {
         buf.drain(..drop);
         *buf_start += drop;
         while *buf_start < a {
-            let skip = read(r, (a - *buf_start).min(RATE as usize * 60));
+            let skip = read(r, (a - *buf_start).min(MINUTE));
             if skip.is_empty() {
                 break;
             }

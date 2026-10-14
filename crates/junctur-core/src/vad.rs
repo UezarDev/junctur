@@ -13,6 +13,8 @@ use crate::runtime;
 use crate::Result;
 
 pub const RATE: u32 = 16_000;
+/// A minute of samples: a whole number of frames, so reads of it never split one.
+pub const MINUTE: usize = RATE as usize * 60;
 pub const FRAME: usize = 512;
 const CONTEXT: usize = 64;
 pub const FRAME_SECONDS: f64 = FRAME as f64 / RATE as f64;

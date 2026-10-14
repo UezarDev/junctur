@@ -26,6 +26,19 @@ pub const SPEECH_MIN: f64 = 0.05;
 pub const FAINT_SPEECH_MIN: f64 = 0.1;
 /// Non-speech time at least this quiet means nothing else plays under the voice.
 pub const QUIET_GAPS: f64 = 0.6;
+/// Without speech detection, a track near-silent this share of the time is intermittent, like a
+/// voice.
+const INTERMITTENT: f64 = 0.3;
+
+/// How sure each decision is, from a silent track (it cannot be anything else) down to a faint
+/// one with nothing to go on.
+const SURE: f64 = 0.99;
+const STRONG: f64 = 0.8;
+const GOOD: f64 = 0.75;
+const FAIR: f64 = 0.6;
+const EVEN: f64 = 0.5;
+const WEAK: f64 = 0.4;
+const POOR: f64 = 0.3;
 
 /// Speech stats from VAD probabilities and the un-normalised samples they came from.
 pub fn measure(probs: &[f32], samples: &[f32]) -> Speech {
@@ -68,7 +81,7 @@ pub fn decide(a: &Activity, speech: Option<Speech>, cx: &Context) -> (Role, f64,
     if a.silent {
         return (
             Role::Silent,
-            0.99,
+            SURE,
             format!("silent: loudest frame {:.0} dB", a.peak_db),
         );
     }
@@ -80,7 +93,7 @@ pub fn decide(a: &Activity, speech: Option<Speech>, cx: &Context) -> (Role, f64,
         if let Some(s) = speech {
             why += &format!(", speech {:.0}%", pct(s.share));
         }
-        return (Role::Mix, 0.8, why);
+        return (Role::Mix, STRONG, why);
     }
     match (speech, cx.faint) {
         (s, true) => faint(a, s),
@@ -98,7 +111,7 @@ fn faint(a: &Activity, speech: Option<Speech>) -> (Role, f64, String) {
     match speech {
         None => (
             Role::Unknown,
-            0.3,
+            POOR,
             format!(
                 "faint: mean {:.0} dB, near-silent {:.0}% of the time; a low-level source \
                  (PC or Discord audio turned down, or bleed), not enough to tell which",
@@ -108,7 +121,7 @@ fn faint(a: &Activity, speech: Option<Speech>) -> (Role, f64, String) {
         ),
         Some(s) if s.share >= FAINT_SPEECH_MIN => (
             Role::Voice,
-            0.6,
+            FAIR,
             format!(
                 "faint (mean {:.0} dB) but carries speech {:.0}% of the time: likely Discord \
                  turned down, or mic bleed",
@@ -118,7 +131,7 @@ fn faint(a: &Activity, speech: Option<Speech>) -> (Role, f64, String) {
         ),
         Some(s) => (
             Role::GamePc,
-            0.5,
+            EVEN,
             format!(
                 "faint (mean {:.0} dB) with no speech ({:.0}%): likely PC or game audio turned down",
                 a.mean_db,
@@ -133,7 +146,7 @@ fn with_speech(s: Speech, substantial: usize) -> (Role, f64, String) {
     if s.share < SPEECH_MIN {
         (
             Role::GamePc,
-            0.6,
+            FAIR,
             format!(
                 "no speech ({:.0}%): game, PC or music audio (music is not told apart yet)",
                 pct(s.share)
@@ -142,7 +155,7 @@ fn with_speech(s: Speech, substantial: usize) -> (Role, f64, String) {
     } else if s.quiet_gaps >= QUIET_GAPS {
         (
             Role::Voice,
-            0.75,
+            GOOD,
             format!(
                 "speech {:.0}% of the time, near-silent between phrases ({:.0}% of the gaps)",
                 pct(s.share),
@@ -152,7 +165,7 @@ fn with_speech(s: Speech, substantial: usize) -> (Role, f64, String) {
     } else if substantial == 1 {
         (
             Role::Mix,
-            0.8,
+            STRONG,
             format!(
                 "the only substantial track: speech {:.0}% of the time over a background that keeps \
                  playing (only {:.0}% of the gaps near-silent)",
@@ -163,7 +176,7 @@ fn with_speech(s: Speech, substantial: usize) -> (Role, f64, String) {
     } else {
         (
             Role::Voice,
-            0.5,
+            EVEN,
             format!(
                 "speech {:.0}% of the time over continuous sound: a noisy voice track, or game \
                  audio with voices in it",
@@ -178,13 +191,13 @@ fn loudness_only(a: &Activity, substantial: usize) -> (Role, f64, String) {
     if substantial == 1 {
         (
             Role::Mix,
-            0.6,
+            FAIR,
             "the only track with substantial sound; other tracks are silent or faint".into(),
         )
-    } else if a.near_silent_share >= 0.3 {
+    } else if a.near_silent_share >= INTERMITTENT {
         (
             Role::Voice,
-            0.5,
+            EVEN,
             format!(
                 "intermittent like speech: near-silent {:.0}% of the time",
                 a.near_silent_share * 100.0
@@ -193,7 +206,7 @@ fn loudness_only(a: &Activity, substantial: usize) -> (Role, f64, String) {
     } else {
         (
             Role::GamePc,
-            0.4,
+            WEAK,
             format!(
                 "continuous sound: near-silent only {:.0}% of the time",
                 a.near_silent_share * 100.0
