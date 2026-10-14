@@ -14,6 +14,7 @@
 //! loop that cannot be tested here.
 
 pub mod bridge;
+pub mod flow;
 pub mod install;
 pub mod job;
 pub mod lua;
@@ -25,8 +26,10 @@ pub use reply::{Sent, Timeline};
 pub use timeline::Answer;
 
 use crate::edit::{Captions, EditList};
+use crate::export;
 use crate::export::srt::Cue;
-use crate::export::{self, layout};
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// What a send came to (5z).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -40,15 +43,11 @@ pub enum Outcome {
     Sent(Sent),
 }
 
-/// A 5g script still running in Resolve after Junctur installed a newer one answers `check` so.
-const OLD_SCRIPT: &str = "The Junctur script running in Resolve is from an older Junctur: in \
-     Resolve choose Workspace > Scripts > Junctur again, then send again";
-
-/// Sends the whole edit (5z): installs (or refreshes) the script, asks Resolve for the open
-/// project's timelines, and unless `<recording> (Junctur)` is there and `answer` does not say what
-/// to do with it, has the script import the edit as that timeline (Junctur's FCPXML: the recording,
-/// every audio track, cut as the edit list says) and place `cues` on it as Text+ clips, laid out
-/// for its shape (side-by-side lines are wrapped to its width).
+/// Sends the whole edit (5z): installs (or refreshes) the script, then [`flow::run`] through the
+/// mailbox: asks Resolve for the open project's timelines and, unless `<recording> (Junctur)` is
+/// there and `answer` does not say what to do with it, has the script import the edit as a
+/// timeline (Junctur's FCPXML: the recording, every audio track, cut as the edit list says), place
+/// `cues` on it as Text+ clips laid out for its shape, and for Replace only then delete the old one.
 pub fn send(
     cues: &[Cue],
     edit: &EditList,
@@ -59,48 +58,27 @@ pub fn send(
         return Err("nothing is kept in this edit, so there is no timeline to send".into());
     }
     install()?;
-    let names = bridge::request("check", vec![]).map_err(older)?;
-    let wanted = timeline::name(edit);
-    let (name, replace) = match timeline::decide(&reply::timeline_names(&names), &wanted, answer) {
-        timeline::Decision::Ask => return Ok(Outcome::Exists { name: wanted }),
-        timeline::Decision::Build { name, replace } => (name, replace),
-    };
-    let file = bridge::mailbox()
-        .ok_or("no folder for Junctur's settings")?
-        .join("timeline.fcpxml");
-    export::write_fcpxml(edit, &file).map_err(|e| format!("writing the timeline: {e}"))?;
-    let built = bridge::request(
-        "build",
-        vec![
-            ("file", file.to_string_lossy().into_owned().into()),
-            ("name", name.as_str().into()),
-            ("replace", replace.into()),
-            ("source", edit.source.to_string_lossy().into_owned().into()),
-            ("captions", (!cues.is_empty()).into()),
-            ("template", job::template(c).into()),
-        ],
-    )?;
-    let timeline = reply::timeline(&built)?;
-    let mut sent = if cues.is_empty() {
-        reply::sent(&Default::default(), &timeline.name)
-    } else {
-        let aspect = timeline.height as f64 / timeline.width.max(1) as f64;
-        let placed = layout::place(cues, edit, c, aspect);
-        let job = job::build(&placed, edit, c, &timeline);
-        let done = bridge::request("place", job.to_lua())?;
-        reply::sent(&done, &timeline.name)
-    };
-    sent.replaced = built.get("replaced").is_some_and(|v| v == "true");
-    sent.note = built.get("note").filter(|n| !n.is_empty()).cloned();
-    Ok(Outcome::Sent(sent))
+    flow::run(&mut Mailbox, cues, edit, c, answer)
 }
 
-/// `check` is the first request a 5z script knows: an older one calls it unknown.
-fn older(e: String) -> String {
-    if e.starts_with("unknown request") {
-        OLD_SCRIPT.into()
-    } else {
-        e
+/// The real [`flow::Link`]: the request file and `Fusion.prefs` ([`bridge`]), the FCPXML beside them.
+struct Mailbox;
+
+impl flow::Link for Mailbox {
+    fn request(
+        &mut self,
+        kind: &str,
+        fields: Vec<(&'static str, lua::Value)>,
+    ) -> Result<HashMap<String, String>, String> {
+        bridge::request(kind, fields)
+    }
+
+    fn write_timeline(&mut self, edit: &EditList) -> Result<PathBuf, String> {
+        let file = bridge::mailbox()
+            .ok_or("no folder for Junctur's settings")?
+            .join("timeline.fcpxml");
+        export::write_fcpxml(edit, &file).map_err(|e| format!("writing the timeline: {e}"))?;
+        Ok(file)
     }
 }
 
@@ -130,11 +108,5 @@ mod tests {
         assert_eq!(sent["replaced"], true);
         assert_eq!(sent["note"], serde_json::Value::Null);
         assert_eq!(sent["firstError"], serde_json::Value::Null);
-    }
-
-    #[test]
-    fn an_older_script_is_told_to_start_again() {
-        assert_eq!(older("unknown request check".into()), OLD_SCRIPT);
-        assert_eq!(older("No project is open".into()), "No project is open");
     }
 }

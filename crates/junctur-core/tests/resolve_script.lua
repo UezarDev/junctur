@@ -93,10 +93,15 @@ local function world(opts)
 
     local function Clip(name, lacks, path)
         local c = { name = name, lacks = lacks, path = path }
+        -- `props` overrides a property (Type, In, Out); `marks` is what GetMarkInOut gives.
         function c:GetClipProperty(k)
+            if self.props and self.props[k] ~= nil then return self.props[k] end
             if k == "Clip Name" then return self.name elseif k == "FPS" then return "24"
-            elseif k == "File Path" then return self.path or "" end
+            elseif k == "File Path" then return self.path or ""
+            elseif k == "Type" then return self.path and "Video + Audio" or "Fusion Title"
+            elseif k == "In" or k == "Out" then return "" end
         end
+        function c:GetMarkInOut() return self.marks or {} end
         function c:SetClipProperty(_, v) self.name = v return true end
         return c
     end
@@ -184,9 +189,7 @@ local function world(opts)
             local found = false
             for _, f in ipairs(o.sourceClipsFolders or {}) do
                 for _, c in ipairs(f.clips) do
-                    if c.path and c.path:lower():gsub("\\", "/") == w.source:lower():gsub("\\", "/") then
-                        found = true
-                    end
+                    if c.path then found = true end
                 end
             end
             if opts.link_fails or not found then return nil end
@@ -196,10 +199,13 @@ local function world(opts)
         for _, t in ipairs(w.timelines) do
             assert(t.name ~= o.timelineName, "imported under a taken name")
         end
-        local t = Timeline(o.timelineName, "T-" .. (#w.timelines + 1), 2400)
+        w.ids = w.ids + 1
+        local t = Timeline(o.timelineName, "T-" .. w.ids, 2400)
         w.timelines[#w.timelines + 1] = t
         return t
     end
+    w.ids = 1
+    w.Clip = Clip
     function pool:DeleteTimelines(list)
         if opts.no_delete_timelines then return false end
         for _, t in ipairs(list) do drop(w.timelines, t) end
@@ -210,7 +216,10 @@ local function world(opts)
     w.project = project
     function project:GetCurrentTimeline() return w.current end
     function project:SetCurrentTimeline(t) w.current = t return true end
-    function project:GetTimelineCount() return #w.timelines end
+    function project:GetTimelineCount()
+        if opts.no_count then error("no such method") end
+        return #w.timelines
+    end
     function project:GetTimelineByIndex(i) return w.timelines[i] end
     function project:GetMediaPool() return pool end
     local resolve = {}
@@ -253,7 +262,8 @@ local function names(w)
     return table.concat(out, ", ")
 end
 
--- 5z check: the project's timeline names; no project is an error.
+-- 5z check: the project's timeline names; no project, or no count from Resolve, is an error
+-- (never "no timelines").
 local w = world()
 local c = w.m.handlers.check({})
 check(c.timelines == 1 and c.timeline1 == "Main", "check lists the timelines")
@@ -261,6 +271,9 @@ w.no_project = true
 check(w.m.handlers.check({}).error ~= nil, "check without a project")
 check(w.m.handlers.build(build()).error ~= nil, "build without a project")
 w.no_project = nil
+check(world({ no_count = true }).m.handlers.check({}).error ~= nil, "no count is an error")
+local nw = world({ no_count = true })
+check(nw.m.handlers.build(build()).error ~= nil and #nw.made == 0, "build without a count makes nothing")
 
 -- 5z build: the timeline made from the file under the name, the current one now; the recording
 -- imported by Resolve the first time. The template: the bundled bin imported once, its Text+ kept
@@ -269,7 +282,6 @@ local info = w.m.handlers.build(build())
 check(info.error == nil, tostring(info.error))
 check(info.name == "rec (Junctur)" and info.id == "T-2" and w.current.name == "rec (Junctur)", "made, current")
 check(info.template == "Junctur Caption" and info.fps == "24" and info.start == 0 and info["end"] == 2400, "info")
-check(info.replaced == false and info.note == "", "nothing replaced")
 check(w.made[1].file == [[C:\J\timeline.fcpxml]] and w.made[1].opts.timelineName == "rec (Junctur)", "the file")
 check(w.made[1].opts.importSourceClips == true, "the recording imported the first time")
 check(names(w) == "Main, rec (Junctur)" and w.main.name == "Main", "Main untouched")
@@ -280,11 +292,12 @@ c = w.m.handlers.check({})
 check(c.timelines == 2 and c.timeline2 == "rec (Junctur)", "check sees it")
 
 -- The name taken and not replacing (another send took it meanwhile): refused, nothing made.
-local r = w.m.handlers.build(build({ name = " REC (junctur) " }))
-check(r.error ~= nil and #w.made == 1, "a taken name is refused")
+local r = w.m.handlers.build(build({ name = " REC (junctur)\t" }))
+check(r.error ~= nil and r.error:find("nothing was changed") ~= nil and #w.made == 1, "a taken name is refused")
 
 -- Create new: another timeline beside it; the recording already in the pool (its path written
--- otherwise) is linked to, not imported again; the template not imported again.
+-- with other slashes and ASCII case) is linked to, not imported again; the template not imported
+-- again.
 info = w.m.handlers.build(build({ name = "rec (Junctur) 2" }))
 check(info.error == nil and info.name == "rec (Junctur) 2", tostring(info.error))
 check(w.made[2].opts.importSourceClips == false and w.made[2].opts.sourceClipsFolders[1] == w.root,
@@ -298,30 +311,73 @@ w.m.handlers.build(build())
 info = w.m.handlers.build(build({ name = "again" }))
 check(info.error == nil and #w.made == 3 and w.made[3].opts.importSourceClips == true, "link failed, imported")
 
--- Replace, the old one open: made under a free name, switched to, the old deleted, renamed.
+-- Only the whole recording is linked to: a sub-clip (a Type of its own), a clip with an In, one
+-- with marks, or a path differing past ASCII case is passed over, and Resolve imports instead.
+for _, odd in ipairs({ { props = { Type = "Subclip" } }, { props = { In = "00:00:10:00" } },
+    { marks = { video = { ["in"] = 10, out = 20 } } }, { path = [[C:\Vidéos\rec.mp4]], source = [[C:\VIDÉOS\rec.mp4]] } }) do
+    w = world()
+    local clip = w.Clip("rec.mp4", nil, odd.path or w.source)
+    clip.props, clip.marks = odd.props, odd.marks
+    w.root.clips = { clip }
+    info = w.m.handlers.build(build({ source = odd.source }))
+    check(info.error == nil and w.made[1].opts.importSourceClips == true, "not the whole recording")
+end
+w = world()
+w.source = [[C:\Vidéos\rec.mp4]]
+w.root.clips = { w.Clip("rec.mp4", nil, w.source) }
+w.m.handlers.build(build({ source = [[c:/vidéos/REC.mp4]] }))
+check(w.made[1].opts.importSourceClips == false, "a non-ASCII path matches byte for byte, ASCII case aside")
+
+-- Replace: build only makes the new one beside the old, under a free name, and opens it; the old
+-- is still there (the captions come next). Then finish deletes the old and renames the new.
 w = world()
 w.m.handlers.build(build())
 local old = w.current
 w.m.handlers.build(build({ name = "rec (Junctur) (new)" }))
 w.current = old
 info = w.m.handlers.build(build({ replace = true }))
-check(info.error == nil and info.replaced == true and info.note == "", tostring(info.error))
-check(w.made[3].opts.timelineName == "rec (Junctur) (new 2)", "made under a free name first")
-check(info.name == "rec (Junctur)" and w.current ~= old and w.current.name == "rec (Junctur)", "renamed, current")
+check(info.error == nil and info.name == "rec (Junctur) (new 2)", tostring(info.error))
+check(w.current ~= old and w.current.name == "rec (Junctur) (new 2)", "the new one open")
+check(names(w) == "Main, rec (Junctur), rec (Junctur) (new), rec (Junctur) (new 2)", "the old one kept: " .. names(w))
+r = w.m.handlers.place(request({ clip(1, 0, "hola") }, { timeline = info.id }))
+check(r.placed == 1 and #old.tracks == 1, "captions on the new one, the old untouched")
+local fin = w.m.handlers.finish({ name = "rec (Junctur)", made = info.id })
+check(fin.error == nil and fin.replaced == true and fin.note == "" and fin.name == "rec (Junctur)", tostring(fin.note))
 check(names(w) == "Main, rec (Junctur) (new), rec (Junctur)", "the old one gone: " .. names(w))
+check(w.current.tracks[2].items[1].start == 0, "the captions went with it")
 
--- Replace with the delete refused: both kept, the new one under its own name, the send says so.
+-- Replace refused at build when two timelines have the name (as Junctur compares names): nothing made.
+w = world()
+w.m.handlers.build(build())
+w.m.handlers.build(build({ name = "other" }))
+w.timelines[#w.timelines].name = " REC (Junctur)	"
+local made = #w.made
+r = w.m.handlers.build(build({ replace = true }))
+check(r.error ~= nil and r.error:find("2 timelines") ~= nil and #w.made == made, "two of the name: " .. tostring(r.error))
+
+-- finish with the delete refused: both kept, the new one under its own name, the send says so.
 w = world({ no_delete_timelines = true })
 w.m.handlers.build(build())
 info = w.m.handlers.build(build({ replace = true }))
-check(info.error == nil and info.replaced == false and info.name == "rec (Junctur) (new)", "delete refused")
-check(info.note:find("did not delete") ~= nil and names(w) == "Main, rec (Junctur), rec (Junctur) (new)", info.note)
+fin = w.m.handlers.finish({ name = "rec (Junctur)", made = info.id })
+check(fin.replaced == false and fin.name == "rec (Junctur) (new)", "delete refused")
+check(fin.note:find("did not delete") ~= nil and names(w) == "Main, rec (Junctur), rec (Junctur) (new)", fin.note)
 
--- Replace with the rename refused: the old one gone, the new one says its name.
+-- finish with the rename refused: the old one gone, the new one says its name.
 w = world({ no_rename = true })
 w.m.handlers.build(build())
 info = w.m.handlers.build(build({ replace = true }))
-check(info.replaced == true and info.note:find("did not rename") ~= nil, "rename refused")
+fin = w.m.handlers.finish({ name = "rec (Junctur)", made = info.id })
+check(fin.replaced == true and fin.note:find("did not rename") ~= nil, "rename refused")
+
+-- finish when the old one is gone or doubled meanwhile, or the new one is gone: nothing deleted.
+w = world()
+w.m.handlers.build(build())
+info = w.m.handlers.build(build({ replace = true }))
+drop(w.timelines, w.timelines[2])
+fin = w.m.handlers.finish({ name = "rec (Junctur)", made = info.id })
+check(fin.replaced == false and fin.note:find("0 timelines") ~= nil, "the old one gone meanwhile")
+check(w.m.handlers.finish({ name = "rec (Junctur)", made = "T-99" }).error ~= nil, "the new one gone")
 
 -- The import refused: an error, the old timeline kept and still open; no template looked for
 -- when there are no captions.

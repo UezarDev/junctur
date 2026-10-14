@@ -122,7 +122,11 @@
         }
         r = await api.sendToResolve(answer);
       }
-      if (r.kind !== "sent") return;
+      // An answered send never asks again; if it did, say so rather than end without a word.
+      if (r.kind !== "sent") {
+        onError(`Resolve still has a timeline called "${r.name}" and nothing was sent: send again.`);
+        return;
+      }
       const n = (k: number, what: string) => `${k.toLocaleString()} ${what}`;
       const captioned = r.placed + r.restyled + r.failed > 0;
       sentLines = [
