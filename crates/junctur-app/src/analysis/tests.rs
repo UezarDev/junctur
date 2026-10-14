@@ -1,4 +1,4 @@
-use junctur_core::pipeline::{Step, Steps};
+use junctur_core::pipeline::{StageName, Step, Steps};
 
 use super::run::Second;
 use super::*;
@@ -375,24 +375,24 @@ fn steps_are_sent_when_a_track_moves_a_whole_percent_or_a_stage() {
         at,
         of: 1000.0,
     };
-    a.step(&k, step("speech", 1, 0.0), &notify);
-    a.step(&k, step("speech", 0, 0.0), &notify);
+    a.step(&k, step(StageName::Speech, 1, 0.0), &notify);
+    a.step(&k, step(StageName::Speech, 0, 0.0), &notify);
     // Under a whole percent: kept, not sent.
-    a.step(&k, step("speech", 0, 9.0), &notify);
-    a.step(&k, step("speech", 0, 10.0), &notify);
+    a.step(&k, step(StageName::Speech, 0, 9.0), &notify);
+    a.step(&k, step(StageName::Speech, 0, 10.0), &notify);
     // A new stage at the same percentage is sent.
-    a.step(&k, step("transcribe", 0, 10.0), &notify);
+    a.step(&k, step(StageName::Transcribe, 0, 10.0), &notify);
     let sent = lock(&sent).clone();
     assert_eq!(sent.len(), 4);
     let last = sent.last().unwrap();
     assert_eq!(last.iter().map(|s| s.track).collect::<Vec<_>>(), [0, 1]);
-    assert_eq!(last[0], step("transcribe", 0, 10.0));
+    assert_eq!(last[0], step(StageName::Transcribe, 0, 10.0));
     // 1 % (10 s) is the third event.
     assert_eq!(sent[2][0].at, 10.0);
     // A file with no run takes nothing.
     a.step(
         &PathBuf::from("other.mp4"),
-        step("speech", 0, 500.0),
+        step(StageName::Speech, 0, 500.0),
         &|_, _| panic!("no run"),
     );
 }
@@ -426,7 +426,7 @@ fn steps_from_two_threads_reach_notify_in_the_order_taken() {
             scope.spawn(move || {
                 for at in 0..=1000 {
                     let s = Step {
-                        stage: "speech",
+                        stage: StageName::Speech,
                         track,
                         at: at as f64,
                         of: 1000.0,

@@ -16,7 +16,7 @@ mod steps;
 
 use std::path::{Path, PathBuf};
 
-pub use jobs::{Jobs, StageRecord, StageState, STAGES};
+pub use jobs::{Jobs, StageName, StageRecord, StageState, STAGES};
 pub use speakers::{hearing_key, seeded, speech_key, Found, Heard, Method, Pin};
 pub use speech::{Speech, SpeechTrack};
 pub use steps::{Step, Steps};
@@ -239,7 +239,7 @@ pub fn prepare(
     let mut jobs = p.jobs();
     jobs.file = p.file.clone();
 
-    let report = jobs.stage(&p.dir, "tracks", log, |_| {
+    let report = jobs.stage(&p.dir, StageName::Tracks, log, |_| {
         tracks::analyze(&p.file, &tracks_options(p, opts.force))
     })?;
     let speech = speech_stage(
@@ -271,7 +271,7 @@ pub fn prepare(
             }
         }
     };
-    let edit = jobs.stage(&p.dir, "edit", log, |log| {
+    let edit = jobs.stage(&p.dir, StageName::Edit, log, |log| {
         let d = draft(p, &report, &speech, speakers.as_ref(), None, &opts.cut);
         keep_or_write(p, d, speakers.as_ref(), opts.keep_list, log)
     })?;

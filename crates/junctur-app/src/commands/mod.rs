@@ -30,7 +30,7 @@ use crate::lock::lock;
 use crate::player::{Core, Player};
 use crate::translation::Translation;
 use crate::waves::{self};
-use junctur_core::pipeline::StageState;
+use junctur_core::pipeline::{StageName, StageState};
 
 /// The player, or why it could not start (libmpv missing, no GL): the window still opens and
 /// says so instead of the app failing to launch.
@@ -130,7 +130,7 @@ pub fn notifier(handle: AppHandle) -> Notify {
             let tracks_done = p.project.as_ref().is_some_and(|s| {
                 s.stages
                     .iter()
-                    .any(|st| st.name == "tracks" && st.state == StageState::Done)
+                    .any(|st| st.name == StageName::Tracks.name() && st.state == StageState::Done)
             });
             if tracks_done {
                 core.tracks_known(Path::new(&p.file));

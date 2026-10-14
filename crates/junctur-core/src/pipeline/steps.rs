@@ -4,13 +4,13 @@
 
 use serde::Serialize;
 
+use super::StageName;
 use crate::tracks::TrackReport;
 
 /// One track's place in one stage: `at` seconds of `of` are behind it.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Step {
-    /// A name from [`super::STAGES`].
-    pub stage: &'static str,
+    pub stage: StageName,
     /// 0-based audio ordinal.
     pub track: usize,
     pub at: f64,
@@ -49,7 +49,7 @@ pub fn track_length(report: &TrackReport, track: usize) -> f64 {
 
 /// `at` seconds into `track` for `stage`, clamped to the track's length (so `f64::INFINITY` is
 /// the whole track).
-pub fn step(report: &TrackReport, stage: &'static str, track: usize, at: f64) -> Step {
+pub fn step(report: &TrackReport, stage: StageName, track: usize, at: f64) -> Step {
     let of = track_length(report, track);
     Step {
         stage,
@@ -66,7 +66,7 @@ mod tests {
     #[test]
     fn percent_is_whole_and_never_past_the_end() {
         let s = |at, of| Step {
-            stage: "transcribe",
+            stage: StageName::Transcribe,
             track: 0,
             at,
             of,

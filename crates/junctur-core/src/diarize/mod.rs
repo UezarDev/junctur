@@ -43,7 +43,39 @@ pub struct Speaker {
     pub id: usize,
     pub seconds: f64,
     pub share: f64,
+    /// Its [`SpeakerKind`]'s label: the text is what is cached, the kind is read back from it.
     pub label: String,
+}
+
+impl Speaker {
+    /// `None` for a label no kind writes (a hand-edited cache).
+    pub fn kind(&self) -> Option<SpeakerKind> {
+        SpeakerKind::ALL
+            .into_iter()
+            .find(|k| k.label() == self.label)
+    }
+}
+
+/// What a speaker is taken to be from its share of the talk time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpeakerKind {
+    /// The one who talks most.
+    Main,
+    Other,
+    /// Under [`MINOR_SHARE`]: laughs, bleed or clustering noise.
+    Minor,
+}
+
+impl SpeakerKind {
+    pub const ALL: [SpeakerKind; 3] = [SpeakerKind::Main, SpeakerKind::Other, SpeakerKind::Minor];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SpeakerKind::Main => "main voice: most talk time, likely the streamer's mic",
+            SpeakerKind::Other => "other voice: likely Discord or a guest",
+            SpeakerKind::Minor => "minor: too little talk time to call a person",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -368,18 +400,18 @@ pub fn summarize(segs: &[Region], labels: &[usize]) -> Diarization {
         .enumerate()
         .map(|(r, &o)| {
             let share = if total > 0.0 { secs[o] / total } else { 0.0 };
-            let label = if r == 0 {
-                "main voice: most talk time, likely the streamer's mic"
+            let kind = if r == 0 {
+                SpeakerKind::Main
             } else if share < MINOR_SHARE {
-                "minor: too little talk time to call a person"
+                SpeakerKind::Minor
             } else {
-                "other voice: likely Discord or a guest"
+                SpeakerKind::Other
             };
             Speaker {
                 id: r,
                 seconds: secs[o],
                 share,
-                label: label.to_string(),
+                label: kind.label().to_string(),
             }
         })
         .collect();
@@ -550,5 +582,31 @@ mod tests {
         assert_eq!(d.turns[0].speaker, 1);
         assert_eq!(d.turns[1].speaker, 0);
         assert!(summarize(&[], &[]).speakers.is_empty());
+    }
+
+    /// The labels are cached in `stems.json`, so their text stays; the kind is read back from it.
+    #[test]
+    fn a_speakers_kind_is_its_label() {
+        // 100 s, 10 s and 1 s: the last under the minor share.
+        let segs = [r(0.0, 100.0), r(100.0, 110.0), r(110.0, 111.0)];
+        let d = summarize(&segs, &[0, 1, 2]);
+        let labels: Vec<&str> = d.speakers.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "main voice: most talk time, likely the streamer's mic",
+                "other voice: likely Discord or a guest",
+                "minor: too little talk time to call a person",
+            ]
+        );
+        let kinds: Vec<_> = d.speakers.iter().map(Speaker::kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                Some(SpeakerKind::Main),
+                Some(SpeakerKind::Other),
+                Some(SpeakerKind::Minor)
+            ]
+        );
     }
 }

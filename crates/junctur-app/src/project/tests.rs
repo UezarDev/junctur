@@ -1,6 +1,7 @@
 use super::*;
 use crate::test_support::scratch;
 use junctur_core::edit::{CutSettings, EditList, Range};
+use junctur_core::pipeline::STAGES;
 
 #[test]
 fn new_project_has_nothing_yet() {

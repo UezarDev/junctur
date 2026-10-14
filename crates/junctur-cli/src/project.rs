@@ -2,7 +2,7 @@
 //! recording (`--project <dir>` to keep it somewhere git can track it).
 
 use junctur_core::edit::{Captions, CutSettings, EditList};
-use junctur_core::pipeline::{self, Project, StageState, STAGES};
+use junctur_core::pipeline::{self, Project, StageName, StageState};
 use junctur_core::render::{self, RenderOptions};
 use junctur_core::runtime::DevicePref;
 use junctur_core::transcribe;
@@ -87,8 +87,9 @@ pub fn status(a: Args) -> Result<(), String> {
     let jobs = p.jobs();
     println!("{}", p.file.display());
     println!("project: {}", p.dir.display());
-    for name in STAGES {
-        let r = jobs.get(name);
+    for stage in StageName::ALL {
+        let name = stage.name();
+        let r = jobs.get(stage);
         let state = match r.map(|r| r.state) {
             None | Some(StageState::Pending) => "pending",
             Some(StageState::Running) => "running (or interrupted: rerun analyze to resume)",

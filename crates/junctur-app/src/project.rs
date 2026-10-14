@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use junctur_core::ffmpeg;
-use junctur_core::pipeline::{self, Project, StageState, STAGES};
+use junctur_core::pipeline::{self, Project, StageName, StageState};
 use junctur_core::transcribe;
 use serde::Serialize;
 
@@ -52,11 +52,11 @@ pub fn status(file: &Path, cache_dir: Option<PathBuf>) -> Result<ProjectStatus, 
 
 fn status_of(p: &Project) -> ProjectStatus {
     let jobs = p.jobs();
-    let stages = STAGES
-        .iter()
-        .map(|&name| Stage {
-            name: name.to_string(),
-            state: jobs.get(name).map_or(StageState::Pending, |r| r.state),
+    let stages = StageName::ALL
+        .into_iter()
+        .map(|stage| Stage {
+            name: stage.name().to_string(),
+            state: jobs.get(stage).map_or(StageState::Pending, |r| r.state),
         })
         .collect();
     let (edit, edit_error) = if p.edit_path().is_file() {
@@ -128,7 +128,7 @@ pub struct RecordingInfo {
     pub duration: Option<f64>,
     /// The edit list's kept ranges, when it has one that parses.
     pub ranges: Option<usize>,
-    /// Stages done, of [`STAGES`].
+    /// Stages done, of [`StageName::ALL`].
     pub stages_done: usize,
     pub stages: usize,
 }

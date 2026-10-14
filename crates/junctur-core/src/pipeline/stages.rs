@@ -4,7 +4,7 @@
 use super::speaker_files::{set_aside, write_speakers};
 use super::{
     describe, speakers, speech, speech_tracks, steps, Found, Jobs, PipelineOptions, Project,
-    Speech, Steps,
+    Speech, StageName, Steps,
 };
 use crate::edit::{self, EditList};
 use crate::tracks::{Role, TrackReport};
@@ -58,11 +58,11 @@ pub(super) fn speech_stage(st: Stage, force: bool, log: &mut dyn FnMut(&str)) ->
     }
     let speech = match p.speech().filter(|_| !force) {
         Some(s) if p.envelope_path().is_file() => {
-            jobs.skip(&p.dir, "speech", log)?;
+            jobs.skip(&p.dir, StageName::Speech, log)?;
             s
         }
-        _ => jobs.stage(&p.dir, "speech", log, |_| {
-            let read = |track, at| steps(steps::step(report, "speech", track, at));
+        _ => jobs.stage(&p.dir, StageName::Speech, log, |_| {
+            let read = |track, at| steps(steps::step(report, StageName::Speech, track, at));
             let (s, env) = speech::detect(&p.file, &sources, &p.cache_dir, &read)?;
             speech::save_envelope(&p.envelope_path(), &env)?;
             std::fs::write(p.speech_path(), serde_json::to_vec_pretty(&s)?)?;
@@ -114,14 +114,14 @@ pub(super) fn speakers_stage(
     let found = match cached {
         // Heard before: only labelled again, with the voices as they are now (cheap).
         Some((f, embeddings)) => {
-            jobs.skip(&p.dir, "speakers", log)?;
+            jobs.skip(&p.dir, StageName::Speakers, log)?;
             let again = speakers::label(&f, &embeddings, &opts.voices);
             if again != f {
                 write_speakers(p, &again)?;
             }
             again
         }
-        None => jobs.stage(&p.dir, "speakers", log, |_| {
+        None => jobs.stage(&p.dir, StageName::Speakers, log, |_| {
             // The user's pins cut the windows and outlive the hearing they were made on.
             let pins = previous
                 .as_ref()
@@ -137,7 +137,7 @@ pub(super) fn speakers_stage(
                     dir: &p.dir,
                     cache_dir: &p.cache_dir,
                 },
-                &mut |track, at| steps(steps::step(report, "speakers", track, at)),
+                &mut |track, at| steps(steps::step(report, StageName::Speakers, track, at)),
             )?;
             // Heard again: the voice names the old labels knew still are the voices', not
             // names for whatever cluster now sits there.
@@ -184,7 +184,7 @@ pub(super) fn transcribe_stage(
             regions: t.regions.clone(),
         })
         .collect();
-    jobs.stage(&p.dir, "transcribe", log, |log| {
+    jobs.stage(&p.dir, StageName::Transcribe, log, |log| {
         transcribe::transcribe(
             &transcribe::Job {
                 file: &p.file,
@@ -196,7 +196,9 @@ pub(super) fn transcribe_stage(
             },
             log,
             transcribe::Reports {
-                reach: &mut |track, at| steps(steps::step(report, "transcribe", track, at)),
+                reach: &mut |track, at| {
+                    steps(steps::step(report, StageName::Transcribe, track, at))
+                },
                 transcribed: &mut *transcribed,
                 between: &mut *between,
             },

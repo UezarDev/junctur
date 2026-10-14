@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use super::{
     not_analysed, speakers_for, speech, tracks_options, Found, KeepList, Project, Speech,
-    StageState, EDIT_FILE,
+    StageName, StageState, EDIT_FILE,
 };
 use crate::edit::{self, CutSettings, EditList, Speakers};
 use crate::tracks::{self, TrackReport};
@@ -248,7 +248,7 @@ pub fn recut(p: &Project, settings: &CutSettings) -> Result<EditList> {
     jobs.file = p.file.clone();
     jobs.set(
         &p.dir,
-        "edit",
+        StageName::Edit,
         StageState::Done,
         Some(t0.elapsed().as_secs_f64()),
         None,

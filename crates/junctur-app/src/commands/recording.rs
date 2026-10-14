@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use junctur_core::pipeline::StageState;
+use junctur_core::pipeline::{StageName, StageState};
 use junctur_core::transcribe;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -95,14 +95,14 @@ fn needs_run(s: &ProjectStatus, busy: bool) -> bool {
     let finished = s
         .stages
         .iter()
-        .any(|st| st.name == "edit" && st.state == StageState::Done);
+        .any(|st| st.name == StageName::Edit.name() && st.state == StageState::Done);
     let unanalysed = s.edit.is_none() && (s.edit_error.is_none() || !finished);
     // The list comes before the transcript: a run whose transcription never finished is
     // resumed, reusing finished stages and chunks and keeping the user's edits.
     let untranscribed = s
         .stages
         .iter()
-        .any(|st| st.name == "transcribe" && st.state != StageState::Done);
+        .any(|st| st.name == StageName::Transcribe.name() && st.state != StageState::Done);
     // Not while another process transcribes it (`junctur analyze`): the stage reads `running`
     // then too, and a second Whisper on its partial would only be refused. A run of this app's
     // own is returned by `start` as it is.
