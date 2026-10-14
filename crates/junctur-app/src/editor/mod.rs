@@ -13,7 +13,8 @@ use junctur_core::edit::{
 };
 
 use crate::cuts::Fps;
-pub use words::{Placing, Retyped, Side, TranscriptView, Words};
+use words::Placing;
+pub use words::{Retyped, Side, TranscriptView, Words};
 
 /// What a word edit under a frame is refused with: [`Editor::edit_all`] tells it from the others.
 const UNDER_A_FRAME: &str = "that is shorter than a frame: select a little more";

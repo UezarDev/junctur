@@ -60,19 +60,20 @@ fn tracks_speech_and_speakers_open_their_models_on_the_cpu_only() {
     }
     // The VAD's, the segmenter's and the embedder's.
     assert!(opened >= 3, "{opened}");
-    // The run's own code: this module and the files it was split into.
-    let this = [
-        "pipeline/mod.rs",
-        "pipeline/again.rs",
-        "pipeline/editlist.rs",
-        "pipeline/speaker_files.rs",
-        "pipeline/stages.rs",
-    ]
-    .map(|rel| code_under(rel).remove(0).1)
-    .join(
-        "
+    // The run's own code: every file of this module but the stages read above, so a file the run
+    // gains is checked without being named here.
+    let this = code_under("pipeline")
+        .into_iter()
+        .filter(|(name, _)| {
+            let parts: Vec<_> = Path::new(name).components().collect();
+            parts.len() == 2 && !name.ends_with("speech.rs")
+        })
+        .map(|(_, code)| code)
+        .collect::<Vec<_>>()
+        .join(
+            "
 ",
-    );
+        );
     for banned in [
         "runtime::open",
         "Session::builder",
