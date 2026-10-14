@@ -507,9 +507,9 @@
   // above the caption block when the captions preview would sit under them (2r, layout.ts
   // `floatAt`). 2n had them centred over the lanes, where they hid the cuts; 2g at the selection or
   // the playhead, so they slid along while playing.
-  const band = $derived(edit?.editable && edit.captions?.preview ? edit.captions : null);
-  const toolsAt = $derived(floatAt(L.picture, TOOLS, band));
-  const reviewAt = $derived(floatAt(L.picture, REVIEW, band));
+  const band = $derived(edit?.editable && edit.captions?.preview ? { ...edit.captions, speakers: edit.speakers.length } : null);
+  const toolsAt = $derived(floatAt(L.picture, L.video, TOOLS, band));
+  const reviewAt = $derived(floatAt(L.picture, L.video, REVIEW, band));
 
   onMount(() => {
     // A transcription started before the page (a reload) has sent no event yet; one that has wins.

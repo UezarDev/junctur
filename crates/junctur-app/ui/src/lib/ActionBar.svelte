@@ -33,7 +33,7 @@
     /** The Transcript tab is showing, with its own bar for a selection of words (2p). */
     wordsShown?: boolean;
     /** Where the box's top-left goes (layout.ts `floatAt`). */
-    at: { left: number; top: number };
+    at: { left: number; top: number; scale: number };
     onSelect: (s: sel.Selection | null) => void;
     onError: (message: string) => void;
   } = $props();
@@ -62,7 +62,7 @@
 </script>
 
 {#if edit?.editable}
-  <div class="float" style:left="{at.left}px" style:top="{at.top}px" style:width="{TOOLS.w}px" style:height="{TOOLS.h}px">
+  <div class="float" style:left="{at.left}px" style:top="{at.top}px" style:width="{TOOLS.w}px" style:height="{TOOLS.h}px" style:transform={at.scale < 1 ? `scale(${at.scale})` : undefined}>
     {#if message}
       <div class="message" class:bad={!!edit.error}>{message}</div>
     {/if}
@@ -91,7 +91,7 @@
         <button class="act" onclick={() => call(() => sel.apply(m, true))} title="Keep the selection (K)">Keep</button>
         <span class="gap"></span>
         <button class="i x" onclick={() => onSelect(null)} title="Clear the selection (Esc)" aria-label="Clear the selection">×</button>
-      {:else if stretch && fps && !selection}
+      {:else if stretch && fps}
         <button class="n" onclick={(e) => move("start", -1, e)} title="Start one frame earlier (shift: 10)">◀</button>
         <span class="tc mono">{timecode(stretch.start, fps)}</span>
         <button class="n" onclick={(e) => move("start", 1, e)} title="Start one frame later (shift: 10)">▶</button>
@@ -109,6 +109,8 @@
   .float {
     position: absolute;
     z-index: 5;
+    /* floatAt's scale, in a video area smaller than the box, from the corner it places. */
+    transform-origin: top left;
     box-sizing: border-box;
     display: flex;
     flex-direction: column;

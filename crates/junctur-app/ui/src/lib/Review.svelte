@@ -26,7 +26,7 @@
     player: api.PlayerState | null;
     edit: api.EditState | null;
     /** Where the box's top-left goes (layout.ts `floatAt`). */
-    at: { left: number; top: number };
+    at: { left: number; top: number; scale: number };
     onDone: () => void;
     onError: (message: string) => void;
   } = $props();
@@ -113,6 +113,12 @@
     f();
   }
 
+  let root = $state<HTMLElement | null>(null);
+  function focused(): boolean {
+    const f = document.activeElement;
+    return f instanceof HTMLButtonElement && !!root?.contains(f);
+  }
+
   /** A key while reviewing: true when review took it. Undo and redo are review's too (they wait
    * for a decision on its way); other Ctrl combinations (the menus) stay the editor's. */
   export function key(e: KeyboardEvent): boolean {
@@ -130,6 +136,11 @@
       // A held key decides once (2r): holding Enter must not keep clip after clip.
       case "Enter":
       case "NumpadEnter":
+        // A review button reached with Tab takes its own Enter (Done ends review, Back goes back);
+        // focus anywhere else (the play bar's Review button after the click that started it) keeps.
+        if (focused()) return false;
+        if (!e.repeat) decide(true);
+        return true;
       case "KeyK":
       case "ArrowRight":
         if (!e.repeat) decide(true);
@@ -180,13 +191,13 @@
   });
 </script>
 
-<div class="float" role="group" aria-label="Review clips" style:left="{at.left}px" style:top="{at.top}px" style:width="{REVIEW.w}px" style:height="{REVIEW.h}px">
+<div bind:this={root} class="float" role="group" aria-label="Review clips" style:left="{at.left}px" style:top="{at.top}px" style:width="{REVIEW.w}px" style:height="{REVIEW.h}px" style:transform={at.scale < 1 ? `scale(${at.scale})` : undefined}>
   <div class="row info">
     {#if clip && fps}
-      <span class="where mono">{index + 1} of {list.length}</span>
+      <span class="where mono" title="Clip {index + 1} of {list.length}">{index + 1} of {list.length}</span>
       <span class="kind" class:cut={!clip.kept}>{clip.kept ? `Range ${clip.index}` : "Cut"}</span>
       <span class="times mono">{timecode(clip.start, fps)} – {timecode(clip.end, fps)}</span>
-      <span class="len mono">{length(clip)}</span>
+      <span class="len mono" title={length(clip)}>{length(clip)}</span>
     {:else}
       <span class="all">{list.length ? `All ${list.length} clips reviewed` : "No clips to review"}</span>
     {/if}
@@ -217,6 +228,8 @@
   .float {
     position: absolute;
     z-index: 5;
+    /* floatAt's scale, in a video area smaller than the box, from the corner it places. */
+    transform-origin: top left;
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
@@ -235,8 +248,19 @@
     align-items: center;
     gap: 8px;
   }
+  /* Nothing here may push the box wider (2r repair): the count and the length give way, with an
+     ellipsis and the whole in their title; the kind and the times keep their room. */
   .info {
     height: 20px;
+  }
+  .info > span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .kind,
+  .times {
+    flex-shrink: 0;
   }
   .decide {
     height: 36px;
@@ -247,7 +271,7 @@
   }
   /* Room for "123 of 456". */
   .where {
-    width: 10ch;
+    flex: 0 1 10ch;
     color: var(--muted);
     font-size: 13px;
   }
@@ -264,10 +288,10 @@
     font-size: 12px;
   }
   .len {
-    flex: 1;
+    flex: 1 1 0;
     text-align: right;
     color: var(--muted);
-    font-size: 13px;
+    font-size: 12px;
   }
   .all {
     flex: 1;
