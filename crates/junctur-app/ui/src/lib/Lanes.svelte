@@ -247,6 +247,19 @@
         from = sec(r[2 * i + 1]);
       }
       if (from < end) shade(from, sec(edit.totalFrames));
+      // Every cut's edge in view, drawn at once (2w: Uezar, "it should be higlighted
+      // inmediately"), so an edge is seen before it is hovered; the one in reach lights up above.
+      if (edges && edit.editable) {
+        ctx.fillStyle = "rgba(255, 220, 140, 0.5)";
+        for (let i = lo; i < n; i++) {
+          if (sec(r[2 * i]) > end) break;
+          for (const f of [r[2 * i], r[2 * i + 1]]) {
+            if (f <= 0 || f >= edit.totalFrames) continue;
+            const px = x(sec(f));
+            if (px >= 0 && px <= width) ctx.fillRect(Math.round(px) - 1, RULER, 2, height - RULER);
+          }
+        }
+      }
     }
   }
 
@@ -254,6 +267,7 @@
     // Repaint when anything drawn changes, never for a position.
     void peaks;
     void edit;
+    void edges;
     void tracks;
     void speakers;
     void talk;
@@ -295,12 +309,13 @@
     const [p, q] = [toFrame(clampT(Math.min(a, b)), fps, Math.round), toFrame(clampT(Math.max(a, b)), fps, Math.round)];
     onSelect(q > p ? { kind: "frames", start: p, end: q } : null);
   }
-  // Cut edges (2s): within GRAB px of one over a lane (not the ruler) the cursor and a handle show
-  // it, and a press there drags it, in whole frames, inside its room (nudge.ts `Edge`). The edit
+  // Cut edges (2s): every edge in view is drawn as a thin mark (2w); within GRAB px of one over a
+  // lane (not the ruler) the cursor and a lit handle show it, and a press there drags it, in whole frames, inside its room (nudge.ts `Edge`). The edit
   // waits for the release, so a drag is one undo step and one reload of the ranges, not one per
   // frame passed; then the preview plays from PREROLL before where the edge landed, so the fix is
   // heard (with Skip cuts on, a range's start is reached through the cut and lands on it).
-  const GRAB = 5;
+  // 2w: a little wider than 2s's 5px, so an edge is found without hunting for it.
+  const GRAB = 8;
   const PREROLL = 1.5;
   let hover = $state.raw<Edge | null>(null);
   let drag = $state.raw<{ edge: Edge; to: number } | null>(null);
@@ -384,7 +399,8 @@
       waitTimer = window.setTimeout(stopWaiting, WAIT);
       void (async () => {
         try {
-          await api.editFrames(step.start, step.end, step.keep);
+          // 2w: the words beside the edge move with it.
+          await api.moveEdge(step, d.edge.frame);
         } catch (e) {
           stopWaiting();
           onError(String(e));
@@ -653,18 +669,20 @@
   .body.grabbing {
     cursor: ew-resize;
   }
-  /* A cut's edge under the pointer, or being dragged (2s). */
+  /* A cut's edge under the pointer, or being dragged (2s); lit over the thin mark every edge has
+     (2w). */
   .edge {
     position: absolute;
     bottom: 0;
     left: -2px;
     width: 4px;
     border-radius: 2px;
-    background: rgba(255, 220, 140, 0.55);
+    background: rgba(255, 220, 140, 0.85);
+    box-shadow: 0 0 6px rgba(255, 220, 140, 0.6);
     pointer-events: none;
   }
   .edge.on {
-    background: rgba(255, 220, 140, 0.95);
+    background: rgba(255, 230, 160, 1);
   }
   .when {
     position: absolute;

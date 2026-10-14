@@ -476,7 +476,10 @@ impl Core {
         if new_list.is_some() && new_list != in_play {
             eprintln!("junctur-app: edit.junctur changed on disk, taken ({by})");
         }
-        if new_list.is_some() && new_list.map(|l| &l.keep) != in_play.map(|l| &l.keep) {
+        // The history holds the ranges and the retimed words (2w): an outside change to either
+        // would be undone over.
+        let undone = |l: &EditList| (l.keep.clone(), l.times.clone());
+        if new_list.is_some() && new_list.map(undone) != in_play.map(undone) {
             ed.changed_elsewhere();
             // A first list (the app's own analysis just wrote it, 2d) had no history to clear.
             let notice =
@@ -523,6 +526,18 @@ impl Core {
             self.prepare();
         }
         self.change(file, |ed, list, fps| ed.edit(list, step, fps))
+    }
+
+    /// Moves a cut's edge (2w): frame edit `frames` (start, end, keep) moving edge `from`, and the
+    /// words beside it with it, as one undo step. See [`Editor::move_edge`].
+    pub fn move_edge(
+        &self,
+        file: Option<&str>,
+        frames: (u64, u64, bool),
+        from: u64,
+    ) -> Result<(), String> {
+        self.prepare();
+        self.change(file, |ed, list, fps| ed.move_edge(list, frames, from, fps))
     }
 
     /// Cuts (`keep` false) or keeps every run of transcript words in `runs` (`first..=last` each)
@@ -585,9 +600,14 @@ impl Core {
         if self.file().as_deref() != Some(file) {
             return Err(OPENED_MEANWHILE.into());
         }
+        let times = lock(&self.ctl)
+            .edit
+            .list
+            .as_ref()
+            .map_or_else(Vec::new, |l| l.times.clone());
         let stretches = runs
             .iter()
-            .map(|&(first, last)| words.stretch(first, last))
+            .map(|&(first, last)| words.stretch(first, last, &times))
             .collect::<Option<Vec<_>>>()
             .ok_or("no such words in the transcript")?;
         let (found, line) = voices::enroll(file, name, &stretches)?;
@@ -1035,7 +1055,8 @@ impl Core {
         let none = Speakers::default();
         let speakers = list.as_deref().map_or(&none, |l| &l.speakers);
         let fixes = list.as_deref().map_or(&[][..], |l| &l.fixes);
-        Some(TranscriptView::new(&words, speakers, fixes))
+        let times = list.as_deref().map_or(&[][..], |l| &l.times);
+        Some(TranscriptView::new(&words, speakers, fixes, times))
     }
 
     /// Keeps the right-hand `right`, bottom `bottom` and top `top` shares of the window (0..1) free

@@ -106,6 +106,7 @@ mod tests {
             speakers: Default::default(),
             captions: None,
             fixes: Vec::new(),
+            times: Vec::new(),
             windows: Vec::new(),
         };
         assert_eq!(name(&edit), "2026-06-15 00-09-04 (Junctur)");

@@ -104,7 +104,7 @@ pub fn same_millisecond(a: f64, b: f64) -> bool {
 }
 
 /// Seconds to whole milliseconds, half away from zero.
-fn millis(start: f64) -> i64 {
+pub(super) fn millis(start: f64) -> i64 {
     (start * 1000.0).round() as i64
 }
 

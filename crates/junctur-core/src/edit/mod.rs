@@ -16,6 +16,7 @@ mod save;
 mod scores;
 mod speakers;
 mod splice;
+mod times;
 
 use std::path::PathBuf;
 
@@ -36,6 +37,7 @@ pub use speakers::{
     check_name, default_name, Labeller, Person, SpeakerName, Speakers, Turn, MAX_NAME,
 };
 pub use splice::{cut_span, keep_span};
+pub use times::{set_time, to_ms, Retime, Times};
 
 /// A kept stretch of the source, in seconds.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -104,6 +106,10 @@ pub struct EditList {
     /// Words the user fixed (5h), and runs of words fixed as one text (5x), in time order: shown in
     /// place of what Whisper heard.
     pub fixes: Vec<Fix>,
+    /// Words the user retimed by moving a cut's edge (2w), in heard order: their start and end in
+    /// place of Whisper's wherever a word's time is read.
+    #[serde(default)]
+    pub times: Vec<Retime>,
     pub windows: Vec<Window>,
 }
 

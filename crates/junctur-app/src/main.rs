@@ -132,6 +132,7 @@ fn main() {
             commands::transcript,
             commands::edit_words,
             commands::edit_frames,
+            commands::move_edge,
             commands::rename_speaker,
             commands::fix_word,
             commands::fix_words,

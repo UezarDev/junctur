@@ -57,7 +57,9 @@
   function move(edge: "start" | "end", dir: number, e: MouseEvent) {
     if (!stretch || !edit) return;
     const step = nudge(stretch, edge, dir * (e.shiftKey ? 10 : 1), edit.totalFrames);
-    if (step) call(() => api.editFrames(step.start, step.end, step.keep));
+    // 2w: the words beside the edge move with it.
+    const from = edge === "start" ? stretch.start : stretch.end;
+    if (step) call(() => api.moveEdge(step, from));
   }
 </script>
 

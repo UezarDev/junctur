@@ -484,6 +484,21 @@ pub async fn edit_frames(
     e.edit(e.file(), Step::Do(Op::Frames { start, end, keep }))
 }
 
+/// Moves a cut's edge (2w: the lanes' drag, review's and the range toolbar's steppers): the frame
+/// edit `[start, end)` (`keep`) that moves edge `from` to its other end, and the words beside the
+/// edge with it, as one undo step; an edit that moves no edge of the list is the frame edit alone.
+#[tauri::command]
+pub async fn move_edge(
+    app: State<'_, App>,
+    start: u64,
+    end: u64,
+    keep: bool,
+    from: u64,
+) -> Result<(), String> {
+    let e = app.editable()?;
+    e.move_edge(e.file(), (start, end, keep), from)
+}
+
 /// Renames speaker `id` in the edit list.
 #[tauri::command]
 pub async fn rename_speaker(app: State<'_, App>, id: u32, name: String) -> Result<(), String> {

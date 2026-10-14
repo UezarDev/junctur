@@ -9,12 +9,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use junctur_core::edit::{
-    self, check_name, frame_ranges, frames_ceil, Captions, EditList, Envelope, Range, Saved,
+    self, check_name, frame_ranges, frames_ceil, Captions, EditList, Envelope, Range, Retime, Saved,
 };
 
 use crate::cuts::Fps;
 use junctur_core::transcribe::Word;
-pub use words::{Retyped, TranscriptView, Words};
+pub use words::{Retyped, Side, TranscriptView, Words};
 
 /// What a word edit under a frame is refused with: [`Editor::edit_all`] tells it from the others.
 const UNDER_A_FRAME: &str = "that is shorter than a frame: select a little more";
@@ -77,14 +77,31 @@ pub fn join_runs(runs: &[(usize, usize)]) -> Result<Vec<(usize, usize)>, String>
     Ok(out)
 }
 
+/// What an undo step puts back: the kept ranges and, since a moved cut edge moves words with it
+/// (2w), the retimed words. Everything else in the list (names, fixes, captions) is not undone.
+#[derive(Debug, Clone, PartialEq)]
+struct Snapshot {
+    keep: Vec<Range>,
+    times: Vec<Retime>,
+}
+
+impl Snapshot {
+    fn of(list: &EditList) -> Self {
+        Self {
+            keep: list.keep.clone(),
+            times: list.times.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Editor {
     /// The edit list being edited; `None` when no project is open.
     path: Option<PathBuf>,
     /// The text of the app's last save: what is on disk unless someone else wrote since.
     written: Option<String>,
-    undo: Vec<Vec<Range>>,
-    redo: Vec<Vec<Range>>,
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
     /// Read on first use, by the player outside this editor's lock (see `Core::prepare`); `None`
     /// is retried, since the pipeline may write them while the app is open.
     pub words: Option<Arc<Words>>,
@@ -137,12 +154,67 @@ impl Editor {
         step: Step,
         fps: Fps,
     ) -> Result<Option<Edited>, String> {
-        let (keep, unsnapped) = match step {
-            Step::Do(op) => self.apply(list, op, fps)?,
+        let (to, unsnapped) = match step {
+            Step::Do(op) => {
+                let (keep, unsnapped) = self.apply(list, op, fps)?;
+                (
+                    Snapshot {
+                        keep,
+                        times: list.times.clone(),
+                    },
+                    unsnapped,
+                )
+            }
             Step::Undo => (self.undo.last().cloned().ok_or("nothing to undo")?, false),
             Step::Redo => (self.redo.last().cloned().ok_or("nothing to redo")?, false),
         };
-        self.commit(list, step, keep, unsnapped, fps)
+        self.commit(list, step, to, unsnapped, fps)
+    }
+
+    /// Makes frame edit `start..end` (`keep`) and, when it moves edge `from` of a kept range to
+    /// its other end (2w: a cut's edge dragged on the lanes or stepped in review or the range
+    /// toolbar), moves the words beside that edge with it ([`Words::moved_edge`]), saved as **one**
+    /// undo step. An edit that is not such a move (review's clips are not always the list's ranges,
+    /// and a clip edge between two kept clips is no edge of the list) is the frame edit alone, as
+    /// is one on a recording without a transcript. The words are the editor's, read before
+    /// ([`crate::player`] prepares them).
+    pub fn move_edge(
+        &mut self,
+        list: &EditList,
+        (start, end, keep): (u64, u64, bool),
+        from: u64,
+        fps: Fps,
+    ) -> Result<Option<Edited>, String> {
+        let op = Op::Frames { start, end, keep };
+        let (kept, _) = self.apply(list, op, fps)?;
+        let to = match (start == from, end == from) {
+            (true, false) => Some(end),
+            (false, true) => Some(start),
+            _ => None,
+        };
+        let total = frames_ceil(list.duration, fps.num, fps.den);
+        let ranges = frame_ranges(&list.keep, fps.num, fps.den, total);
+        // The kept range whose edge `from` is, and which edge: one the edit moves (keeping frames
+        // past a range's end or before its start, or cutting frames inside it from that edge).
+        let moved = to.and_then(|to| {
+            ranges.iter().find_map(|&(a, b)| {
+                if b == from && b < total && keep == (to > from) {
+                    Some(((a, b), Side::End, to))
+                } else if a == from && a > 0 && keep == (to < from) {
+                    Some(((a, b), Side::Start, to))
+                } else {
+                    None
+                }
+            })
+        });
+        let times = match (moved, self.words.as_deref()) {
+            (Some((range, side, to)), Some(words)) => {
+                words.moved_edge(&list.times, range, side, to, fps)
+            }
+            _ => list.times.clone(),
+        };
+        let to = Snapshot { keep: kept, times };
+        self.commit(list, Step::Do(op), to, false, fps)
     }
 
     /// Applies every op of `ops` in order to `list` and saves the result as **one** undo step (2p:
@@ -189,25 +261,32 @@ impl Editor {
                 if skipped == 1 { "is" } else { "are" }
             ));
         }
-        let edited = self.commit(list, Step::Do(first), now.keep, unsnapped, fps)?;
+        let to = Snapshot {
+            keep: now.keep,
+            times: list.times.clone(),
+        };
+        let edited = self.commit(list, Step::Do(first), to, unsnapped, fps)?;
         Ok(edited.map(|e| Edited { skipped, ..e }))
     }
 
-    /// Saves `keep` as the list's new ranges after `step` and moves the history (see [`Self::edit`]).
+    /// Saves `to` as the list's new ranges and retimed words after `step` and moves the history
+    /// (see [`Self::edit`]).
     fn commit(
         &mut self,
         list: &EditList,
         step: Step,
-        keep: Vec<Range>,
+        to: Snapshot,
         unsnapped: bool,
         fps: Fps,
     ) -> Result<Option<Edited>, String> {
-        if keep == list.keep {
+        let before = Snapshot::of(list);
+        if to == before {
             // Nothing to write; an undo or redo step that is already in play is still used up,
             // so the next one moves on.
-            self.shift(step, list.keep.clone());
+            self.shift(step, before);
             return Ok(None);
         }
+        let Snapshot { keep, times } = to;
         if let Step::Do(_) = step {
             // Spans under half a frame are joined back on the frame grid: say so rather than
             // write a change nobody can see or hear.
@@ -220,12 +299,12 @@ impl Editor {
         let path = self.path.clone().ok_or("no edit list is open")?;
         let new = EditList {
             keep,
+            times,
             ..list.clone()
         };
         let saved =
             edit::save(&path, &new).map_err(|e| format!("saving {}: {e}", path.display()))?;
         self.written = Some(saved.text.clone());
-        let before = list.keep.clone();
         if let Step::Do(_) = step {
             self.undo.push(before);
             if self.undo.len() > HISTORY {
@@ -244,7 +323,7 @@ impl Editor {
     }
 
     /// Renames speaker `id` and saves; `None` when the name is already that. Like every styling
-    /// change (below) not an undo step: the history holds kept ranges only, so undoing a cut keeps
+    /// change (below) not an undo step: the history holds kept ranges (and retimed words, 2w) only, so undoing a cut keeps
     /// the new name (the list saved for an undo is the one in play with older ranges).
     pub fn rename(
         &mut self,
@@ -357,8 +436,8 @@ impl Editor {
         }))
     }
 
-    /// Moves an undo (or redo) step to the other stack, `before` being the ranges it replaced.
-    fn shift(&mut self, step: Step, before: Vec<Range>) {
+    /// Moves an undo (or redo) step to the other stack, `before` being what it replaced.
+    fn shift(&mut self, step: Step, before: Snapshot) {
         match step {
             Step::Do(_) => {}
             Step::Undo => {
@@ -388,7 +467,15 @@ impl Editor {
                     .ok_or("this recording has no transcript")?;
                 let env = self.envelope.clone().unwrap_or_default();
                 let (a, b) = words
-                    .span(first, last, keep, &env, &list.settings, list.duration)
+                    .span(
+                        first,
+                        last,
+                        keep,
+                        &env,
+                        &list.settings,
+                        list.duration,
+                        &list.times,
+                    )
                     .ok_or("no such words in the transcript")?;
                 (a, b, keep, self.envelope.is_none())
             }
@@ -443,6 +530,7 @@ mod tests {
             speakers: Default::default(),
             captions: Default::default(),
             fixes: Vec::new(),
+            times: Vec::new(),
             windows: vec![],
         }
     }
@@ -875,5 +963,135 @@ mod tests {
             .list;
         assert!(l3.fixes.is_empty());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_moved_edge_moves_the_words_beside_it_and_undoes_with_it() {
+        // 2w: kept 10.0-11.0 at 30 fps (frames 300..330). Whisper put "dos" at 10.2-10.8 and "tres"
+        // at 10.9-11.6, so moving the end out to 11.4 (frame 342) would make "tres" kept by its
+        // middle: "dos" follows the edge, "tres" starts at it and stays cut.
+        let d = scratch("edge");
+        let path = d.join("edit.junctur");
+        let mut e = Editor::default();
+        e.reset(Some(path.clone()));
+        let w = |start, end, text: &str| Word {
+            start,
+            end,
+            text: text.into(),
+            p: 1.0,
+        };
+        e.words = Some(Arc::new(Words::from_words(vec![
+            w(9.5, 9.95, "pre"),
+            w(10.0, 10.2, "uno"),
+            w(10.2, 10.8, "dos"),
+            w(10.9, 11.6, "tres"),
+        ])));
+        let l0 = list(vec![r(10.0, 11.0)]);
+        let spans = |l: &EditList| -> Vec<(f64, f64, f64)> {
+            l.times.iter().map(|t| (t.start, t.from, t.to)).collect()
+        };
+        let l1 = e
+            .move_edge(&l0, (330, 342, true), 330, FPS)
+            .unwrap()
+            .expect("a change")
+            .list;
+        assert_eq!(frames(&l1, FPS), vec![(300, 342)]);
+        assert_eq!(spans(&l1), [(10.2, 10.2, 11.4), (10.9, 11.4, 11.6)]);
+        assert_eq!(reread(&path), l1, "saved with the frames");
+        // What the page gets: "tres" now starts at the edge, its middle past it.
+        let v = TranscriptView::new(
+            e.words.as_ref().unwrap(),
+            &Default::default(),
+            &[],
+            &l1.times,
+        );
+        assert_eq!((v.start[2], v.end[2], v.start[3]), (10_200, 11_400, 11_400));
+        // One undo puts the frames and the words back; redo both again.
+        let back = step(&mut e, &l1, Step::Undo, FPS);
+        assert_eq!(back.keep, l0.keep);
+        assert!(back.times.is_empty());
+        let again = step(&mut e, &back, Step::Redo, FPS);
+        assert_eq!(again, l1);
+        // Moving it back in a little: "dos", now running into it, ends at it; "tres" is not moved.
+        let l2 = e
+            .move_edge(&l1, (336, 342, false), 342, FPS)
+            .unwrap()
+            .unwrap()
+            .list;
+        assert_eq!(spans(&l2), [(10.2, 10.2, 11.2), (10.9, 11.4, 11.6)]);
+        // The start out to 9.8 (frame 294): "uno" starts there, "pre" ends there and stays cut.
+        let l3 = e
+            .move_edge(&l2, (294, 300, true), 300, FPS)
+            .unwrap()
+            .unwrap()
+            .list;
+        assert_eq!(frames(&l3, FPS), vec![(294, 336)]);
+        assert_eq!(
+            spans(&l3),
+            [
+                (9.5, 9.5, 9.8),
+                (10.0, 9.8, 10.2),
+                (10.2, 10.2, 11.2),
+                (10.9, 11.4, 11.6)
+            ]
+        );
+        // A frame edit that moves no edge of the list (inside a range) leaves the words.
+        let l4 = e
+            .move_edge(&l3, (310, 312, false), 310, FPS)
+            .unwrap()
+            .unwrap()
+            .list;
+        assert_eq!(l4.times, l3.times);
+        // Without a transcript it is the frame edit alone.
+        e.words = None;
+        let l5 = e
+            .move_edge(&l0, (330, 342, true), 330, FPS)
+            .unwrap()
+            .unwrap()
+            .list;
+        assert!(l5.times.is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_word_far_from_the_edge_is_not_stretched_and_one_passed_whole_turns_kept() {
+        // 2w: a range kept by hand to 20.0 whose last word ended at 15.0: moving its end out leaves
+        // the word (it is not beside the edge). And moving an end over a whole short word keeps
+        // that word, the word following the edge stopping at it.
+        let d = scratch("edge-far");
+        let path = d.join("edit.junctur");
+        let mut e = Editor::default();
+        e.reset(Some(path));
+        let w = |start, end| Word {
+            start,
+            end,
+            text: "w".into(),
+            p: 1.0,
+        };
+        e.words = Some(Arc::new(Words::from_words(vec![
+            w(14.0, 15.0),
+            w(21.0, 21.5),
+        ])));
+        let l = list(vec![r(10.0, 20.0)]);
+        let l1 = e
+            .move_edge(&l, (600, 615, true), 600, FPS)
+            .unwrap()
+            .unwrap()
+            .list;
+        assert!(l1.times.is_empty(), "{:?}", l1.times);
+        e.words = Some(Arc::new(Words::from_words(vec![
+            w(10.0, 10.8),
+            w(10.9, 11.0),
+            w(11.5, 12.0),
+        ])));
+        let l = list(vec![r(10.0, 10.85)]);
+        // 10.85 ends in frame 326; out to 11.1 (frame 333), past the word at 10.9-11.0 whole.
+        let l2 = e
+            .move_edge(&l, (326, 333, true), 326, FPS)
+            .unwrap()
+            .unwrap()
+            .list;
+        let t: Vec<_> = l2.times.iter().map(|t| (t.start, t.from, t.to)).collect();
+        assert_eq!(t, [(10.0, 10.0, 10.9)]);
     }
 }
