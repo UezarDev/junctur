@@ -405,11 +405,6 @@ export interface Transcription {
   jobs: Progress[];
 }
 
-export interface Reanalysed {
-  progress: Progress | null;
-  /** A fresh cut was asked for and nothing started: the edit list holds the user's edits, so ask first. */
-  handEdited: boolean;
-}
 
 export const startupFile = () => invoke<string | null>("startup_file");
 export const playerState = () => invoke<PlayerState>("player_state");
@@ -420,13 +415,6 @@ export const currentRecording = () => invoke<Opened | null>("current_recording")
 export const recent = () => invoke<Recent[]>("recent");
 export const forgetRecent = (path: string) => invoke<void>("forget_recent", { path });
 export const analysis = (path: string) => invoke<Progress | null>("analysis", { path });
-/**
- * Analyses `path` again: the user's edit list is kept, with the speakers matched again against
- * the remembered voices. With `fresh` the list is re-cut instead; then, without `replace`, a list with
- * the user's edits starts nothing.
- */
-export const reanalyse = (path: string, fresh: boolean, replace: boolean) =>
-  invoke<Reanalysed>("reanalyse", { path, fresh, replace });
 export const transcription = () => invoke<Transcription>("transcription");
 /** Pauses or resumes the transcription lane, from any recording. */
 export const pauseTranscription = (paused: boolean) =>
@@ -539,13 +527,34 @@ export interface SetAside {
 export const fixesSetAside = () => invoke<SetAside[]>("fixes_set_aside");
 /** Forgets `seen`, as `fixesSetAside` gave them: any set aside since stay listed. */
 export const forgetFixesSetAside = (seen: SetAside[]) => invoke<void>("forget_fixes_set_aside", { seen });
-/** What the Correct button started. */
-export interface Corrected {
-  progress: Progress;
+/** What the Correct pop-up asks for. */
+export interface Ask {
+  /** Transcribe the words again. */
+  words: boolean;
+  /** Hear the speakers again. */
+  speakers: boolean;
+  /** Keep the cut; unticked, a fresh one (asks first over the user's edits). */
+  keepCuts: boolean;
+  /** Keep the speakers' names and the seconds pinned to people; unticked, named afresh. */
+  keepNames: boolean;
+  /** Keep the fixed words and word times, moved onto new words; unticked, dropped. */
+  keepFixes: boolean;
+  /** The selection in source seconds; null for the whole timeline. */
+  within: [number, number] | null;
+  /** Re-cut even over the user's edits (asked). */
+  replace: boolean;
 }
-/** The Correct button: the open recording's speakers heard again and its words transcribed again
- * with the word list, the user's edits kept; the fixes and word times move onto the new words. */
-export const correct = () => invoke<Corrected>("correct");
+/** What the Correct pop-up's run did. */
+export interface Corrected {
+  /** The run, when one started. */
+  progress: Progress | null;
+  /** The cut was to be made afresh and nothing started: the edit list holds the user's edits, so ask first. */
+  handEdited: boolean;
+}
+/** The Correct pop-up: analyses `path` again as `ask` says; the fixes and word times kept move onto
+ * the new words, and no other word is given a fix. Refused while analysed, and for a selection with
+ * the speakers asked for (they are heard over the whole recording only). */
+export const reanalyse = (path: string, ask: Ask) => invoke<Corrected>("reanalyse", { path, ask });
 /** Sets speaker `id`'s caption colour (`#RRGGBB`). */
 export const recolorSpeaker = (id: number, color: string) =>
   invoke<void>("recolor_speaker", { id, color });

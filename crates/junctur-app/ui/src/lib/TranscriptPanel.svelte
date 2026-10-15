@@ -62,8 +62,9 @@
     reviewing?: boolean;
     onSelect: (s: sel.Selection | null) => void;
     onError: (message: string) => void;
-    /** The Correct button: asks, starts the run; its answer, or null when not started. */
-    correct: () => Promise<api.Corrected | null>;
+    /** The Correct button: opens the pop-up; what its run started and what it is doing, or null
+     * when none started. */
+    correct: () => Promise<{ r: api.Corrected; doing: string } | null>;
   } = $props();
 
   const ROW = 24;
@@ -346,10 +347,9 @@
     return [listed, ...notes].filter((t) => t).join(" ");
   });
   async function correctAll() {
-    const r = await correct();
-    if (!r || !mounted) return;
-    note =
-      "Correcting: hearing the speakers and the words again (Properties shows how far); your fixes move onto the new words.";
+    const started = await correct();
+    if (!started || !mounted) return;
+    note = `Correcting: ${started.doing} (Properties shows how far).`;
   }
 
   const first = $derived(Math.max(0, Math.floor(top / ROW) - OVERSCAN));
@@ -713,8 +713,11 @@
             ? "Transcribing: the words show here five minutes at a time. Cut and keep on the timeline meanwhile."
             : analysing
               ? "Analysing this recording: the transcript shows here when it is done."
-              : "No transcript for this recording yet. Re-analyse it (project panel) to edit by text."}
+              : "No transcript for this recording yet. Correct analyses it again, to edit by text."}
       </p>
+      {#if !analysing && !loading}
+        <p class="note"><button class="correct" onclick={() => void correctAll()}>Correct…</button></p>
+      {/if}
     {:else if laid}
       <div class="spacer" style:height="{laid.rows.length * ROW}px">
         {#each visible as { index, row } (index)}
@@ -837,6 +840,7 @@
       checks={toCheck.length > 0}
       onFixed={tellFixed}
       onCorrect={correctAll}
+      {analysing}
       onLooksRight={checking >= 0 ? looksRight : null}
     />
   {/if}
@@ -1027,5 +1031,12 @@
     height: 20px;
     font-size: 12px;
     font-weight: 600;
+  }
+  /* The empty transcript's way to analyse again, as the word bar's Correct looks. */
+  .note .correct {
+    padding: 4px 14px;
+    font-weight: 600;
+    border-color: var(--accent);
+    color: var(--accent);
   }
 </style>

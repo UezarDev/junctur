@@ -1,14 +1,15 @@
-//! Word fixes, flagged words and Correct (transcribing again with the fixes carried over).
+//! Word fixes, flagged words and Correct (its pop-up's re-analysis: the words, the speakers and the
+//! cut redone apart, the user's fixes, names and cut kept or dropped, over a selection or all).
 
 use std::path::Path;
 
 use junctur_core::edit::Fix;
 use junctur_core::pipeline::{self, Project, SetAside};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
-use super::{notifier, App};
-use crate::analysis::Progress;
+use super::{blocking, notifier, App};
+use crate::analysis::{Again, Forget, Progress, Reanalysis, Redo};
 use crate::player::{FixDone, WordRef};
 use crate::settings;
 
@@ -133,22 +134,98 @@ pub async fn forget_fixes_set_aside(
     pipeline::forget_fixes_set_aside(&p, &seen).map_err(|e| e.to_string())
 }
 
-/// What the Correct button started.
+/// What the Correct pop-up asks for, as the page sends it: what to hear again, what of the user's
+/// to keep, and the selection.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Ask {
+    /// Transcribe the words again.
+    pub words: bool,
+    /// Hear the speakers again.
+    pub speakers: bool,
+    /// Keep the cut; unticked, a fresh one (asks first over the user's edits).
+    pub keep_cuts: bool,
+    /// Keep the speakers' names and the seconds pinned to people; unticked, named afresh.
+    pub keep_names: bool,
+    /// Keep the fixed words and word times, carried onto new words; unticked, dropped.
+    pub keep_fixes: bool,
+    /// The selection in source seconds; `None` for the whole timeline.
+    pub within: Option<[f64; 2]>,
+    /// Re-cut even over the user's edits: the page asked.
+    pub replace: bool,
+}
+
+impl Ask {
+    pub fn reanalysis(&self) -> Reanalysis {
+        Reanalysis {
+            again: match (self.keep_cuts, self.replace) {
+                (true, _) => Again::KeepList,
+                (false, false) => Again::Recut,
+                (false, true) => Again::RecutOverEdits,
+            },
+            redo: Redo {
+                words: self.words,
+                speakers: self.speakers,
+            },
+            forget: Forget {
+                names: !self.keep_names,
+                fixes: !self.keep_fixes,
+            },
+            within: self.within.map(|[a, b]| (a, b)),
+        }
+    }
+}
+
+/// What the Correct pop-up's run did.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Corrected {
-    /// The run hearing the speakers and the words again.
-    pub progress: Progress,
+    /// The run, when one started.
+    pub progress: Option<Progress>,
+    /// The cut was to be made afresh and nothing started, because the edit list holds the user's
+    /// edits: the page asks first.
+    pub hand_edited: bool,
 }
 
-/// The Correct button: a run hearing the speakers and the words again, keeping the user's edit list
-/// (`Analysis::correct`); the fixes and word times move onto the new words at its end, and nothing
-/// else is fixed. Refused while analysed, or while the list cannot be edited.
+/// The Correct pop-up: analyses `path` again as `ask` says ([`Analysis::reanalyse`]); a
+/// re-transcription moves the fixes and word times kept onto the new words at its end, and gives no
+/// fix to any other word (5ah). Refused while analysed, or while the list cannot be edited. Off the
+/// async runtime: asking whether the list holds the user's edits reads the track analysis and the
+/// transcript.
+///
+/// [`Analysis::reanalyse`]: crate::analysis::Analysis::reanalyse
 #[tauri::command]
-pub async fn correct(handle: AppHandle, app: State<'_, App>) -> Result<Corrected, String> {
+pub async fn reanalyse(
+    handle: AppHandle,
+    app: State<'_, App>,
+    path: String,
+    ask: Ask,
+) -> Result<Corrected, String> {
+    let r = ask.reanalysis();
+    // Only while the list can be edited, as the fixes are, and only the open recording's: the page
+    // asks for the one it shows. The mark is held until the run has started, so an edit begun
+    // meanwhile ends before the run reads anything.
     let e = app.editable()?;
-    let path = e.file().ok_or("no recording is open")?.to_string();
-    let progress = app.analysis.correct(Path::new(&path), notifier(handle))?;
-    drop(e);
-    Ok(Corrected { progress })
+    let open = e
+        .file()
+        .map(|f| std::path::absolute(f).unwrap_or_else(|_| f.into()));
+    if open.as_deref()
+        != Some(
+            std::path::absolute(&path)
+                .as_deref()
+                .unwrap_or(Path::new(&path)),
+        )
+    {
+        return Err("this recording is no longer the open one".into());
+    }
+    let analysis = app.analysis.clone();
+    blocking(move || {
+        let started = analysis.reanalyse(Path::new(&path), r, notifier(handle))?;
+        drop(e);
+        Ok(Corrected {
+            progress: started.progress,
+            hand_edited: started.hand_edited,
+        })
+    })
+    .await
 }

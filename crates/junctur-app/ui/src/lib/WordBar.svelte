@@ -19,6 +19,7 @@
     retyping = $bindable(false),
     onFixed,
     onCorrect,
+    analysing = false,
   }: {
     edit: api.EditState | null;
     words: Words;
@@ -34,8 +35,10 @@
     retyping?: boolean;
     /** What a fix did besides itself: the word list's new entries. */
     onFixed: (r: api.Fixed) => void;
-    /** The Correct button. */
+    /** The Correct button: opens the pop-up. */
     onCorrect: () => Promise<void>;
+    /** The recording is being analysed: Correct waits until it is done. */
+    analysing?: boolean;
   } = $props();
 
   // A speaker the analysis named "Speaker 3" has no name set yet: remembering a voice under that
@@ -196,7 +199,8 @@
   }
 </script>
 
-<div class="wordbar" class:idle={!selection}>
+<div class="wordbar">
+  <div class="body" class:idle={!selection}>
   {#if !selection}
     <div class="hint">Select words to cut, keep or fix them, or to say who says them</div>
   {/if}
@@ -299,40 +303,52 @@
         title="Someone not listed yet: name whoever says these words (only one person, the more the better)">New name…</button
       >
     {/if}
-    <button
-      class="correct"
-      disabled={busy || correcting}
-      onclick={async () => {
-        correcting = true;
-        try {
-          await onCorrect();
-        } finally {
-          correcting = false;
-        }
-      }}
-      title="Hear the speakers again, then transcribe the whole recording again with your word list (your cuts and edits stay; your fixes move onto the new words)"
-      >{correcting ? "Correcting…" : "Correct"}</button
-    >
   </div>
   </div>
+  </div>
+  <!-- Outside the rows, so it is there with nothing selected too: it works on the whole
+       recording or on the selection, the timeline's included. -->
+  <button
+    class="correct"
+    disabled={busy || correcting || analysing}
+    onclick={async () => {
+      correcting = true;
+      try {
+        await onCorrect();
+      } finally {
+        correcting = false;
+      }
+    }}
+    title={analysing
+      ? "Analysing this recording: Correct waits until it is done"
+      : "Analyse this recording again, part by part: the words, the speakers or the cut, keeping what you choose of yours, over the selection or the whole timeline"}
+    >Correct…</button
+  >
 </div>
 
 <style>
   .wordbar {
-    position: relative;
     display: flex;
-    flex-direction: column;
-    gap: 6px;
+    align-items: center;
+    gap: 10px;
     padding: 8px 12px 10px;
     border-top: 1px solid var(--line);
     background: var(--panel-solid);
+  }
+  .body {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
   }
   .rows {
     display: flex;
     flex-direction: column;
     gap: 6px;
   }
-  .idle .rows {
+  .idle > .rows {
     visibility: hidden;
   }
   .hint {
@@ -340,7 +356,6 @@
     inset: 0;
     display: flex;
     align-items: center;
-    padding: 0 12px;
     color: var(--muted);
     font-size: 12px;
   }
@@ -372,15 +387,19 @@
   .person:hover:not(:disabled) {
     background: color-mix(in srgb, var(--c) 24%, transparent);
   }
-  .new,
-  .correct {
+  .new {
     padding: 2px 9px;
     font-size: 12px;
   }
-  .correct {
-    /* At the row's end, or the next line's end when the panel is narrow. */
-    margin-left: auto;
+  /* The bar's one big button, beside its rows: the way to analyse the recording again. */
+  .wordbar > .correct {
+    flex: none;
+    align-self: stretch;
+    padding: 6px 16px;
+    font-size: 14px;
     font-weight: 600;
+    border-color: var(--accent);
+    color: var(--accent);
   }
   .naming {
     display: inline-flex;

@@ -29,7 +29,9 @@ pub use speaker_files::{
 };
 
 use again::{carry_fixes, hear_again, heard_again, not_again};
-use editlist::{draft, keep_or_write};
+#[cfg(test)]
+use editlist::keep_or_write;
+use editlist::{draft, rewrite, Rewrite};
 use stages::{count_words, speakers_stage, speech_stage, transcribe_stage, Stage};
 
 use crate::edit::{self, CutSettings, EditList};
@@ -153,18 +155,115 @@ pub struct PipelineOptions {
     /// Whether an edit list holding the user's edits is kept or re-cut ([`KeepList`]).
     pub keep_list: KeepList,
     /// Hear the speakers again from the audio, cut at the user's pins, instead of reusing the
-    /// hearing (the Correct button; what [`rehear`] does outside a run).
+    /// hearing (the app's Correct pop-up; what [`rehear`] does outside a run).
     pub rehear: bool,
     /// Transcribe the recording again, the word list as it is now, and carry the edit list's fixes
-    /// onto the new words ([`finish`]; the Correct button).
+    /// onto the new words ([`finish`]; the app's Correct pop-up). Apart from
+    /// `rehear` and `keep_list`, so either hearing can be asked for alone.
     pub retranscribe: bool,
+    /// What of the user's this run drops instead of carrying ([`Forget`]).
+    pub forget: Forget,
+    /// Only this stretch of the recording, in source seconds: the words transcribed again on the
+    /// chunks it touches, the cut made again inside it, the fixes dropped inside it; the rest of
+    /// the transcript and the list as they were. The speakers are heard over the whole recording
+    /// only, so it is refused with `rehear` or `forget.names` ([`check`]).
+    pub within: Option<(f64, f64)>,
+}
+
+/// What a run drops of the user's instead of carrying it onto the new analysis (the app's Correct
+/// pop-up, its "keep" boxes unticked). Each kept list that loses something is backed up first.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Forget {
+    /// The speakers' names in the list and the seconds pinned to people (`speakers.json`, copied to
+    /// `speakers.json.bak*` first): the speakers are heard again and named afresh, the remembered
+    /// voices still naming who they recognise. Implies `rehear`.
+    pub names: bool,
+    /// The fixed words and the word times set by moving a cut's edge, in `within` or everywhere:
+    /// dropped at the list's write, so a re-transcription after has nothing to carry.
+    pub fixes: bool,
+}
+
+impl Forget {
+    pub fn any(&self) -> bool {
+        self.names || self.fixes
+    }
+}
+
+/// There from the moment a hearing that names the speakers afresh is in `speakers.json` (its pins
+/// left out, [`speakers_stage`]) until the edit list has its speakers named afresh too: a run stopped
+/// in between would otherwise carry the old names onto the new hearing on its resume. Empty.
+const AFRESH_FILE: &str = "speakers-afresh";
+
+/// What the edit stage of this run forgets: what it was asked, and the names when an earlier run that
+/// was asked to name the speakers afresh stopped before its list ([`AFRESH_FILE`]) and speakers were
+/// found this time (with none, the list keeps what it has, as any run without speakers).
+fn forget_now(p: &Project, opts: &PipelineOptions, found: bool) -> Forget {
+    Forget {
+        names: opts.forget.names || (found && p.dir.join(AFRESH_FILE).is_file()),
+        ..opts.forget
+    }
+}
+
+/// The edit list has the speakers as heard last: an [`AFRESH_FILE`] is done with.
+fn afresh_done(p: &Project, log: &mut dyn FnMut(&str)) {
+    let path = p.dir.join(AFRESH_FILE);
+    if let Err(e) = crate::output::remove_retrying(&path) {
+        if path.exists() {
+            log(&format!("could not remove {}: {e}", path.display()));
+        }
+    }
+}
+
+/// Refuses options a run cannot do soundly, before anything is written: a stretch with the speakers
+/// heard again (they are clustered over the whole recording, and a stretch's clusters match no one
+/// outside it), and a stretch's words transcribed again with nothing to splice them into or a
+/// transcript that does not answer the settings (it would mix two models or languages; under `Auto`
+/// the stretch is heard by the transcript's own model, which must be one this version loads), or
+/// while an earlier transcription is unfinished (a run that redoes nothing resumes it first).
+fn check(p: &Project, opts: &PipelineOptions) -> Result<()> {
+    let Some((a, b)) = opts.within else {
+        return Ok(());
+    };
+    let refuse = |why: &str| Err(Error::Edit(why.to_string()));
+    if !(a.is_finite() && b.is_finite() && a < b) {
+        return refuse("the stretch to analyse again is empty");
+    }
+    if opts.rehear || opts.forget.names {
+        return refuse(
+            "the speakers are heard over the whole recording only: analyse the whole timeline to hear them again",
+        );
+    }
+    if opts.retranscribe && !opts.no_transcript {
+        if transcribe::interrupted(&p.dir) {
+            return refuse(transcribe::UNFINISHED);
+        }
+        let t = TranscribeOptions {
+            model: opts.model,
+            languages: opts.languages.clone(),
+            ..Default::default()
+        };
+        match transcribe::made_with(&p.dir) {
+            None => return refuse("there is no transcript to transcribe a part of again: analyse the whole timeline"),
+            Some(Err(e)) => return refuse(&format!("the transcript could not be read ({e}): analyse the whole timeline")),
+            Some(Ok((model, languages))) if !transcribe::answers(&model, &languages, &t) => {
+                return refuse("the transcript was made with another model or languages than the settings ask: analyse the whole timeline, or one transcript would mix both")
+            }
+            // Heard with the model that made it ([`transcribe::stretch_model`]), so it must be
+            // one this version loads.
+            Some(Ok((model, _))) if model.parse::<ModelPref>().is_err() => {
+                return refuse(&format!("the transcript was made with {model}, which this version cannot run: analyse the whole timeline"))
+            }
+            Some(Ok(_)) => {}
+        }
+    }
+    Ok(())
 }
 
 /// What a run's `edit` stage does with an edit list on disk that holds the user's edits.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum KeepList {
-    /// Re-cut it, keeping it as `edit.junctur.bak*` (`junctur analyze`, and the app's "Start over
-    /// with a fresh cut", which asks first).
+    /// Re-cut it, keeping it as `edit.junctur.bak*` (`junctur analyze`, and the app's Correct
+    /// pop-up with Cuts unticked, which asks first); with `within`, only inside that stretch.
     #[default]
     No,
     /// Keep it, taking only the speakers the run found; one that does not parse (a broken hand
@@ -172,7 +271,8 @@ pub enum KeepList {
     /// run the user edited during).
     Edits,
     /// As `Edits`, and one that does not parse is left as it is too: the run fails saying so,
-    /// since re-cutting is only ever the user's choice here (the app's Re-analyse).
+    /// since re-cutting is only ever the user's choice here (the app's Correct pop-up with Cuts
+    /// kept).
     Whole,
 }
 
@@ -236,6 +336,7 @@ pub fn prepare(
     log: &mut dyn FnMut(&str),
     steps: Steps,
 ) -> Result<Prepared> {
+    check(p, opts)?;
     let mut jobs = p.jobs();
     jobs.file = p.file.clone();
 
@@ -273,8 +374,14 @@ pub fn prepare(
     };
     let edit = jobs.stage(&p.dir, StageName::Edit, log, |log| {
         let d = draft(p, &report, &speech, speakers.as_ref(), None, &opts.cut);
-        keep_or_write(p, d, speakers.as_ref(), opts.keep_list, log)
+        let how = Rewrite {
+            keep: opts.keep_list,
+            within: opts.within,
+            forget: forget_now(p, opts, speakers.is_some()),
+        };
+        rewrite(p, d, speakers.as_ref(), &how, log)
     })?;
+    afresh_done(p, log);
     Ok(Prepared {
         report,
         speech,

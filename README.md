@@ -156,12 +156,7 @@ recording, choose one, or pick one of the recent ones (`junctur/recent.json` bes
 the background with `junctur analyze`'s defaults (model from the config file, remembered voices); the
 project panel shows each stage as it runs, and the transcript and edit list fill in when it is done. An
 analysed recording opens straight away; when the config file now asks for another Whisper model than the
-transcript was made with, the panel says so and offers Re-analyse (never on its own). Re-analyse reruns
-only what the settings changed, matches the speakers against the remembered voices again and puts them
-into your edit list, keeping your cut, speaker names and colours, fixed words and caption settings
-(an edit list that no longer reads is left as it is, and the analysis says so).
-"Start over with a fresh cut" under it re-cuts instead; when the edit list holds your own edits it asks
-first, and keeps them as `edit.junctur.bak*` (as `junctur analyze` does). `npm run tauri dev` / `build` build the app with `--features cuda` when
+transcript was made with, the panel says so and points to Correct (below; never on its own). `npm run tauri dev` / `build` build the app with `--features cuda` when
 the CUDA 13 toolkit is installed (`CUDA_PATH_V13_0`), so it analyses on the GPU; `JUNCTUR_CPU=1` builds
 a CPU one. Plain `cargo build` is always CPU-only.
 
@@ -188,14 +183,31 @@ there too. (An earlier version also gave a fix to every place heard the same way
 ordinary fixes now, and Fixes is how to take the wrong ones away.) **Fixes**, in the panel's header,
 lists every fix of the recording grouped by its text (how many places, what they were heard as), each
 place with its time to go there; tick places or whole groups and Remove takes them out, so those words
-read as heard. **Correct**, at the end of the word bar's row of speakers, hears the whole recording
-again: the speakers heard again against the remembered voices and the recording transcribed again with
-the word list, your cuts, names, fixes and caption settings kept; nothing is fixed beyond what you
-fixed yourself. It is an analysis like any
-other (on the transcription lane, pausable, the words coming back five minutes at a time); the fixes,
-and the word times set by moving a cut's edge, move onto the new words, one whose word Whisper now
-spells your way is no longer needed, and one whose word is heard otherwise now is set aside and listed
-above the transcript until you dismiss it.
+read as heard.
+
+**Correct…**, the big button at the right of the word bar (there with nothing selected too, and in an
+empty transcript), analyses the recording again, part by part. Its pop-up has two things to redo,
+"Transcribe the words again" (Whisper with the word list as it is now) and "Hear the speakers again"
+(against the remembered voices, your pinned seconds still deciding theirs), and three of yours to keep:
+**Cuts** (unticked, a fresh cut from the analysis; when the list holds your edits it asks first and keeps
+them as `edit.junctur.bak*`, as `junctur analyze` does), **Names and voices** (unticked, the speakers are
+heard again and named afresh, without your names or pins; the list and `speakers.json` are backed up,
+the remembered voices file is never touched) and **Corrected words** (your fixes and the word times set by
+moving a cut's edge or a word's own edge; unticked, they are dropped, the list backed up, so "transcribe
+again ignoring my fixes" is one untick). It opens on everything redone and everything kept, and
+Re-analyse whole timeline does what is ticked: with nothing ticked to redo it reruns only what the
+settings changed, as after a model change. Re-analyse selection works on the stretch selected on the
+timeline, or the words selected in the transcript (several stretches count as the span holding them):
+the words are transcribed again on the Whisper chunks it touches (whole chunks, so no word is cut in
+half), the cut made again only inside it, the fixes dropped only inside it, the rest of the transcript
+and the cut as they were. The speakers are heard over the whole recording only, so with either speakers
+box asking for them the selection button is greyed and says why; a selection also needs a transcript
+made with the settings' model and languages. A run is an analysis like any other (on the transcription
+lane, pausable, the words coming back five minutes at a time). Kept fixes and word times move onto the
+new words, and nothing is fixed beyond what you fixed yourself; one whose word Whisper now spells your
+way is no longer needed, and one whose word is heard otherwise now is set aside and listed above the
+transcript until you dismiss it. An edit list that no longer reads is left as it is, and the analysis
+says so.
 Words Whisper was unsure of (the lowest probability of their letters' tokens under 25 %, `flag_below`
 below) are underlined; the panel's header steps through them, and "Looks right" keeps one as heard and
 stops flagging it (a `fix` line with the heard text). Transcripts made before this have no flags.

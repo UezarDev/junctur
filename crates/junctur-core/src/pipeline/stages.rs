@@ -4,7 +4,7 @@
 use super::speaker_files::{set_aside, write_speakers};
 use super::{
     describe, speakers, speech, speech_tracks, steps, Found, Jobs, PipelineOptions, Project,
-    Speech, StageName, Steps,
+    Speech, StageName, Steps, AFRESH_FILE,
 };
 use crate::edit::{self, EditList};
 use crate::tracks::{Role, TrackReport};
@@ -109,7 +109,7 @@ pub(super) fn speakers_stage(
     let cached = previous
         .clone()
         .filter(|_| !opts.force)
-        .filter(|_| !opts.rehear)
+        .filter(|_| !opts.rehear && !opts.forget.names)
         .and_then(|f| speakers::cached(f, speech, &voice_tracks(report), &p.dir));
     let found = match cached {
         // Heard before: only labelled again, with the voices as they are now (cheap).
@@ -121,12 +121,19 @@ pub(super) fn speakers_stage(
             }
             again
         }
-        None => jobs.stage(&p.dir, StageName::Speakers, log, |_| {
-            // The user's pins cut the windows and outlive the hearing they were made on.
-            let pins = previous
-                .as_ref()
-                .map(|f| f.pins.clone())
-                .unwrap_or_default();
+        None => jobs.stage(&p.dir, StageName::Speakers, log, |log| {
+            // The user's pins cut the windows and outlive the hearing they were made on, unless the
+            // speakers are to be named afresh: then they are not used, and kept in a copy of the
+            // file the new hearing replaces.
+            let pins = if opts.forget.names {
+                keep_copy(p, log)?;
+                Vec::new()
+            } else {
+                previous
+                    .as_ref()
+                    .map(|f| f.pins.clone())
+                    .unwrap_or_default()
+            };
             let mut f = speakers::find(
                 &speakers::Job {
                     file: &p.file,
@@ -144,12 +151,33 @@ pub(super) fn speakers_stage(
             if let Some(old) = &previous {
                 speakers::remember_known(&mut f, old);
             }
+            // Named afresh: said before the hearing lands, so a run stopped before its list names
+            // them afresh on its resume instead of carrying the old names onto it.
+            if opts.forget.names {
+                crate::output::write_replacing(&p.dir.join(AFRESH_FILE), b"")?;
+            }
             write_speakers(p, &f)?;
             Ok(f)
         })?,
     };
     log(&describe(&found));
     Ok(found)
+}
+
+/// Copies `speakers.json` to the first free `speakers.json.bak*` before a hearing that names the
+/// speakers afresh replaces it: it holds the seconds the user pinned to people.
+fn keep_copy(p: &Project, log: &mut dyn FnMut(&str)) -> Result<()> {
+    let path = p.speakers_path();
+    if !path.is_file() {
+        return Ok(());
+    }
+    let copy = crate::output::first_free(&path, "bak");
+    std::fs::copy(&path, &copy)?;
+    log(&format!(
+        "speakers: named afresh, without the seconds pinned to people; they are kept in {}",
+        copy.display()
+    ));
+    Ok(())
 }
 
 /// Whisper over the speech regions, resumed or reused when it can be.
@@ -175,6 +203,9 @@ pub(super) fn transcribe_stage(
         force: opts.force,
         again,
         words: opts.words.clone(),
+        // Only a stretch this run asked to transcribe again; a resumed ask has no stretch (its
+        // partial already holds the rest of the transcript).
+        within: opts.within.filter(|_| opts.retranscribe),
     };
     let src: Vec<Source> = speech
         .tracks
