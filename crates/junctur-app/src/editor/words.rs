@@ -128,7 +128,7 @@ impl Words {
         }
     }
 
-    /// Every word with its track, in the list's order: the order `edit::Fixes` and `edit::spread`
+    /// Every word with its track, in the list's order: the order `edit::Fixes` and `edit::placed`
     /// read a transcript in.
     pub fn in_order(&self) -> Vec<(usize, &Word)> {
         self.tracks.iter().copied().zip(self.list.iter()).collect()

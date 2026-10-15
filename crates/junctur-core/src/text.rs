@@ -1,5 +1,5 @@
 //! Small text rules several modules apply to a word or a line, kept in one place so the word list,
-//! fixes, spreading and captions read a word alike.
+//! fixes, the carry onto a new transcript and captions read a word alike.
 
 /// Runs of whitespace as one space, trimmed.
 pub fn one_spaced(s: &str) -> String {

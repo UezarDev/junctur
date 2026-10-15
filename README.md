@@ -182,15 +182,16 @@ new time is a `time` line, one undo step, used by the transcript, the captions a
 Double-click a misheard word, or point at it and press F2, to fix its spelling (F2 with no word under
 the pointer opens Fix text for the words selected, when they are in view; a field left as it opened
 saves nothing when you click away): the fix is a `fix` line in `edit.junctur`, shown in the
-transcript, the caption preview and the SRT, and the spelling joins the word list (below). Every other
-place the transcript has the same misheard word (case and punctuation aside) gets the same fix in the
-same save; a line under the panel's header says how many, with Undo those. **Fixes**, in the panel's
-header, lists every fix of the recording grouped by its text (how many places, what they were heard
-as), each place with its time to go there; tick places or whole groups and Remove takes them back to
-what was heard (kept as heard, so a later spread does not bring them back). **Correct**, at the end of
-the word bar's row of speakers, does it for the whole recording: every fix given to the words heard the
-same way, then the speakers heard again against the remembered voices and the recording transcribed
-again with the word list, your cuts, names, fixes and caption settings kept. It is an analysis like any
+transcript, the caption preview and the SRT, and the spelling joins the word list (below). A fix
+changes only the words you fixed: the same misheard word elsewhere stays as heard until you fix it
+there too. (An earlier version also gave a fix to every place heard the same way; those copies are
+ordinary fixes now, and Fixes is how to take the wrong ones away.) **Fixes**, in the panel's header,
+lists every fix of the recording grouped by its text (how many places, what they were heard as), each
+place with its time to go there; tick places or whole groups and Remove takes them out, so those words
+read as heard. **Correct**, at the end of the word bar's row of speakers, hears the whole recording
+again: the speakers heard again against the remembered voices and the recording transcribed again with
+the word list, your cuts, names, fixes and caption settings kept; nothing is fixed beyond what you
+fixed yourself. It is an analysis like any
 other (on the transcription lane, pausable, the words coming back five minutes at a time); the fixes,
 and the word times set by moving a cut's edge, move onto the new words, one whose word Whisper now
 spells your way is no longer needed, and one whose word is heard otherwise now is set aside and listed

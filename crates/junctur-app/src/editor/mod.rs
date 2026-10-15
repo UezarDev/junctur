@@ -6,10 +6,10 @@ mod styling;
 pub mod words;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use junctur_core::edit::{
-    self, frame_ranges, frames_ceil, EditList, Envelope, Fix, Range, Retime, Saved, SpreadIndex,
+    self, frame_ranges, frames_ceil, EditList, Envelope, Range, Retime, Saved,
 };
 
 use crate::cuts::Fps;
@@ -52,10 +52,6 @@ pub struct Edited {
     pub unsnapped: bool,
     /// Stretches of a several-stretch edit left out as under a frame ([`Editor::edit_all`]).
     pub skipped: usize,
-    /// Fixes a word fix also made on the words heard like it ([`Editor::fix_word`]), and what
-    /// those words were heard as.
-    pub others: Vec<Fix>,
-    pub heard: Vec<String>,
 }
 
 /// Runs of transcript words (`(first, last)`, inclusive) as the engine takes them from the page:
@@ -121,10 +117,6 @@ pub struct Editor {
     /// While the recording transcribes: the words are read up to this many seconds, where
     /// every track is transcribed; `None` reads the finished transcript.
     pub through: Option<f64>,
-    /// What a spread reads of `words`, kept beside the words it was built from. Weak, so words
-    /// read again are not kept alive for it and it is never taken for a later transcript's. The
-    /// pointer names the words because `Words` behind its `Arc` is never changed in place.
-    spread_index: Option<(Weak<Words>, Arc<SpreadIndex>)>,
 }
 
 impl Editor {
@@ -357,8 +349,6 @@ impl Editor {
             saved,
             unsnapped,
             skipped: 0,
-            others: Vec::new(),
-            heard: Vec::new(),
         }))
     }
 
