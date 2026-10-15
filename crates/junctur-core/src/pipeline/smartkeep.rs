@@ -131,8 +131,8 @@ pub fn automatic_keep(p: &Project, list: &EditList) -> Option<Vec<Range>> {
 /// What `p`'s suggestions are now, the one reading of them the app's lane and its answers share, so
 /// Accept all applies the parts the lane showed: the automatic cut (the list itself before the speech
 /// is found) and the suggestions against it. The fit is the default one: the rules' margin is not
-/// refitted (3b's pairs and refit were of Laya's; fitting the rules' would move the spans the answers
-/// are kept by).
+/// refitted (3b's pairs and refit were of Laya's margin; the rules' is a distance above the
+/// recording's own line, which a fit across recordings would only blur).
 pub struct Standing {
     pub auto: Vec<Range>,
     pub items: Vec<Item>,

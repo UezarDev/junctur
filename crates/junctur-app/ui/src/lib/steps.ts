@@ -12,7 +12,7 @@ export const STEP: Record<string, string> = {
   transcribe: "Transcribing",
   edit: "Cutting",
   labels: "Labelling the silent parts",
-  keep: "Finding busy silent parts to keep",
+  keep: "Finding busy silent stretches to keep",
 };
 
 /** The stage running now, while the run is. */

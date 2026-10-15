@@ -695,7 +695,7 @@
       <div
         class="h labels"
         style:height="{keepRow}px"
-        title="Smart keep's suggestions for the video you described (Properties, Smart keep): green where a silent part busier than usual is cut, paler when it is a close call, outlined once accepted. Click one to accept, dismiss or undo it."
+        title="Smart keep's suggestions for the video you described (Properties, Smart keep): green where a cut silent stretch holds something busier than usual, paler when it is a close call, outlined once accepted. Click one to accept, dismiss or undo it."
       >
         <span class="nm">Suggestions</span>
       </div>

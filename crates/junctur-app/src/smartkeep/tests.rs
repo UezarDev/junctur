@@ -95,7 +95,7 @@ fn the_rules_keeps_are_suggested_and_a_laya_file_shows_nothing() {
     );
     assert_eq!(
         v.reading.as_deref(),
-        Some("strict, the busiest 10% of the silence")
+        Some("strict, every silent stretch holding the busiest 10% of the silent windows")
     );
     let at: Vec<(f64, bool, bool)> = v
         .items

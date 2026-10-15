@@ -163,7 +163,7 @@
 
       <Section
         title="Smart keep"
-        info="Talk stays as the cut leaves it; the silent parts busier than the recording usually is (its game audio, or the fight labels) are suggested as keeps, more or fewer as the kind of video you describe asks (Properties, Smart keep). Nothing is applied until you accept, and nothing is downloaded."
+        info="Talk stays as the cut leaves it; a silent stretch with a moment busier than the recording usually is (its game audio, or the fight labels) is suggested as a keep, whole, more or fewer as the kind of video you describe asks (Properties, Smart keep). Nothing is applied until you accept, and nothing is downloaded."
       >
         <Field
           label="Judge every analysed recording"

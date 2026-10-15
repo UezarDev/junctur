@@ -1,14 +1,14 @@
 //! Smart keep's rules (phase 3d), which replaced Laya's answer: talk stays as the automatic cut leaves
-//! it, and the windows of a silent stretch that are busier than this recording usually is (its game
-//! audio, or 3a's fight labels) are suggested as keeps, padded and merged. How many is read from the
-//! prompt's words ([`Strictness`]). A module of its own because it is the whole judgement smart keep
+//! it, and a silent stretch holding a window busier than this recording usually is (its game audio,
+//! or 3a's fight labels) is suggested as a keep, whole: a long silence with a fight inside is kept in
+//! full (Uezar). How many windows count is read from the prompt's words ([`Strictness`]). A module of its own because it is the whole judgement smart keep
 //! now makes, pure (no file, no model) so every edge is a unit test; the stage reads the peaks and
 //! writes the file around it.
 //!
 //! Rejected: Laya over the silent parts (its margin never followed busy or the fight labels in any
 //! wording tried, ideas.md); a fixed busy number (busy is a rank in the recording already, and a dB
-//! line would follow the game's volume); whole stretches (one fight in two minutes of walking would
-//! bring back the two minutes); every silent part kept or cut in `keep.json` (the automatic cut keeps
+//! line would follow the game's volume); only the busy windows, padded and merged (built first;
+//! Uezar chose the whole stretch, so the fight is kept with what leads to it); every silent part kept or cut in `keep.json` (the automatic cut keeps
 //! silence beside talk, which a "cut" would then suggest cutting: only keeps are suggested).
 
 use super::parts::Kind;
@@ -22,18 +22,15 @@ use crate::vad::Region;
 
 /// The judge's name in `keep.json` ([`Judged::model`]).
 pub const NAME: &str = "rules";
-/// Bumped when the rules change, so a `keep.json` they wrote before is judged again.
-pub const VERSION: u32 = 1;
+/// Bumped when the rules change, so a `keep.json` they wrote before is judged again. 2: whole
+/// stretches, not padded windows.
+pub const VERSION: u32 = 2;
 /// A silent stretch is looked at in windows of at most this many seconds (the score windows' grain).
 pub const WINDOW: f64 = 5.0;
-/// A kept window is padded by this much either side, inside its stretch, so a fight is not cut at its
-/// first blow.
-pub const PAD: f64 = 2.0;
-/// Kept spans this close (after padding) are one.
-pub const MERGE: f64 = 3.0;
 /// The labels that say "fight" (3a's generic and League lists).
 const FIGHT: [&str; 2] = ["fighting", "teamfight"];
-/// A span's margin at the top of the recording: its chance shows 0.5 at the line to 0.98 at the top.
+/// A stretch's margin at the top of the recording: its chance shows 0.5 at the line to 0.98 at the
+/// top.
 const TOP_MARGIN: f64 = 4.0;
 
 /// How much of the silence a prompt keeps, read from its words ([`Strictness::read`]).
@@ -41,11 +38,11 @@ const TOP_MARGIN: f64 = 4.0;
 pub enum Strictness {
     /// No silent part: the talk is the video.
     TalkOnly,
-    /// The busiest tenth of the silence.
+    /// The stretches holding the busiest tenth of the silent windows.
     Strict,
     /// The busiest quarter: no word says otherwise.
     Usual,
-    /// The busiest half: only the dead air goes.
+    /// The busiest half: mostly the dead air goes.
     Loose,
 }
 
@@ -137,7 +134,7 @@ impl Strictness {
             .map_or(Strictness::Usual, |(level, _)| *level)
     }
 
-    /// The share of the recording's silent windows kept.
+    /// The share of the recording's silent windows that count: a stretch holding one is kept whole.
     pub fn share(self) -> f64 {
         match self {
             Strictness::TalkOnly => 0.0,
@@ -158,7 +155,7 @@ impl Strictness {
                     _ => "usual",
                 };
                 format!(
-                    "{name}, the busiest {:.0}% of the silence",
+                    "{name}, every silent stretch holding the busiest {:.0}% of the silent windows",
                     s.share() * 100.0
                 )
             }
@@ -205,8 +202,6 @@ pub struct Input<'a> {
 /// One window of a silent stretch, with its two signals.
 #[derive(Debug, Clone, Copy)]
 struct Look {
-    start: f64,
-    end: f64,
     /// Which stretch it is in.
     stretch: usize,
     /// Busy (a rank among the recording's seconds), `None` when unknown.
@@ -215,7 +210,7 @@ struct Look {
     fight: f64,
 }
 
-/// `input`'s busy silent spans, as `keep.json` holds them: only keeps, in time order.
+/// `input`'s busy silent stretches, as `keep.json` holds them: only keeps, in time order.
 pub fn judge(input: &Input) -> Judged {
     let strictness = Strictness::read(input.prompt);
     let stretches: Vec<(f64, f64)> = joined(
@@ -225,7 +220,7 @@ pub fn judge(input: &Input) -> Judged {
         Join::Touching,
     );
     let looks = looks(&stretches, input);
-    let parts = spans(&looks, &stretches, strictness.share());
+    let parts = kept(&looks, &stretches, strictness.share());
     Judged {
         model: NAME.into(),
         prompt: input.prompt.into(),
@@ -274,8 +269,6 @@ fn looks(stretches: &[(f64, f64)], input: &Input) -> Vec<Look> {
                     .sum()
             });
             Look {
-                start: w.start,
-                end: w.end,
                 stretch,
                 busy,
                 fight,
@@ -299,11 +292,11 @@ fn ranks(values: &[Option<f64>]) -> Vec<f64> {
         .collect()
 }
 
-/// The kept windows of `looks` as spans: each window's score the higher of its two ranks, the line
-/// the score that leaves the top `share` of the windows at or above it, a window lowest on both
-/// signals (score 0) never kept; each kept window padded by [`PAD`] inside its stretch and those
-/// within [`MERGE`] of each other joined.
-fn spans(looks: &[Look], stretches: &[(f64, f64)], share: f64) -> Vec<Judgement> {
+/// The stretches holding a kept window, whole: each window's score the higher of its two ranks, the
+/// line the score that leaves the top `share` of the windows at or above it, a window lowest on both
+/// signals (score 0) never kept. So the share still counts windows, the grain the recording is ranked
+/// at; a stretch is kept when it holds one, and it keeps more time than the share says.
+fn kept(looks: &[Look], stretches: &[(f64, f64)], share: f64) -> Vec<Judgement> {
     let keep = (share * looks.len() as f64).round() as usize;
     if keep == 0 {
         return Vec::new();
@@ -314,63 +307,41 @@ fn spans(looks: &[Look], stretches: &[(f64, f64)], share: f64) -> Vec<Judgement>
     let mut sorted = score.clone();
     sorted.sort_by(|a, b| b.total_cmp(a));
     let line = sorted[keep - 1];
-    let kept = |s: f64| s >= line && s > 0.0;
-    // The best window left out: a kept window's sureness is how far it stands above it (0 there, 1
-    // at the top), so a close call at the line is uncertain and a clear one is not, ties or not.
+    let counts = |s: f64| s >= line && s > 0.0;
+    // The best window left out: a stretch's sureness is how far its best window stands above it (0
+    // there, 1 at the top), so a stretch kept on a close call at the line is uncertain and a clear
+    // one is not, ties or not.
     let floor = score
         .iter()
         .copied()
-        .filter(|s| !kept(*s))
+        .filter(|s| !counts(*s))
         .fold(0.0f64, f64::max);
-    let windows: Vec<((f64, f64), f64, usize)> = looks
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| kept(score[*i]))
-        .map(|(i, l)| {
-            let (a, b) = stretches[l.stretch];
-            let span = ((l.start - PAD).max(a), (l.end + PAD).min(b));
-            (span, (score[i] - floor) / (1.0 - floor), i)
-        })
-        .collect();
-    let mut out: Vec<(Judgement, f64)> = Vec::new();
-    for ((a, b), above, i) in windows {
-        let l = &looks[i];
-        let why = why(l, busy[i], fight[i]);
-        match out.last_mut() {
-            Some((last, best)) if a - last.end <= MERGE && same_stretch(last, l, stretches) => {
-                last.end = last.end.max(b);
-                if above > *best {
-                    *best = above;
-                    last.state = why;
-                }
-            }
-            _ => out.push((
-                Judgement {
-                    start: a,
-                    end: b,
-                    kind: Kind::Silent,
-                    margin: 0.0,
-                    state: why,
-                    hash: String::new(),
-                },
-                above,
-            )),
+    // Per stretch, its best counted window.
+    let mut best: Vec<Option<usize>> = vec![None; stretches.len()];
+    for (i, l) in looks.iter().enumerate() {
+        if counts(score[i]) && best[l.stretch].is_none_or(|b| score[i] > score[b]) {
+            best[l.stretch] = Some(i);
         }
     }
-    out.into_iter()
-        .map(|(mut j, above)| {
-            j.margin = (above * TOP_MARGIN * 1000.0).round() / 1000.0;
-            j
+    stretches
+        .iter()
+        .zip(best)
+        .filter_map(|(&(start, end), b)| {
+            let i = b?;
+            let above = (score[i] - floor) / (1.0 - floor);
+            Some(Judgement {
+                start,
+                end,
+                kind: Kind::Silent,
+                margin: (above * TOP_MARGIN * 1000.0).round() / 1000.0,
+                state: why(&looks[i], busy[i], fight[i]),
+                hash: String::new(),
+            })
         })
         .collect()
 }
 
-fn same_stretch(last: &Judgement, l: &Look, stretches: &[(f64, f64)]) -> bool {
-    let (a, b) = stretches[l.stretch];
-    last.start >= a - 1e-9 && last.end <= b + 1e-9
-}
-
-/// Why a window is kept, in words, for `keep.json`.
+/// Why a stretch is kept (its best window), in words, for `keep.json`.
 fn why(l: &Look, busy: f64, fight: f64) -> String {
     let mut s = format!("game audio busier than {:.0}% of the silence", busy * 100.0);
     if l.fight > 0.0 {
@@ -384,7 +355,7 @@ fn why(l: &Look, busy: f64, fight: f64) -> String {
 }
 
 /// The window scores (`len` seconds from each start): the speech share, the edit list's base, blended
-/// toward a kept span's chance for the share of the window it covers.
+/// toward a kept stretch's chance for the share of the window it covers.
 pub fn score_windows(windows: &mut [Window], len: f64, j: &Judged) {
     for w in windows {
         let (a, b) = (w.start, w.start + len);
@@ -404,10 +375,10 @@ pub fn score_windows(windows: &mut [Window], len: f64, j: &Judged) {
 /// One line for the log.
 pub fn summary(j: &Judged) -> String {
     let s = Strictness::read(&j.prompt);
-    // From 0.0, not `sum`'s -0.0, so no span reads "0 s".
+    // From 0.0, not `sum`'s -0.0, so nothing kept reads "-0 s".
     let seconds = j.parts.iter().fold(0.0, |s, p| s + p.end - p.start);
     format!(
-        "keep: talk as the cut leaves it; silence read as {}: {} busy spans to keep ({seconds:.0} s)",
+        "keep: talk as the cut leaves it; silence read as {}: {} busy silent stretches to keep, whole ({seconds:.0} s)",
         s.describe(),
         j.parts.len()
     )
@@ -478,32 +449,31 @@ mod tests {
     }
 
     #[test]
-    fn only_the_busy_windows_of_a_long_silence_are_kept_padded() {
-        // Talk 0-10 and 130-140; 120 s of silence between, loud from 60 to 70 only.
-        let speech = [r(0.0, 10.0), r(130.0, 140.0)];
-        let p = peaks(140.0, &[(60.0, 70.0, 200)]);
-        let j = judge(&input("highlights", &speech, 140.0, &p));
+    fn a_long_silence_with_a_busy_window_is_kept_whole_and_a_quiet_one_is_not() {
+        // Talk at 0-10, 130-140 and 200-210; the 120 s silence between the first two is loud from 60
+        // to 70 only, the other two silences are quiet.
+        let speech = [r(0.0, 10.0), r(130.0, 140.0), r(200.0, 210.0)];
+        let p = peaks(260.0, &[(60.0, 70.0, 200)]);
+        let j = judge(&input("highlights", &speech, 260.0, &p));
         assert_eq!((j.model.as_str(), j.version), (NAME, VERSION));
-        // Strict keeps 10% of the 24 windows of 5 s: the two loud ones, each padded 2 s, joined.
-        assert_eq!(spans_of(&j), [(58.0, 72.0)]);
+        // The two loud windows count (strict: 10% of 46 windows, the rest tied at 0), and the
+        // stretch that holds them is kept in full, not padded windows.
+        assert_eq!(spans_of(&j), [(10.0, 130.0)]);
         assert!(j
             .parts
             .iter()
             .all(|p| p.kind == Kind::Silent && p.margin >= 0.0));
         assert!(j.parts[0].state.contains("game audio busier than"));
-        // Talk only keeps nothing; loose keeps more around the same place.
-        let none = judge(&input("podcast", &speech, 140.0, &p));
+        assert_eq!(
+            summary(&j),
+            "keep: talk as the cut leaves it; silence read as strict, every silent stretch holding the busiest 10% of the silent windows: 1 busy silent stretches to keep, whole (120 s)"
+        );
+        // Talk only keeps nothing.
+        let none = judge(&input("podcast", &speech, 260.0, &p));
         assert!(none.parts.is_empty());
-        assert!(
-            summary(&none).ends_with("talk only, no silent part kept: 0 busy spans to keep (0 s)")
-        );
-        assert!(
-            summary(&j).ends_with("1 busy spans to keep (14 s)"),
-            "{}",
-            summary(&j)
-        );
-        let loose = judge(&input("whole stream", &speech, 140.0, &p));
-        assert!(loose.parts.iter().any(|x| x.start <= 58.0 && x.end >= 72.0));
+        assert!(summary(&none).ends_with(
+            "talk only, no silent part kept: 0 busy silent stretches to keep, whole (0 s)"
+        ));
     }
 
     #[test]
@@ -519,12 +489,12 @@ mod tests {
     }
 
     #[test]
-    fn a_padded_span_stays_inside_its_stretch_and_stretches_do_not_join() {
+    fn stretches_either_side_of_a_sentence_are_kept_apart() {
         // Two silences split by a sentence at 30-32; loud at both its edges.
         let speech = [r(30.0, 32.0)];
         let p = peaks(62.0, &[(27.0, 30.0, 200), (32.0, 35.0, 200)]);
         let j = judge(&input("", &speech, 62.0, &p));
-        assert_eq!(spans_of(&j), [(23.0, 30.0), (32.0, 39.0)]);
+        assert_eq!(spans_of(&j), [(0.0, 30.0), (32.0, 62.0)]);
     }
 
     #[test]
@@ -563,8 +533,8 @@ mod tests {
         let mut i = input("", &speech, 122.0, &flat);
         i.labels = Some(&labels);
         let j = judge(&i);
-        // The fight piece's 6 windows are the top quarter of 24 (all even on busy), padded.
-        assert_eq!(spans_of(&j), [(30.0, 64.0)]);
+        // The fight piece's 6 windows are the top quarter of 24 (all even on busy): their stretch.
+        assert_eq!(spans_of(&j), [(2.0, 122.0)]);
         assert!(j.parts[0].state.contains("fight labels 90%"));
         // No peaks, no labels: nothing to tell windows apart, nothing kept.
         let none = Input {
@@ -605,11 +575,11 @@ mod tests {
             labels: Some(&labels),
             peaks: None,
         };
-        assert_eq!(spans_of(&judge(&i)), [(48.0, 77.0)]);
+        assert_eq!(spans_of(&judge(&i)), [(0.0, 100.0)]);
     }
 
     #[test]
-    fn a_span_well_above_the_best_left_out_is_sure() {
+    fn a_stretch_well_above_the_best_window_left_out_is_sure_and_a_close_call_is_not() {
         use crate::keep::Fit;
         let speech = [r(0.0, 5.0)];
         // A ramp: each later window louder; strict keeps the top tenth.
@@ -624,7 +594,7 @@ mod tests {
             .collect();
         let p = peaks(105.0, &loud);
         let j = judge(&input("highlights", &speech, 105.0, &p));
-        assert_eq!(spans_of(&j), [(93.0, 105.0)]);
+        assert_eq!(spans_of(&j), [(5.0, 105.0)]);
         let f = Fit::default();
         assert!(f.keeps(j.parts[0].margin) && !f.uncertain(j.parts[0].margin));
         // Its best window ranks 0.95, the best left out 0.85: two thirds of the way to the top.
@@ -633,10 +603,24 @@ mod tests {
             "{:?}",
             j.parts
         );
+        // 41 silences of 4 s, one window each, each louder than the one before: the usual quarter
+        // keeps the top 10; the lowest of them is one step above the best left out, a close call.
+        let speech: Vec<Region> = (0..40)
+            .map(|k| r(4.0 + 6.0 * k as f64, 6.0 + 6.0 * k as f64))
+            .collect();
+        let loud: Vec<(f64, f64, u8)> = (0..41)
+            .map(|k| (6.0 * k as f64, 6.0 * k as f64 + 4.0, 20 + 5 * k as u8))
+            .collect();
+        let p = peaks(244.0, &loud);
+        let j = judge(&input("", &speech, 244.0, &p));
+        assert_eq!(j.parts.len(), 10);
+        assert_eq!(spans_of(&j)[0], (186.0, 190.0));
+        assert!(f.uncertain(j.parts[0].margin), "{:?}", j.parts[0]);
+        assert!(!f.uncertain(j.parts[9].margin), "{:?}", j.parts[9]);
     }
 
     #[test]
-    fn windows_keep_their_speech_share_and_lean_toward_a_kept_span() {
+    fn windows_keep_their_speech_share_and_lean_toward_a_kept_stretch() {
         let j = Judged {
             model: NAME.into(),
             prompt: String::new(),

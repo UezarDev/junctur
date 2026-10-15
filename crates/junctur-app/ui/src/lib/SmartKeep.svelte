@@ -65,9 +65,9 @@
 <section class="keep">
   <h3>Smart keep</h3>
   <p class="hint">
-    Say what kind of video you are making. Talk stays as the cut leaves it; the silent parts busier than
-    this recording usually is (game audio, fight labels) are suggested as keeps, fewer for highlights,
-    more for a whole stream, none for a podcast. Nothing changes until you accept.
+    Say what kind of video you are making. Talk stays as the cut leaves it; a silent stretch with a moment
+    busier than this recording usually is (game audio, fight labels) is suggested as a keep, whole: fewer
+    for highlights, more for a whole stream, none for a podcast. Nothing changes until you accept.
   </p>
   <textarea
     rows="3"
@@ -110,7 +110,7 @@
     <p>
       {#if view.reading}Read as {view.reading}.{/if}
       {#if waiting > 0}
-        Smart keep suggests keeping <b>{s.keep}</b> busy silent parts ({clock(s.keepS)}){#if s.cut > 0}
+        Smart keep suggests keeping <b>{s.keep}</b> busy silent stretches ({clock(s.keepS)}){#if s.cut > 0}
           and cutting <b>{s.cut}</b> ({clock(s.cutS)}){/if}{#if s.uncertain > 0}; {s.uncertain} close calls{/if}.
       {:else}
         Smart keep agrees with the cut as it is.

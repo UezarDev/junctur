@@ -1,5 +1,5 @@
 //! `junctur judge`: smart keep's stage alone on an analysed recording, with its prompt or a new one:
-//! the rules write the busy silent spans to keep (phase 3d). 3b's `--agreement`, `--cpu` and `--force`
+//! the rules write the busy silent stretches to keep (phase 3d). 3b's `--agreement`, `--cpu` and `--force`
 //! went with Laya: the rules have no margin to measure, no model and nothing reused.
 
 use junctur_core::config;
@@ -23,7 +23,7 @@ pub fn judge(a: Args) -> Result<(), String> {
         .ok_or("smart keep is off for this recording: give it a prompt with --prompt")?;
     println!("  {}", p.dir.join(keep::FILE).display());
     println!(
-        "  read as {}; {} spans to keep",
+        "  read as {}; {} stretches to keep",
         rules::Strictness::read(&judged.prompt).describe(),
         judged.parts.len()
     );

@@ -62,7 +62,7 @@ pub struct Settings {
     pub last: Option<String>,
 }
 
-/// What smart keep made of a recording: the rules' busy silent spans, or (3b) Laya's every part.
+/// What smart keep made of a recording: the rules' busy silent stretches, or (3b) Laya's every part.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Judged {
     /// Who judged: [`rules::NAME`], or [`laya::NAME`] in a file 3b wrote.

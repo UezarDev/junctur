@@ -92,17 +92,19 @@ app's Properties, `analyze --keep "<prompt>"`, or `judge --prompt`), or turn it 
 Settings) to run it on every analysed recording with the last prompt used. Talk stays as the automatic cut
 leaves it. The silent stretches are looked at in windows of at most 5 s, each ranked within this recording
 by how busy its game audio is (the game/PC track, else the mix) and by its share of the "fighting" and
-"teamfight" labels when there are labels; a window busier than usual on either counts. How many of them are
-kept is read from the prompt's words, in English or Spanish: "podcast", "only the talk" or "solo la charla"
-keep no silence; "highlights", "only the fights", "mejores momentos" the busiest 10%; "dead air", "whole
-stream", "tiempo muerto" the busiest 50%; anything else 25% (a negation such as "not only the fights" is
-read as its phrase). The kept windows, padded by 2 s and merged, are suggestions (the app's Suggestions lane,
-Accept all, accept, dismiss or undo one, Review the close calls), and nothing is applied until you accept it;
-a part you edited yourself is never suggested. No model and no download: about 6 s for the 1h45 sample, most
-of it reading the game track when the app has not drawn its waveforms. On that sample the League preset
-(read as strict) suggests 67 spans (378 s) of its 56 minutes of silence, Full VOD minus dead air (loose) 260
-(1853 s), Podcast-style talk none. Phase 3b had Laya, a decision model, judge every part instead; it judged
-no better than chance, so smart keep no longer calls it (its code stays in the repo).
+"teamfight" labels when there are labels; a window busier than usual on either counts, and a silent stretch
+holding one is suggested as a keep whole, so a long silence with a fight inside is kept in full. How many
+windows count is read from the prompt's words, in English or Spanish: "podcast", "only the talk" or "solo la
+charla" keep no silence; "highlights", "only the fights", "mejores momentos" the busiest 10%; "dead air",
+"whole stream", "tiempo muerto" the busiest 50%; anything else 25% (a negation such as "not only the fights"
+is read as its phrase). The stretches are suggestions (the app's Suggestions lane, Accept all, accept,
+dismiss or undo one, Review the close calls), and nothing is applied until you accept it; a part you edited
+yourself is never suggested. No model and no download: about 6 s for the 1h45 sample, most of it reading
+the game track when the app has not drawn its waveforms. On that sample, with 56 minutes of silence in 455
+stretches, the League preset (read as strict) suggests 67 stretches (587 s), Full VOD minus dead air (loose)
+253 (2275 s), Podcast-style talk none, a prompt with no cue 148 (1453 s). Phase 3b had Laya, a decision
+model, judge every part instead; it judged no better than chance, so smart keep no longer calls it (its
+code stays in the repo).
 
 Voices can be remembered once and recognised in every recording: in the app, select words only one
 person says and choose "Remember voice…", or `junctur voices <file> --add <name> --at 61-75,300-312`
