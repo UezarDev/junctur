@@ -46,7 +46,8 @@ pub fn pairs_path() -> Option<PathBuf> {
 }
 
 /// `recording`'s pairs as they stand: each answered part, and each unanswered part the list (`now`)
-/// does otherwise than the reduction (`auto`) does with it.
+/// does otherwise than the reduction (`auto`) does with it. A part taken by Accept all is neither:
+/// that is Laya's choice repeated, and fitting on it would teach the fit Laya's own boundary.
 pub fn collect(
     recording: &Path,
     j: &Judged,
@@ -58,6 +59,7 @@ pub fn collect(
     for x in &j.parts {
         let part = x.part();
         let (keep, how) = match choices.standing(&part, now) {
+            Some(a) if a.bulk => continue,
             Some(a) => (
                 a.keep,
                 match a.how {

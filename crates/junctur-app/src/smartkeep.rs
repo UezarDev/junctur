@@ -238,10 +238,10 @@ pub fn answer(
     let near =
         |i: &&Item| at.is_some_and(|(a, b)| (i.start - a).abs() < 1e-3 && (i.end - b).abs() < 1e-3);
     let edits: Vec<(f64, f64, bool)> = match action {
-        Action::AcceptAll => keep::accept(&items, &judged, &auto, &mut choices),
+        Action::AcceptAll => keep::accept(&items, &judged, &auto, &mut choices, true),
         Action::Accept => {
             let picked: Vec<Item> = items.iter().filter(near).copied().collect();
-            keep::accept(&picked, &judged, &auto, &mut choices)
+            keep::accept(&picked, &judged, &auto, &mut choices, false)
         }
         Action::Dismiss => {
             let item = items

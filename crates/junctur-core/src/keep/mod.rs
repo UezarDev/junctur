@@ -110,6 +110,14 @@ pub struct Answer {
     pub end: f64,
     pub keep: bool,
     pub how: How,
+    /// Accepted with every other suggestion at once (Accept all): Laya's own choice, not a decision
+    /// about this part, so it is no training pair ([`collect`]).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bulk: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !b
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

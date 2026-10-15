@@ -73,7 +73,7 @@ fn accepting_dismissing_and_undoing_record_answers() {
     let fit = Fit::default();
     let mut c = Choices::default();
     let (items, _) = suggestions(&j, &fit, &auto, &auto, &c);
-    let edits = accept(&items, &j, &auto, &mut c);
+    let edits = accept(&items, &j, &auto, &mut c, false);
     // The talk's cut takes its pads too (no sliver of silence left kept), and comes first so the
     // kept silence beside it stays whole.
     assert_eq!(edits, [(9.7, 20.4, false), (0.0, 10.0, true)]);
@@ -83,7 +83,7 @@ fn accepting_dismissing_and_undoing_record_answers() {
     assert_eq!(sum.accepted, 2);
     assert!(items.iter().all(|i| i.state == ItemState::Accepted));
     // Accepted twice is no edit.
-    assert!(accept(&items, &j, &auto, &mut c).is_empty());
+    assert!(accept(&items, &j, &auto, &mut c, false).is_empty());
     // Undo the cut alone: its span cut, then what the automatic cut kept of it kept again; the
     // answer is now "keep, dismissed".
     assert_eq!(
@@ -122,7 +122,10 @@ fn a_cut_of_talk_never_reaches_into_the_talk_beside_it() {
     let auto = ranges(&[(9.7, 50.0)]);
     let mut c = Choices::default();
     let (items, _) = suggestions(&j, &Fit::default(), &auto, &auto, &c);
-    assert_eq!(accept(&items, &j, &auto, &mut c), [(9.7, 30.0, false)]);
+    assert_eq!(
+        accept(&items, &j, &auto, &mut c, false),
+        [(9.7, 30.0, false)]
+    );
 }
 
 impl Item {
@@ -140,7 +143,7 @@ fn an_accepted_part_keeps_what_was_taken_after_a_refit() {
     let (j, auto) = sample();
     let mut c = Choices::default();
     let (items, _) = suggestions(&j, &Fit::default(), &auto, &auto, &c);
-    accept(&items[..1], &j, &auto, &mut c);
+    accept(&items[..1], &j, &auto, &mut c, false);
     // A fit that would now cut the first silence.
     let strict = Fit {
         temperature: 1.0,
@@ -257,12 +260,14 @@ fn choices_read_back_and_a_broken_file_is_an_error() {
         end: 2.0,
         keep: true,
         how: How::Accepted,
+        bulk: true,
     });
     c.set(Answer {
         start: 1.0,
         end: 2.0,
         keep: false,
         how: How::Dismissed,
+        bulk: false,
     });
     assert_eq!(c.answers.len(), 1);
     save_choices(&dir, &c).unwrap();
@@ -291,7 +296,7 @@ fn an_accept_taken_back_by_the_editors_undo_no_longer_stands() {
     let fit = Fit::default();
     let mut c = Choices::default();
     let (items, _) = suggestions(&j, &fit, &auto, &auto, &c);
-    accept(&items, &j, &auto, &mut c);
+    accept(&items, &j, &auto, &mut c, false);
     // Ctrl+Z put the list back as it was: both are suggestions again, and no pair is counted.
     let (items, sum) = suggestions(&j, &fit, &auto, &auto, &c);
     assert_eq!((sum.accepted, sum.keep, sum.cut), (0, 1, 1));
@@ -307,4 +312,35 @@ fn an_accept_taken_back_by_the_editors_undo_no_longer_stands() {
         .map(|p| (p.start, p.keep, p.how.as_str()))
         .collect();
     assert_eq!(got, [(10.0, false, "hand")]);
+}
+
+#[test]
+fn accept_all_is_no_training_pair_but_one_part_accepted_or_undone_is() {
+    let (j, auto) = sample();
+    let fit = Fit::default();
+    let mut c = Choices::default();
+    let (items, _) = suggestions(&j, &fit, &auto, &auto, &c);
+    accept(&items, &j, &auto, &mut c, true);
+    let now = ranges(&[(0.0, 10.0), (30.0, 40.0)]);
+    // Taken, shown as accepted, but not a pair: Laya's choice is not the user's decision.
+    let (items, sum) = suggestions(&j, &fit, &now, &auto, &c);
+    assert_eq!(sum.accepted, 2);
+    assert!(collect(Path::new("r.mp4"), &j, &now, &auto, &c).is_empty());
+    // Undoing one of them is a decision about that part: a pair.
+    undo(&items[1], &j, &auto, &mut c);
+    let now = ranges(&[(0.0, 10.0), (10.0, 20.0), (30.0, 40.0)]);
+    let pairs = collect(Path::new("r.mp4"), &j, &now, &auto, &c);
+    let got: Vec<(f64, bool, &str)> = pairs
+        .iter()
+        .map(|p| (p.start, p.keep, p.how.as_str()))
+        .collect();
+    assert_eq!(got, [(10.0, true, "dismissed")]);
+    // One part accepted on its own is a pair.
+    let mut one = Choices::default();
+    let (items, _) = suggestions(&j, &fit, &auto, &auto, &one);
+    accept(&items[..1], &j, &auto, &mut one, false);
+    let now = ranges(&[(0.0, 20.0), (30.0, 40.0)]);
+    let pairs = collect(Path::new("r.mp4"), &j, &now, &auto, &one);
+    assert_eq!(pairs.len(), 1);
+    assert_eq!((pairs[0].start, pairs[0].how.as_str()), (0.0, "accepted"));
 }

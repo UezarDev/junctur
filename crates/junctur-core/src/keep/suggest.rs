@@ -126,12 +126,14 @@ fn span(item: &Item, j: &Judged, auto: &[Range]) -> (f64, f64) {
 }
 
 /// The edits that accept `items` (start, end, keep), cuts first so a kept part next to a cut one
-/// stays whole, and their answers recorded in `choices`. Only waiting suggestions are taken.
+/// stays whole, and their answers recorded in `choices`. Only waiting suggestions are taken. `bulk`:
+/// Accept all, whose answers are no training pairs ([`super::Answer::bulk`]).
 pub fn accept(
     items: &[Item],
     j: &Judged,
     auto: &[Range],
     choices: &mut Choices,
+    bulk: bool,
 ) -> Vec<(f64, f64, bool)> {
     let mut edits = Vec::new();
     for i in items.iter().filter(|i| i.state == ItemState::Suggested) {
@@ -142,6 +144,7 @@ pub fn accept(
             end: i.end,
             keep: i.keep,
             how: How::Accepted,
+            bulk,
         });
     }
     edits.sort_by_key(|e| e.2);
@@ -155,6 +158,7 @@ pub fn dismiss(item: &Item, choices: &mut Choices) {
         end: item.end,
         keep: !item.keep,
         how: How::Dismissed,
+        bulk: false,
     });
 }
 
