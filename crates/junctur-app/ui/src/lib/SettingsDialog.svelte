@@ -161,6 +161,27 @@
         {/if}
       </Section>
 
+      <Section
+        title="Smart keep"
+        info="Laya, a decision model, reads every part of a recording against the kind of video you describe (Properties, Smart keep) and suggests what to keep; nothing is applied until you accept. Out of the box its choices are weak: it improves from your decisions. The first use fetches about 680 MB of model."
+      >
+        <Field
+          label="Judge every analysed recording"
+          info="With the last prompt you used, at the end of each analysis. Off, only a recording you gave a prompt is judged."
+        >
+          {#snippet children(id)}
+            <input
+              {id}
+              type="checkbox"
+              bind:checked={() => draft?.keep?.on ?? false, (v) => draft && (draft.keep = { ...draft.keep, on: v })}
+            />
+          {/snippet}
+        </Field>
+        {#if draft?.keep?.last}
+          <p class="status builtin">Last prompt: {draft.keep.last}</p>
+        {/if}
+      </Section>
+
       <div class="group">
         <h3>Caption defaults</h3>
         <InfoTip

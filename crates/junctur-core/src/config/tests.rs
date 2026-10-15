@@ -96,7 +96,7 @@ fn saves_what_it_reads_with_canonical_names() {
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains(r#""whisper_model": "large-v3""#), "{text}");
     assert!(
-        !text.contains("captions"),
+        !text.contains("captions") && !text.contains("keep"),
         "unset keys are not written: {text}"
     );
     assert_eq!(load_from(&path, true).unwrap(), c);
@@ -115,6 +115,10 @@ fn saves_what_it_reads_with_canonical_names() {
                 league: vec!["baron fight".into()],
                 ..Default::default()
             },
+        },
+        keep: crate::keep::Settings {
+            on: true,
+            last: Some("League highlights".into()),
         },
     };
     save_to(&path, &c).unwrap();

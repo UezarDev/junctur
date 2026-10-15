@@ -10,12 +10,16 @@
   let {
     player,
     edit,
+    only = null,
     at,
     onDone,
     onError,
   }: {
     player: api.PlayerState | null;
     edit: api.EditState | null;
+    /** Review only these clips (smart keep's uncertain suggestions), from the first; else every
+     * stretch of the list from the one playing. */
+    only?: Clip[] | null;
     /** Where the box's top-left goes (layout.ts `floatAt`). */
     at: { left: number; top: number; scale: number };
     onDone: () => void;
@@ -27,11 +31,12 @@
   const start = untrack(() => edit);
   const fps = start?.fps ?? null;
   // Replaced (never changed in place) when an edge moves.
-  const first: Clip[] = start && fps ? clips(start) : [];
+  const chosen = untrack(() => only);
+  const first: Clip[] = chosen ?? (start && fps ? clips(start) : []);
   let list = $state.raw(first);
   const total = start?.totalFrames ?? 0;
   const from = untrack(() => player?.frame ?? (fps && player?.position != null ? toFrame(player.position, fps) : 0));
-  let index = $state(holding(first, from));
+  let index = $state(chosen ? 0 : holding(first, from));
   let speed = $state(1);
   // An edit or a move on its way: a second click waits for it, so two decisions never cross.
   let busy = $state(false);

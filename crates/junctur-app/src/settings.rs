@@ -4,6 +4,7 @@
 
 use junctur_core::config::{self, Config};
 use junctur_core::edit::{Captions, ExistingClips};
+use junctur_core::keep;
 use junctur_core::labels::{self, Kind};
 use junctur_core::transcribe::ModelPref;
 use junctur_core::wordlist;
@@ -78,6 +79,9 @@ pub struct Settings {
     /// Labels for the parts where nobody talks: off by default; the kind and the labels added.
     #[serde(default)]
     pub labels: labels::Settings,
+    /// Smart keep: off by default; `last` is the prompt last set on a recording (kept as it is).
+    #[serde(default)]
+    pub keep: keep::Settings,
 }
 
 fn flag_below() -> u8 {
@@ -143,6 +147,7 @@ fn from_config(c: &Config) -> Settings {
         words: c.words.clone(),
         flag_below: c.flag_below(),
         labels: c.labels.clone(),
+        keep: c.keep.clone(),
     }
 }
 
@@ -172,6 +177,16 @@ fn to_config(s: &Settings) -> Result<Config, String> {
                 league: added(&s.labels.added.league),
             },
             ..s.labels.clone()
+        },
+        keep: keep::Settings {
+            last: s
+                .keep
+                .last
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(String::from),
+            ..s.keep.clone()
         },
     })
 }
@@ -259,6 +274,13 @@ pub fn learn(entries: &[String]) -> Result<Vec<String>, String> {
     config::save(&c).map_err(|e| e.to_string())?;
     added.reverse();
     Ok(added)
+}
+
+/// Keeps `prompt` as smart keep's last one, so a recording without its own is judged with it when
+/// smart keep is on. A config file that cannot be read is not replaced from here.
+pub fn remember_prompt(prompt: &str) -> Result<(), String> {
+    let _one = config_lock();
+    config::remember_prompt(prompt).map_err(|e| e.to_string())
 }
 
 /// The caption defaults the player starts with; the built-in ones when the file cannot be read

@@ -1,12 +1,14 @@
 <script lang="ts">
   // The Properties tab: the recording, the background transcription job, the analysis steps with
-  // their progress, the out-of-date notice and Re-analyse, the speakers and the project folder.
+  // their progress, the out-of-date notice and Re-analyse, smart keep, the speakers and the project
+  // folder.
   import * as api from "./api";
   import { clock } from "./time";
   import { busy as running, current, whole } from "./steps";
   import { name as trackName } from "./tracks";
   import TrackSteps from "./TrackSteps.svelte";
   import TranscriptionJob from "./TranscriptionJob.svelte";
+  import SmartKeep from "./SmartKeep.svelte";
 
   let {
     player,
@@ -18,6 +20,10 @@
     lane,
     outdated,
     waves,
+    keep = null,
+    keepFile = null,
+    onKeepChanged = () => {},
+    onReviewUncertain = () => {},
     onReanalyse,
     onFreshCut,
     onError,
@@ -33,6 +39,12 @@
     lane: api.Transcription | null;
     outdated: string[];
     waves: api.WavesState | null;
+    /** Smart keep for the open recording; null before it is read. */
+    keep?: api.KeepView | null;
+    /** The open recording as its analysis names it (absolute). */
+    keepFile?: string | null;
+    onKeepChanged?: () => void;
+    onReviewUncertain?: () => void;
     /** Analyse again keeping the user's edits, speakers matched again. */
     onReanalyse: () => void;
     /** Analyse again and replace the cut with a fresh one (asks first when it is the user's). */
@@ -48,6 +60,7 @@
     transcribe: "Transcript",
     edit: "Edit list",
     labels: "Labels",
+    keep: "Smart keep",
   };
   // The running stage's tracks, named as their lanes are.
   const steps = $derived(current(analysis));
@@ -74,7 +87,7 @@
   function state(s: api.StageState, note?: string): { label: string; cls: string } {
     switch (s) {
       case "done":
-        // Labels not asked for (Settings): done, nothing made.
+        // Labels or smart keep not asked for: done, nothing made.
         return note === "off" ? { label: "off", cls: "pending" } : { label: "done", cls: "done" };
       case "failed":
         return { label: "failed", cls: "failed" };
@@ -171,6 +184,10 @@
       >
     {/if}
   </section>
+
+  {#if keepFile && status}
+    <SmartKeep file={keepFile} view={keep} onChanged={onKeepChanged} {onReviewUncertain} {onError} />
+  {/if}
 
   <section>
     <h3>Speakers</h3>

@@ -46,6 +46,7 @@ fn defaults_are_not_written_and_the_rest_round_trips() {
         words: vec!["Uezar".into(), "Tsunheto".into()],
         flag_below: 25,
         labels: Default::default(),
+        keep: Default::default(),
     };
     let c = to_config(&s).unwrap();
     assert_eq!(c.whisper_model, Some(ModelPref::LargeV3));
@@ -65,6 +66,7 @@ fn a_recordings_remembered_choice_for_clips_in_resolve_never_becomes_a_default()
         words: vec![],
         flag_below: config::FLAG_BELOW,
         labels: Default::default(),
+        keep: Default::default(),
     };
     let saved = to_config(&s).unwrap().captions.unwrap();
     assert!(saved.on);
@@ -88,6 +90,7 @@ fn the_word_list_is_saved_trimmed_without_blanks_or_repeats() {
         words: vec![" Uezar ".into(), "".into(), "Delay".into(), "Uezar".into()],
         flag_below: config::FLAG_BELOW,
         labels: Default::default(),
+        keep: Default::default(),
     };
     assert_eq!(
         to_config(&s).unwrap().words,
@@ -109,6 +112,7 @@ fn a_bad_model_or_out_of_limits_captions_are_refused() {
         words: vec![],
         flag_below: config::FLAG_BELOW,
         labels: Default::default(),
+        keep: Default::default(),
     };
     assert!(to_config(&s).is_err());
     let s = Settings {
@@ -120,6 +124,7 @@ fn a_bad_model_or_out_of_limits_captions_are_refused() {
         words: vec![],
         flag_below: config::FLAG_BELOW,
         labels: Default::default(),
+        keep: Default::default(),
     };
     assert!(to_config(&s).unwrap_err().contains("caption defaults"));
 }
@@ -179,4 +184,31 @@ fn labels_settings_round_trip_and_added_ones_are_cleaned() {
     assert!(kinds.iter().all(|k| !k.builtin.is_empty()));
     let v = serde_json::to_value(&kinds[1]).unwrap();
     assert_eq!(v["key"], "league");
+}
+
+/// Smart keep round-trips, off by default and not written then; a blank last prompt is none.
+#[test]
+fn smart_keep_settings_round_trip_off_by_default() {
+    let plain = from_config(&Config::default());
+    assert!(!plain.keep.on);
+    assert_eq!(to_config(&plain).unwrap(), Config::default());
+    let on = Settings {
+        keep: keep::Settings {
+            on: true,
+            last: Some(" League highlights ".into()),
+        },
+        ..plain.clone()
+    };
+    let c = to_config(&on).unwrap();
+    assert!(c.keep.on);
+    assert_eq!(c.keep.last.as_deref(), Some("League highlights"));
+    assert_eq!(from_config(&c).keep, c.keep);
+    let blank = Settings {
+        keep: keep::Settings {
+            on: false,
+            last: Some("  ".into()),
+        },
+        ..plain
+    };
+    assert_eq!(to_config(&blank).unwrap(), Config::default());
 }

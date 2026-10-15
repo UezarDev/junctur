@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::edit::Captions;
-use crate::labels;
 use crate::pipeline::PipelineOptions;
 use crate::transcribe::ModelPref;
 use crate::{hidden, voices, Error, Result};
+use crate::{keep, labels};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -33,10 +33,13 @@ pub struct Config {
     /// Labels for the parts where nobody talks ([`labels`]): off, generic, nothing added, unless set.
     #[serde(default, skip_serializing_if = "is_default")]
     pub labels: labels::Settings,
+    /// Smart keep ([`keep`]): off, no prompt used yet, unless set.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub keep: keep::Settings,
 }
 
-fn is_default(s: &labels::Settings) -> bool {
-    s == &labels::Settings::default()
+fn is_default<T: Default + PartialEq>(s: &T) -> bool {
+    s == &T::default()
 }
 
 /// The default of [`Config::flag_below`], in percent: flags about one word in twenty, nearly all
@@ -113,6 +116,21 @@ fn save_to(path: &Path, c: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Remembers `prompt` as smart keep's last one ([`keep::Settings::last`]), the one a recording without
+/// its own is judged with when smart keep is on. The rest of the file is left as it is.
+pub fn remember_prompt(prompt: &str) -> Result<()> {
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        return Ok(());
+    }
+    let mut c = load()?;
+    if c.keep.last.as_deref() != Some(prompt) {
+        c.keep.last = Some(prompt.to_string());
+        save(&c)?;
+    }
+    Ok(())
+}
+
 /// The caption settings a list cuts its cues with: its own (`own`), else the config file's
 /// defaults, else the built-in ones. `cfg` is called only for a list without its own, so a broken
 /// config file cannot block one that has them.
@@ -155,8 +173,8 @@ fn transcription(flag: Option<&str>, cfg: Result<Config>) -> Result<(ModelPref, 
 
 /// The options `junctur analyze` runs with before its own flags, and the app's analysis with, from
 /// one read of the config file: the model and word list ([`transcription`]; not taken without a
-/// transcript, since no model is loaded, so a broken file then stops nothing), the labels settings
-/// (off when the file cannot be read: an extra, never a reason to stop) and the remembered voices (not
+/// transcript, since no model is loaded, so a broken file then stops nothing), the labels and smart
+/// keep settings (off when the file cannot be read: extras, never a reason to stop) and the remembered voices (not
 /// read without speakers, so a broken voices file cannot block the rest). Device, cut settings and
 /// `force` stay the defaults for the caller to set.
 pub fn analysis_options(
@@ -166,6 +184,7 @@ pub fn analysis_options(
 ) -> Result<PipelineOptions> {
     let cfg = load();
     let labels = cfg.as_ref().map(|c| c.labels.clone()).unwrap_or_default();
+    let keep = cfg.as_ref().map(|c| c.keep.clone()).unwrap_or_default();
     let (model, words) = if no_transcript {
         (ModelPref::Auto, Vec::new())
     } else {
@@ -175,6 +194,10 @@ pub fn analysis_options(
         model,
         words,
         labels,
+        keep: crate::pipeline::KeepRun {
+            settings: keep,
+            prompt: None,
+        },
         no_transcript,
         no_speakers,
         voices: if no_speakers {

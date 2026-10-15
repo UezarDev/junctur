@@ -8,6 +8,7 @@ mod adopt;
 mod again;
 mod editlist;
 mod jobs;
+mod smartkeep;
 mod speaker_files;
 mod speakers;
 mod speech;
@@ -30,8 +31,10 @@ pub use speaker_files::{
 
 use again::{carry_fixes, hear_again, heard_again, not_again};
 use editlist::{draft, keep_or_write};
+use smartkeep::keep_stage;
 use stages::{count_words, labels_stage, speakers_stage, speech_stage, transcribe_stage, Stage};
 
+pub use smartkeep::{automatic_keep, judge, learn, KeepRun, KEEP_OFF};
 pub use stages::LABELS_OFF;
 
 use crate::edit::{self, CutSettings, EditList};
@@ -155,6 +158,8 @@ pub struct PipelineOptions {
     pub voices: Vec<Voice>,
     /// Whether the silent parts are labelled, and with which list ([`labels`]).
     pub labels: labels::Settings,
+    /// Smart keep's settings and this run's prompt ([`crate::keep`]).
+    pub keep: KeepRun,
     /// Whether an edit list holding the user's edits is kept or re-cut ([`KeepList`]).
     pub keep_list: KeepList,
     /// Hear the speakers again from the audio, cut at the user's pins, instead of reusing the
@@ -290,8 +295,9 @@ pub fn prepare(
 
 /// A run's second half: the labels of the silent parts when they are on ([`labels`]), then Whisper
 /// over the speech, piece by piece (`transcribed` is told where the transcript is whole, `between`
-/// is called between chunks and may block: the app's pause; [`transcribe::Reports`]), then the words counted into the edit list's score windows in place
-/// ([`count_words`]). Never re-cuts: edits made since [`prepare`] stay.
+/// is called between chunks and may block: the app's pause; [`transcribe::Reports`]), then the words
+/// counted into the edit list's score windows in place ([`count_words`]), then Laya's keep when the
+/// recording has a prompt ([`judge`]). Never re-cuts: edits made since [`prepare`] stay.
 pub fn finish(
     p: &Project,
     opts: &PipelineOptions,
@@ -353,6 +359,23 @@ pub fn finish(
             Ok(Some(e)) => edit = e,
             Ok(None) => {}
             Err(e) => log(&format!("edit list: word counts not written ({e})")),
+        }
+        // An extra, like the labels: Laya that cannot run (the model cannot be fetched) leaves the
+        // run done.
+        let stage = Stage {
+            p,
+            jobs: &mut jobs,
+            report: &report,
+            steps,
+        };
+        match keep_stage(stage, &speech, &t, opts, log) {
+            Ok(Some(_)) => {
+                if let Ok(e) = p.edit() {
+                    edit = e;
+                }
+            }
+            Ok(None) => {}
+            Err(e) => log(&format!("keep: {e}; going on without it")),
         }
         Some(t)
     };

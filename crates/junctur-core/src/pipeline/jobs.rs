@@ -13,7 +13,8 @@ pub(crate) const FILE: &str = "jobs.json";
 
 /// The stages, in run order. The edit list comes before the transcript: it needs none of it but
 /// the word counts, filled in once the transcript is whole. The labels come between: they need the
-/// speech and the video only, and so show in the editor while Whisper runs.
+/// speech and the video only, and so show in the editor while Whisper runs. Laya's keep comes last:
+/// it reads the transcript and the labels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StageName {
@@ -23,16 +24,18 @@ pub enum StageName {
     Edit,
     Labels,
     Transcribe,
+    Keep,
 }
 
 impl StageName {
-    pub const ALL: [StageName; 6] = [
+    pub const ALL: [StageName; 7] = [
         StageName::Tracks,
         StageName::Speech,
         StageName::Speakers,
         StageName::Edit,
         StageName::Labels,
         StageName::Transcribe,
+        StageName::Keep,
     ];
 
     /// Its name in `jobs.json`, the log and the page.
@@ -44,13 +47,14 @@ impl StageName {
             StageName::Edit => "edit",
             StageName::Labels => "labels",
             StageName::Transcribe => "transcribe",
+            StageName::Keep => "keep",
         }
     }
 }
 
 /// Stage names, in run order ([`StageName::ALL`]).
-pub const STAGES: [&str; 6] = {
-    let mut names = [""; 6];
+pub const STAGES: [&str; 7] = {
+    let mut names = [""; 7];
     let mut i = 0;
     while i < names.len() {
         names[i] = StageName::ALL[i].name();
@@ -357,8 +361,11 @@ mod tests {
         let back = Jobs::load(&dir);
         // Also put in run order: the file had `transcribe` before `edit`.
         let names: Vec<&str> = back.stages.iter().map(|s| s.name.as_str()).collect();
-        // Every stage it holds, in run order; the labels were never recorded in it.
-        let held: Vec<&str> = STAGES.into_iter().filter(|&n| n != "labels").collect();
+        // Every stage it holds, in run order; the labels and keep were never recorded in it.
+        let held: Vec<&str> = STAGES
+            .into_iter()
+            .filter(|&n| n != "labels" && n != "keep")
+            .collect();
         assert_eq!(names, held);
         assert_eq!(
             back.get(StageName::Speakers).unwrap().state,
@@ -378,7 +385,8 @@ mod tests {
                 "speakers",
                 "edit",
                 "labels",
-                "transcribe"
+                "transcribe",
+                "keep"
             ]
         );
         for s in StageName::ALL {

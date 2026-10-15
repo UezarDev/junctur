@@ -176,6 +176,20 @@ impl Core {
         self.change(file, |ed, list, fps| ed.edit_all(list, &ops, fps))
     }
 
+    /// Cuts or keeps each of `frames` (start, end, keep) exactly, in order, as one undo step: smart
+    /// keep's Accept all. See [`Editor::edit_all`].
+    pub fn edit_frames_all(
+        &self,
+        file: Option<&str>,
+        frames: &[(u64, u64, bool)],
+    ) -> Result<(), String> {
+        let ops: Vec<Op> = frames
+            .iter()
+            .map(|&(start, end, keep)| Op::Frames { start, end, keep })
+            .collect();
+        self.change(file, |ed, list, fps| ed.edit_all(list, &ops, fps))
+    }
+
     /// The list in play, its caption settings, its words when there is a transcript, and the
     /// frame rate: what a send to Resolve needs, which goes without captions too.
     pub(super) fn edit_source(&self) -> Result<EditSource, String> {

@@ -26,6 +26,8 @@
   import * as sel from "./lib/selection";
   import { words as toWords, type Words } from "./lib/transcript";
   import { blockReload } from "./lib/noReload";
+  import type { Clip } from "./lib/review";
+  import { toFrame } from "./lib/time";
 
   // Raw (not deeply reactive): these are replaced whole on every update, and a 30 h transcript or
   // edit list read through a reactive proxy makes every layout pass several times slower.
@@ -35,6 +37,10 @@
   let opened = $state.raw<api.Opened | null>(null);
   // The open recording's labels for its silent parts (the Labels lane); null when it has none.
   let labels = $state.raw<api.Labels | null>(null);
+  // The open recording's smart keep: its prompt and Laya's suggestions (the Suggestions lane).
+  let keep = $state.raw<api.KeepView | null>(null);
+  // Review over only these clips (the uncertain suggestions), or over every clip when null.
+  let reviewOnly = $state.raw<Clip[] | null>(null);
   let edit = $state.raw<api.EditState | null>(null);
   // Every track's mute, solo and role; the meters go straight to the bars (meters.ts).
   let mixer = $state.raw<api.MixerState | null>(null);
@@ -99,6 +105,7 @@
   const trackCount = $derived(mixer?.tracks.length ?? 0);
   const speakerCount = $derived(speakers.length);
   const hasLabels = $derived((labels?.pieces.length ?? 0) > 0);
+  const hasKeep = $derived(!!keep?.judgedPrompt);
   const L = $derived(
     layout({
       width: windowWidth,
@@ -108,6 +115,7 @@
       tracks: trackCount,
       speakers: speakerCount,
       labels: hasLabels,
+      keep: hasKeep,
     }),
   );
   // The layout's shares are of the window below the title bar; mpv's are of the whole window, the
@@ -133,13 +141,30 @@
     }
   }
   // Into review (on an editable list) or out of it; a selection would only sit under it unseen.
-  function toggleReview() {
+  function toggleReview(only: Clip[] | null = null) {
     if (reviewing) reviewing = false;
     // Not while a recording opens: review's first clip would play on the one coming.
     else if (edit?.editable && edit.fps && player?.path && !opening) {
       selection = null;
+      reviewOnly = only;
       reviewing = true;
     }
+  }
+  // Review over Laya's uncertain suggestions only, each a clip as the list has it now.
+  function reviewUncertain() {
+    const fps = edit?.fps;
+    if (!fps || !keep) return;
+    const only = keep.items
+      .filter((i) => i.state === "suggested" && i.uncertain)
+      .map((i) => ({
+        start: toFrame(i.start, fps, Math.floor),
+        end: toFrame(i.end, fps, Math.ceil),
+        kept: !i.keep,
+        index: 0,
+      }))
+      .filter((c) => c.end > c.start);
+    // Review keeps the list it started with: one already open goes on with its own.
+    if (only.length && !reviewing) toggleReview(only);
   }
   // The recording closed or its list stopped being editable (a re-analysis): review ends.
   $effect(() => {
@@ -338,6 +363,7 @@
       if (now.phase === "done") opened = { ...o, outdated: [] };
     }
     void loadLabels();
+    void loadKeep();
     const w = await api.wavesState();
     if (stale()) return;
     if (w && w.file === o.file) {
@@ -371,6 +397,44 @@
       void api.uiLog(`labels could not be read: ${e}`);
     }
   }
+  // Smart keep of the open recording as its project has it now; the latest ask's answer only.
+  let keepAsk = 0;
+  async function loadKeep() {
+    const o = opened;
+    const ask = ++keepAsk;
+    if (!o) {
+      keep = null;
+      return;
+    }
+    try {
+      const k = await api.keepView(o.file);
+      if (ask === keepAsk && opened?.file === o.file) {
+        keep = k;
+        void api.uiLog(`keep: ${k.items.length} suggestions, judged ${k.judgedPrompt ? "yes" : "no"}`);
+      }
+    } catch (e) {
+      // An extra, like the labels: logged, not a banner over the editor.
+      void api.uiLog(`smart keep could not be read: ${e}`);
+    }
+  }
+  // After an edit the suggestions move (a hand edit wins over one) and the pairs are collected
+  // again: read once the edits settle.
+  let keepTimer = 0;
+  $effect(() => {
+    void edit;
+    if (!untrack(() => keep?.judgedPrompt)) return;
+    clearTimeout(keepTimer);
+    keepTimer = window.setTimeout(() => void loadKeep(), 500);
+  });
+  async function keepAnswer(action: api.KeepAction, item: api.KeepItem) {
+    try {
+      await api.keepAnswer(action, item.start, item.end);
+    } catch (e) {
+      failure = String(e);
+    }
+    void loadKeep();
+  }
+
   /** Whether `p`'s labels stage is done (made, reused or off). */
   const labelled = (p: api.Progress | null) =>
     p?.project?.stages.some((s) => s.name === "labels" && s.state === "done") ?? false;
@@ -400,6 +464,8 @@
     analysis = p;
     // The labels stage done during the run (they show while Whisper runs), or the run over.
     if ((labelled(p) && !labelled(was)) || (busy(was) && !busy(p))) void loadLabels();
+    // The run judged at its end (smart keep on, or a prompt): the suggestions are new.
+    if (busy(was) && !busy(p)) void loadKeep();
     if (busy(was) && !busy(p)) {
       // The run ended: what the panel said was out of date was its business; the transcript may
       // be new (the edit list comes in through the watch). One that grew piece by piece is the
@@ -479,6 +545,7 @@
     opened = null;
     analysis = null;
     labels = null;
+    keep = null;
     words = null;
     selection = null;
     waves = null;
@@ -614,6 +681,12 @@
       api.onMixer((s) => (mixer = s)),
       api.onAnalysis(onProgress),
       api.onTranscription((t) => (lane = t)),
+      api.onKeep((r) => {
+        if (opened && r.file === opened.file) {
+          if (keep) keep = { ...keep, run: r };
+          if (!r.running) void loadKeep();
+        }
+      }),
       api.onWaves((w) => {
         if (opened && w.file === opened.file) {
           waves = w;
@@ -691,7 +764,7 @@
         view={{ start: view.start, end: view.start + view.len }}
         onZoom={zoom}
         {reviewing}
-        onReview={toggleReview}
+        onReview={() => toggleReview()}
         onSelect={(s) => (selection = s)}
         onError={(e) => (failure = e)}
       />
@@ -709,6 +782,9 @@
           speakersRow={L.speakersRow}
           labelsRow={L.labelsRow}
           {labels}
+          keepRow={L.keepRow}
+          keepItems={keep?.items ?? []}
+          onKeep={keepAnswer}
           head={L.head}
           thin={L.portrait}
           {wavesVersion}
@@ -721,7 +797,7 @@
       </div>
     {/if}
     {#if reviewing}
-      <Review bind:this={reviewer} {player} {edit} at={reviewAt} onDone={() => (reviewing = false)} onError={(e) => (failure = e)} />
+      <Review bind:this={reviewer} {player} {edit} only={reviewOnly} at={reviewAt} onDone={() => (reviewing = false)} onError={(e) => (failure = e)} />
     {:else}
       <ActionBar
         {player}
@@ -787,6 +863,10 @@
             {lane}
             outdated={opened.outdated}
             {waves}
+            {keep}
+            keepFile={opened.file}
+            onKeepChanged={() => void loadKeep()}
+            onReviewUncertain={reviewUncertain}
             onReanalyse={() => reanalyse(false)}
             onFreshCut={() => reanalyse(true)}
             onError={(e) => (failure = e)}

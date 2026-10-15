@@ -82,10 +82,11 @@ fn tracks_speech_and_speakers_open_their_models_on_the_cpu_only() {
     ] {
         assert!(!this.contains(banned), "the run's code has {banned}");
     }
-    // Every `device` field this file writes is transcription's or the labels' (its own options'
-    // declaration aside), and the run's device is only ever written into one. The labels' vision
-    // tower is the one ONNX model on the GPU: 400 to 800 ms a frame on the CPU, and its CUDA
-    // embeddings checked against the CPU's (`tests/models.rs`), which CAM++'s were not.
+    // Every `device` field this file writes is transcription's, the labels' or Laya's (its own
+    // options' declaration aside), and the run's device is only ever written into one. The labels'
+    // vision tower and Laya are the ONNX models on the GPU: 400 to 800 ms a frame on the CPU for the
+    // one, seconds a part in fp16 for the other, and both checked against a reference
+    // (`tests/models.rs`), which CAM++ was not.
     let mut fields = 0;
     for (k, _) in this.match_indices("device:") {
         let before = &this[..k];
@@ -93,7 +94,7 @@ fn tracks_speech_and_speakers_open_their_models_on_the_cpu_only() {
         let owner = opened.rsplit([' ', '(', '=']).next().unwrap();
         if !opened.ends_with("pub struct PipelineOptions") {
             assert!(
-                ["TranscribeOptions", "labels::Job"].contains(&owner),
+                ["TranscribeOptions", "labels::Job", "keep::Job"].contains(&owner),
                 "a device field of {owner} at byte {k}"
             );
             fields += 1;
@@ -1148,5 +1149,31 @@ fn outdated_says_when_labels_are_on_and_missing_left_off_or_from_another_list() 
         outdated(&p, &on),
         vec!["The parts where nobody talks have no labels yet."]
     );
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
+/// Laya judges an analysed recording only: before the speech is found, and while the transcript is
+/// not done, `judge` says so and writes nothing.
+#[test]
+fn judge_waits_for_the_analysis_and_the_transcript() {
+    let (d, p) = scratch_project("judge-early");
+    let opts = PipelineOptions {
+        keep: KeepRun {
+            prompt: Some("League highlights".into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let e = judge(&p, &opts, &mut |_| {}).unwrap_err().to_string();
+    assert!(e.contains("analyze"), "{e}");
+    let speech = Speech {
+        tracks: vec![],
+        seconds: 0.0,
+    };
+    std::fs::write(p.speech_path(), serde_json::to_vec(&speech).unwrap()).unwrap();
+    let e = judge(&p, &opts, &mut |_| {}).unwrap_err().to_string();
+    assert!(e.contains("not finished"), "{e}");
+    assert!(!p.dir.join(crate::keep::FILE).exists());
+    assert!(!p.dir.join(crate::keep::CHOICES).exists());
     std::fs::remove_dir_all(&d).unwrap();
 }

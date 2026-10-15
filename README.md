@@ -52,7 +52,9 @@ junctur tracks <file> [--json <out.json>] [--cache-dir <dir>] [--no-cache] [--no
 junctur separate <file> [--track <n>] [--start <s>] [--duration <s>] [--cpu] [--force]
                         [--no-speakers] [--json <out.json>] [--cache-dir <dir>]
 junctur analyze <file> [--project <dir>] [--cpu] [--force] [--no-transcript] [--no-speakers]
-                       [--labels] [--model auto|large-v3-turbo|large-v3|large-v3-q5_0] [cut flags]
+                       [--labels] [--keep <prompt>] [--model auto|large-v3-turbo|large-v3|large-v3-q5_0]
+                       [cut flags]
+junctur judge <file> [--prompt <prompt>] [--agreement] [--project <dir>] [--cpu] [--force]
 junctur status <file> [--project <dir>]
 junctur cut <file> [--project <dir>] [cut flags]
 junctur export <file> [--fcpxml <out.fcpxml>] [--srt <out.srt>] [--project <dir>]
@@ -67,8 +69,8 @@ in the cache unless `--project <dir>` puts it somewhere else, for example a git 
 `analyze` also tells speakers apart (`--no-speakers` skips it): one speaker per speech track when OBS
 recorded the voices on their own tracks, otherwise by voice on the mix (CAM++ embeddings of 1.5 s
 windows, and pyannote's segmentation model for where two people talk at once). Both always run on the
-CPU, as tracks and speech do, also in a CUDA build, where only Whisper and the labels' picture model run
-on the GPU (`junctur separate` still separates on the GPU): on ONNX Runtime's CUDA provider CAM++'s
+CPU, as tracks and speech do, also in a CUDA build, where only Whisper, the labels' picture model and Laya
+run on the GPU (`junctur separate` still separates on the GPU): on ONNX Runtime's CUDA provider CAM++'s
 embeddings were wrong, and every sentence became its own speaker. They are written into
 `edit.junctur` as `speaker <id> <name>` lines and `turn <start> <end> <id>` lines; turns of two people
 overlap where both talk. Rename or recolour a speaker by editing its line (or in the app). A re-cut keeps
@@ -84,6 +86,22 @@ Whisper. On the 1h45 sample they take about 75 s on an RTX 3060 (about 45 s per 
 1.5 GB download the first time; a changed list is scored again from the kept frames in seconds. Base reads
 menus, the client and the desktop well, and calls most of a League game "teamfight": the busy score is
 what tells a real fight from walking.
+
+Smart keep is off by default: give a recording a prompt saying what kind of video you are making (the
+app's Properties, `analyze --keep "<prompt>"`, or `judge --prompt`), or turn it on (`"keep": {"on": true}`,
+Settings) to judge every analysed recording with the last prompt used. Laya, a decision model (Convai
+Innovations' laya-multilingual, fp16 on ONNX Runtime), reads each part of the recording (the talk between
+the silent stretches, cut at its pauses into pieces of at most 30 s, with who says what; each silent piece
+with its labels and busy score) and the talk around it, and gives the chance it should stay. That chance
+goes into the edit list's score windows, the parts it would keep or cut otherwise than the list does are
+shown as suggestions (the app's Suggestions lane, Accept all, accept, dismiss or undo one, Review the
+uncertain ones), and nothing is applied until you accept it; a part you edited yourself is never
+suggested. Every answer and every hand edit of a part is kept as a pair in `keep_pairs.json` beside the
+config file, and the cutoff and temperature are fitted to them once there are 20. It runs after Whisper and
+judges again only the parts whose words, labels or prompt changed: about 11 s for the 1h45 sample on an RTX
+3060 (3.6 s to open), 1.2 GB of GPU memory, and a 680 MB download the first time. Out of the box its
+choices are weak (the phase's first test agreed with a hand-edited list no better than chance); `junctur
+judge --agreement` says how well it agrees with yours.
 
 Voices can be remembered once and recognised in every recording: in the app, select words only one
 person says and choose "Remember voice…", or `junctur voices <file> --add <name> --at 61-75,300-312`
@@ -229,6 +247,7 @@ Downloaded on first use into `<cache>/models/`, checked against pinned SHA-256 d
 | 3D-Speaker CAM++ (VoxCeleb) | speaker embeddings | Apache-2.0 |
 | pyannote segmentation-3.0 (k2-fsa's ONNX export) | overlapping speech | MIT |
 | SigLIP 2 base 224 px (onnx-community's export) | labels for the silent parts | Apache-2.0 |
+| Laya multilingual (Convai Innovations; our fp16 ONNX export, tokenizer from Convai) | smart keep | Apache-2.0 |
 | Whisper large-v3-turbo, large-v3 f16 or 5-bit large-v3, ggml (whisper.cpp) | transcription | MIT |
 
 ## Whisper models

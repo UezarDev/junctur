@@ -4,6 +4,7 @@
 mod args;
 mod commands;
 mod flags;
+mod judge;
 mod project;
 mod voices;
 
@@ -15,8 +16,10 @@ const USAGE: &str = "usage:
   junctur separate <file> [--track <n>] [--start <s>] [--duration <s>] [--cpu] [--force]
                           [--no-speakers] [--json <out.json>] [--cache-dir <dir>]
   junctur analyze <file> [--project <dir>] [--cache-dir <dir>] [--cpu] [--force] [--no-transcript]
-                         [--no-speakers] [--labels]
+                         [--no-speakers] [--labels] [--keep <prompt>]
                          [--model auto|large-v3-turbo|large-v3|large-v3-q5_0] [cut flags]
+  junctur judge <file> [--prompt <prompt>] [--agreement] [--project <dir>] [--cache-dir <dir>]
+                       [--cpu] [--force]
   junctur status <file> [--project <dir>] [--cache-dir <dir>]
   junctur cut <file> [--project <dir>] [--cache-dir <dir>] [cut flags]
   junctur export <file> [--fcpxml <out.fcpxml>] [--srt <out.srt>] [--project <dir>]
@@ -47,6 +50,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         Some("tracks") => commands::tracks(a),
         Some("separate") => commands::separate(a),
         Some("analyze") => project::analyze(a),
+        Some("judge") => judge::judge(a),
         Some("status") => project::status(a),
         Some("cut") => project::cut(a),
         Some("export") => project::export(a),
