@@ -263,9 +263,10 @@ impl Words {
     }
 
     /// The list's retimed words after dragging `side` of word `word` itself to frame `to`, for a
-    /// word heard late or short that no cut edge is beside. The neighbour on its own track (before
-    /// it for a start, after it for an end) is trimmed if run into; the edge stops a frame inside
-    /// that neighbour's far end, a frame inside the word's other end, and at the file's ends. Other
+    /// word heard late or short that no cut edge is beside. The neighbour on its own track (the
+    /// nearest before it for a start, after it for an end, where `times` put them) is trimmed if run
+    /// into; the edge stops a frame inside that neighbour's far end, a frame inside the word's other
+    /// end, at the file's ends, and while transcribing at the words still to come. Other
     /// tracks' words are left, since people talking over each other is ordinary. Refused for a word
     /// out of range or with no room to move.
     pub fn retimed(
@@ -291,10 +292,14 @@ impl Words {
         };
         // (word, new start, new end) for the word and the neighbour it runs into.
         let mut moved: Vec<(usize, f64, f64)> = Vec::new();
+        // Word `j` against the word by retimed start, list order breaking a tie.
+        let before = |j: usize| (s(j), j) < (s(word), word);
+        let mates = || (0..self.list.len()).filter(|&j| j != word && self.tracks[j] == track);
+        let by_start = |a: &usize, b: &usize| s(*a).total_cmp(&s(*b)).then(a.cmp(b));
         match side {
             Side::Start => {
                 let mut edge = fps.seconds(to).max(0.0);
-                let prev = (0..word).rev().find(|&j| self.tracks[j] == track);
+                let prev = mates().filter(|&j| before(j)).max_by(by_start);
                 if let Some(j) = prev.filter(|&j| edge < e(j)) {
                     edge = edge.max(s(j) + frame);
                 }
@@ -307,8 +312,13 @@ impl Words {
                 moved.push((word, edge, e(word)));
             }
             Side::End => {
-                let mut edge = fps.seconds(to).min(duration);
-                let next = (word + 1..self.list.len()).find(|&j| self.tracks[j] == track);
+                let next = mates().filter(|&j| !before(j)).min_by(by_start);
+                // Words not yet transcribed start at or after `until`, as span() reads it.
+                let last = match (next, self.until) {
+                    (None, Some(u)) => u.max(e(word)).min(duration),
+                    _ => duration,
+                };
+                let mut edge = fps.seconds(to).min(last);
                 if let Some(j) = next.filter(|&j| edge > s(j)) {
                     edge = edge.min(e(j) - frame);
                 }

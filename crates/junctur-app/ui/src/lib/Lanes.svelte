@@ -272,7 +272,9 @@
     paint();
   });
 
-  // Pointer: a click seeks, a drag on a lane selects, a drag on the ruler scrubs.
+  // Pointer: a click seeks, a drag on a lane selects, a drag on the ruler scrubs. A press that
+  // moves more than CLICK px is a drag.
+  const CLICK = 3;
   let down: { x: number; t: number; ruler: boolean; moved: boolean } | null = null;
   let queued: number | null = null;
   let frame = 0;
@@ -310,8 +312,10 @@
   type Handle = Edge & { word?: WordEdge };
   let hover = $state.raw<Handle | null>(null);
   let drag = $state.raw<{ edge: Handle; to: number } | null>(null);
-  // Where the pointer last was during a drag, so a zoom or pan under it moves the edge with it.
+  // Where the pointer last was during a drag, so a zoom or pan under it moves the edge with it,
+  // and where the drag was pressed.
   let dragX = 0;
+  let dragFrom = 0;
   // A drag's edit sent and its new list not yet here: no edge is offered until it is, since one
   // grabbed from the old list would be placed by frames that have moved. Cleared by the next edit
   // list, by a failure, or after WAIT ms if no list comes (the edit changed nothing).
@@ -327,7 +331,8 @@
   // WAIT ms (the retime changed nothing). The edit list comes first and moves no word edge.
   let waitWords: string | null = null;
   let wordTimer = 0;
-  const wordsAt = () => wordEdges.map((g) => `${g.word}:${g.side}:${g.at}`).join(",");
+  // The word edges as one value, which changes only when an edge does.
+  const wordsAt = $derived(wordEdges.map((g) => `${g.word}:${g.side}:${g.at}:${g.lo}:${g.hi}`).join(","));
   function edgeAt(clientX: number, clientY: number, alt: boolean): Handle | null {
     const fps = edit?.fps;
     if (!edges || !fps || !edit?.editable || width <= 0) return null;
@@ -339,7 +344,7 @@
     const slack = (GRAB * view.len * perSecond) / width;
     const cut = waiting || !edit.ranges.length ? null : edgeNear(edit, f, slack);
     let word: Handle | null = null;
-    if (waitWords === null || waitWords !== wordsAt()) {
+    if (waitWords === null || waitWords !== wordsAt) {
       for (const g of wordEdges) {
         const frame = g.at * perSecond;
         if (Math.abs(frame - f) <= slack && (!word || Math.abs(frame - f) < Math.abs(word.frame - f))) {
@@ -369,7 +374,7 @@
   // A handle shown for an edit list or a window that has since changed would be in the wrong place.
   $effect(() => {
     void edit;
-    void wordEdges;
+    void wordsAt;
     void view.start;
     void view.len;
     void edges;
@@ -393,6 +398,8 @@
     const fps = edit?.fps;
     if (!edit || !fps) return;
     if (d.to === Math.round(d.edge.frame)) {
+      // Dragged away and back: nothing moves and the selection stays.
+      if (Math.abs(clientX - dragFrom) > CLICK) return;
       // Let go where it started: a click, which seeks.
       void call(() => api.seek(clampT(timeAt(clientX)), true));
       onSelect(null);
@@ -437,7 +444,7 @@
       onError("The word moved while its edge was being dragged; nothing was moved. Drag it again.");
       return;
     }
-    waitWords = wordsAt();
+    waitWords = wordsAt;
     clearTimeout(wordTimer);
     wordTimer = window.setTimeout(() => (waitWords = null), WAIT);
     void (async () => {
@@ -459,6 +466,7 @@
     if (g) {
       drag = { edge: g, to: Math.round(g.frame) };
       dragX = e.clientX;
+      dragFrom = e.clientX;
       hover = null;
       return;
     }
@@ -474,7 +482,7 @@
       setHover(edgeAt(e.clientX, e.clientY, e.altKey));
       return;
     }
-    if (Math.abs(e.clientX - down.x) > 3) down.moved = true;
+    if (Math.abs(e.clientX - down.x) > CLICK) down.moved = true;
     if (!down.moved) return;
     if (down.ruler) scrub(clampT(timeAt(e.clientX)));
     else select(down.t, timeAt(e.clientX));

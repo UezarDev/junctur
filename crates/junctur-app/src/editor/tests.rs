@@ -789,6 +789,12 @@ fn a_selected_words_own_edge_moves_it_trims_its_neighbour_and_undoes_alone() {
     assert!(e.retime_word(&l0, 2, Side::Start, 1540, FPS).is_err());
     assert!(e.retime_word(&l0, 2, Side::End, 1520, FPS).is_err());
     assert!(e.retime_word(&l0, 9, Side::End, 1540, FPS).is_err());
+    // Dragged to where it already is: no ranges and no times change, so no step is written.
+    assert!(e
+        .retime_word(&l0, 2, Side::Start, 1527, FPS)
+        .unwrap()
+        .is_none());
+    assert!(!e.can_undo());
     // Dragged back to where it was heard: the override goes.
     let l5 = e
         .retime_word(&l1, 2, Side::Start, 1527, FPS)
