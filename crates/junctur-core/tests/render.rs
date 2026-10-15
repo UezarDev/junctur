@@ -1,17 +1,14 @@
 //! Smart render end to end on generated clips: frame count, audio tracks, copy vs fallback.
 //! Ignored by default: it needs an NVIDIA GPU (NVENC/NVDEC). Run with `cargo test -- --ignored`.
 
-use std::path::{Path, PathBuf};
+mod common;
+
+use common::workdir;
+use std::path::Path;
 use std::process::Command;
 
 use junctur_core::edit::{CutSettings, EditList, Range};
 use junctur_core::render::{self, RenderOptions};
-
-fn workdir(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("junctur-render-{}-{name}", std::process::id()));
-    std::fs::create_dir_all(&d).unwrap();
-    d
-}
 
 /// 20 s, 30 fps, keyframe every second, B-frames, two AAC tracks.
 fn clip(path: &Path, codec: &str) {
@@ -81,7 +78,7 @@ fn count(path: &Path, select: &str, entry: &str) -> String {
 #[test]
 #[ignore = "needs NVENC"]
 fn h264_is_smart_rendered_frame_exact() {
-    let d = workdir("h264");
+    let d = workdir("render", "h264");
     let src = d.join("in.mp4");
     clip(&src, "libx264");
     let out = d.join("out.mp4");
@@ -121,7 +118,7 @@ fn h264_is_smart_rendered_frame_exact() {
 #[test]
 #[ignore = "needs NVENC"]
 fn hevc_falls_back_to_a_full_encode_and_says_why() {
-    let d = workdir("hevc");
+    let d = workdir("render", "hevc");
     let src = d.join("in.mp4");
     clip(&src, "libx265");
     let out = d.join("out.mp4");

@@ -1,9 +1,5 @@
-//! Hand edits to the kept ranges: cut a span out, or keep a span. Used by the app's editor, where
-//! every edit is written straight back to the file.
-//!
-//! Results sit on the file's millisecond grid, so the list in memory is exactly what a re-read of
-//! the file gives (anything finer would be rounded on write, and two writes of "the same" list
-//! could name different frames).
+//! Hand edits to the kept ranges: cut a span out, or keep a span. Results sit on the file's
+//! millisecond grid, so the list in memory is exactly what a re-read of the file gives.
 
 use super::Range;
 
@@ -60,10 +56,7 @@ fn normalize(sorted: Vec<Range>, join: f64) -> Vec<Range> {
         if r.end <= r.start {
             continue;
         }
-        match out.last_mut() {
-            Some(last) if r.start - last.end < join.max(1e-9) => last.end = last.end.max(r.end),
-            _ => out.push(r),
-        }
+        crate::spans::push_joined(&mut out, r, crate::spans::Join::Within(join.max(1e-9)));
     }
     out
 }

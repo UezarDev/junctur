@@ -682,7 +682,7 @@ function handlers.open(req)
             .. "all but one, or choose Create new timeline" }
     end
     local t = found[1]
-    -- Switched first and the template looked up after (5v): with none named and no Junctur bin yet
+    -- Switched first and the template looked up after: with none named and no Junctur bin yet
     -- the bundled bin is imported, and that is not done for a send Resolve then refuses.
     local was = project:GetCurrentTimeline()
     pcall(function() project:SetCurrentTimeline(t) end)

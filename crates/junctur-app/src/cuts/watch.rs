@@ -1,6 +1,5 @@
-//! Notices when the edit list changes on disk (a hand edit, `junctur cut`, later the app's own
-//! editor) by polling its size and modification time. One small file does not justify a
-//! file-system notification dependency, and a stat every few hundred ms costs nothing.
+//! Notices when the edit list changes on disk (a hand edit, `junctur cut`) by polling its size and
+//! modification time: one small file does not justify a file-system notification dependency.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -6,7 +6,8 @@
 
 use crate::Result;
 
-/// Interleaved samples `[from, to)` (sample frames, not values) of one source track; zeros past its end.
+/// Interleaved samples `[from, to)` (sample frames, not values) of one source track; zeros past
+/// its end.
 pub trait Samples {
     fn read(&mut self, from: u64, to: u64) -> Result<Vec<f32>>;
 }

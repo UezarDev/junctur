@@ -1,13 +1,6 @@
-//! The user's settings: the optional config file (the file named by `JUNCTUR_CONFIG`, else
-//! `junctur/config.json` in the OS config folder) and the pipeline options `junctur analyze` and the
-//! app both start from ([`analysis_options`]); the app's Settings dialog writes it ([`save`], 2i), the
-//! CLI only reads it. A missing default file means defaults; a broken file,
-//! or a `JUNCTUR_CONFIG` that names nothing, is an error, so a typo never silently falls back to a
-//! different model.
-//!
-//! The engine itself never reads these: [`crate::pipeline::run`] takes its options, and a caller that
-//! wants the user's asks for them here. Moved from the CLI (2d) so the app builds its analysis from
-//! the same rules instead of a copy.
+//! The user's config file (`JUNCTUR_CONFIG`, else `junctur/config.json` in the OS config folder)
+//! and the pipeline options the CLI and the app both start from. A broken or named-but-missing file
+//! is an error, so a typo never silently falls back to a different model.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -25,27 +18,21 @@ pub struct Config {
     /// Whisper model used when the command line names none (`auto` when this is unset too).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub whisper_model: Option<ModelPref>,
-    /// The caption settings of a recording whose edit list has none of its own (2i, [`captions`]).
+    /// The caption settings of a recording whose edit list has none of its own ([`captions`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub captions: Option<Captions>,
-    /// The word list Whisper is told before every chunk (5h, [`crate::wordlist`]): names and terms
-    /// to spell the user's way. Read when a transcription starts, so a change applies to the next.
+    /// Names and terms Whisper is told before every chunk ([`crate::wordlist`]); read when a
+    /// transcription starts, so a change applies to the next.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub words: Vec<String>,
-    /// The transcript panel flags a word for review (5o) when Whisper's lowest token probability in
-    /// it is under this many percent; 0 flags none. Unset: [`FLAG_BELOW`]. Only the app reads it.
-    /// Read as any whole number, so a hand-typed 300 reads as 100 rather than making the whole file
-    /// an error and taking every other setting with it.
+    /// Flag a word for review when its lowest token probability is under this many percent; 0 flags
+    /// none. Any whole number reads (300 clamps to 100), so one bad value cannot break the file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flag_below: Option<u64>,
 }
 
-/// The default of [`Config::flag_below`], in percent; the page's own fallback before it reads the
-/// settings is 0 (`App.svelte`), not this. Measured on 4 min 40 s of the sample recording
-/// (large-v3-turbo, 628 words, 5o): under 25 % fall 4.6 % of the words, about one in twenty, and
-/// among them nearly every word that reads as a misheard name or a made-up one (`WDuel?` at 6 %,
-/// `Waystuff`, `fuoco`, `flasho`, `Arokeret` from 16 to 24 %); 30 % would add a `Wen` (Gwen?) at
-/// 28 % and flag 6.8 %. The mean under 25 % flags 1.6 % and none of those (their means are 40 to 74 %).
+/// The default of [`Config::flag_below`], in percent: flags about one word in twenty, nearly all
+/// of them misheard or made-up names.
 pub const FLAG_BELOW: u8 = 25;
 
 impl Config {
@@ -56,13 +43,9 @@ impl Config {
 }
 
 /// The user's Junctur folder in the OS config folder (`%APPDATA%\junctur`), where the config file,
-/// the voices (5b) and the app's recent recordings (2d) live; `None` when there is no config folder.
+/// the voices and the app's recent recordings live; `None` when there is no config folder.
 pub fn folder() -> Option<PathBuf> {
-    std::env::var_os("APPDATA")
-        .or_else(|| std::env::var_os("XDG_CONFIG_HOME"))
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .map(|b| b.join("junctur"))
+    crate::paths::config_home().map(|b| b.join("junctur"))
 }
 
 /// The files of [`folder`] core reads, each with the variable that points it elsewhere.
@@ -71,10 +54,9 @@ pub const FILES: [(&str, &str); 2] = [
     ("voices.json", voices::ENV),
 ];
 
-/// Takes into [`folder`] those of `files` (name, overriding variable) that a packaged app's hidden copy
-/// of it holds and it lacks (2f, [`hidden`]), so settings and voices saved from a Claude-launched run
-/// reach every run. A file whose variable is set is not the folder's and is left alone. Called once at
-/// startup by the CLI and the app, never by a path lookup.
+/// Takes into [`folder`] those of `files` (name, overriding variable) that a packaged app's hidden
+/// copy holds and it lacks ([`hidden`]), so settings saved from a sandboxed run reach every run.
+/// A file whose variable is set is left alone. Called once at startup, never by a path lookup.
 pub fn adopt_hidden(files: &[(&str, &str)]) {
     let Some(folder) = folder() else {
         return;
@@ -147,7 +129,7 @@ pub fn whisper_model(
     }
 }
 
-/// The model and word list a transcription runs with (5h): the model as [`whisper_model`] says; the
+/// The model and word list a transcription runs with: the model as [`whisper_model`] says; the
 /// word list is the config file's, empty when an explicit model meets a file that cannot be read
 /// (that file cannot block the choice, and its list is not known).
 fn transcription(flag: Option<&str>, cfg: Result<Config>) -> Result<(ModelPref, Vec<String>)> {
@@ -224,198 +206,4 @@ fn parse(bytes: &[u8]) -> std::result::Result<Config, String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reads_models_and_aliases() {
-        let c = parse(br#"{"whisper_model":"large-v3"}"#).unwrap();
-        assert_eq!(c.whisper_model, Some(ModelPref::LargeV3));
-        let c = parse(br#"{"whisper_model":"turbo"}"#).unwrap();
-        assert_eq!(c.whisper_model, Some(ModelPref::LargeV3Turbo));
-        assert_eq!(parse(b"{}").unwrap(), Config::default());
-    }
-
-    #[test]
-    fn skips_a_byte_order_mark() {
-        let c = parse(b"\xEF\xBB\xBF{\"whisper_model\":\"best\"}").unwrap();
-        assert_eq!(c.whisper_model, Some(ModelPref::LargeV3));
-    }
-
-    #[test]
-    fn typos_are_errors() {
-        assert!(parse(br#"{"whisper_model":"large-v4"}"#).is_err());
-        assert!(parse(br#"{"whisper_modle":"large-v3"}"#).is_err());
-        // PR #1's `models_dir` is not supported: models live in the cache folder.
-        assert!(parse(br#"{"models_dir":"D:/m"}"#).is_err());
-    }
-
-    #[test]
-    fn model_flag_beats_config_beats_auto() {
-        let cfg = |m: Option<ModelPref>| {
-            move || {
-                Ok(Config {
-                    whisper_model: m,
-                    ..Default::default()
-                })
-            }
-        };
-        let broken = || Err(Error::Config("bad config".into()));
-        assert_eq!(
-            whisper_model(Some("turbo"), cfg(Some(ModelPref::LargeV3))).unwrap(),
-            ModelPref::LargeV3Turbo
-        );
-        // An explicit choice never reads the config, so a broken one cannot block it.
-        assert_eq!(
-            whisper_model(Some("best"), broken).unwrap(),
-            ModelPref::LargeV3
-        );
-        assert_eq!(
-            whisper_model(None, cfg(Some(ModelPref::LargeV3Q5))).unwrap(),
-            ModelPref::LargeV3Q5
-        );
-        assert_eq!(whisper_model(None, cfg(None)).unwrap(), ModelPref::Auto);
-        assert!(whisper_model(None, broken).is_err());
-        assert!(whisper_model(Some("large-v4"), cfg(None)).is_err());
-    }
-
-    #[test]
-    fn caption_defaults_are_read_checked_and_resolved() {
-        let c = parse(br#"{"captions":{"on":true,"chars":30}}"#).unwrap();
-        // A field the file leaves out (as an older file lacks a newer one) is the built-in value.
-        let want = Captions {
-            on: true,
-            chars: 30,
-            ..Default::default()
-        };
-        assert_eq!(c.captions, Some(want.clone()));
-        assert!(
-            parse(br#"{"captions":{"chars":500}}"#).is_err(),
-            "out of limits"
-        );
-        let e = parse(br#"{"captions":{"chrs":30}}"#).unwrap_err();
-        assert!(
-            e.contains("chrs"),
-            "a misspelt caption setting is an error: {e}"
-        );
-        let broken = || Err(Error::Config("bad config".into()));
-        let own = Captions {
-            lines: 1,
-            ..Default::default()
-        };
-        // A list's own settings win, and never read the config.
-        assert_eq!(captions(Some(own.clone()), broken).unwrap(), own);
-        assert_eq!(captions(None, || Ok(c.clone())).unwrap(), want);
-        assert_eq!(
-            captions(None, || Ok(Config::default())).unwrap(),
-            Captions::default()
-        );
-        assert!(captions(None, broken).is_err());
-    }
-
-    #[test]
-    fn saves_what_it_reads_with_canonical_names() {
-        let d = std::env::temp_dir().join(format!("junctur-config-save-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        let path = d.join("junctur").join("config.json");
-        let c = parse(br#"{"whisper_model":"best"}"#).unwrap();
-        save_to(&path, &c).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains(r#""whisper_model": "large-v3""#), "{text}");
-        assert!(
-            !text.contains("captions"),
-            "unset keys are not written: {text}"
-        );
-        assert_eq!(load_from(&path, true).unwrap(), c);
-        let c = Config {
-            whisper_model: None,
-            captions: Some(Captions {
-                on: true,
-                ..Default::default()
-            }),
-            words: vec!["Uezar".into(), "Tsunheto".into()],
-            flag_below: Some(0),
-        };
-        save_to(&path, &c).unwrap();
-        assert_eq!(load_from(&path, true).unwrap(), c);
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    /// 5o: the flag threshold is read, defaults when unset, and is not written unset.
-    #[test]
-    fn the_flag_threshold_reads_and_defaults() {
-        assert_eq!(parse(b"{}").unwrap().flag_below(), FLAG_BELOW);
-        let c = parse(br#"{"flag_below":25}"#).unwrap();
-        assert_eq!((c.flag_below, c.flag_below()), (Some(25), 25));
-        assert_eq!(parse(br#"{"flag_below":0}"#).unwrap().flag_below(), 0);
-        assert_eq!(parse(br#"{"flag_below":250}"#).unwrap().flag_below(), 100);
-        // Past a byte too (repair): the rest of the file still reads.
-        let c = parse(br#"{"flag_below":300,"words":["Uezar"]}"#).unwrap();
-        assert_eq!((c.flag_below(), c.words.len()), (100, 1));
-        assert!(parse(br#"{"flag_below":-1}"#).is_err());
-        assert!(parse(br#"{"flag_below":"40"}"#).is_err());
-        assert!(!serde_json::to_string(&Config::default())
-            .unwrap()
-            .contains("flag_below"));
-    }
-
-    #[test]
-    fn the_word_list_is_read_and_goes_with_the_model() {
-        let c = parse(br#"{"words":["Uezar","Delay"]}"#).unwrap();
-        assert_eq!(c.words, vec!["Uezar".to_string(), "Delay".to_string()]);
-        assert!(
-            parse(br#"{"words":"Uezar"}"#).is_err(),
-            "a list, not a string"
-        );
-        let ok = || Ok(c.clone());
-        let broken = || Err(Error::Config("bad config".into()));
-        assert_eq!(
-            transcription(None, ok()).unwrap(),
-            (ModelPref::Auto, c.words.clone())
-        );
-        assert_eq!(
-            transcription(Some("best"), ok()).unwrap(),
-            (ModelPref::LargeV3, c.words.clone())
-        );
-        // An explicit model is not blocked by a broken file; its list is then not known.
-        assert_eq!(
-            transcription(Some("best"), broken()).unwrap(),
-            (ModelPref::LargeV3, vec![])
-        );
-        assert!(transcription(None, broken()).is_err());
-        assert!(transcription(Some("large-v4"), ok()).is_err());
-    }
-
-    #[test]
-    fn where_the_file_is() {
-        let base = PathBuf::from("cfg").join("junctur");
-        assert_eq!(
-            locate(None, Some(base.clone())).unwrap(),
-            Some((base.join("config.json"), false))
-        );
-        assert_eq!(locate(None, None).unwrap(), None);
-        assert_eq!(
-            locate(Some("x.json".into()), Some(base)).unwrap(),
-            Some((PathBuf::from("x.json"), true))
-        );
-        assert!(locate(Some(OsString::new()), None).is_err());
-    }
-
-    #[test]
-    fn missing_default_is_defaults_but_missing_named_file_and_broken_file_are_errors() {
-        let d = std::env::temp_dir().join(format!("junctur-config-{}", std::process::id()));
-        std::fs::create_dir_all(&d).unwrap();
-        let none = d.join("none.json");
-        assert_eq!(load_from(&none, false).unwrap(), Config::default());
-        let e = load_from(&none, true).unwrap_err().to_string();
-        assert!(e.contains("none.json"), "{e}");
-        let bad = d.join("bad.json");
-        std::fs::write(&bad, "{ not json").unwrap();
-        let e = load_from(&bad, false).unwrap_err().to_string();
-        assert!(e.contains("bad.json"), "{e}");
-        // Any other read failure (here: a folder) names the path too.
-        let e = load_from(&d, false).unwrap_err().to_string();
-        assert!(e.contains("junctur-config-"), "{e}");
-        let _ = std::fs::remove_dir_all(&d);
-    }
-}
+mod tests;

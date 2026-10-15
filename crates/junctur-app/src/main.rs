@@ -17,7 +17,17 @@ mod project;
 mod recent;
 mod settings;
 mod state;
+#[cfg(test)]
+mod test_support;
+// Test mode (the off-screen launch checks) is in dev builds, and in a release build only with
+// `--features test-hooks`.
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
 mod testmode;
+#[cfg(not(any(debug_assertions, feature = "test-hooks")))]
+#[path = "testmode/off.rs"]
+mod testmode;
+// Only test mode makes a trace.
+#[cfg_attr(not(any(debug_assertions, feature = "test-hooks")), allow(dead_code))]
 mod trace;
 mod translation;
 #[cfg(windows)]
@@ -28,85 +38,21 @@ mod window;
 
 use std::sync::Mutex;
 
-use tauri::window::Color;
-use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{AppHandle, Manager, RunEvent, Window, WindowEvent};
 
 use commands::App;
 use lock::lock;
 use player::Player;
 
-/// The app's dark background (`--panel-solid` in app.css), shown wherever no video is drawn.
-const BACKGROUND: Color = Color(16, 17, 20, 0);
-
 fn main() {
-    // 2f: settings, voices and recent recordings a Claude-launched run saved in a hidden copy of the
-    // config folder (a file pointed elsewhere by its variable, as in launch checks, is not taken).
+    // Settings, voices and recent recordings an automated run saved in a hidden copy of the config
+    // folder (a file pointed elsewhere by its variable, as in launch checks, is not taken).
     let [config, voices] = junctur_core::config::FILES;
     junctur_core::config::adopt_hidden(&[config, voices, ("recent.json", recent::ENV)]);
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .setup(|app| {
-            // Built here rather than in tauri.conf.json so the player can attach to it before the
-            // page asks for anything. Alpha 0 makes only the WebView transparent, so the video
-            // under it shows through; the window itself stays opaque (tao fills it with the RGB).
-            // Rejected: `.transparent(true)`, which makes the whole window see-through (DWM
-            // blur-behind): the desktop showed through, and the GL surface never did.
-            // Frameless (2i): the page draws the title bar (`TitleBar.svelte`); Tauri keeps the
-            // edges resizable, and mpv keeps the picture below the bar. No shadow: Tauri's
-            // undecorated shadow keeps a hidden frame around the client area, and with it every
-            // launch check's capture of the window came back blank, page and picture alike;
-            // without it the page shows as it does in a decorated window.
-            let test = testmode::seconds();
-            let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
-                .title("Junctur")
-                .decorations(false)
-                .shadow(false)
-                .inner_size(1280.0, 800.0)
-                .min_inner_size(640.0, 400.0)
-                .background_color(BACKGROUND);
-
-            if test.is_some() {
-                // Built hidden and moved before it is shown, so it never flashes on screen.
-                builder = builder.visible(false).focused(false).skip_taskbar(true);
-            }
-            let window = builder.build()?;
-            if test.is_some() {
-                testmode::place(&window)?;
-            }
-            let extra = if test.is_some() {
-                testmode::SILENT
-            } else {
-                &[]
-            };
-            let trace = testmode::trace();
-            let player = Player::start(app.handle().clone(), &window, extra, trace.clone());
-            match &player {
-                Ok(p) => p.set_caption_defaults(settings::caption_defaults()),
-                Err(e) => eprintln!("junctur-app: no player: {e}"),
-            }
-            app.manage(App {
-                player: Mutex::new(player),
-                analysis: Default::default(),
-                waves: Default::default(),
-                translation: Default::default(),
-            });
-            if let Some(secs) = test {
-                testmode::arm(app.handle().clone(), secs, trace);
-            }
-            Ok(())
-        })
-        .on_window_event(|window, event| {
-            if let WindowEvent::Resized(size) = event {
-                // Resizes during window creation come before the player is managed.
-                let Some(app) = window.try_state::<App>() else {
-                    return;
-                };
-                let guard = lock(&app.player);
-                if let Ok(p) = &*guard {
-                    p.resize(size.width, size.height);
-                }
-            }
-        })
+        .setup(|app| Ok(setup(app)?))
+        .on_window_event(resized)
         .invoke_handler(tauri::generate_handler![
             commands::startup_file,
             commands::player_state,
@@ -177,15 +123,60 @@ fn main() {
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the app")
-        .run(|app, event| {
-            if let RunEvent::Exit = event {
-                let Some(state) = app.try_state::<App>() else {
-                    return;
-                };
-                let mut guard = lock(&state.player);
-                if let Ok(p) = &mut *guard {
-                    p.shutdown();
-                }
-            }
-        });
+        .run(exited);
+}
+
+/// The window, then the player attached to it, managed before the page can ask for anything; in
+/// test mode hidden, muted and armed.
+fn setup(app: &mut tauri::App) -> tauri::Result<()> {
+    let test = testmode::seconds();
+    let window = window::create(app, test.is_some())?;
+    let extra = if test.is_some() {
+        testmode::SILENT
+    } else {
+        &[]
+    };
+    let trace = testmode::trace();
+    let player = Player::start(app.handle().clone(), &window, extra, trace.clone());
+    match &player {
+        Ok(p) => p.set_caption_defaults(settings::caption_defaults()),
+        Err(e) => eprintln!("junctur-app: no player: {e}"),
+    }
+    app.manage(App {
+        player: Mutex::new(player),
+        analysis: Default::default(),
+        waves: Default::default(),
+        translation: Default::default(),
+    });
+    if let Some(secs) = test {
+        testmode::arm(app.handle().clone(), secs, trace);
+    }
+    Ok(())
+}
+
+/// The video follows the window's size.
+fn resized(window: &Window, event: &WindowEvent) {
+    if let WindowEvent::Resized(size) = event {
+        // Resizes during window creation come before the player is managed.
+        let Some(app) = window.try_state::<App>() else {
+            return;
+        };
+        let guard = lock(&app.player);
+        if let Ok(p) = &*guard {
+            p.resize(size.width, size.height);
+        }
+    }
+}
+
+/// mpv is stopped before the process ends ([`Player::shutdown`]).
+fn exited(app: &AppHandle, event: RunEvent) {
+    if let RunEvent::Exit = event {
+        let Some(state) = app.try_state::<App>() else {
+            return;
+        };
+        let mut guard = lock(&state.player);
+        if let Ok(p) = &mut *guard {
+            p.shutdown();
+        }
+    }
 }

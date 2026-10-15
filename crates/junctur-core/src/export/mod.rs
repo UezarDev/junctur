@@ -1,7 +1,5 @@
-//! Turning an edit list into something another program opens: an FCPXML timeline and SRTs of
-//! captions (5a; overlapping speakers stacked in one caption since 5e), both for Resolve; the
-//! rendered video is the smart-render phase. Captions may be shown translated (5k,
-//! [`translated`]).
+//! Turning an edit list into something another program opens: an FCPXML timeline and an SRT of
+//! captions, both for Resolve, captions optionally translated ([`translated`]).
 
 pub mod caption_text;
 pub mod fcpxml;
@@ -39,17 +37,15 @@ pub fn write_fcpxml(edit: &EditList, out: &Path) -> Result<()> {
 pub struct CaptionFiles {
     /// Cues in the file.
     pub cues: usize,
-    /// `<stem> (…).srt` files beside it: speaker files 5b wrote before captions became one file
-    /// (5e). Not deleted (they could be the user's own); said, so they are not imported by mistake.
+    /// `<stem> (…).srt` files beside it, from an older per-speaker export. Not deleted (they could
+    /// be the user's own); reported, so they are not imported by mistake.
     pub stale: Vec<PathBuf>,
 }
 
-/// Write `edit`'s captions as one SRT at `out` (5a, 5e): the kept words on the edited timeline,
-/// each speaker's lines in their colour, people talking at once stacked in one cue, cut by the
-/// caption settings `captions` (resolved by the caller: the list's own, else the user's defaults,
-/// 2i). The frame rate is the source's, as for the FCPXML, so cues land on the frames the render and
-/// the timeline have. Translated captions (5k) take their translations from `translations`. Any
-/// `out` but the source itself is replaced.
+/// Write `edit`'s captions as one SRT at `out`, cut by the resolved caption settings `captions`
+/// at the source's frame rate (as for the FCPXML, so cues land on the render's frames).
+/// Translated captions take their translations from `translations`. Any `out` but the source
+/// itself is replaced.
 pub fn write_srt(
     edit: &EditList,
     captions: &Captions,
@@ -67,7 +63,7 @@ pub fn write_srt(
     write_captions(edit, captions, &words, num, den, translations, out)
 }
 
-/// Makes the translations `captions` need (5k) for `edit`'s captions from `transcript`, kept in
+/// Makes the translations `captions` need for `edit`'s captions from `transcript`, kept in
 /// the `project` folder, the model fetched into `cache_dir` on first use; `progress` hears
 /// `(done, to do)` sentences. Nothing to do (captions not translated, or every sentence done)
 /// returns at once. Returns the project's translations, for [`write_srt`], and what the run did
@@ -121,10 +117,10 @@ pub fn write_captions(
     })
 }
 
-/// The cues of a finished caption output, the SRT or the send to Resolve (5g): refused while the
-/// translation is not all made ([`untranslated`]), else [`srt::cues`] with every translation. One
-/// place for both, so a change to how a file is cut reaches the send too, and the preview
-/// (`srt::cues` with what is translated so far) stays what they give (5q).
+/// The cues of a finished caption output, the SRT or the send to Resolve: refused while the
+/// translation is not all made (as [`untranslated`]), else [`srt::cues`] with every translation,
+/// the kept words gone over once ([`srt::finished`]). One place for both, so a change to how a
+/// file is cut reaches the send too.
 pub fn finished_cues(
     edit: &EditList,
     captions: &Captions,
@@ -133,18 +129,18 @@ pub fn finished_cues(
     den: u64,
     translations: &Translations,
 ) -> Result<Vec<srt::Cue>> {
-    untranslated(edit, captions, words, num, den, translations)?;
-    Ok(srt::cues(
+    srt::finished(
         edit,
         captions,
         words.iter().copied(),
         num,
         den,
-        Some(translations),
-    ))
+        translations,
+    )
+    .map_err(|(n, of)| not_translated(n, of))
 }
 
-/// Refuses captions to be translated whose translation is not all made yet (5k): a file or a
+/// Refuses captions to be translated whose translation is not all made yet: a file or a
 /// send with some sentences in the spoken language would look finished and not be. The preview
 /// shows what there is instead.
 pub fn untranslated(
@@ -161,11 +157,14 @@ pub fn untranslated(
     let sentences = srt::sentences(edit, words.iter().copied(), num, den);
     match srt::missing(captions, &sentences, translations) {
         0 => Ok(()),
-        n => Err(Error::Edit(format!(
-            "{n} of {} caption sentences are not translated yet: translate the captions first",
-            sentences.len()
-        ))),
+        n => Err(not_translated(n, sentences.len())),
     }
+}
+
+fn not_translated(n: usize, of: usize) -> Error {
+    Error::Edit(format!(
+        "{n} of {of} caption sentences are not translated yet: translate the captions first"
+    ))
 }
 
 /// `<stem> (…).srt` files beside `out`.

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ffmpeg::PcmReader;
 use crate::runtime;
-use crate::vad::{Region, RATE};
+use crate::vad::{Region, MINUTE, RATE};
 use crate::Result;
 
 pub use cluster::{
@@ -43,7 +43,48 @@ pub struct Speaker {
     pub id: usize,
     pub seconds: f64,
     pub share: f64,
+    /// Its [`SpeakerKind`]'s label: the text is what is cached, the kind is read back from it.
     pub label: String,
+}
+
+impl Speaker {
+    /// `None` for a label no kind writes (a hand-edited cache), except that any label starting
+    /// with "minor" is a minor one, as an older wording of it would be.
+    pub fn kind(&self) -> Option<SpeakerKind> {
+        SpeakerKind::ALL
+            .into_iter()
+            .find(|k| k.label() == self.label)
+            .or_else(|| {
+                self.label
+                    .starts_with(MINOR_PREFIX)
+                    .then_some(SpeakerKind::Minor)
+            })
+    }
+}
+
+/// What every minor speaker's label starts with.
+const MINOR_PREFIX: &str = "minor";
+
+/// What a speaker is taken to be from its share of the talk time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpeakerKind {
+    /// The one who talks most.
+    Main,
+    Other,
+    /// Under [`MINOR_SHARE`]: laughs, bleed or clustering noise.
+    Minor,
+}
+
+impl SpeakerKind {
+    pub const ALL: [SpeakerKind; 3] = [SpeakerKind::Main, SpeakerKind::Other, SpeakerKind::Minor];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SpeakerKind::Main => "main voice: most talk time, likely the streamer's mic",
+            SpeakerKind::Other => "other voice: likely Discord or a guest",
+            SpeakerKind::Minor => "minor: too little talk time to call a person",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -52,8 +93,8 @@ pub struct Diarization {
     pub turns: Vec<Turn>,
 }
 
-/// Which embeddings a cached window or a remembered voiceprint holds: CAM++ on the CPU (5r). Part of
-/// [`hearing_settings`] and of a voiceprint's model key, so ones made before 5r are not trusted.
+/// Which embeddings a cached window or a remembered voiceprint holds: CAM++ on the CPU. Part of
+/// [`hearing_settings`] and of a voiceprint's model key, so ones made otherwise are not trusted.
 pub const EMBEDDINGS_MARK: &str = "cpu";
 
 pub struct Embedder {
@@ -62,9 +103,8 @@ pub struct Embedder {
 }
 
 impl Embedder {
-    /// Always on the CPU (5r): ONNX Runtime's CUDA provider gives CAM++ embeddings that agree with the
-    /// CPU's at only 0.1 to 0.4 cosine for the same input, whatever its options, so on the GPU every
-    /// window became its own speaker. No device argument, so no caller can put it back there.
+    /// Always on the CPU: ONNX Runtime's CUDA provider gives CAM++ embeddings far from the CPU's for
+    /// the same input, so every window would be its own speaker. No device argument on purpose.
     pub fn open(model: &Path) -> Result<Self> {
         Ok(Self {
             session: runtime::open_on_cpu(model, None)?,
@@ -105,7 +145,7 @@ impl Embedder {
 
 /// Fixed-length embedding windows over the speech regions. Every window is exactly [`SEGMENT_S`]
 /// long (a short region gets one window centred on it), because on CUDA every new input shape
-/// costs a fresh kernel search: variable lengths made diarization 10x slower than separation.
+/// costs a fresh kernel search.
 pub fn segments(regions: &[Region]) -> Vec<Region> {
     let mut out: Vec<Region> = Vec::new();
     for r in regions {
@@ -133,7 +173,7 @@ pub fn hearing_settings() -> String {
     )
 }
 
-/// What one read of a track gives the `speakers` stage (5b): the fixed embedding windows over its
+/// What one read of a track gives the `speakers` stage: the fixed embedding windows over its
 /// speech and their unit embeddings, in the same order, and, when a segmentation model was given,
 /// where two people talk at once. Kept whole (not just the labels) so speakers can be labelled again
 /// from it, for a newly enrolled voice, without reading the recording again.
@@ -144,42 +184,74 @@ pub struct Analysis {
     pub overlaps: Vec<Overlap>,
 }
 
-/// Clips of a 16 kHz mono stream starting at time 0, asked for in order of start and read once:
-/// only the stretch from the current clip's start on is buffered (at most a segmentation window).
-struct Clips<'a> {
-    reader: &'a mut PcmReader,
-    buf: Vec<f32>,
-    buf_start: usize,
+/// Where [`Clips`] reads: the decoder, or a stand-in in tests.
+trait Samples {
+    /// Up to `n` samples into `buf` (replacing its contents); fewer only at the end, empty then.
+    fn read_into(&mut self, buf: &mut Vec<f32>, n: usize) -> Result<()>;
 }
 
-impl Clips<'_> {
+impl Samples for PcmReader {
+    fn read_into(&mut self, buf: &mut Vec<f32>, n: usize) -> Result<()> {
+        PcmReader::read_into(self, buf, n)
+    }
+}
+
+/// Clips of a 16 kHz mono stream starting at time 0, asked for in order of start and read once:
+/// only the stretch from the current clip's start on is kept (at most a segmentation window).
+struct Clips<'a, R> {
+    reader: &'a mut R,
+    /// Samples from stream sample `start` on, the first `head` of them already let go: they are
+    /// moved out only once they are half the buffer, so a clip does not shift the whole window.
+    buf: Vec<f32>,
+    head: usize,
+    start: usize,
+    scratch: Vec<f32>,
+}
+
+impl<'a, R: Samples> Clips<'a, R> {
+    fn new(reader: &'a mut R) -> Self {
+        Self {
+            reader,
+            buf: Vec::new(),
+            head: 0,
+            start: 0,
+            scratch: Vec::new(),
+        }
+    }
+
     /// Samples `a..a + len`, zero-padded past the end of the stream. `a` must not go backwards.
     fn clip(&mut self, a: usize, len: usize) -> Result<Vec<f32>> {
-        // Drop what lies before this clip, then read up to its end.
-        let drop = a.saturating_sub(self.buf_start).min(self.buf.len());
-        self.buf.drain(..drop);
-        self.buf_start += drop;
-        while self.buf_start < a {
-            let skip = self
-                .reader
-                .read((a - self.buf_start).min(RATE as usize * 60))?;
-            if skip.is_empty() {
-                break;
-            }
-            self.buf_start += skip.len();
+        // Let go of what lies before this clip, then read up to its end.
+        let drop = a
+            .saturating_sub(self.start + self.head)
+            .min(self.buf.len() - self.head);
+        self.head += drop;
+        if self.head * 2 >= self.buf.len() {
+            self.buf.drain(..self.head);
+            self.start += self.head;
+            self.head = 0;
         }
-        while self.buf_start + self.buf.len() < a + len {
-            let more = self
-                .reader
-                .read(a + len - self.buf_start - self.buf.len())?;
-            if more.is_empty() {
+        // Only an empty buffer can lie wholly before `a`, and it is compacted above.
+        while self.start + self.head < a {
+            let n = (a - self.start - self.head).min(MINUTE);
+            self.reader.read_into(&mut self.scratch, n)?;
+            if self.scratch.is_empty() {
                 break;
             }
-            self.buf.extend(more);
+            self.start += self.scratch.len();
+        }
+        while self.start + self.buf.len() < a + len {
+            let n = a + len - self.start - self.buf.len();
+            self.reader.read_into(&mut self.scratch, n)?;
+            if self.scratch.is_empty() {
+                break;
+            }
+            self.buf.extend_from_slice(&self.scratch);
         }
         // Clips are sorted but may overlap the previous one, so slice from the buffer.
-        let lo = a.saturating_sub(self.buf_start).min(self.buf.len());
-        let mut clip = self.buf[lo..(lo + len).min(self.buf.len())].to_vec();
+        let kept = &self.buf[self.head..];
+        let lo = a.saturating_sub(self.start + self.head).min(kept.len());
+        let mut clip = kept[lo..(lo + len).min(kept.len())].to_vec();
         clip.resize(len, 0.0);
         Ok(clip)
     }
@@ -188,7 +260,7 @@ impl Clips<'_> {
 /// Embeds every [`segments`] window of a 16 kHz mono stream (which starts at time 0) over its
 /// speech `regions` and, with `segmenter`, finds the overlapping talk, all in one read: both kinds
 /// of clip are taken in order of start from one buffer, so the recording is decoded once. `heard`
-/// is told each clip's start (seconds) as it is taken: how far through the stream this is (2h).
+/// is told each clip's start (seconds) as it is taken: how far through the stream this is.
 pub fn analyze(
     reader: &mut PcmReader,
     regions: &[Region],
@@ -204,11 +276,7 @@ pub fn analyze(
     };
     let at = |t: f64| (t * RATE as f64) as usize;
     let len = at(SEGMENT_S);
-    let mut clips = Clips {
-        reader,
-        buf: Vec::new(),
-        buf_start: 0,
-    };
+    let mut clips = Clips::new(reader);
     let mut emb_clips: Vec<Vec<f32>> = Vec::new();
     let mut embeddings: Vec<Vec<f32>> = Vec::new();
     let mut seg_clips: Vec<(usize, Vec<f32>)> = Vec::new();
@@ -266,7 +334,7 @@ fn segment_all(seg: &mut Segmenter, clips: &mut Vec<(usize, Vec<f32>)>) -> Resul
 }
 
 /// Diarize a 16 kHz mono stream (which starts at time 0) over its speech `regions`, reading it
-/// once: 5a's two-pass clustering, no voiceprints, no overlap (what `junctur separate` reports).
+/// once: two-pass clustering, no voiceprints, no overlap (what `junctur separate` reports).
 pub fn diarize(
     reader: &mut PcmReader,
     regions: &[Region],
@@ -290,7 +358,7 @@ fn embed_all(embedder: &mut Embedder, clips: &mut Vec<Vec<f32>>) -> Result<Vec<V
 /// Turns from windows and their labels, in window order: adjacent windows of one speaker joined,
 /// and where a window reaches into the previous one of another speaker (a short region's window is
 /// centred on it and can), both stop at the middle of the overlap. Windows hold one voice each, so
-/// turns made from them never overlap; only [`Overlap`]s put two speakers at one instant (5b).
+/// turns made from them never overlap; only [`Overlap`]s put two speakers at one instant.
 pub fn turns(segs: &[Region], labels: &[usize]) -> Vec<Turn> {
     let mut turns: Vec<Turn> = Vec::new();
     for (s, &l) in segs.iter().zip(labels) {
@@ -341,18 +409,18 @@ pub fn summarize(segs: &[Region], labels: &[usize]) -> Diarization {
         .enumerate()
         .map(|(r, &o)| {
             let share = if total > 0.0 { secs[o] / total } else { 0.0 };
-            let label = if r == 0 {
-                "main voice: most talk time, likely the streamer's mic"
+            let kind = if r == 0 {
+                SpeakerKind::Main
             } else if share < MINOR_SHARE {
-                "minor: too little talk time to call a person"
+                SpeakerKind::Minor
             } else {
-                "other voice: likely Discord or a guest"
+                SpeakerKind::Other
             };
             Speaker {
                 id: r,
                 seconds: secs[o],
                 share,
-                label: label.to_string(),
+                label: kind.label().to_string(),
             }
         })
         .collect();
@@ -367,10 +435,8 @@ mod tests {
         Region { start, end }
     }
 
-    /// 5r: the embeddings hearing makes must be CAM++'s, which the CPU gives. Through
-    /// [`Embedder::open`], batched and one at a time, against a plain CPU session on the same
-    /// features. In a `cuda` build the embedder on the CUDA provider gave 0.39 here (and the
-    /// embedder can only open through [`runtime::open_on_cpu`] since).
+    /// The embeddings hearing makes must be CAM++'s, which the CPU gives: [`Embedder::open`],
+    /// batched and one at a time, against a plain CPU session on the same features.
     #[test]
     #[ignore = "downloads models"]
     fn embeddings_agree_with_the_cpu_reference() {
@@ -421,6 +487,80 @@ mod tests {
         }
     }
 
+    /// A stream held in memory, read in pieces as the decoder reads.
+    struct Held(Vec<f32>, usize);
+
+    impl Samples for Held {
+        fn read_into(&mut self, buf: &mut Vec<f32>, n: usize) -> Result<()> {
+            let end = (self.1 + n).min(self.0.len());
+            buf.clear();
+            buf.extend_from_slice(&self.0[self.1..end]);
+            self.1 = end;
+            Ok(())
+        }
+    }
+
+    /// The clip reader as written before it let go of its front lazily: a drain per clip and a
+    /// new Vec per read.
+    fn draining_clip(
+        r: &mut Held,
+        buf: &mut Vec<f32>,
+        buf_start: &mut usize,
+        a: usize,
+        len: usize,
+    ) -> Vec<f32> {
+        let read = |r: &mut Held, n: usize| {
+            let mut v = Vec::new();
+            r.read_into(&mut v, n).unwrap();
+            v
+        };
+        let drop = a.saturating_sub(*buf_start).min(buf.len());
+        buf.drain(..drop);
+        *buf_start += drop;
+        while *buf_start < a {
+            let skip = read(r, (a - *buf_start).min(MINUTE));
+            if skip.is_empty() {
+                break;
+            }
+            *buf_start += skip.len();
+        }
+        while *buf_start + buf.len() < a + len {
+            let more = read(r, a + len - *buf_start - buf.len());
+            if more.is_empty() {
+                break;
+            }
+            buf.extend(more);
+        }
+        let lo = a.saturating_sub(*buf_start).min(buf.len());
+        let mut clip = buf[lo..(lo + len).min(buf.len())].to_vec();
+        clip.resize(len, 0.0);
+        clip
+    }
+
+    /// Both readers hand out the same clips.
+    #[test]
+    fn clips_match_the_draining_reader() {
+        let stream: Vec<f32> = (0..3_000_000).map(|i| i as f32).collect();
+        // Embedding and segmentation clips interleaved, overlapping, with gaps, one past the end.
+        let mut asks: Vec<(usize, usize)> = Vec::new();
+        let mut a = 0;
+        for k in 0..400 {
+            let len = if k % 3 == 0 { 160_000 } else { 24_000 };
+            asks.push((a, len));
+            a += [7_000, 24_000, 0, 1_500_000 / 400, 41_000][k % 5];
+        }
+        asks.push((2_990_000, 24_000));
+        asks.push((3_100_000, 24_000));
+        let mut held = Held(stream.clone(), 0);
+        let mut clips = Clips::new(&mut held);
+        let mut old = Held(stream, 0);
+        let (mut buf, mut start) = (Vec::new(), 0);
+        for &(a, len) in &asks {
+            let want = draining_clip(&mut old, &mut buf, &mut start, a, len);
+            assert_eq!(clips.clip(a, len).unwrap(), want, "clip at {a}");
+        }
+    }
+
     #[test]
     fn segments_split_long_and_skip_short() {
         let s = segments(&[r(0.0, 0.3), r(1.0, 4.2), r(10.0, 10.8)]);
@@ -451,5 +591,39 @@ mod tests {
         assert_eq!(d.turns[0].speaker, 1);
         assert_eq!(d.turns[1].speaker, 0);
         assert!(summarize(&[], &[]).speakers.is_empty());
+    }
+
+    /// The labels are cached in `stems.json`, so their text stays; the kind is read back from it.
+    #[test]
+    fn a_speakers_kind_is_its_label() {
+        // 100 s, 10 s and 1 s: the last under the minor share.
+        let segs = [r(0.0, 100.0), r(100.0, 110.0), r(110.0, 111.0)];
+        let d = summarize(&segs, &[0, 1, 2]);
+        let labels: Vec<&str> = d.speakers.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "main voice: most talk time, likely the streamer's mic",
+                "other voice: likely Discord or a guest",
+                "minor: too little talk time to call a person",
+            ]
+        );
+        let kinds: Vec<_> = d.speakers.iter().map(Speaker::kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                Some(SpeakerKind::Main),
+                Some(SpeakerKind::Other),
+                Some(SpeakerKind::Minor)
+            ]
+        );
+        assert!(SpeakerKind::Minor.label().starts_with(MINOR_PREFIX));
+        // Any label starting "minor" is minor, as the summary always read it; others need the text.
+        let with = |label: &str| Speaker {
+            label: label.into(),
+            ..d.speakers[0].clone()
+        };
+        assert_eq!(with("minor: laughs").kind(), Some(SpeakerKind::Minor));
+        assert_eq!(with("main voice").kind(), None);
     }
 }

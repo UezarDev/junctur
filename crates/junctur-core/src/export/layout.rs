@@ -1,18 +1,12 @@
-//! Where each speaker's caption sits in the picture (5g): the preview over the picture and the Text+
-//! clips sent to Resolve both place captions from here, so what the editor shows is what Resolve
-//! gets. The SRT does not use it: a subtitle track has one position for every caption (5d), so it
-//! keeps 5e's one block, first speaker first.
-//!
-//! With the word highlight on (5l) each block also says where each unit of it sits on its lines and
-//! when it was said, so the preview and the Resolve send light the same word at the same time.
-//!
-//! Positions are the centre of each speaker's block as fractions of the picture, x across from
-//! the left and y up from the bottom (Fusion's `Center`). Heights are in picture heights: a block
-//! is `lines × size × LINE` tall, the size being the font's em.
+//! Where each speaker's caption sits in the picture: the preview and the Text+ clips sent to
+//! Resolve both place captions from here, so the editor shows what Resolve gets. Positions are
+//! block centres as fractions of the picture, x from the left and y up from the bottom (Fusion's
+//! `Center`); heights are in picture heights, a block `lines × size × LINE` tall. The SRT does not
+//! use it: a subtitle track has one position for every caption.
 
 use serde::Serialize;
 
-use super::srt::{Cue, Spoken};
+use super::srt::{wrap_onto, Cue, Spoken};
 use crate::edit::{Captions, EditList, Layout};
 
 /// Line height over the em, the usual default of a text renderer (Fusion's and a browser's).
@@ -31,7 +25,7 @@ pub struct PlacedPart {
     /// Centre of the block, fractions of the picture: x from the left, y from the bottom.
     pub x: f64,
     pub y: f64,
-    /// Where each word sits on `lines` and when it is lit (5l), only with the highlight on.
+    /// Where each word sits on `lines` and when it is lit, only with the highlight on.
     pub words: Vec<WordSpan>,
 }
 
@@ -113,7 +107,11 @@ fn place_one(cue: &Cue, protagonist: Option<u32>, c: &Captions, aspect: f64) -> 
             None => p.lines.clone(),
         })
         .collect();
-    let height = |i: usize| lines[i].len().max(1) as f64 * em * LINE;
+    let heights: Vec<f64> = lines
+        .iter()
+        .map(|l| l.len().max(1) as f64 * em * LINE)
+        .collect();
+    let height = |i: usize| heights[i];
     let width = |i: usize| {
         lines[i]
             .iter()
@@ -122,41 +120,10 @@ fn place_one(cue: &Cue, protagonist: Option<u32>, c: &Captions, aspect: f64) -> 
             .unwrap_or(0) as f64
             * glyph
     };
-    let mut at = vec![(0.5, 0.0); cue.parts.len()];
-    // A stack from `bottom` up through `ids`, each centred at `x`.
-    let stack = |ids: &[usize], x: f64, at: &mut Vec<(f64, f64)>| {
-        let mut edge = bottom;
-        for &i in ids {
-            at[i] = (x, edge + height(i) / 2.0);
-            edge += height(i) + GAP * em;
-        }
-    };
-    match c.layout {
-        Layout::Stacked => stack(&order, 0.5, &mut at),
-        Layout::TopBottom => {
-            let mut low = vec![order[0]];
-            low.extend(order.iter().skip(2));
-            stack(&low, 0.5, &mut at);
-            if let Some(&top) = order.get(1) {
-                at[top] = (0.5, 1.0 - bottom - height(top) / 2.0);
-            }
-        }
-        Layout::Side if protagonist.is_some_and(|id| cue.parts[order[0]].speaker == id) => {
-            // The protagonist stays centred; two others beside, any more above the protagonist.
-            let mut centre = vec![order[0]];
-            centre.extend(order.iter().skip(1 + BESIDE.len()));
-            stack(&centre, 0.5, &mut at);
-            for (&i, x) in order.iter().skip(1).zip(BESIDE) {
-                stack(&[i], x, &mut at);
-            }
-        }
-        Layout::Side => {
-            let n = order.len() as f64;
-            for (k, &i) in order.iter().enumerate() {
-                stack(&[i], (2.0 * k as f64 + 1.0) / (2.0 * n), &mut at);
-            }
-        }
-    }
+    // Side by side with the protagonist first: they stay centred.
+    let centred = matches!(c.layout, Layout::Side)
+        && protagonist.is_some_and(|id| cue.parts[order[0]].speaker == id);
+    let at = centres(c.layout, centred, &order, &heights, bottom, em);
     let sizes: Vec<(f64, f64)> = (0..cue.parts.len())
         .map(|i| (width(i), height(i)))
         .collect();
@@ -192,19 +159,65 @@ fn place_one(cue: &Cue, protagonist: Option<u32>, c: &Captions, aspect: f64) -> 
     }
 }
 
+/// Each part's centre (x, y from the bottom) by `layout`, the parts in speaking `order` with their
+/// `heights`, from `bottom` up; `centred`: side by side around the first, the protagonist.
+fn centres(
+    layout: Layout,
+    centred: bool,
+    order: &[usize],
+    heights: &[f64],
+    bottom: f64,
+    em: f64,
+) -> Vec<(f64, f64)> {
+    let height = |i: usize| heights[i];
+    let mut at = vec![(0.5, 0.0); heights.len()];
+    // A stack from `bottom` up through `ids`, each centred at `x`.
+    let stack = |ids: &[usize], x: f64, at: &mut Vec<(f64, f64)>| {
+        let mut edge = bottom;
+        for &i in ids {
+            at[i] = (x, edge + height(i) / 2.0);
+            edge += height(i) + GAP * em;
+        }
+    };
+    match layout {
+        Layout::Stacked => stack(order, 0.5, &mut at),
+        Layout::TopBottom => {
+            let mut low = vec![order[0]];
+            low.extend(order.iter().skip(2));
+            stack(&low, 0.5, &mut at);
+            if let Some(&top) = order.get(1) {
+                at[top] = (0.5, 1.0 - bottom - height(top) / 2.0);
+            }
+        }
+        Layout::Side if centred => {
+            // The protagonist stays centred; two others beside, any more above the protagonist.
+            let mut centre = vec![order[0]];
+            centre.extend(order.iter().skip(1 + BESIDE.len()));
+            stack(&centre, 0.5, &mut at);
+            for (&i, x) in order.iter().skip(1).zip(BESIDE) {
+                stack(&[i], x, &mut at);
+            }
+        }
+        Layout::Side => {
+            let n = order.len() as f64;
+            for (k, &i) in order.iter().enumerate() {
+                stack(&[i], (2.0 * k as f64 + 1.0) / (2.0 * n), &mut at);
+            }
+        }
+    }
+    at
+}
+
 /// Whitespace as Lua's `%s` has it (C's `isspace`): the animated caption splits its text into
 /// words with `%S+`, so the words here are cut the same way, and a no-break space stays inside one.
 pub fn is_lua_space(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\x0B' | '\x0C' | '\r')
 }
 
-/// Where `words` sit on `lines`, a span per word as the animated caption counts words (its text
-/// split at whitespace): a unit of several words (a phrase 5j's find and replace made one, or one
-/// re-wrapped over two lines) has a span for each, splitting the unit's time evenly in turn, since
-/// the macro lights one word at a time and re-counts its words from the text whenever the text is
-/// set (its `UpdateTextContent`). The pieces are walked through the lines' own, so a re-wrap (side
-/// by side) is followed. Nothing when they do not line up, which they always should: no highlight
-/// rather than the wrong word lit.
+/// Where `words` sit on `lines`, a span per word as the animated caption counts words (split at
+/// whitespace): a unit of several words gets a span each, sharing its time evenly in turn, since
+/// the macro lights one word at a time. Nothing when they do not line up: no highlight rather
+/// than the wrong word lit.
 fn spans(lines: &[String], words: &[Spoken]) -> Vec<WordSpan> {
     // Every piece of the lines, as (line, from, to, text).
     let mut pieces = Vec::new();
@@ -262,316 +275,11 @@ fn rewrap(lines: &[String], chars: usize) -> Vec<String> {
     if lines.iter().all(|l| l.chars().count() <= chars) {
         return lines.to_vec();
     }
-    let mut out: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    for word in lines.iter().flat_map(|l| l.split_whitespace()) {
-        if !cur.is_empty() && cur.chars().count() + 1 + word.chars().count() > chars {
-            out.push(std::mem::take(&mut cur));
-        }
-        if !cur.is_empty() {
-            cur.push(' ');
-        }
-        cur.push_str(word);
-    }
-    if !cur.is_empty() {
-        out.push(cur);
-    }
-    out
+    lines
+        .iter()
+        .flat_map(|l| l.split_whitespace())
+        .fold(Vec::new(), |out, w| wrap_onto(out, w, chars))
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::edit::{SpeakerName, Speakers};
-    use crate::export::srt::Part;
-
-    fn cue(parts: &[(u32, usize)]) -> Cue {
-        Cue {
-            start: 1.0,
-            end: 2.0,
-            parts: parts
-                .iter()
-                .map(|&(speaker, lines)| Part {
-                    speaker,
-                    lines: vec!["x".into(); lines],
-                    words: Vec::new(),
-                })
-                .collect(),
-        }
-    }
-
-    fn edit() -> EditList {
-        let name = |id: u32, n: &str| SpeakerName {
-            id,
-            name: n.into(),
-            track: None,
-            color: "#FFFFFF".into(),
-        };
-        EditList {
-            source: "x.mp4".into(),
-            duration: 10.0,
-            settings: Default::default(),
-            keep: Vec::new(),
-            speakers: Speakers {
-                names: vec![name(1, "Ana"), name(2, "Bo"), name(3, "Cy")],
-                turns: Vec::new(),
-            },
-            captions: None,
-            fixes: Vec::new(),
-            times: Vec::new(),
-            windows: Vec::new(),
-        }
-    }
-
-    // Size 5 % and position 10 % so the numbers are round: one line is 0.06 tall, the gap 0.015.
-    fn settings(layout: Layout, protagonist: &str) -> Captions {
-        Captions {
-            size: 5.0,
-            position: 10.0,
-            layout,
-            protagonist: protagonist.into(),
-            ..Default::default()
-        }
-    }
-
-    fn spots(cue: &Cue, c: &Captions) -> Vec<(u32, f64, f64)> {
-        place(std::slice::from_ref(cue), &edit(), c, 9.0 / 16.0)[0]
-            .parts
-            .iter()
-            .map(|p| {
-                let r = |v: f64| (v * 1000.0).round() / 1000.0;
-                (p.speaker, r(p.x), r(p.y))
-            })
-            .collect()
-    }
-
-    #[test]
-    fn one_speaker_sits_at_the_normal_spot_whatever_the_layout() {
-        for layout in [Layout::Stacked, Layout::Side, Layout::TopBottom] {
-            // Two lines: the bottom edge stays at the position, so the centre is half the block up.
-            assert_eq!(
-                spots(&cue(&[(1, 2)]), &settings(layout, "")),
-                [(1, 0.5, 0.16)]
-            );
-        }
-    }
-
-    #[test]
-    fn stacked_puts_each_later_speaker_above() {
-        // Ana (2 lines) from 0.1 to 0.22, gap to 0.235, Bo (1 line) centred 0.03 above that.
-        assert_eq!(
-            spots(&cue(&[(1, 2), (2, 1)]), &settings(Layout::Stacked, "")),
-            [(1, 0.5, 0.16), (2, 0.5, 0.265)]
-        );
-        // The protagonist keeps the normal spot though they started second.
-        assert_eq!(
-            spots(&cue(&[(1, 1), (2, 2)]), &settings(Layout::Stacked, "bo")),
-            [(1, 0.5, 0.265), (2, 0.5, 0.16)]
-        );
-        // A protagonist who is not talking changes nothing.
-        assert_eq!(
-            spots(&cue(&[(1, 1), (2, 1)]), &settings(Layout::Stacked, "Cy")),
-            spots(&cue(&[(1, 1), (2, 1)]), &settings(Layout::Stacked, ""))
-        );
-    }
-
-    #[test]
-    fn side_by_side_spreads_across_or_round_the_protagonist() {
-        assert_eq!(
-            spots(&cue(&[(1, 1), (2, 1)]), &settings(Layout::Side, "")),
-            [(1, 0.25, 0.13), (2, 0.75, 0.13)]
-        );
-        let three = spots(&cue(&[(1, 1), (2, 1), (3, 1)]), &settings(Layout::Side, ""));
-        assert_eq!(
-            three.iter().map(|s| s.1).collect::<Vec<_>>(),
-            [0.167, 0.5, 0.833]
-        );
-        // Bo centred, Ana to the right, Cy to the left.
-        assert_eq!(
-            spots(
-                &cue(&[(1, 1), (2, 1), (3, 1)]),
-                &settings(Layout::Side, "Bo")
-            ),
-            [(1, 0.8, 0.13), (2, 0.5, 0.13), (3, 0.2, 0.13)]
-        );
-    }
-
-    #[test]
-    fn top_bottom_sends_the_second_to_the_top() {
-        // Bo's one line: top edge 0.1 below the top, so centred at 1 - 0.1 - 0.03.
-        assert_eq!(
-            spots(&cue(&[(1, 1), (2, 1)]), &settings(Layout::TopBottom, "")),
-            [(1, 0.5, 0.13), (2, 0.5, 0.87)]
-        );
-        // With Bo the protagonist, Bo is the one kept at the bottom; a third stacks above them.
-        assert_eq!(
-            spots(
-                &cue(&[(1, 1), (2, 1), (3, 1)]),
-                &settings(Layout::TopBottom, "Bo")
-            ),
-            [(1, 0.5, 0.87), (2, 0.5, 0.13), (3, 0.5, 0.205)]
-        );
-    }
-
-    #[test]
-    fn side_by_side_wraps_each_block_to_its_column() {
-        let long = "una frase bastante larga que llena la línea";
-        let cue = Cue {
-            start: 1.0,
-            end: 2.0,
-            parts: [1, 2]
-                .map(|speaker| Part {
-                    speaker,
-                    lines: vec![long.into()],
-                    words: Vec::new(),
-                })
-                .to_vec(),
-        };
-        // 5 % text on 16:9: a character is about 0.014 of the width, half the picture holds 32.
-        let placed = &place(
-            std::slice::from_ref(&cue),
-            &edit(),
-            &settings(Layout::Side, ""),
-            9.0 / 16.0,
-        )[0];
-        for p in &placed.parts {
-            assert!(p.lines.len() > 1, "{:?}", p.lines);
-            assert!(
-                p.lines.iter().all(|l| l.chars().count() <= 32),
-                "{:?}",
-                p.lines
-            );
-            assert_eq!(p.lines.join(" "), long);
-        }
-        // Two lines tall now: the bottom edge stays at the position.
-        assert!((placed.parts[0].y - (0.1 + 0.06)).abs() < 1e-9);
-        // Stacked, the lines are the cue's own.
-        let stacked = &place(&[cue], &edit(), &settings(Layout::Stacked, ""), 9.0 / 16.0)[0];
-        assert_eq!(stacked.parts[0].lines, [long]);
-        assert_eq!(rewrap(&["a b".into(), "c".into()], 3), ["a b", "c"]);
-    }
-
-    #[test]
-    fn blocks_stay_inside_the_picture() {
-        // Three speakers of three lines at 15 %: the stack would run off the top.
-        let big = Captions {
-            size: 15.0,
-            ..settings(Layout::Stacked, "")
-        };
-        for p in &place(&[cue(&[(1, 3), (2, 3), (3, 3)])], &edit(), &big, 9.0 / 16.0)[0].parts {
-            let h = 3.0 * 0.15 * LINE;
-            assert!(
-                p.y - h / 2.0 >= -1e-9 && p.y + h / 2.0 <= 1.0 + 1e-9,
-                "{}",
-                p.y
-            );
-        }
-        // A wide line beside a protagonist is pulled in from the edge.
-        let wide = Cue {
-            start: 1.0,
-            end: 2.0,
-            parts: vec![
-                Part {
-                    speaker: 1,
-                    lines: vec!["extraordinariamente".into()],
-                    words: Vec::new(),
-                },
-                Part {
-                    speaker: 2,
-                    lines: vec!["x".into()],
-                    words: Vec::new(),
-                },
-            ],
-        };
-        let c = Captions {
-            size: 15.0,
-            ..settings(Layout::Side, "Bo")
-        };
-        let p = &place(&[wide], &edit(), &c, 9.0 / 16.0)[0].parts[0];
-        let w = 19.0 * 0.15 * (9.0 / 16.0) * GLYPH;
-        assert!((p.x - (1.0 - w / 2.0)).abs() < 1e-9, "{}", p.x);
-    }
-    #[test]
-    fn the_highlight_finds_each_unit_on_the_placed_lines() {
-        let said = |text: &str, start: f64| Spoken {
-            text: text.into(),
-            start,
-            end: start + 0.4,
-        };
-        // A replaced phrase is one unit, but the animated caption lights a word at a time:
-        // "¿qué tal?" is two words sharing its time, "a todos" two, re-wrapped over two lines.
-        // Indices count characters, "¿" and "é" one each. A no-break space is not Lua's
-        // whitespace, so "10 %" with one stays one word, as the macro counts it.
-        let lines = vec![
-            "hola ¿qué tal? a".to_string(),
-            "todos 10\u{a0}%".to_string(),
-        ];
-        let words = [
-            said("hola", 1.0),
-            said("¿qué tal?", 1.6),
-            said("a todos", 2.0),
-            said("10\u{a0}%", 3.0),
-        ];
-        let ms = |t: f64| (t * 1000.0).round() as i64;
-        let got: Vec<_> = spans(&lines, &words)
-            .iter()
-            .map(|s| (s.word, s.line, s.from, s.to, ms(s.start), ms(s.end)))
-            .collect();
-        assert_eq!(
-            got,
-            [
-                (0, 0, 0, 4, 1000, 1400),
-                (1, 0, 5, 9, 1600, 1800),
-                (2, 0, 10, 14, 1800, 2000),
-                (3, 0, 15, 16, 2000, 2200),
-                (4, 1, 0, 5, 2200, 2400),
-                (5, 1, 6, 10, 3000, 3400),
-            ]
-        );
-        // Units that do not match the lines give nothing rather than the wrong word lit.
-        assert!(spans(&lines, &words[..2]).is_empty());
-        assert!(spans(&lines, &[said("adiós", 0.0)]).is_empty());
-        // Only with the highlight on; side by side, the spans follow the re-wrapped lines.
-        let long = [
-            "una", "frase", "bastante", "larga", "que", "llena", "la", "línea",
-        ];
-        let cue = Cue {
-            start: 1.0,
-            end: 5.0,
-            parts: [1, 2]
-                .map(|speaker| Part {
-                    speaker,
-                    lines: vec![long.join(" ")],
-                    words: long
-                        .iter()
-                        .enumerate()
-                        .map(|(k, w)| said(w, 1.0 + k as f64 * 0.5))
-                        .collect(),
-                })
-                .to_vec(),
-        };
-        let off = place(
-            std::slice::from_ref(&cue),
-            &edit(),
-            &settings(Layout::Side, ""),
-            9.0 / 16.0,
-        );
-        assert!(off[0].parts[0].words.is_empty());
-        let on = Captions {
-            highlight: true,
-            ..settings(Layout::Side, "")
-        };
-        let p = &place(&[cue], &edit(), &on, 9.0 / 16.0)[0].parts[0];
-        assert!(p.lines.len() > 1, "{:?}", p.lines);
-        assert_eq!(p.words.len(), long.len());
-        for s in &p.words {
-            let shown: String = p.lines[s.line]
-                .chars()
-                .skip(s.from)
-                .take(s.to - s.from)
-                .collect();
-            assert_eq!(shown, long[s.word]);
-            assert_eq!(s.start, 1.0 + s.word as f64 * 0.5);
-        }
-    }
-}
+mod tests;

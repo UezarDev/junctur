@@ -1,9 +1,6 @@
 /**
- * How much of each pixel column of the timeline is kept, 0..1. A 30 h recording on a ~1000 px bar
- * puts ~100 s in a pixel, so most ranges are thinner than a pixel: drawing each at a minimum width
- * would paint the whole bar as kept. Shading each column by its kept share keeps dense stretches
- * honest. O(ranges + width).
- *
+ * How much of each pixel column of the timeline is kept, 0..1: a long recording puts many ranges
+ * in one pixel, and drawing each at a minimum width would paint the whole bar as kept.
  * `ranges` is flattened `[start0, end0, start1, end1, ...]` in frames of `total`.
  */
 export function coverage(ranges: number[], total: number, width: number): Float32Array {

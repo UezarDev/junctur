@@ -33,14 +33,12 @@ impl Speech {
 }
 
 /// 60 s = 1875 whole VAD frames, so frames never straddle reads.
-const READ: usize = vad::RATE as usize * 60;
+const READ: usize = vad::MINUTE;
 const HOP: usize = (vad::RATE as f64 * ENVELOPE_HOP) as usize;
 
 /// Speech regions on each of `tracks` and the loudest-track envelope. Each track runs on a thread
-/// of its own (its own decode and Silero session): a 30 h recording with two speech tracks took
-/// twice one track's time when they ran one after the other. The first track to fail stops the
-/// others at their next read, rather than letting them decode on to the end. `read` is told each
-/// track's seconds decoded so far (2h), from that track's thread.
+/// of its own (its own decode and Silero session), and the first to fail stops the others at their
+/// next read. `read` is told each track's seconds decoded so far, from that track's thread.
 pub fn detect(
     file: &Path,
     tracks: &[usize],

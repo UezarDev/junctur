@@ -44,14 +44,7 @@ pub fn windows(speech: &[Region], word_starts: &[f64], total: f64, len: f64) -> 
 fn union(speech: &[Region]) -> Vec<(f64, f64)> {
     let mut v: Vec<(f64, f64)> = speech.iter().map(|r| (r.start, r.end)).collect();
     v.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let mut out: Vec<(f64, f64)> = Vec::new();
-    for (a, b) in v {
-        match out.last_mut() {
-            Some(last) if a <= last.1 => last.1 = last.1.max(b),
-            _ => out.push((a, b)),
-        }
-    }
-    out
+    crate::spans::joined(v, crate::spans::Join::Touching)
 }
 
 #[cfg(test)]

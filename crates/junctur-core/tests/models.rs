@@ -1,8 +1,10 @@
 //! The ONNX models end to end. Ignored by default because the first run downloads ~100 MB into the
 //! user cache; run with `cargo test -- --ignored`.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+mod common;
+
+use common::{ffmpeg, workdir};
+use std::path::Path;
 
 use junctur_core::diarize::{segment, Embedder, Segmenter};
 use junctur_core::ffmpeg::{PcmReader, Span};
@@ -10,22 +12,6 @@ use junctur_core::runtime::DevicePref;
 use junctur_core::tracks::Role;
 use junctur_core::vad::{self, Vad};
 use junctur_core::{analyze, cache, models, separate, AnalyzeOptions, SeparateOptions};
-
-fn workdir(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("junctur-models-{}-{name}", std::process::id()));
-    std::fs::create_dir_all(&d).unwrap();
-    d
-}
-
-fn ffmpeg(args: &[&str]) {
-    let ok = Command::new("ffmpeg")
-        .args(["-v", "error", "-nostdin", "-y"])
-        .args(args)
-        .status()
-        .unwrap()
-        .success();
-    assert!(ok, "{args:?}");
-}
 
 fn read_all(f: &Path, rate: u32, ch: u32) -> Vec<f32> {
     let mut r = PcmReader::open(f, 0, rate, ch, Span::default()).unwrap();
@@ -86,7 +72,7 @@ fn segmentation_hears_nobody_in_silence_or_a_tone() {
 #[test]
 #[ignore = "downloads models"]
 fn tracks_with_speech_detection_keeps_tone_layouts_sane() {
-    let d = workdir("tracks");
+    let d = workdir("models", "tracks");
     let f = d.join("tone.mp4");
     ffmpeg(&[
         "-f",
@@ -115,7 +101,7 @@ fn tracks_with_speech_detection_keeps_tone_layouts_sane() {
 #[test]
 #[ignore = "downloads models"]
 fn separation_streams_and_stems_add_up_to_the_mix() {
-    let d = workdir("sep");
+    let d = workdir("models", "sep");
     let f = d.join("mix.mkv");
     // 14 s: longer than one model chunk (5.9 s), so chunk joins and the tail are exercised.
     ffmpeg(&[
@@ -215,7 +201,7 @@ fn captions_translate_between_languages() {
         "{fr}"
     );
     assert!(en.to_lowercase().contains("know"), "{en}");
-    // Speed on caption-length sentences, for the phase notes.
+    // Speed on caption-length sentences, printed.
     let lines = [
         "Bueno, vamos a empezar con la partida de hoy.",
         "¿Alguien sabe dónde está el último cofre?",
@@ -268,7 +254,7 @@ fn captions_translate_between_languages() {
     // segment was heard in.
     use junctur_core::transcribe::Segment;
     use junctur_core::translate::{self, Sentence, Translations};
-    let d = workdir("translate");
+    let d = workdir("models", "translate");
     let seg = |start: f64, lang: &str| Segment {
         track: 0,
         start,
@@ -307,7 +293,7 @@ fn captions_translate_between_languages() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// 5h: the word list reaches Whisper as prompt tokens, a long list cut to the prompt's room from
+/// The word list reaches Whisper as prompt tokens, a long list cut to the prompt's room from
 /// the end, and a chunk decodes with it (no panic on the tokenizer's count, no failure). Turbo, on
 /// the CPU: about 1.6 GB downloaded on a first run.
 #[test]

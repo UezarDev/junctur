@@ -1,24 +1,6 @@
 <script lang="ts">
-  // The caption styling panel (5a, 5d): exporting captions with a render, previewing them over the
-  // picture (two switches since 5d), each speaker's colour and name with a sample of how it reads,
-  // bold, italic and underline (5f), how cues are cut, and exporting the SRT. Everything is saved to edit.junctur
-  // at once (the `captions` and `speaker` lines), so it is readable and survives a re-cut. An SRT
-  // carries only text, timing, colour, bold, italic and underline into DaVinci Resolve (5d, 5f); the
-  // font, size, position, outline and where people talking at once go (5g) reach it through "Send to
-  // Resolve", Text+ clips placed by the Junctur script running in Resolve on the timeline the send makes
-  // of the edit (5z), and drive the preview. When Resolve already has that timeline, `TimelineExists`
-  // asks what to do, Update captions only (5ab) among the choices.
-  // Export writes one file
-  // (5e): a Resolve subtitle track shows one caption at a time, so people talking at once share one
-  // caption, a line each; 5b's per-speaker files left beside it are listed. The remembered voices
-  // are listed with Forget, and the speakers can be analysed again from the audio (5c), the seconds
-  // picked for each voice cutting the windows; that reads the recording again, so it is a button,
-  // never automatic. The caption settings' own fields (export, preview, style, the text options of
-  // 5j and the translation of 5k, whose run `CaptionTranslation` shows, how cues are cut) are
-  // `CaptionRules`, shared with Settings (2i); a list without
-  // its own settings follows the user's defaults, and "Save as default" makes this recording's the
-  // defaults. Each group is a `Section`; what used to be a paragraph under it is its (i) (2t), and
-  // only status and results show as text.
+  // The caption panel: export and preview switches, each speaker's colour and name, the caption
+  // settings (`CaptionRules`, shared with Settings), the SRT export, Send to Resolve and the voices.
   import { onDestroy, tick } from "svelte";
   import { save } from "@tauri-apps/plugin-dialog";
   import * as api from "./api";
@@ -95,17 +77,11 @@
     call(() => api.setCaptions({ ...captions, ...change }));
   }
 
-  // Send to Resolve (5g, 5z): one at a time; the reply says what landed. The send makes the edit's
-  // own timeline; when the project already has one of that name nothing is changed until the
-  // pop-up is answered (Create new, Update captions only (5ab) or Replace), and Cancel (or Escape,
-  // or a press outside it) sends nothing. A panel closed under the pop-up answers it as Cancel, so
-  // the send never waits on a dialog that is gone; once the send is over, the keys go back to its
-  // button. A send that finds clips Junctur did not place where its captions go (5n) places none
-  // and comes back with them counted: `inTheWay` holds the question until the user picks or
-  // cancels. That happens only on Update captions only, which places on the timeline already there
-  // (a timeline a send makes is never asked about, 5v: the engine puts anything in the way there on
-  // a new track); the answer is sent again with the same answer to the pop-up, so it updates that
-  // timeline rather than making another.
+  // Send to Resolve, one at a time. When the timeline exists, nothing changes until the pop-up is
+  // answered, and a panel closed under it answers Cancel so the send never waits on a gone dialog.
+  // Clips in the captions' way (only on Update captions only: a new timeline puts them on a new
+  // track) hold the send (`inTheWay`) until the user picks; the re-send repeats the pop-up's answer
+  // so it updates that timeline rather than making another.
   let sending = $state(false);
   let sendButton = $state<HTMLButtonElement | undefined>();
   let sentLines = $state<string[] | null>(null);
@@ -165,8 +141,8 @@
       };
     });
   onDestroy(() => asking?.answer(null));
-  // `existing` (5n) and `given` (the pop-up's answer, 5z/5ab) are a re-send's: the question about
-  // clips in the way answered for the send that asked.
+  // `existing` and `given` (the pop-up's answer) are a re-send's: the question about clips in the
+  // way answered for the send that asked.
   async function sendResolve(
     existing?: api.ExistingClips,
     given: api.TimelineAnswer | null = null,
@@ -203,7 +179,7 @@
         return false;
       }
       const n = (k: number, what: string) => `${k.toLocaleString()} ${what}`;
-      // 5l's two are not inputs a template lacks but a kind of template it is not.
+      // The highlight and animation are not inputs a template lacks but a kind of template it is not.
       const MOTION = ["word highlight", "animation"];
       const motion = r.unstyled.filter((u) => MOTION.includes(u));
       const inputs = r.unstyled.filter((u) => !MOTION.includes(u));
@@ -559,7 +535,7 @@
   .path {
     word-break: break-all;
   }
-  /* 5n: the question when clips Junctur did not place are in its captions' way. */
+  /* The question when clips Junctur did not place are in its captions' way. */
   .ask {
     margin-top: 8px;
     padding: 8px 10px;

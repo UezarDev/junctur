@@ -2,22 +2,20 @@
 //! recording (`--project <dir>` to keep it somewhere git can track it).
 
 use junctur_core::edit::{Captions, CutSettings, EditList};
-use junctur_core::pipeline::{self, Project, StageState, STAGES};
+use junctur_core::pipeline::{self, Project, StageName, StageState};
 use junctur_core::render::{self, RenderOptions};
 use junctur_core::runtime::DevicePref;
 use junctur_core::transcribe;
 use junctur_core::{config, export, voices};
 
 use crate::args::Args;
-
-const PROJECT_FLAGS: &[&str] = &["--project", "--cache-dir"];
-const CUT_FLAGS: &[&str] = &["--pad-before", "--pad-after", "--merge-gap", "--crossfade"];
+use crate::flags;
 
 fn project(a: &Args) -> Result<Project, String> {
     Project::open(&a.file()?, a.path("--cache-dir"), a.path("--project")).map_err(|e| e.to_string())
 }
 
-/// The caption settings `e`'s cues are cut with (2i): its own, else the config file's defaults, as
+/// The caption settings `e`'s cues are cut with: its own, else the config file's defaults, as
 /// the app shows them, so a render and an export cut the cues the app would. The config file is
 /// read only for a list without its own.
 fn captions(e: &EditList) -> Result<Captions, String> {
@@ -41,20 +39,8 @@ fn cut_settings(a: &Args) -> Result<CutSettings, String> {
     Ok(s)
 }
 
-fn known(extra: &[&'static str]) -> Vec<&'static str> {
-    PROJECT_FLAGS.iter().chain(extra).copied().collect()
-}
-
 pub fn analyze(a: Args) -> Result<(), String> {
-    let mut k = known(&[
-        "--cpu",
-        "--model",
-        "--force",
-        "--no-transcript",
-        "--no-speakers",
-    ]);
-    k.extend(CUT_FLAGS);
-    a.reject_unknown(&k)?;
+    a.reject_unknown(&flags::known("analyze"))?;
     let p = project(&a)?;
     // The model (`--model`, else the config file's `whisper_model`, else `auto`), as the app's
     // analysis takes it too; then this command's own flags.
@@ -96,13 +82,14 @@ pub fn analyze(a: Args) -> Result<(), String> {
 }
 
 pub fn status(a: Args) -> Result<(), String> {
-    a.reject_unknown(PROJECT_FLAGS)?;
+    a.reject_unknown(&flags::known("status"))?;
     let p = project(&a)?;
     let jobs = p.jobs();
     println!("{}", p.file.display());
     println!("project: {}", p.dir.display());
-    for name in STAGES {
-        let r = jobs.get(name);
+    for stage in StageName::ALL {
+        let name = stage.name();
+        let r = jobs.get(stage);
         let state = match r.map(|r| r.state) {
             None | Some(StageState::Pending) => "pending",
             Some(StageState::Running) => "running (or interrupted: rerun analyze to resume)",
@@ -126,12 +113,10 @@ pub fn status(a: Args) -> Result<(), String> {
 }
 
 pub fn cut(a: Args) -> Result<(), String> {
-    let mut k = known(&[]);
-    k.extend(CUT_FLAGS);
-    a.reject_unknown(&k)?;
+    a.reject_unknown(&flags::known("cut"))?;
     let p = project(&a)?;
     // The voices may have changed since `analyze`: label the speakers again first (cheap). A
-    // project heard before 5b cannot be; its speakers stay as they were.
+    // project heard by an older Junctur cannot be; its speakers stay as they were.
     if let Some(f) = p.speakers() {
         if f.heard_by_an_older_junctur() {
             eprintln!("junctur: speakers were found by an older Junctur: run `junctur analyze` to hear them again");
@@ -147,7 +132,7 @@ pub fn cut(a: Args) -> Result<(), String> {
 }
 
 pub fn export(a: Args) -> Result<(), String> {
-    a.reject_unknown(&known(&["--fcpxml", "--srt"]))?;
+    a.reject_unknown(&flags::known("export"))?;
     let (fcpxml, srt) = (a.path("--fcpxml"), a.path("--srt"));
     if fcpxml.is_none() && srt.is_none() {
         return Err("export needs --fcpxml <out.fcpxml> and/or --srt <out.srt>".into());
@@ -180,7 +165,7 @@ fn write_captions(
     Ok(())
 }
 
-/// The translations captions set to be translated need (5k), made first where missing, with a
+/// The translations captions set to be translated need, made first where missing, with a
 /// progress line; the model is fetched on first use.
 fn translations(
     p: &Project,
@@ -225,7 +210,7 @@ fn print_captions(out: &std::path::Path, files: &export::CaptionFiles) {
 }
 
 pub fn render(a: Args) -> Result<(), String> {
-    a.reject_unknown(&known(&["--out", "--full", "--force", "--jobs"]))?;
+    a.reject_unknown(&flags::known("render"))?;
     let out = a.path("--out").ok_or("render needs --out <out.mp4>")?;
     let p = project(&a)?;
     let e = p.edit().map_err(|e| e.to_string())?;

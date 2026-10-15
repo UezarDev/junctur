@@ -1,12 +1,11 @@
-//! `junctur voices`: the voices Junctur remembers (5b), listed, enrolled from a recording, or
-//! forgotten. The app enrolls from a selection in the transcript; this is the same from stretches
-//! given by hand, for scripts and for checking the labelling without the app. `--rehear` is the
-//! app's "Analyse speakers again" (5c): the speakers heard again from the audio, cut at the pins.
+//! `junctur voices`: the remembered voices listed, enrolled from stretches given by hand, or
+//! forgotten. `--rehear` is the app's "Analyse speakers again", cut at the pins.
 
 use junctur_core::pipeline::{self, Found, Project};
-use junctur_core::voices::{self, Voice, Voices};
+use junctur_core::voices::{self, Voices};
 
 use crate::args::Args;
+use crate::flags;
 
 /// The voices file this environment points at ([`voices::default_path`]).
 pub fn path() -> Result<std::path::PathBuf, String> {
@@ -47,16 +46,7 @@ fn stretches(s: &str) -> Result<Vec<(f64, f64)>, String> {
 }
 
 pub fn run(a: Args) -> Result<(), String> {
-    a.reject_unknown(&[
-        "--add",
-        "--at",
-        "--forget",
-        "--rehear",
-        // Before 5r it put `--rehear` on the CPU; speakers always are now. Accepted for scripts.
-        "--cpu",
-        "--project",
-        "--cache-dir",
-    ])?;
+    a.reject_unknown(&flags::known("voices"))?;
     let file = path()?;
     let mut v = Voices::load(&file).map_err(|e| e.to_string())?;
     if let Some(name) = a.value("--forget") {
@@ -71,11 +61,8 @@ pub fn run(a: Args) -> Result<(), String> {
             .ok_or("--add needs --at <start>-<end>[,...]")?;
         let p = Project::open(&a.file()?, a.path("--cache-dir"), a.path("--project"))
             .map_err(|e| e.to_string())?;
-        let (found, added) =
-            pipeline::enroll(&p, &mut v, name, &stretches(at)?).map_err(|e| e.to_string())?;
-        // The voices first: labels are only saved once the voices they stand on are.
-        v.save(&file).map_err(|e| e.to_string())?;
-        pipeline::save_speakers(&p, &found).map_err(|e| e.to_string())?;
+        let (found, added) = pipeline::enroll_and_save(&p, &mut v, &file, name, &stretches(at)?)
+            .map_err(|e| e.to_string())?;
         let voice = v.get(name).expect("just enrolled");
         println!(
             "remembered {} from {added:.1} s ({:.1} s of speech in all; {}); those seconds are pinned to them in this recording",
@@ -94,10 +81,9 @@ pub fn run(a: Args) -> Result<(), String> {
     } else if a.has("--rehear") {
         let p = Project::open(&a.file()?, a.path("--cache-dir"), a.path("--project"))
             .map_err(|e| e.to_string())?;
-        let usable: Vec<Voice> = v.usable().into_iter().cloned().collect();
         // The stage's log already ends with what it found.
-        let found =
-            pipeline::rehear(&p, &usable, &mut |l| println!("{l}")).map_err(|e| e.to_string())?;
+        let found = pipeline::rehear(&p, &v.usable_owned(), &mut |l| println!("{l}"))
+            .map_err(|e| e.to_string())?;
         print_speakers(&p, &found, false)?;
         return Ok(());
     }

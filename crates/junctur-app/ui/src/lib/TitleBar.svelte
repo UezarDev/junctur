@@ -1,13 +1,6 @@
 <script lang="ts">
-  // Junctur's own title bar (2i): the window is frameless, so this is the whole caption. The app
-  // icon, File and View as icon buttons with dropdowns (menus.ts), the Settings cog, the back arrow
-  // (2u: File > Back to recordings, out where it can be seen, while a recording is open), a drag area
-  // (Tauri's `data-tauri-drag-region`: a press drags through Windows' own move loop, so snapping to
-  // an edge works; a double press maximises), then minimise, maximise and close. It is opaque and
-  // mpv keeps the picture below it (App.svelte's top margin).
-  //
-  // Snap layouts: Windows shows them only for a native maximise button, which this is not, so
-  // resting on it asks the app for them (src/window.rs).
+  // Junctur's own title bar: the window is frameless. Windows shows snap layouts only for a native
+  // maximise button, so resting on this one asks the app for them (src/window.rs).
   import { onMount } from "svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import icon from "../../../icons/32x32.png";
@@ -127,8 +120,8 @@
     disabled={menu.locked}
     onclick={() => choose("settings")}
   >
-    <!-- A cog (2q): one outline of eight teeth (tips at radius 6.6, roots at 4.9) around a hole.
-         It was a circle with eight separate rays, which Uezar read as a sun. -->
+    <!-- A cog: one outline of eight teeth (tips at radius 6.6, roots at 4.9) around a hole, so it
+         does not read as a sun. -->
     <svg viewBox="0 0 16 16" aria-hidden="true"
       ><path
         d="M12.73 6.73L14.54 7.08 14.54 8.92 12.73 9.27 12.24 10.45 13.27 11.97 11.97 13.27 10.45 12.24 9.27 12.73 8.92 14.54 7.08 14.54 6.73 12.73 5.55 12.24 4.03 13.27 2.73 11.97 3.76 10.45 3.27 9.27 1.46 8.92 1.46 7.08 3.27 6.73 3.76 5.55 2.73 4.03 4.03 2.73 5.55 3.76 6.73 3.27 7.08 1.46 8.92 1.46 9.27 3.27 10.45 3.76 11.97 2.73 13.27 4.03 12.24 5.55Z"
@@ -139,9 +132,8 @@
       /><circle cx="8" cy="8" r="2.1" fill="none" stroke="currentColor" stroke-width="1.2" /></svg
     >
   </button>
-  <!-- The way back to the start window (2u): Uezar did not find it in the File dropdown, so it is out
-       here too, beside the gear, doing what File > Back to recordings does. Only while there is a
-       recording to go back from (open or opening, the entry's own rule). Not a drag region. -->
+  <!-- The way back to the start window, out here as well as in File so it can be seen. Only while
+       there is a recording to go back from. Not a drag region. -->
   {#if menu.closable}
     <button
       class="tool"

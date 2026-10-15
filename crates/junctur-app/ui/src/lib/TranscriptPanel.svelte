@@ -1,27 +1,7 @@
 <script lang="ts">
-  // The transcript beside the video: kept words in order, cut runs folded, the word under the
-  // playhead lit and followed. Rows have one fixed height and only those on screen (plus a few) are
-  // in the DOM, so a 30 h transcript scrolls like a short one. An edit rebuilds the tokens
-  // (transcript.ts, one pass over the words); a resize or a fold toggle only repacks them into rows.
-  // Where the speaker changes a name row comes first; click the name to rename the speaker (saved
-  // to edit.junctur at once). Double-click a word to fix its spelling (5h): saved to edit.junctur at
-  // once, shown here, in the caption preview and the SRT, and added to the word list Whisper is told
-  // (the header says so for a moment, 5t).
-  // A selection of words shows its actions at the bottom (WordBar, 2p): Cut, Keep, Fix text (5x),
-  // and the people with names as one-click buttons; with nothing selected the bar keeps its place
-  // with a hint (5v). Ctrl+click or Ctrl+drag adds another stretch to
-  // it. Several words fixed as one text (5x: a sentence retyped) show as that text, selected and lit
-  // whole; a double-click inside a selection of several words, on such a text, or on a word starting
-  // in the same millisecond as its neighbours (5w) opens the word bar's field for all of them.
-  // A fix lands on every other word heard the same way too (5aa); a line under the header says how
-  // many, with Undo those. The word bar's Correct does that for every fix, then hears the speakers and
-  // the words again (App asks first and starts the run).
-  // Words Whisper was unsure of are underlined (5o) and stepped through from the header; "Looks
-  // right", which confirms the one flagged word selected, is among the word actions at the bottom
-  // (2p's place for them). A fixed or confirmed word, or one in a retyped text, is not flagged (the
-  // core decides, `words.sure`).
-  // F2 (5ac) opens the field a double-click would on the word under the pointer, else Fix text for a
-  // selection of words; never while a field is being typed in or a dialog is open.
+  // The transcript beside the video: kept words in order, cut runs folded, the playhead's word lit
+  // and followed. Rows have one fixed height and only those on screen are in the DOM, so a long
+  // transcript scrolls like a short one; a resize or fold toggle only repacks the rows.
   import { onMount, tick } from "svelte";
   import { SvelteSet } from "svelte/reactivity";
   import * as api from "./api";
@@ -36,6 +16,7 @@
     tokens,
     widen,
     wordAt,
+    wordRef,
     type Stretch,
     type Token,
     type Words,
@@ -64,24 +45,24 @@
     loading: boolean;
     /** The recording is being analysed: the transcript comes when it is done. */
     analysing?: boolean;
-    /** Its edit list is made: the transcript comes a 5-minute piece at a time (2j). */
+    /** Its edit list is made: the transcript comes a 5-minute piece at a time. */
     listed?: boolean;
-    /** Its transcription waits for another recording's (2j). */
+    /** Its transcription waits for another recording's. */
     waiting?: boolean;
     /** Its analysis failed (a transcription that stopped part way keeps its pieces). */
     failed?: boolean;
-    /** While it transcribes: the words shown are every one before this many seconds (2j). */
+    /** While it transcribes: the words shown are every one before this many seconds. */
     through?: number | null;
     player: api.PlayerState | null;
     edit: api.EditState | null;
     selection: sel.Selection | null;
-    /** Kept words Whisper was less sure of than this many percent are flagged (5o); 0 for none. */
+    /** Kept words Whisper was less sure of than this many percent are flagged; 0 for none. */
     flagBelow?: number;
-    /** Review mode (2o) has the editing: the word bar is not shown meanwhile. */
+    /** Review mode has the editing: the word bar is not shown meanwhile. */
     reviewing?: boolean;
     onSelect: (s: sel.Selection | null) => void;
     onError: (message: string) => void;
-    /** The Correct button (5aa): asks, starts the run; its answer, or null when not started. */
+    /** The Correct button: asks, starts the run; its answer, or null when not started. */
     correct: () => Promise<api.Corrected | null>;
   } = $props();
 
@@ -105,8 +86,7 @@
   const open = new SvelteSet<number>();
 
   // A new transcript (another recording) starts with every fold closed. One that only grew at its
-  // end (2j: a piece more while it transcribes) keeps them: folds are keyed by their first word,
-  // whose index has not moved.
+  // end keeps them: folds are keyed by their first word, whose index has not moved.
   let shown: Words | null = null;
   $effect(() => {
     const w = words;
@@ -154,7 +134,7 @@
     }
   }
 
-  // Only a slow step is logged (test mode reads the log; a 30 h transcript is the case to watch).
+  // Only a slow step is logged (test mode reads the log).
   const SLOW_MS = 50;
   function timed<T>(what: string, f: () => T): T {
     const t0 = performance.now();
@@ -168,7 +148,7 @@
   const wordWidth = $derived(
     words ? timed("widths", () => Float64Array.from(words!.text, (t) => measure(t, FONT) + SPACE)) : null,
   );
-  // Per transcript: each span text's words' widths (5x).
+  // Per transcript: each span text's words' widths.
   const spanWidth = $derived(
     words ? words.spanWords.map((ws) => ws.map((t) => measure(t, FONT) + SPACE)) : [],
   );
@@ -213,66 +193,55 @@
     if (name && name !== nameOf(id)) call(() => api.renameSpeaker(id, name));
   }
 
-  // Fixing a word (5h): the one double-clicked turns into a field with its text; Enter or leaving it
+  // Fixing a word: the one double-clicked turns into a field with its text; Enter or leaving it
   // saves, Escape drops it. Nothing typed, or the heard text again, takes a fix away (the core
   // decides). The new text comes back through the edit state's fixes key (App.svelte).
   let fixing = $state<number | null>(null);
   let fixDraft = $state("");
-  // What the open field showed when it opened, and its word's heard start (5ae). Leaving saves only
-  // what was typed, never "changed" against the word as it is by then: a field left alone while its
-  // word changed under it (a fix spreading onto it, a re-transcription's words) wrote its old text
-  // back onto that index on a click away, and 5aa then gave it to every word heard alike. The heard
-  // start goes with the save, which the engine refuses when that index names another word now.
+  // What the open field showed when it opened, and its word as the engine names it (5ae). Leaving
+  // saves only what was typed, never measured against the word as it is by then: a field left
+  // alone while its word changed under it (a fix spreading onto it, a re-transcription's words)
+  // wrote its old text back onto that index on a click away, and the spread then gave it to every
+  // word heard alike. The engine refuses the save when the index names another word now.
   let fixFrom = "";
-  let fixAt_ = 0;
-  // `fixing` as a plain variable, for the field's own teardown and blur (5t repair): Svelte gives an
-  // effect's teardown the state from before the change that tore it down, so there `fixing` still
-  // named the field just closed. Its teardown then finished it a second time: Escape's draft was
-  // saved after all, Enter saved twice, and a field replaced by another word's closed that one too.
+  let fixRef: api.WordRef = { at: 0, track: 0, nth: 0 };
+  // `fixing` as a plain variable, for the field's own teardown and blur: Svelte gives an effect's
+  // teardown the state from before the change, so a `$state` would still name the field just closed.
   let fixOpen: number | null = null;
-  // The word bar's field for several words (5x), opened from here by a double-click. Closed whenever
-  // the selection stops being words (5x repair): the bar is gone then, and a field left marked open
-  // would come back unasked with the next word clicked.
+  // The word bar's field for several words, opened from here by a double-click. Closed whenever the
+  // selection stops being words, or it would come back unasked with the next word clicked.
   let retyping = $state(false);
   $effect(() => {
     if (selection?.kind !== "words") retyping = false;
   });
-  // The selection before a press, for a double-click inside a selection of several words: the
-  // double-click's first press had already replaced it with the one word pressed. `pending` is the
-  // selection as each press found it; the click after a first press (`detail` 1) keeps it, the
-  // second click of a double-click (`detail` 2) does not, so the double-click reads the selection
-  // from before its first press. The click counts the clicks with the system's own double-click
-  // time (5x repair: a 600 ms guess of ours was shorter than Windows allows); a pointerdown's
-  // `detail` is always 0 in WebView2, so the press itself cannot.
+  // The selection before a press, so a double-click inside a selection of several words reads it
+  // from before its first press. The click counts with the system's double-click time, since a
+  // pointerdown's `detail` is always 0 in WebView2.
   let beforePress: sel.Selection | null = null;
   let pending: sel.Selection | null = null;
   function clicked(e: MouseEvent) {
     if (e.detail <= 1) beforePress = pending;
   }
-  // The kept word at a point in this list, or -1. Not `e.target` (5t): `down` captures the pointer on
-  // the scroller, and Chromium (WebView2) then sends the clicks and the double-click to the scroller,
-  // so the target never was a word and the field never opened. The element under the pointer, as
-  // `move` finds it. Only a kept word: a cut word in an open fold has no field, and `fixing` set
-  // without one would hold the follow for good.
+  // The kept word at a point in this list, or -1. Not `e.target`: `down` captures the pointer on the
+  // scroller, so Chromium sends the clicks there. Only a kept word, as a cut word has no field.
   function keptWordAt(x: number, y: number): number {
     const el = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-i]");
     if (!el || el.classList.contains("cutword") || !scroller?.contains(el)) return -1;
     return Number(el.dataset.i);
   }
   function startFix(e: MouseEvent) {
-    // With Ctrl (Cmd on macOS) a double-click is two Ctrl+clicks, picking the word and taking it out
-    // again, so it opens no field (5v: the field opened on a word the second press had unpicked).
-    // F2 with Ctrl held does nothing either (5ac).
+    // With Ctrl (Cmd on macOS) a double-click is two Ctrl+clicks that pick the word and unpick it,
+    // so it opens no field.
     if (MAC ? e.metaKey : e.ctrlKey) return;
     const i = keptWordAt(e.clientX, e.clientY);
     if (i >= 0) fixAt(i, beforePress);
   }
-  // Opens the field for word `i`: what a double-click on it opens, and F2 over it (5ac). `before` is
-  // the selection the user had made: from before the double-click's first press, or as it is for F2.
+  // Opens the field for word `i`: what a double-click on it opens, and F2 over it. `before` is the
+  // selection the user had made: from before the double-click's first press, or as it is for F2.
   function fixAt(i: number, before: sel.Selection | null) {
     if (!words || i === fixing) return;
-    // Several words, one field in the word bar (5x): a span fixed as one text, a selection of
-    // several words holding this one, or the words starting with it in one millisecond on its track.
+    // Several words, one field in the word bar: a span fixed as one text, a selection of several
+    // words holding this one, or the words starting with it in one millisecond on its track.
     const s = words.span[i];
     const prior = sel.runs(before);
     const run = s
@@ -290,12 +259,11 @@
       return;
     }
     // Another word's field still open (the press on this word kept it from blurring): what was
-    // typed there is saved first, as leaving it does (5t repair: it was lost, or saved as this
-    // word's text, when this word's draft replaced it before its field went away).
+    // typed there is saved first, as leaving it does.
     if (fixing != null) finishFix(true);
     fixing = fixOpen = i;
     fixDraft = fixFrom = words.text[i];
-    fixAt_ = words.heard[i];
+    fixRef = wordRef(words, i);
   }
   // The field's row can scroll out of the rendered window (the list is virtual) and take the field
   // with it, without a blur: what was typed is saved then, as leaving the field does, so `fixing`
@@ -314,21 +282,19 @@
     fixing = fixOpen = null;
     if (!save || i == null || fixDraft.trim() === fixFrom.trim()) return;
     const text = fixDraft;
-    const at = fixAt_;
-    call(async () => tellFixed(await api.fixWord(i, at, text)));
+    const word = fixRef;
+    call(async () => tellFixed(await api.fixWord(i, word, text)));
   }
 
-  // A fix whose spelling joined the word list (5h's `settings::learn`) says so for a moment in the
-  // header (5t): before, nothing showed the list had changed until Settings was opened. A retyped
-  // sentence (5x) names every word it added. The same place says when Looks right has no flagged
-  // word left to go to (5v).
+  // A fix whose spelling joined the word list says so for a moment in the header; a retyped
+  // sentence names every word it added. The same place says when Looks right has none left.
   const LEARNED_MS = 4000;
   let learned = $state<string | null>(null);
   let learnedTimer = 0;
-  // Cleared when the panel goes: `fixWord` can answer after that (5t repair), and a timer set then
-  // would outlive the panel.
+  // Cleared when the panel goes: `fixWord` can answer after that, and a timer set then would
+  // outlive the panel.
   let mounted = false;
-  // In the header for a moment, in place of the word count (`tell` is 5aa's line under it).
+  // In the header for a moment, in place of the word count (`tell` is the line under it).
   function flash(text: string) {
     if (!mounted) return;
     learned = text;
@@ -339,10 +305,8 @@
     if (all.length) flash(`${all.map((e) => `"${e}"`).join(", ")} added to the word list`);
   }
 
-  // What a fix also did elsewhere (5aa), under the header for a while: "Also fixed 2 other places"
-  // with Undo those (the engine takes back only those still as it made them), or what Correct
-  // started. A newer fix's line replaces it.
-  // Correct's line stays until dismissed: its run goes on for a while, and its Undo with it.
+  // What a fix also did elsewhere, under the header for a while ("Also fixed 2 other places" with
+  // Undo those), or what Correct started, which stays until dismissed as its run goes on.
   const NOTE_MS = 20000;
   let note = $state<{ text: string; others: api.Fix[]; heard: string[] } | null>(null);
   let noteTimer = 0;
@@ -359,8 +323,8 @@
     tellLearned(r.learned);
     if (r.others.length) tell(`Also fixed ${places(r.others.length)} heard the same way.`, r.others, r.heard);
   }
-  // Kept as heard rather than taken away (5aa): a later Correct, or the spread after its
-  // transcription, would otherwise give those words the fix again.
+  // Kept as heard rather than taken away: a later Correct, or the spread after its transcription,
+  // would otherwise give those words the fix again.
   async function undoOthers() {
     const n = note;
     note = null;
@@ -372,8 +336,8 @@
     });
   }
 
-  // Fixes a re-transcription could not put on any word (5aa repair): listed once it ends, and on
-  // opening, until dismissed, so a fix is never lost without the user seeing it.
+  // Fixes a re-transcription could not put on any word: listed once it ends, and on opening, until
+  // dismissed, so a fix is never lost without the user seeing it.
   let setAside = $state<api.SetAside[]>([]);
   $effect(() => {
     if (analysing) return;
@@ -384,12 +348,12 @@
     );
   });
   async function forgetSetAside() {
-    // Only what was shown (5ad): a run may have set more aside since, which stay to be seen.
+    // Only what was shown: a run may have set more aside since, which stay to be seen.
     const seen = setAside;
     setAside = [];
     await call(() => api.forgetFixesSetAside(seen));
   }
-  // A set-aside fix, or a word time set by moving a cut's edge (5ad), as the line lists it.
+  // A set-aside fix, or a word time set by moving a cut's edge, as the line lists it.
   function asideText(s: api.SetAside): string {
     const silent = s.silent ? ", its track has no words this time" : "";
     if (s.retimed) {
@@ -397,8 +361,8 @@
     }
     return `"${s.text}" (was "${s.heard}", ${stamp(s.at * 1000)}${silent})`;
   }
-  // The set-aside line (5ad repair): the fixes, and what Correct could not do (`note`), which the
-  // run's progress line no longer shows by its end.
+  // The set-aside line: the fixes, and what Correct could not do (`note`), which the run's progress
+  // line no longer shows by its end.
   const asideLine = $derived.by(() => {
     const fixes = setAside.filter((s) => !s.note);
     const notes = setAside.flatMap((s) => (s.note ? [s.note] : []));
@@ -432,13 +396,13 @@
   });
 
   const current = $derived(words && player?.position != null ? wordAt(words, player.position * 1000) : -1);
-  // The span the playhead is in (5x), lit whole.
+  // The span the playhead is in, lit whole.
   const currentSpan = $derived(words && current >= 0 ? (words.span[current] ?? 0) : 0);
   // The selected words, sorted and joined, for drawing; the latest run, for Shift+click.
   const joined = $derived(sel.runs(selection));
   const latest = $derived(sel.latest(selection));
 
-  // Flagged words (5o): per edit or threshold, the kept ones to check, in order.
+  // Flagged words: per edit or threshold, the kept ones to check, in order.
   const toCheck = $derived(toks && words ? flagged(toks, words.sure, flagBelow) : []);
   const doubt = (i: number) => flagBelow > 0 && words != null && words.sure[i] < flagBelow;
   // The one word selected (a single stretch of one word), when it is flagged: what "Looks right"
@@ -447,10 +411,8 @@
     joined.length === 1 && joined[0].first === joined[0].last && doubt(joined[0].first) ? joined[0].first : -1,
   );
 
-  // Next or previous flagged word from the selection, else from the word under the playhead: it is
-  // selected, played from and scrolled to (even while the list does not follow the playhead). Each
-  // button is greyed when there is none that way (no wrapping: the end of the list stays an end).
-  // With several stretches selected (2p), from the first one's start and the last one's end.
+  // Next or previous flagged word from the selection, else from the playhead's word: selected,
+  // played from and scrolled to. No wrapping: the end of the list stays an end.
   const before = $derived(stepFrom(toCheck, joined.length ? joined[0].first : current, true));
   const after = $derived(stepFrom(toCheck, joined.length ? joined[joined.length - 1].last : current, false));
   function goTo(i: number) {
@@ -475,9 +437,8 @@
     if (last > first) onSelect(sel.words(first, last));
   }
 
-  // Confirms the selected flagged word (it keeps what Whisper heard) and goes on to the next. With
-  // none after it the header says so and the selection goes (5v: the word stayed selected, now
-  // unflagged, and nothing showed the end had been reached).
+  // Confirms the selected flagged word (it keeps what Whisper heard) and goes on to the next; with
+  // none after it the header says so and the selection goes, so the end is seen.
   function looksRight() {
     const i = checking;
     if (i < 0) return;
@@ -515,12 +476,9 @@
     ours = -1;
   }
 
-  // F2 (5ac): the word under the pointer gets the field a double-click gives it; with none, a
-  // selection of one stretch gets Fix text, as the word bar's button does. A window listener, so it
-  // works after a click on the picture or the lanes (mpv draws under the transparent page, so the
-  // keyboard stays here). The word is looked up at the pointer's last position when F2 comes, not
-  // remembered on entering it: the list scrolls under a still pointer (the playhead follow), and
-  // neither `pointerenter` nor `:hover` notice that until the pointer moves.
+  // F2: the field a double-click gives the word under the pointer, else Fix text for one stretch. A
+  // window listener, so it works after a click on the picture; the word is looked up when F2 comes,
+  // since the list can scroll under a still pointer without `:hover` noticing.
   let pointer: { x: number; y: number } | null = null;
   function typing(t: EventTarget | null): boolean {
     return (
@@ -532,9 +490,8 @@
   }
   function onF2(e: KeyboardEvent) {
     if (e.key !== "F2" || e.repeat || e.ctrlKey || e.altKey || e.shiftKey || e.metaKey) return;
-    // A field open or being typed in keeps its keys, and a dialog in the page holds them (Settings;
-    // the Resolve timeline question stops every key before this). Correct's and Re-analyse's
-    // questions are native dialogs, which keep the keyboard from the page.
+    // A field open or being typed in keeps its keys, and a dialog in the page holds them; native
+    // dialogs keep the keyboard from the page themselves.
     if (fixing != null || retyping || renaming || typing(e.target) || typing(document.activeElement)) return;
     if (document.querySelector('[aria-modal="true"]')) return;
     // The Transcript tab hidden (another tab, the panel closed): nothing of it to act on.
@@ -550,11 +507,9 @@
       sel.pairs(selection).length === 1 &&
       inSight(sel.runs(selection)[0])
     ) {
-      // The word bar is shown (its conditions below) with its actions and Fix text enabled (a
-      // selection of one stretch; with none the bar holds only its hint, 5v). Only a selection in
-      // sight (5ae): a click on no word (between words, a row's end, the picture) leaves the
-      // selection where it was, and F2 opened Fix text holding a sentence fixed long before, for
-      // words out of view.
+      // The word bar shows its actions with Fix text enabled (one stretch selected). Only for a
+      // selection in sight (5ae): a click on no word leaves the selection where it was, and F2
+      // opened Fix text holding a sentence fixed long before, for words out of view.
       e.preventDefault();
       retyping = true;
     }
@@ -580,16 +535,9 @@
     }
   }
 
-  // Selecting: press on a word, drag across others, release. A press and release on one word
-  // without moving seeks there (and selects it); shift extends the latest stretch from its anchor.
-  // Ctrl (2p; Cmd on macOS, where Ctrl+click is the context menu, and never the Windows key)
-  // adds a stretch beside the ones selected: a press on a word adds it (a drag from it, the words
-  // dragged over), and a press and release on a word already selected takes it out, while a drag
-  // that starts on a selected word adds the words dragged over like any other (it only takes out
-  // the one word when the press does not move); a Ctrl+click does not seek, so picking out someone's lines one after another leaves the playhead
-  // where it was. `pressed` is the one drag in progress; `anchor` outlives it, for shift-clicks.
-  // `base` is what the drag's own run goes beside: nothing for a plain press, every stretch for
-  // Ctrl, all but the latest for Shift (that one is the run being extended).
+  // Selecting: press, drag, release; a press and release without moving seeks. Shift extends the
+  // latest stretch; Ctrl (Cmd on macOS) adds a stretch or takes out a word, without seeking. `base`
+  // is what the drag's run goes beside: nothing, every stretch (Ctrl), all but the latest (Shift).
   let anchor = -1;
   let pressed = false;
   let moved = false;
@@ -602,7 +550,7 @@
     return el ? Number(el.dataset.i) : -1;
   }
 
-  // Selecting a run that reaches into a span takes the whole span (5x).
+  // Selecting a run that reaches into a span takes the whole span.
   function pick(s: sel.Selection | null) {
     if (s?.kind === "words" && words) {
       const w = words;
@@ -617,8 +565,7 @@
     if (i < 0 || e.button !== 0) return;
     e.preventDefault();
     // The press seeks to the word on release (`up`), and the follow would then scroll a word in the
-    // first row or the last three away from under the pointer before a double-click's second press
-    // (5t). The word pressed is on screen already.
+    // first row or the last three away from under the pointer before a double-click's second press.
     pausedUntil = performance.now() + FOLLOW_PAUSE_MS;
     adding = MAC ? e.metaKey : e.ctrlKey;
     unpick = false;
@@ -659,7 +606,7 @@
     if (!pressed) return;
     pressed = false;
     if (!moved && unpick) {
-      // A span is taken out whole (5x).
+      // A span is taken out whole.
       const r = words ? widen(words, { first: anchor, last: anchor }) : { first: anchor, last: anchor };
       let left = selection;
       for (let j = r.first; j <= r.last; j++) left = sel.without(left, j);
@@ -903,7 +850,7 @@
       {/if}
     {/if}
   </div>
-  <!-- Kept while nothing is selected (5v): a bar that came with the selection shrank the scroller
+  <!-- Kept while nothing is selected: a bar that came with the selection shrank the scroller
        between a double-click's two presses. -->
   {#if words && edit?.editable && !reviewing && !listing}
     <WordBar

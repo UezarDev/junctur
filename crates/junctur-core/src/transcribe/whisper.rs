@@ -29,8 +29,8 @@ pub enum ModelPref {
     LargeV3Turbo,
     /// Best quality, opt-in: f16 large-v3 is slower than turbo and wants about 4.8 GB of free VRAM.
     LargeV3,
-    /// 1b's fallback, kept as an explicit choice: it needs more VRAM than turbo (below), so `Auto`
-    /// never falls back to it, but it is large-v3's decoder for anyone who prefers it.
+    /// An explicit choice only: it needs more VRAM than turbo (below), so `Auto` never falls back
+    /// to it, but it is large-v3's decoder for anyone who prefers it.
     LargeV3Q5,
 }
 
@@ -56,7 +56,7 @@ impl ModelPref {
         }
     }
 
-    /// The name the config file is written with (2i): the first of [`Self::NAMES`] for it, so an
+    /// The name the config file is written with: the first of [`Self::NAMES`] for it, so an
     /// alias read in comes back out as the canonical name.
     pub fn key(self) -> &'static str {
         Self::NAMES
@@ -107,10 +107,8 @@ impl TryFrom<String> for ModelPref {
     }
 }
 
-/// Free MiB turbo needs on the GPU (weights + compute buffers), measured in 1f: a 2025 MiB peak over
-/// a 10-minute recording with beam search 5. The 5-bit large-v3 peaked at 2211 MiB on the same audio
-/// (its 32 decoder layers hold more KV cache than turbo's 4 save in weights), so there is no free-VRAM
-/// band where it fits and turbo does not.
+/// Free MiB turbo needs on the GPU (weights + compute buffers, a ~2025 MiB peak with beam search 5).
+/// The 5-bit large-v3 needs more (its 32 decoder layers' KV cache), so never fits where turbo fails.
 const TURBO_MIB: u64 = 2100;
 
 /// What will run, and why, decided before anything is loaded.
@@ -127,7 +125,7 @@ pub struct Choice {
 enum Gpu {
     /// The caller asked for the CPU (`--cpu`): nothing to warn about.
     Off,
-    /// Built without `cuda`. 2l: the app's normal build was one, and its CPU runs said nothing.
+    /// Built without `cuda`, so a CPU run must say why.
     NotBuilt,
     /// A GPU answered but the CUDA runtime DLL whisper.cpp delay-loads is not there (named).
     NoRuntime(&'static str),
@@ -146,7 +144,7 @@ pub fn choose(pref: ModelPref, device: DevicePref) -> (Choice, &'static Model) {
     } else {
         None
     };
-    // 2l: without cuBLAS whisper.cpp dies on its first GPU call instead of failing, so the GPU is only
+    // Without cuBLAS whisper.cpp dies on its first GPU call instead of failing, so the GPU is only
     // offered to it when the DLL can be found.
     if free.is_some() {
         if let Some(dll) = runtime::whisper_cuda_missing() {
@@ -158,10 +156,8 @@ pub fn choose(pref: ModelPref, device: DevicePref) -> (Choice, &'static Model) {
 
 /// The choice for `free` MiB of VRAM (None: no GPU answered, or none was asked). `gpu` says why, so a
 /// CPU run that the user did not ask for carries a note. Pure, so the fallback table is testable
-/// without a GPU.
-///
-/// `Auto` without room on the card runs turbo on CPU rather than 1b's 5-bit large-v3: the 5-bit model
-/// would not fit either (see [`TURBO_MIB`]), and on CPU turbo's 4 decoder layers make it the faster.
+/// without a GPU. `Auto` without room runs turbo on CPU: the 5-bit large-v3 would not fit either
+/// ([`TURBO_MIB`]), and turbo is the faster on CPU.
 fn pick(pref: ModelPref, free: Option<u64>, gpu: Gpu) -> (Choice, &'static Model) {
     let m = pref.model();
     let (device, note) = match (pref, free, gpu) {
@@ -198,13 +194,13 @@ fn pick(pref: ModelPref, free: Option<u64>, gpu: Gpu) -> (Choice, &'static Model
 }
 
 pub struct Whisper {
-    /// Kept for its tokenizer, to fit the word list to the prompt (5h).
+    /// Kept for its tokenizer, to fit the word list to the prompt.
     ctx: WhisperContext,
     state: WhisperState,
     threads: i32,
     /// Token ids from end-of-text up are special (timestamps, language, markers).
     eot: i32,
-    /// The initial prompt every chunk is decoded with, as tokens (5h, [`Self::set_prompt`]); empty
+    /// The initial prompt every chunk is decoded with, as tokens ([`Self::set_prompt`]); empty
     /// for none. Tokens rather than whisper-rs's `set_initial_prompt`, which leaks its string on every
     /// call (a 30 h recording is thousands of chunks) and panics on a NUL.
     prompt: Vec<i32>,
@@ -233,7 +229,7 @@ impl Whisper {
         })
     }
 
-    /// Tells Whisper the user's word list (5h) before every chunk from now on: its leading entries
+    /// Tells Whisper the user's word list before every chunk from now on: its leading entries
     /// that fit the prompt's room, which is half the text context (224 tokens on large-v3) less the
     /// marker whisper.cpp puts before it. whisper.cpp would cut a longer prompt itself, but from the
     /// front and mid-word. Returns what went in and what was left out, for the log.
@@ -288,7 +284,7 @@ impl Whisper {
         params.set_token_timestamps(true);
         // Each chunk stands alone: carrying text across chunks is how Whisper loops on a phrase.
         params.set_no_context(true);
-        // The word list (5h). Still applied with `no_context`: whisper.cpp clears the carried text
+        // The word list. Still applied with `no_context`: whisper.cpp clears the carried text
         // before it adds the prompt tokens, on every call.
         if !self.prompt.is_empty() {
             params.set_tokens(&self.prompt);
@@ -378,7 +374,7 @@ mod tests {
         );
     }
 
-    /// 2l: a CPU-only build, or a GPU without the CUDA runtime, ran on CPU and said nothing.
+    /// A CPU-only build, or a GPU without the CUDA runtime, says why it runs on CPU.
     #[test]
     fn a_cpu_run_nobody_asked_for_says_why() {
         for pref in [ModelPref::Auto, ModelPref::LargeV3, ModelPref::LargeV3Turbo] {

@@ -1,7 +1,4 @@
-/**
- * How an audio track is named, described and coloured wherever it shows (2g: the lanes, the
- * portrait strips, Properties). Moved out of 2e's Mixer.svelte, which the lanes and strips replace.
- */
+/** How an audio track is named, described and coloured wherever it shows. */
 import type * as api from "./api";
 
 const ROLE: Record<api.Role, string> = {
@@ -25,7 +22,7 @@ export function name(t: api.MixTrack, audio: api.AudioTrack[]): string {
   return t.role ? ROLE[t.role] : "Track";
 }
 
-/** The speakers told apart on this track (by track, 5a). */
+/** The speakers told apart on this track (by track). */
 export function speakersOn(t: api.MixTrack, speakers: api.Speaker[]): api.Speaker[] {
   return speakers.filter((s) => s.track === t.index);
 }
@@ -70,7 +67,7 @@ export function title(t: api.MixTrack): string {
   return `Track ${t.index + 1}: ${what}`;
 }
 
-/** What an avatar shows: the first letter ("Uezar": U), with the number of a numbered name
+/** What an avatar shows: the first letter ("Ana": A), with the number of a numbered name
  * ("Speaker 2": S2), so unnamed speakers stay apart. */
 export function initials(name: string): string {
   const words = name.trim().split(/\s+/).filter(Boolean);

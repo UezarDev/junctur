@@ -1,12 +1,7 @@
 <script lang="ts">
-  // The question when Resolve already has the timeline a send makes (5z, 5ab): Create new timeline
-  // (recommended), Update captions only, Replace or Cancel. A dialog of its own rather than the
-  // native one 5z used: that one has three buttons, and closing it answers as the third, so a
-  // fourth choice would have made closing it a Replace. Like the native one it is modal: a capture
-  // listener on the window stops every key from reaching the page under it (App's shortcuts, Ctrl+W)
-  // and cancels what the webview would do with it (Ctrl+F, zoom; Ctrl+R is noReload's), but Ctrl+C,
-  // which copies the dialog's text. Tab cycles its buttons, Enter or Space presses the focused one,
-  // Escape or a press outside is Cancel.
+  // The question when Resolve already has the timeline a send makes. Its own dialog because the
+  // native one has three buttons and closing it answers as the third. Modal: a capture listener
+  // stops every key from reaching the page, except Ctrl+C.
   import { onMount } from "svelte";
   import type { TimelineAnswer } from "./api";
 

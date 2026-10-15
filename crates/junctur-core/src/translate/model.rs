@@ -1,11 +1,6 @@
-//! The translation model run through ONNX Runtime (5k): a sentence in, its translation out.
-//!
-//! An encoder–decoder: the source sentence, behind its language's token and ended by `</s>`, is
-//! encoded once; the decoder then writes the translation a token at a time, starting from `</s>`
-//! and the target language's token, until it writes `</s>`. Greedy (the likeliest token each step),
-//! not the five-way beam search the model was published with: a beam is five decoders' work for a
-//! caption-length sentence, and greedy reads the same on short sentences. The decoder file has its
-//! key/value cache merged in (`use_cache_branch`), so each step feeds only the newest token.
+//! The translation model run through ONNX Runtime: a sentence in, its translation out. Decoding is
+//! greedy, not the published five-way beam: a beam is five times the work, and reads the same on
+//! caption-length sentences. The decoder's merged key/value cache feeds only the newest token.
 
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -70,16 +65,10 @@ impl Model {
             .ok_or_else(|| Error::Model(format!("no translation of {text:?}")))
     }
 
-    /// Each `(text, said in)` of `batch` in `to`, in order. A batch is decoded together, a row
-    /// each: a step reads the weights once for every row, which is most of what a step costs on a
-    /// CPU, so a batch of several takes little longer than one sentence (measured in 5k). Rows may
-    /// be in different languages, each behind its own language's token. A row longer than
-    /// [`MAX_SOURCE`] tokens is cut between words into pieces that are translated as rows of
-    /// their own and joined again.
-    ///
-    /// `None` for a row the model gave nothing usable for: an empty translation, or one still
-    /// going at the length cap, which is the greedy decoder looping. `guard` forbids the decoder
-    /// to repeat any three tokens in a row, which ends such a loop, for a second try.
+    /// Each `(text, said in)` of `batch` in `to`, in order, decoded together (a step reads the
+    /// weights once for every row); a row over [`MAX_SOURCE`] tokens is cut between words.
+    /// `None` for a row with an empty or looping translation; `guard` (for a second try) forbids
+    /// repeating any three tokens, which ends such a loop.
     pub fn translate_batch(
         &mut self,
         batch: &[(&str, &str)],

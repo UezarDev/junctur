@@ -1,10 +1,6 @@
-//! Who speaks when, as the edit list keeps it: a name per speaker and the turns each one talks in.
-//!
-//! Kept in the edit file, not beside it, because the names are the user's (renamed from the
-//! "Speaker 1..N" Junctur starts with) and the edit file is the one piece of project state that is
-//! the user's: readable, diffable, carried through a re-cut. The turns come from the `speakers`
-//! stage ([`crate::pipeline`]); the words are labelled from them on demand ([`Speakers::of_word`])
-//! rather than stored per word, so a transcript and an edit list never have to agree on indices.
+//! Who speaks when, as the edit list keeps it (the names are the user's): a name per speaker and the
+//! turns each one talks in. Words are labelled from the turns on demand rather than stored per word,
+//! so a transcript and an edit list never have to agree on indices.
 
 use serde::{Deserialize, Serialize};
 
@@ -19,7 +15,7 @@ pub struct SpeakerName {
     /// (a mic and a Discord recorded on their own tracks). Every word heard on that track is
     /// theirs, which beats any overlap test when two tracks talk at once.
     pub track: Option<usize>,
-    /// Caption colour, `#RRGGBB` (5a): a palette colour by id until the user picks one.
+    /// Caption colour, `#RRGGBB`: a palette colour by id until the user picks one.
     pub color: String,
 }
 
@@ -38,7 +34,7 @@ pub struct Speakers {
     pub turns: Vec<Turn>,
 }
 
-/// A person a speaker was recognised as (5b): an enrolled voice's name and caption colour, which the
+/// A person a speaker was recognised as: an enrolled voice's name and caption colour, which the
 /// speaker takes in every recording.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Person {
@@ -88,18 +84,10 @@ impl Speakers {
         Self::found(turns, tracks, &[], previous, &[])
     }
 
-    /// [`Speakers::new`], where speaker `i + 1` recognised as `people[i]` (an enrolled voice, 5b)
-    /// takes that person's name and colour: they are the person's in every recording.
-    ///
-    /// Every other speaker takes the name and colour of the `previous` speaker it is, found by
-    /// what they say rather than by id: the speaker that is the same track, else the one whose
-    /// turns overlap its turns most (one to one, the largest overlaps first). Ids are renumbered
-    /// whenever the voices change (enrolled people come first), so carrying by id gave a rename to
-    /// someone else (the 5b review). With no turns on either side, by id. A previous
-    /// name in `exclude` (case aside) is never carried: those are the people's names, current or
-    /// forgotten, which belong to a voice, not to whatever cluster now sits where they were.
-    /// Speakers left without a name are "Speaker N" in the first palette colour no one else in
-    /// the list has.
+    /// [`Speakers::new`], where speaker `i + 1` recognised as `people[i]` takes that person's name
+    /// and colour. Others take those of the `previous` speaker on the same track, else with most
+    /// turn overlap (not by id: ids renumber when the voices change), never a name in `exclude`
+    /// (a voice's). Speakers left unnamed are "Speaker N" in the first palette colour nobody else has.
     pub fn found(
         mut turns: Vec<Turn>,
         tracks: &[Option<usize>],
@@ -264,7 +252,7 @@ impl Labeller<'_> {
 }
 
 impl Labeller<'_> {
-    /// Everyone who says a word (5b): its speaker by [`Labeller::of_word`] first, then anyone else
+    /// Everyone who says a word: its speaker by [`Labeller::of_word`] first, then anyone else
     /// whose turn holds the word's middle. Two people's turns overlap only where both talk at once,
     /// and the transcript is one mixed stream there, so the word is both of theirs. Empty when nobody
     /// is near.
@@ -336,7 +324,7 @@ fn carry<'p>(
         }
     }
     if previous.turns.is_empty() || turns.is_empty() {
-        // Nothing to match by: by id, as before 5b.
+        // Nothing to match by: by id.
         for (i, slot) in out.iter_mut().enumerate() {
             if slot.is_some() || is_person(i) {
                 continue;
@@ -351,26 +339,11 @@ fn carry<'p>(
         }
         return out;
     }
-    // Overlap seconds between each new and each previous speaker's turns.
-    let spans = |ts: &[Turn], id: u32| -> Vec<(f64, f64)> {
-        ts.iter()
-            .filter(|t| t.speaker == id)
-            .map(|t| (t.start, t.end))
-            .collect()
-    };
-    let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
-    for i in (0..n).filter(|&i| out[i].is_none() && !is_person(i)) {
-        let a = spans(turns, i as u32 + 1);
-        for (j, p) in previous.names.iter().enumerate() {
-            if taken[j] || !allowed(p) {
-                continue;
-            }
-            let o = overlap(&a, &spans(&previous.turns, p.id));
-            if o > 0.0 {
-                pairs.push((o, i, j));
-            }
-        }
-    }
+    let new: Vec<usize> = (0..n)
+        .filter(|&i| out[i].is_none() && !is_person(i))
+        .collect();
+    let open = |j: usize| !taken[j] && allowed(&previous.names[j]);
+    let mut pairs = overlaps(turns, &new, previous, &open);
     // The largest overlaps first; on a tie, the same id (a re-cut of the same labels).
     pairs.sort_by(|a, b| {
         b.0.total_cmp(&a.0).then_with(|| {
@@ -385,6 +358,41 @@ fn carry<'p>(
         }
     }
     out
+}
+
+/// The turns of speaker `id` as spans.
+fn spans(ts: &[Turn], id: u32) -> Vec<(f64, f64)> {
+    ts.iter()
+        .filter(|t| t.speaker == id)
+        .map(|t| (t.start, t.end))
+        .collect()
+}
+
+/// `(seconds shared, new speaker, previous speaker)` for each of the `new` speakers (indices, id
+/// one more) and each previous one `open` allows, where they share any time.
+fn overlaps(
+    turns: &[Turn],
+    new: &[usize],
+    previous: &Speakers,
+    open: &dyn Fn(usize) -> bool,
+) -> Vec<(f64, usize, usize)> {
+    // Each previous speaker's spans built once, when first needed, not once per new speaker.
+    let mut before: Vec<Option<Vec<(f64, f64)>>> = vec![None; previous.names.len()];
+    let mut pairs = Vec::new();
+    for &i in new {
+        let a = spans(turns, i as u32 + 1);
+        for (j, p) in previous.names.iter().enumerate() {
+            if !open(j) {
+                continue;
+            }
+            let b = before[j].get_or_insert_with(|| spans(&previous.turns, p.id));
+            let o = overlap(&a, b);
+            if o > 0.0 {
+                pairs.push((o, i, j));
+            }
+        }
+    }
+    pairs
 }
 
 /// Seconds two sorted lists of spans share (each list's spans may touch or overlap each other).
@@ -405,7 +413,7 @@ fn overlap(a: &[(f64, f64)], b: &[(f64, f64)]) -> f64 {
 }
 
 /// Joins turns (sorted by start) of one speaker less than [`JOIN_S`] apart. Per speaker, not only
-/// when consecutive: since 5b another speaker's overlap turn can sit between two of one person's.
+/// when consecutive: another speaker's overlap turn can sit between two of one person's.
 fn join(turns: Vec<Turn>) -> Vec<Turn> {
     let mut out: Vec<Turn> = Vec::with_capacity(turns.len());
     // Index in `out` of each speaker's latest turn.
@@ -423,150 +431,4 @@ fn join(turns: Vec<Turn>) -> Vec<Turn> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn t(start: f64, end: f64, speaker: u32) -> Turn {
-        Turn {
-            start,
-            end,
-            speaker,
-        }
-    }
-
-    #[test]
-    fn names_start_numbered_and_survive_a_recut() {
-        let s = Speakers::new(vec![t(0.0, 1.0, 1), t(2.0, 3.0, 2)], &[None, None], None);
-        assert_eq!(s.name(1), Some("Speaker 1"));
-        assert_eq!(s.name(2), Some("Speaker 2"));
-        let mut renamed = s.clone();
-        assert!(renamed.rename(2, "  Lucía "));
-        assert!(renamed.recolor(2, "#123456"));
-        assert!(!renamed.recolor(9, "#123456"));
-        assert_eq!(s.color(1), Some("#F2B33D"));
-        assert!(!renamed.rename(9, "x"));
-        // A re-cut finds three speakers now: the rename stays, the new one is numbered.
-        let again = Speakers::new(vec![], &[None, None, None], Some(&renamed));
-        assert_eq!(again.name(2), Some("Lucía"));
-        assert_eq!(again.color(2), Some("#123456"));
-        assert_eq!(again.name(3), Some("Speaker 3"));
-        // Renumbered (the two swap places): a rename goes with what the speaker says, and so
-        // does a colour, but "Speaker N" stays a number and never doubles up.
-        let swapped = Speakers::new(
-            vec![t(0.0, 1.0, 2), t(2.0, 3.0, 1)],
-            &[None, None],
-            Some(&renamed),
-        );
-        assert_eq!(
-            (swapped.name(1), swapped.color(1)),
-            (Some("Lucía"), Some("#123456"))
-        );
-        assert_eq!(
-            (swapped.name(2), swapped.color(2)),
-            (Some("Speaker 2"), Some("#F2B33D"))
-        );
-    }
-
-    #[test]
-    fn close_turns_of_one_speaker_join_and_others_do_not() {
-        let s = Speakers::new(
-            vec![
-                t(5.0, 6.0, 1),
-                t(0.0, 1.0, 1),
-                t(1.5, 2.0, 1),
-                t(2.2, 3.0, 2),
-            ],
-            &[None, None],
-            None,
-        );
-        assert_eq!(
-            s.turns,
-            vec![t(0.0, 2.0, 1), t(2.2, 3.0, 2), t(5.0, 6.0, 1)]
-        );
-    }
-
-    #[test]
-    fn words_go_to_the_most_overlapping_then_the_nearest_turn() {
-        let s = Speakers::new(
-            vec![t(0.0, 10.0, 1), t(9.0, 12.0, 2), t(40.0, 41.0, 1)],
-            &[None, None],
-            None,
-        );
-        assert_eq!(s.labeller().of_word(0, 1.0, 1.5), Some(1));
-        // 9.2-10.8 overlaps speaker 1 by 0.8 s and speaker 2 by 1.6 s.
-        assert_eq!(s.labeller().of_word(0, 9.2, 10.8), Some(2));
-        // Between turns: the nearer one, within reach.
-        assert_eq!(s.labeller().of_word(0, 13.0, 13.5), Some(2));
-        assert_eq!(s.labeller().of_word(0, 35.0, 35.5), Some(1));
-        assert_eq!(s.labeller().of_word(0, 25.0, 25.5), None);
-        // A zero-length word inside a turn, and one exactly on a turn's edge.
-        assert_eq!(s.labeller().of_word(0, 11.5, 11.5), Some(2));
-        assert_eq!(s.labeller().of_word(0, 40.0, 40.0), Some(1));
-        // Nearest before: the turn reaching furthest, not the last to start.
-        let long = Speakers::new(vec![t(0.0, 30.0, 1), t(5.0, 6.0, 2)], &[None, None], None);
-        assert_eq!(long.labeller().of_word(0, 31.0, 31.5), Some(1));
-        assert_eq!(Speakers::default().labeller().of_word(0, 1.0, 2.0), None);
-    }
-
-    #[test]
-    fn a_word_where_two_people_talk_at_once_is_both_of_theirs() {
-        // Speaker 1 talks 0-10, speaker 2 joins in 4-6 (an overlap turn) and talks 10-12.
-        let s = Speakers::new(
-            vec![t(0.0, 10.0, 1), t(4.0, 6.0, 2), t(10.0, 12.0, 2)],
-            &[None, None],
-            None,
-        );
-        let l = s.labeller();
-        assert_eq!(l.speakers_of_word(0, 1.0, 1.4), vec![1]);
-        assert_eq!(l.speakers_of_word(0, 4.5, 5.0), vec![2, 1]);
-        assert_eq!(l.speakers_of_word(0, 11.0, 11.5), vec![2]);
-        // A word straddling a change of speaker: its primary only (the middle is in one turn).
-        assert_eq!(l.speakers_of_word(0, 9.7, 10.1), vec![1]);
-        assert!(l.speakers_of_word(0, 40.0, 41.0).is_empty());
-        // Two of one person's turns around another's overlap turn are still joined.
-        let j = Speakers::new(
-            vec![t(0.0, 3.0, 1), t(2.5, 3.2, 2), t(3.5, 6.0, 1)],
-            &[None, None],
-            None,
-        );
-        assert_eq!(j.turns, vec![t(0.0, 6.0, 1), t(2.5, 3.2, 2)]);
-    }
-
-    #[test]
-    fn an_enrolled_person_names_their_speaker() {
-        let ana = Person {
-            name: "Ana".into(),
-            color: "#123456".into(),
-        };
-        let mut before = Speakers::new(vec![], &[None, None], None);
-        before.rename(1, "Old");
-        before.rename(2, "Kept");
-        let s = Speakers::found(
-            vec![],
-            &[None, None],
-            &[Some(ana), None],
-            Some(&before),
-            &[],
-        );
-        assert_eq!((s.name(1), s.color(1)), (Some("Ana"), Some("#123456")));
-        assert_eq!(s.name(2), Some("Kept"));
-        // Turns are held to the millisecond, as the file writes them.
-        let r = Speakers::new(vec![t(1.23456, 2.0004, 1)], &[None], None);
-        assert_eq!(r.turns, vec![t(1.235, 2.0, 1)]);
-        assert!(check_name(" Ana ").is_ok_and(|n| n == "Ana"));
-        assert!(check_name("").is_err() && check_name("a\nb").is_err());
-        assert!(check_name("track=1").is_err() && check_name(&"x".repeat(61)).is_err());
-    }
-
-    #[test]
-    fn a_speaker_that_is_a_track_takes_every_word_on_it() {
-        // Two tracks talking at once: the overlap test alone would give the word to speaker 2.
-        let s = Speakers::new(
-            vec![t(0.0, 1.0, 1), t(0.0, 10.0, 2)],
-            &[Some(0), Some(3)],
-            None,
-        );
-        assert_eq!(s.labeller().of_word(0, 2.0, 3.0), Some(1));
-        assert_eq!(s.labeller().of_word(3, 0.2, 0.6), Some(2));
-    }
-}
+mod tests;

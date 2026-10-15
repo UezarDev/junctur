@@ -1,17 +1,6 @@
 <script lang="ts">
-  // Review mode (2o): the proposed edit gone through one clip at a time, as Uezar asked ("like
-  // Tinder", buttons rather than swipes). The clips are review.ts's, frozen as it starts; each
-  // plays from its start on mpv's own loop until it is decided. Keep and Remove are one whole-clip
-  // frame edit each, the same undoable edit the range toolbar's Cut range / Keep cut makes, then
-  // the next clip plays; Back and Skip move without deciding (Enter or K keeps, Backspace or Delete
-  // removes, 2r). It is one box of one size (layout.ts `REVIEW`, a little bigger than the range
-  // toolbar's) in the toolbar's corner of the picture, which hides while it shows (2r; 2o had it
-  // over the lanes, sized by its contents and wrapping). A cut clip is what is being judged, so
-  // review plays the whole file: the player (`play_between`) turns Skip cuts off for it and
-  // `end_review` puts it back as it was and the speed back to 1x (there is no other speed control).
-  // App hands it the keys first. Since 2s the clip's two edges have steppers (◀ ▶ a frame, shift
-  // ten), the cut that split a word moved where it sits: the frozen clips move with them (review.ts
-  // `moveEdge`) and the loop plays the moved clip again from its start.
+  // Review mode: the proposed edit gone through one clip at a time, each looping until decided.
+  // Review plays the whole file, cuts too, since a cut clip is what is being judged.
   import { onMount, untrack } from "svelte";
   import * as api from "./api";
   import { clips, holding, moveEdge, now, SPEEDS, type Clip } from "./review";
@@ -37,7 +26,7 @@
   // the last one.
   const start = untrack(() => edit);
   const fps = start?.fps ?? null;
-  // Replaced (never changed in place) when an edge moves (2s).
+  // Replaced (never changed in place) when an edge moves.
   const first: Clip[] = start && fps ? clips(start) : [];
   let list = $state.raw(first);
   const total = start?.totalFrames ?? 0;
@@ -60,10 +49,8 @@
     return s < 60 ? `${s.toFixed(1)} s` : clock(s);
   }
 
-  // Every player call of the review in one line, in order (2o repair): its start, each move or
-  // edit, and its end, so the end never overtakes a start or an edit still on its way. The
-  // player keeps the review's own state (the skip toggle before it, the loop, the speed), and an
-  // open or close ends it there too, so nothing here can land on another recording's toggle.
+  // Every player call of the review in one line, in order, so the end never overtakes a start or an
+  // edit on its way. The player keeps review's own state, so nothing lands on another recording.
   let line: Promise<void> = Promise.resolve();
   function queue(f: () => Promise<void>): Promise<void> {
     const p = line.then(f);
@@ -103,7 +90,7 @@
       await go(list.indexOf(c) + 1);
     });
   }
-  // Moves the clip's `edge` a frame (shift: ten) earlier (-1) or later (2s), in the frozen list and,
+  // Moves the clip's `edge` a frame (shift: ten) earlier (-1) or later, in the frozen list and,
   // when it changes anything, in the live one, then plays the clip again: the loop restarts from
   // its start and runs to its new end. Read against the engine's list, as `decide` is.
   function move(edge: "start" | "end", dir: number, e: MouseEvent) {
@@ -114,8 +101,7 @@
         const m = moveEdge(list, index, edge, by, await api.editState());
         if (!m) return;
         // The clips move only once the edit is made: one refused leaves review's list and the
-        // live one agreeing, so a later Keep or Remove acts on frames that are really there. The
-        // words beside the edge move with it when it is an edge of the list (2w).
+        // live one agreeing, so a later Keep or Remove acts on frames that are really there.
         if (m.frames) await api.moveEdge(m.frames, edge === "start" ? c.start : c.end);
         list = m.list;
         await play(list[index]);
@@ -156,7 +142,7 @@
     }
     if (ctrl || e.altKey) return false;
     switch (e.code) {
-      // A held key decides once (2r): holding Enter must not keep clip after clip.
+      // A held key decides once: holding Enter must not keep clip after clip.
       case "Enter":
       case "NumpadEnter":
         // A review button reached with Tab takes its own Enter (Done ends review, Back goes back);
@@ -281,8 +267,8 @@
     align-items: center;
     gap: 8px;
   }
-  /* Nothing here may push the box wider (2r repair): the count and the length give way, with an
-     ellipsis and the whole in their title; the kind and the times keep their room. */
+  /* Nothing here may push the box wider: the count and the length give way, with an ellipsis and
+     the whole in their title; the kind and the times keep their room. */
   .info {
     height: 20px;
   }
@@ -294,7 +280,7 @@
   .kind {
     flex-shrink: 0;
   }
-  /* The clip's edges and their steppers (2s), centred; as the range toolbar's. */
+  /* The clip's edges and their steppers, centred; as the range toolbar's. */
   .edges {
     height: 26px;
     justify-content: center;

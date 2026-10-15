@@ -207,7 +207,8 @@ The app looks for `libmpv-2.dll` in `JUNCTUR_LIBMPV`, beside the executable, the
 Without it the window still opens and says what is missing. Plain `cargo build`/`cargo test` do not need
 the DLL or the built frontend (`dist/`); only a release build (`npm run tauri build`) embeds the frontend.
 `JUNCTUR_TEST_OFFSCREEN=<seconds>` runs the app off-screen and silent, prints the player state as one
-JSON line and exits, for scripted launch checks. The libmpv test is ignored by default:
+JSON line and exits, for scripted launch checks; it is in dev builds, and in a release build only with
+`--features test-hooks`. The libmpv test is ignored by default:
 `cargo test -p junctur-app -- --ignored`.
 
 ## Models

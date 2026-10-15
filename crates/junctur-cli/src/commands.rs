@@ -10,16 +10,10 @@ use junctur_core::{analyze, separate as run_separate, AnalyzeOptions, SeparateOp
 use serde::Serialize;
 
 use crate::args::Args;
+use crate::flags;
 
 pub fn tracks(a: Args) -> Result<(), String> {
-    a.reject_unknown(&[
-        "--json",
-        "--cache-dir",
-        "--no-cache",
-        "--no-speech",
-        "--windows",
-        "--window-seconds",
-    ])?;
+    a.reject_unknown(&flags::known("tracks"))?;
     let mut opts = AnalyzeOptions {
         cache_dir: a.path("--cache-dir"),
         use_cache: !a.has("--no-cache"),
@@ -40,16 +34,7 @@ pub fn tracks(a: Args) -> Result<(), String> {
 }
 
 pub fn separate(a: Args) -> Result<(), String> {
-    a.reject_unknown(&[
-        "--track",
-        "--start",
-        "--duration",
-        "--cpu",
-        "--force",
-        "--no-speakers",
-        "--json",
-        "--cache-dir",
-    ])?;
+    a.reject_unknown(&flags::known("separate"))?;
     let file = a.file()?;
     let json = json_out(&a, &file)?;
     let cache_dir = a.path("--cache-dir");

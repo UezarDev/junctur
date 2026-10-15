@@ -1,136 +1,303 @@
-//! The edit list's `captions` line (5a; moved out of `format.rs` when 5g's look made it a parser of
-//! its own). `captions <on|off> chars=.. lines=.. seconds=..` then `key=value` settings, each written
-//! only when it is not the default (5d's rule), so a list that does not use a newer setting still
-//! reads in the builds before it, which refuse keys they do not know. Names with spaces (a font, a
-//! speaker) are written in double quotes; [`Captions::check`] refuses a quote inside one.
+//! The edit list's `captions` line: `captions <on|off> chars=.. lines=.. seconds=..` then `key=value`
+//! settings, each written only when not the default, so a list that does not use a newer setting
+//! still reads in older builds, which refuse unknown keys. Names with spaces are double-quoted;
+//! [`Captions::check`] refuses a quote inside one.
+
+use std::sync::LazyLock;
 
 use super::caption_text::{ENTRY_SEP, PAIR_SEP};
 use super::{Animation, Captions, Case, CensorStyle, ExistingClips, Layout, Replace};
 
+/// One setting of the line: its name, its part of [`help`], how it is written (`None`: left out,
+/// against `d`, the default) and how it is read. Every key is here only, so the comment, the
+/// writer and the reader cannot disagree.
+struct Key {
+    name: &'static str,
+    help: &'static str,
+    /// The limits lead the line, in table order, before every other key.
+    head: bool,
+    write: fn(c: &Captions, d: &Captions) -> Option<String>,
+    read: fn(c: &mut Captions, v: &str) -> Result<(), String>,
+}
+
+/// In the order [`help`] lists them.
+const KEYS: &[Key] = &[
+    Key {
+        name: "chars",
+        help: "chars=<per line>",
+        head: true,
+        write: |c, _| Some(c.chars.to_string()),
+        read: |c, v| set(&mut c.chars, whole(v)),
+    },
+    Key {
+        name: "lines",
+        help: "lines=<per speaker>",
+        head: true,
+        write: |c, _| Some(c.lines.to_string()),
+        read: |c, v| set(&mut c.lines, whole(v)),
+    },
+    Key {
+        name: "seconds",
+        help: "seconds=<longest>",
+        head: true,
+        write: |c, _| Some(c.seconds.to_string()),
+        read: |c, v| set(&mut c.seconds, number(v)),
+    },
+    Key {
+        name: "preview",
+        help: "[preview=on]",
+        head: false,
+        write: |c, _| when_on(c.preview),
+        read: |c, v| set(&mut c.preview, flag(v)),
+    },
+    Key {
+        name: "bold",
+        help: "[bold=on]",
+        head: false,
+        write: |c, _| when_on(c.bold),
+        read: |c, v| set(&mut c.bold, flag(v)),
+    },
+    Key {
+        name: "italic",
+        help: "[italic=on]",
+        head: false,
+        write: |c, _| when_on(c.italic),
+        read: |c, v| set(&mut c.italic, flag(v)),
+    },
+    Key {
+        name: "underline",
+        help: "[underline=on]",
+        head: false,
+        write: |c, _| when_on(c.underline),
+        read: |c, v| set(&mut c.underline, flag(v)),
+    },
+    Key {
+        name: "font",
+        help: "[font=\"..\"]",
+        head: false,
+        write: |c, d| (c.font != d.font).then(|| quoted(&c.font)),
+        read: |c, v| set(&mut c.font, text(v)),
+    },
+    Key {
+        name: "size",
+        help: "[size=<% of height>]",
+        head: false,
+        write: |c, d| (c.size != d.size).then(|| c.size.to_string()),
+        read: |c, v| set(&mut c.size, number(v)),
+    },
+    Key {
+        name: "position",
+        help: "[position=<% from bottom>]",
+        head: false,
+        write: |c, d| (c.position != d.position).then(|| c.position.to_string()),
+        read: |c, v| set(&mut c.position, number(v)),
+    },
+    Key {
+        name: "outline",
+        help: "[outline=off]",
+        head: false,
+        write: |c, d| (c.outline != d.outline).then(|| on_off(c.outline)),
+        read: |c, v| set(&mut c.outline, flag(v)),
+    },
+    Key {
+        name: "outline_width",
+        help: "[outline_width=<1-10>]",
+        head: false,
+        write: |c, d| (c.outline_width != d.outline_width).then(|| c.outline_width.to_string()),
+        read: |c, v| set(&mut c.outline_width, whole(v)),
+    },
+    Key {
+        name: "outline_color",
+        help: "[outline_color=#RRGGBB]",
+        head: false,
+        write: |c, d| (c.outline_color != d.outline_color).then(|| c.outline_color.clone()),
+        read: |c, v| {
+            c.outline_color = super::parse_color(v).ok_or("expected a colour like #000000")?;
+            Ok(())
+        },
+    },
+    Key {
+        name: "layout",
+        help: "[layout=stacked|side|topBottom]",
+        head: false,
+        write: |c, d| (c.layout != d.layout).then(|| c.layout.word().into()),
+        read: |c, v| {
+            c.layout = Layout::from_word(v).ok_or("expected stacked, side or topBottom")?;
+            Ok(())
+        },
+    },
+    Key {
+        name: "protagonist",
+        help: "[protagonist=\"<speaker>\"]",
+        head: false,
+        write: |c, d| (c.protagonist != d.protagonist).then(|| quoted(&c.protagonist)),
+        read: |c, v| set(&mut c.protagonist, text(v)),
+    },
+    Key {
+        name: "template",
+        help: "[template=\"<Resolve title>\"]",
+        head: false,
+        write: |c, d| (c.template != d.template).then(|| quoted(&c.template)),
+        read: |c, v| set(&mut c.template, text(v)),
+    },
+    Key {
+        name: "keep_look",
+        help: "[keep_look=on]",
+        head: false,
+        write: |c, _| when_on(c.keep_look),
+        read: |c, v| set(&mut c.keep_look, flag(v)),
+    },
+    Key {
+        name: "existing_clips",
+        help: "[existing_clips=replace|skip|newTrack]",
+        head: false,
+        write: |c, d| {
+            (c.existing_clips != d.existing_clips).then(|| c.existing_clips.word().into())
+        },
+        read: |c, v| {
+            c.existing_clips =
+                ExistingClips::from_word(v).ok_or("expected ask, replace, skip or newTrack")?;
+            Ok(())
+        },
+    },
+    // Listed with the text options, written with the limits it is one of.
+    Key {
+        name: "words",
+        help: "[words=<per speaker>]",
+        head: true,
+        write: |c, _| (c.words != 0).then(|| c.words.to_string()),
+        read: |c, v| set(&mut c.words, whole(v)),
+    },
+    Key {
+        name: "case",
+        help: "[case=upper|lower|title]",
+        head: false,
+        write: |c, d| (c.case != d.case).then(|| c.case.word().into()),
+        read: |c, v| {
+            c.case = Case::from_word(v).ok_or("expected upper, lower or title")?;
+            Ok(())
+        },
+    },
+    Key {
+        name: "punctuation",
+        help: "[punctuation=off]",
+        head: false,
+        write: |c, d| (c.punctuation != d.punctuation).then(|| on_off(c.punctuation)),
+        read: |c, v| set(&mut c.punctuation, flag(v)),
+    },
+    // Entries joined by `|`, a pair's halves by `>`.
+    Key {
+        name: "censor",
+        help: "[censor=\"word|..\"]",
+        head: false,
+        write: |c, _| {
+            (!c.censor.is_empty()).then(|| quoted(&c.censor.join(&ENTRY_SEP.to_string())))
+        },
+        read: |c, v| set(&mut c.censor, Ok(entries(v).map(str::to_string).collect())),
+    },
+    Key {
+        name: "censor_style",
+        help: "[censor_style=whole]",
+        head: false,
+        write: |c, d| (c.censor_style != d.censor_style).then(|| c.censor_style.word().into()),
+        read: |c, v| {
+            c.censor_style = CensorStyle::from_word(v).ok_or("expected middle or whole")?;
+            Ok(())
+        },
+    },
+    Key {
+        name: "replace",
+        help: "[replace=\"from>to|..\"]",
+        head: false,
+        write: |c, _| {
+            let pairs: Vec<String> = c
+                .replace
+                .iter()
+                .map(|r| format!("{}{PAIR_SEP}{}", r.from, r.to))
+                .collect();
+            (!pairs.is_empty()).then(|| quoted(&pairs.join(&ENTRY_SEP.to_string())))
+        },
+        read: |c, v| {
+            c.replace = entries(v)
+                .map(|e| {
+                    let (from, to) = e.split_once(PAIR_SEP).ok_or("expected from>to")?;
+                    Ok(Replace {
+                        from: from.to_string(),
+                        to: to.to_string(),
+                    })
+                })
+                .collect::<Result<_, String>>()?;
+            Ok(())
+        },
+    },
+    Key {
+        name: "translate",
+        help: "[translate=<language code>]",
+        head: false,
+        write: |c, _| (!c.translate.is_empty()).then(|| c.translate.clone()),
+        read: |c, v| set(&mut c.translate, text(v)),
+    },
+    Key {
+        name: "highlight",
+        help: "[highlight=on]",
+        head: false,
+        write: |c, _| when_on(c.highlight),
+        read: |c, v| set(&mut c.highlight, flag(v)),
+    },
+    Key {
+        name: "highlight_color",
+        help: "[highlight_color=#RRGGBB]",
+        head: false,
+        write: |c, _| (!c.highlight_color.is_empty()).then(|| c.highlight_color.clone()),
+        read: |c, v| {
+            c.highlight_color = if v.is_empty() {
+                String::new()
+            } else {
+                super::parse_color(v).ok_or("expected a colour like #FFD400")?
+            };
+            Ok(())
+        },
+    },
+    Key {
+        name: "animation",
+        help: "[animation=fade|pop|slide]",
+        head: false,
+        write: |c, d| (c.animation != d.animation).then(|| c.animation.word().into()),
+        read: |c, v| {
+            c.animation = Animation::from_word(v).ok_or("expected none, fade, pop or slide")?;
+            Ok(())
+        },
+    },
+    Key {
+        name: "animation_length",
+        help: "[animation_length=<seconds>]",
+        head: false,
+        write: |c, d| {
+            (c.animation_length != d.animation_length).then(|| c.animation_length.to_string())
+        },
+        read: |c, v| set(&mut c.animation_length, number(v)),
+    },
+];
+
 /// The comment line written above it.
-pub const HELP: &str =
-    "# captions <on|off> chars=<per line> lines=<per speaker> seconds=<longest> \
-     [preview=on] [bold=on] [italic=on] [underline=on] [font=\"..\"] [size=<% of height>] \
-     [position=<% from bottom>] [outline=off] [outline_width=<1-10>] [outline_color=#RRGGBB] \
-     [layout=stacked|side|topBottom] [protagonist=\"<speaker>\"] [template=\"<Resolve title>\"] [keep_look=on] \
-     [existing_clips=replace|skip|newTrack] \
-     [words=<per speaker>] [case=upper|lower|title] [punctuation=off] [censor=\"word|..\"] \
-     [censor_style=whole] [replace=\"from>to|..\"] [translate=<language code>] [highlight=on] \
-     [highlight_color=#RRGGBB] [animation=fade|pop|slide] [animation_length=<seconds>]";
+pub fn help() -> &'static str {
+    static HELP: LazyLock<String> = LazyLock::new(|| {
+        let keys: Vec<&str> = KEYS.iter().map(|k| k.help).collect();
+        format!("# captions <on|off> {}", keys.join(" "))
+    });
+    &HELP
+}
 
 pub fn write(c: &Captions) -> String {
     let d = Captions::default();
-    let mut out = format!(
-        "captions {} chars={} lines={} seconds={}",
-        if c.on { "on" } else { "off" },
-        c.chars,
-        c.lines,
-        c.seconds
-    );
-    // 5i's word limit only when set.
-    if c.words != 0 {
-        out.push_str(&format!(" words={}", c.words));
-    }
-    // 5d's switches and 5f's underline only when on.
-    for (k, on) in [
-        ("preview", c.preview),
-        ("bold", c.bold),
-        ("italic", c.italic),
-        ("underline", c.underline),
-    ] {
-        if on {
-            out.push_str(&format!(" {k}=on"));
+    let mut out = format!("captions {}", on_off(c.on));
+    let (head, rest): (Vec<&Key>, Vec<&Key>) = KEYS.iter().partition(|k| k.head);
+    for k in head.into_iter().chain(rest) {
+        if let Some(v) = (k.write)(c, &d) {
+            out.push_str(&format!(" {}={v}", k.name));
         }
     }
-    // 5g's look only when not the default.
-    let mut put = |differs: bool, kv: String| {
-        if differs {
-            out.push(' ');
-            out.push_str(&kv);
-        }
-    };
-    put(c.font != d.font, format!("font=\"{}\"", c.font));
-    put(c.size != d.size, format!("size={}", c.size));
-    put(c.position != d.position, format!("position={}", c.position));
-    put(
-        c.outline != d.outline,
-        format!("outline={}", if c.outline { "on" } else { "off" }),
-    );
-    put(
-        c.outline_width != d.outline_width,
-        format!("outline_width={}", c.outline_width),
-    );
-    put(
-        c.outline_color != d.outline_color,
-        format!("outline_color={}", c.outline_color),
-    );
-    put(c.layout != d.layout, format!("layout={}", c.layout.word()));
-    put(
-        c.protagonist != d.protagonist,
-        format!("protagonist=\"{}\"", c.protagonist),
-    );
-    put(
-        c.template != d.template,
-        format!("template=\"{}\"", c.template),
-    );
-    // 5m's switch only when on.
-    put(c.keep_look, "keep_look=on".to_string());
-    // 5n's remembered choice only when there is one.
-    put(
-        c.existing_clips != d.existing_clips,
-        format!("existing_clips={}", c.existing_clips.word()),
-    );
-    // 5j's text options likewise; entries joined by `|`, a pair's halves by `>`.
-    put(c.case != d.case, format!("case={}", c.case.word()));
-    put(
-        c.punctuation != d.punctuation,
-        format!("punctuation={}", if c.punctuation { "on" } else { "off" }),
-    );
-    put(
-        !c.censor.is_empty(),
-        format!("censor=\"{}\"", c.censor.join(&ENTRY_SEP.to_string())),
-    );
-    put(
-        c.censor_style != d.censor_style,
-        format!("censor_style={}", c.censor_style.word()),
-    );
-    let pairs: Vec<String> = c
-        .replace
-        .iter()
-        .map(|r| format!("{}{PAIR_SEP}{}", r.from, r.to))
-        .collect();
-    put(
-        !pairs.is_empty(),
-        format!("replace=\"{}\"", pairs.join(&ENTRY_SEP.to_string())),
-    );
-    // 5k's translation only when set.
-    put(
-        !c.translate.is_empty(),
-        format!("translate={}", c.translate),
-    );
-    // 5l's highlight and animation likewise.
-    put(
-        c.highlight,
-        format!("highlight={}", if c.highlight { "on" } else { "off" }),
-    );
-    put(
-        !c.highlight_color.is_empty(),
-        format!("highlight_color={}", c.highlight_color),
-    );
-    put(
-        c.animation != d.animation,
-        format!("animation={}", c.animation.word()),
-    );
-    put(
-        c.animation_length != d.animation_length,
-        format!("animation_length={}", c.animation_length),
-    );
     out
-}
-
-/// A `|`-joined list, its empty entries dropped (so `censor=""` is none).
-fn entries(v: &str) -> impl Iterator<Item = &str> {
-    v.split(ENTRY_SEP).filter(|e| !e.trim().is_empty())
 }
 
 /// The line after `captions `.
@@ -144,78 +311,58 @@ pub fn parse(rest: &str) -> Result<Captions, String> {
     };
     for kv in parts {
         let (k, v) = kv.split_once('=').ok_or("expected key=value")?;
-        let whole = || {
-            v.parse::<u32>()
-                .map_err(|_| "not a whole number".to_string())
-        };
-        let number = || v.parse::<f64>().map_err(|_| "not a number".to_string());
-        let flag = || match v {
-            "on" => Ok(true),
-            "off" => Ok(false),
-            _ => Err("expected on or off".to_string()),
-        };
-        match k {
-            "chars" => c.chars = whole()?,
-            "lines" => c.lines = whole()?,
-            "words" => c.words = whole()?,
-            "seconds" => c.seconds = number()?,
-            "preview" => c.preview = flag()?,
-            "bold" => c.bold = flag()?,
-            "italic" => c.italic = flag()?,
-            "underline" => c.underline = flag()?,
-            "font" => c.font = v.to_string(),
-            "size" => c.size = number()?,
-            "position" => c.position = number()?,
-            "outline" => c.outline = flag()?,
-            "outline_width" => c.outline_width = whole()?,
-            "outline_color" => {
-                c.outline_color = super::parse_color(v).ok_or("expected a colour like #000000")?;
-            }
-            "layout" => {
-                c.layout = Layout::from_word(v).ok_or("expected stacked, side or topBottom")?;
-            }
-            "protagonist" => c.protagonist = v.to_string(),
-            "template" => c.template = v.to_string(),
-            "keep_look" => c.keep_look = flag()?,
-            "existing_clips" => {
-                c.existing_clips =
-                    ExistingClips::from_word(v).ok_or("expected ask, replace, skip or newTrack")?;
-            }
-            "case" => c.case = Case::from_word(v).ok_or("expected upper, lower or title")?,
-            "punctuation" => c.punctuation = flag()?,
-            "censor" => c.censor = entries(v).map(str::to_string).collect(),
-            "censor_style" => {
-                c.censor_style = CensorStyle::from_word(v).ok_or("expected middle or whole")?;
-            }
-            "replace" => {
-                c.replace = entries(v)
-                    .map(|e| {
-                        let (from, to) = e.split_once(PAIR_SEP).ok_or("expected from>to")?;
-                        Ok(Replace {
-                            from: from.to_string(),
-                            to: to.to_string(),
-                        })
-                    })
-                    .collect::<Result<_, String>>()?;
-            }
-            "translate" => c.translate = v.to_string(),
-            "highlight" => c.highlight = flag()?,
-            "highlight_color" => {
-                c.highlight_color = if v.is_empty() {
-                    String::new()
-                } else {
-                    super::parse_color(v).ok_or("expected a colour like #FFD400")?
-                };
-            }
-            "animation" => {
-                c.animation = Animation::from_word(v).ok_or("expected none, fade, pop or slide")?;
-            }
-            "animation_length" => c.animation_length = number()?,
-            _ => return Err("unknown caption setting".into()),
-        }
+        let key = KEYS
+            .iter()
+            .find(|key| key.name == k)
+            .ok_or("unknown caption setting")?;
+        (key.read)(&mut c, v)?;
     }
     c.check()?;
     Ok(c)
+}
+
+/// `field` set to `v` once it reads.
+fn set<T>(field: &mut T, v: Result<T, String>) -> Result<(), String> {
+    *field = v?;
+    Ok(())
+}
+
+fn text(v: &str) -> Result<String, String> {
+    Ok(v.to_string())
+}
+
+fn on_off(on: bool) -> String {
+    if on { "on" } else { "off" }.to_string()
+}
+
+/// A switch that is off unless set: written only when on.
+fn when_on(on: bool) -> Option<String> {
+    on.then(|| "on".to_string())
+}
+
+fn quoted(v: &str) -> String {
+    format!("\"{v}\"")
+}
+
+fn whole(v: &str) -> Result<u32, String> {
+    v.parse().map_err(|_| "not a whole number".to_string())
+}
+
+fn number(v: &str) -> Result<f64, String> {
+    v.parse().map_err(|_| "not a number".to_string())
+}
+
+fn flag(v: &str) -> Result<bool, String> {
+    match v {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => Err("expected on or off".to_string()),
+    }
+}
+
+/// A `|`-joined list, its empty entries dropped (so `censor=""` is none).
+fn entries(v: &str) -> impl Iterator<Item = &str> {
+    v.split(ENTRY_SEP).filter(|e| !e.trim().is_empty())
 }
 
 /// Splits on spaces outside double quotes, dropping the quotes: `font="Open Sans"` is one token,
@@ -253,214 +400,4 @@ fn tokens(s: &str) -> Result<Vec<String>, String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn quoted_values_keep_their_spaces() {
-        assert_eq!(
-            tokens(r#"on font="Open Sans"  protagonist="" x=1"#).unwrap(),
-            ["on", "font=Open Sans", "protagonist=", "x=1"]
-        );
-        assert!(tokens(r#"on font="Open"#).is_err());
-    }
-
-    #[test]
-    fn the_look_round_trips_and_defaults_are_not_written() {
-        assert_eq!(
-            write(&Captions::default()),
-            "captions off chars=42 lines=2 seconds=6"
-        );
-        let c = Captions {
-            on: true,
-            font: "Noto Sans".into(),
-            size: 6.5,
-            position: 10.0,
-            outline: false,
-            outline_width: 4,
-            outline_color: "#202020".into(),
-            layout: Layout::TopBottom,
-            protagonist: "Ana María".into(),
-            template: "My Title".into(),
-            ..Default::default()
-        };
-        let line = write(&c);
-        assert_eq!(
-            line,
-            "captions on chars=42 lines=2 seconds=6 font=\"Noto Sans\" size=6.5 position=10 \
-             outline=off outline_width=4 outline_color=#202020 layout=topBottom \
-             protagonist=\"Ana María\" template=\"My Title\""
-        );
-        assert_eq!(parse(line.strip_prefix("captions ").unwrap()).unwrap(), c);
-    }
-
-    #[test]
-    fn the_word_limit_is_written_only_when_set() {
-        let c = Captions {
-            on: true,
-            words: 1,
-            ..Default::default()
-        };
-        let line = write(&c);
-        assert_eq!(line, "captions on chars=42 lines=2 seconds=6 words=1");
-        assert_eq!(parse(line.strip_prefix("captions ").unwrap()).unwrap(), c);
-        assert_eq!(parse("on words=0").unwrap().words, 0);
-        for bad in ["on words=21", "on words=-1", "on words=two"] {
-            assert!(parse(bad).is_err(), "{bad}");
-        }
-    }
-
-    #[test]
-    fn the_text_options_round_trip_and_defaults_are_not_written() {
-        let c = Captions {
-            on: true,
-            case: Case::Title,
-            punctuation: false,
-            censor: vec!["damn".into(), "what the heck".into()],
-            censor_style: CensorStyle::Whole,
-            replace: vec![
-                Replace {
-                    from: "gonna".into(),
-                    to: "going to".into(),
-                },
-                Replace {
-                    from: "um".into(),
-                    to: String::new(),
-                },
-            ],
-            ..Default::default()
-        };
-        let line = write(&c);
-        assert_eq!(
-            line,
-            "captions on chars=42 lines=2 seconds=6 case=title punctuation=off \
-             censor=\"damn|what the heck\" censor_style=whole replace=\"gonna>going to|um>\""
-        );
-        assert_eq!(parse(line.strip_prefix("captions ").unwrap()).unwrap(), c);
-        assert!(parse("on censor=\"\"").unwrap().censor.is_empty());
-        assert_eq!(parse("on case=asSpoken").unwrap().case, Case::AsSpoken);
-        for bad in [
-            "on case=shout",
-            "on punctuation=no",
-            "on censor_style=all",
-            "on replace=gonna",
-            "on replace=\">x\"",
-            "on censor=\"...\"",
-        ] {
-            assert!(parse(bad).is_err(), "{bad}");
-        }
-    }
-
-    #[test]
-    fn the_translation_is_written_only_when_set() {
-        let c = Captions {
-            on: true,
-            translate: "fr".into(),
-            ..Default::default()
-        };
-        let line = write(&c);
-        assert_eq!(line, "captions on chars=42 lines=2 seconds=6 translate=fr");
-        assert_eq!(parse(line.strip_prefix("captions ").unwrap()).unwrap(), c);
-        assert_eq!(parse("on translate=").unwrap().translate, "");
-        assert!(parse("on translate=xx").is_err());
-    }
-
-    #[test]
-    fn the_highlight_and_animation_are_written_only_when_set() {
-        let c = Captions {
-            on: true,
-            highlight: true,
-            highlight_color: "#00FF00".into(),
-            animation: Animation::Pop,
-            animation_length: 0.35,
-            ..Default::default()
-        };
-        let line = write(&c);
-        assert_eq!(
-            line,
-            "captions on chars=42 lines=2 seconds=6 highlight=on highlight_color=#00FF00 \
-             animation=pop animation_length=0.35"
-        );
-        assert_eq!(parse(line.strip_prefix("captions ").unwrap()).unwrap(), c);
-        let off = parse("on highlight=off animation=none highlight_color=").unwrap();
-        assert!(!off.highlight && off.highlight_color.is_empty());
-        for bad in [
-            "on highlight=yes",
-            "on highlight_color=green",
-            "on animation=spin",
-            "on animation_length=3",
-            "on animation_length=quick",
-        ] {
-            assert!(parse(bad).is_err(), "{bad}");
-        }
-    }
-
-    #[test]
-    fn keeping_the_templates_look_is_written_only_when_on() {
-        let c = Captions {
-            on: true,
-            template: "My Title".into(),
-            keep_look: true,
-            ..Default::default()
-        };
-        let line = write(&c);
-        assert_eq!(
-            line,
-            "captions on chars=42 lines=2 seconds=6 template=\"My Title\" keep_look=on"
-        );
-        assert_eq!(parse(line.strip_prefix("captions ").unwrap()).unwrap(), c);
-        assert!(!parse("on keep_look=off").unwrap().keep_look);
-        assert!(parse("on keep_look=yes").is_err());
-    }
-
-    #[test]
-    fn a_remembered_choice_for_clips_in_the_way_is_written_only_when_there_is_one() {
-        // 5n: asking (the default) is not written, so a list that never chose reads in 5m.
-        let ask = Captions {
-            on: true,
-            ..Default::default()
-        };
-        assert!(!write(&ask).contains("existing_clips"));
-        for (choice, word) in [
-            (ExistingClips::Replace, "replace"),
-            (ExistingClips::Skip, "skip"),
-            (ExistingClips::NewTrack, "newTrack"),
-        ] {
-            let c = Captions {
-                existing_clips: choice,
-                ..ask.clone()
-            };
-            let line = write(&c);
-            assert_eq!(
-                line,
-                format!("captions on chars=42 lines=2 seconds=6 existing_clips={word}")
-            );
-            assert_eq!(parse(line.strip_prefix("captions ").unwrap()).unwrap(), c);
-        }
-        assert_eq!(
-            parse("on existing_clips=ask").unwrap().existing_clips,
-            ExistingClips::Ask
-        );
-        assert!(parse("on existing_clips=overwrite").is_err());
-        assert!(parse("on existing_clips=new_track").is_err());
-    }
-
-    #[test]
-    fn bad_look_settings_are_refused() {
-        for bad in [
-            "on size=1",
-            "on size=big",
-            "on position=60",
-            "on outline=yes",
-            "on outline_width=0",
-            "on outline_color=black",
-            "on layout=diagonal",
-            "on font=\"\"",
-            "on font=\"Open",
-        ] {
-            assert!(parse(bad).is_err(), "{bad}");
-        }
-        // A bare one-word font needs no quotes.
-        assert_eq!(parse("off font=Arial").unwrap().font, "Arial");
-    }
-}
+mod tests;

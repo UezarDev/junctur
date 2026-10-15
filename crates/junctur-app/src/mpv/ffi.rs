@@ -1,9 +1,7 @@
-//! The slice of libmpv's C API the app uses, resolved by name from `libmpv-2.dll` at runtime.
-//!
-//! Loaded rather than linked so `cargo build/test/clippy` never need the DLL or an import library:
-//! a clean checkout builds before `scripts/fetch-libmpv.ps1` has run, and a missing DLL becomes an
-//! error the window can show instead of an exe that will not start. Values mirror `client.h`
-//! (API 2.x), `render.h` and `render_gl.h`.
+//! The slice of libmpv's C API the app uses, resolved by name from `libmpv-2.dll` at runtime, so a
+//! clean checkout builds before `scripts/fetch-libmpv.ps1` has run and a missing DLL is an error
+//! the window can show instead of an exe that will not start. Values mirror `client.h` (API 2.x),
+//! `render.h` and `render_gl.h`.
 
 use std::ffi::{c_char, c_double, c_int, c_void};
 use std::path::Path;

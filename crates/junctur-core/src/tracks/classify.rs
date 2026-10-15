@@ -5,8 +5,8 @@ use super::{LogicalTrack, Sameness};
 use crate::ffmpeg::ANALYSIS_RATE;
 use crate::signal::{self, Activity};
 
-/// Mean level below which a non-silent track counts as "faint". The faint second track of the
-/// 3-track recording sits near -70 dB; the main mix near -35 dB.
+/// Mean level below which a non-silent track counts as "faint": faint tracks sit near -70 dB, a
+/// main mix near -35 dB.
 pub const FAINT_MEAN_DB: f64 = -55.0;
 /// Correlation at or above which two non-identical tracks count as the same source (encoder noise,
 /// a slightly different gain stage).
@@ -33,36 +33,9 @@ pub fn classify_with(
         .map(|s| signal::activity(s, ANALYSIS_RATE))
         .collect();
 
-    // 1. Duplicates: exact first, then near. Each track is compared with each group's first member.
-    let mut groups: Vec<(Vec<usize>, Sameness)> = Vec::new();
-    for (i, s) in samples.iter().enumerate() {
-        let mut placed = false;
-        for (members, same) in groups.iter_mut() {
-            let rep = members[0];
-            if signal::identical(&samples[rep], s) {
-                members.push(i);
-                if *same == Sameness::Single {
-                    *same = Sameness::Exact;
-                }
-                placed = true;
-                break;
-            }
-            let close = signal::correlation(&samples[rep], s)
-                .is_some_and(|c| c >= NEAR_DUPLICATE_CORR)
-                && (acts[rep].mean_db - acts[i].mean_db).abs() <= NEAR_DUPLICATE_DB;
-            if close {
-                members.push(i);
-                *same = Sameness::Near;
-                placed = true;
-                break;
-            }
-        }
-        if !placed {
-            groups.push((vec![i], Sameness::Single));
-        }
-    }
+    let groups = group_duplicates(samples, &acts);
 
-    // 2. Roles.
+    // Roles, one per group.
     let audible: Vec<usize> = (0..groups.len())
         .filter(|&g| !acts[groups[g].0[0]].silent)
         .collect();
@@ -77,18 +50,7 @@ pub fn classify_with(
         .map(|(g, (members, sameness))| {
             let rep = members[0];
             let a = acts[rep].clone();
-            let mut reasons = Vec::new();
-            if members.len() > 1 {
-                let kind = if *sameness == Sameness::Exact {
-                    "identical"
-                } else {
-                    "near-identical"
-                };
-                reasons.push(format!(
-                    "{} tracks are {kind} copies; analysed once",
-                    members.len()
-                ));
-            }
+            let mut reasons: Vec<String> = copies(members.len(), *sameness).into_iter().collect();
             let speech = if a.silent {
                 None
             } else {
@@ -116,6 +78,49 @@ pub fn classify_with(
             }
         })
         .collect()
+}
+
+/// Tracks grouped as copies of one another: exact first, then near. Each track is compared with
+/// each group's first member.
+fn group_duplicates(samples: &[Vec<f32>], acts: &[Activity]) -> Vec<(Vec<usize>, Sameness)> {
+    let mut groups: Vec<(Vec<usize>, Sameness)> = Vec::new();
+    for (i, s) in samples.iter().enumerate() {
+        let mut placed = false;
+        for (members, same) in groups.iter_mut() {
+            let rep = members[0];
+            if signal::identical(&samples[rep], s) {
+                members.push(i);
+                if *same == Sameness::Single {
+                    *same = Sameness::Exact;
+                }
+                placed = true;
+                break;
+            }
+            let close = signal::correlation(&samples[rep], s)
+                .is_some_and(|c| c >= NEAR_DUPLICATE_CORR)
+                && (acts[rep].mean_db - acts[i].mean_db).abs() <= NEAR_DUPLICATE_DB;
+            if close {
+                members.push(i);
+                *same = Sameness::Near;
+                placed = true;
+                break;
+            }
+        }
+        if !placed {
+            groups.push((vec![i], Sameness::Single));
+        }
+    }
+    groups
+}
+
+/// The reason a group of `n` copies gives, when it has more than one track.
+fn copies(n: usize, sameness: Sameness) -> Option<String> {
+    let kind = if sameness == Sameness::Exact {
+        "identical"
+    } else {
+        "near-identical"
+    };
+    (n > 1).then(|| format!("{n} tracks are {kind} copies; analysed once"))
 }
 
 /// Residual of group `g` fitted as a weighted sum of the other audible groups, when there are at

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Flags that take no value.
-const SWITCHES: &[&str] = &[
+pub const SWITCHES: &[&str] = &[
     "--no-cache",
     "--no-speech",
     "--cpu",

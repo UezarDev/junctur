@@ -60,7 +60,7 @@ pub enum Role {
     /// Mic or Discord voice.
     Voice,
     GamePc,
-    /// Reserved: no heuristic in this phase tells music from game audio.
+    /// Reserved: no heuristic yet tells music from game audio.
     Music,
     Silent,
     Unknown,
@@ -120,7 +120,7 @@ pub(crate) fn entry(file: &Path, opts: &AnalyzeOptions) -> Result<PathBuf> {
 
 /// The report an earlier [`analyze`] with `opts`' settings left in the cache, without analysing:
 /// `None` when there is none, or it does not parse. For a caller that only wants the roles if they
-/// are known (the app's player, 2e), where `analyze` would decode the whole file.
+/// are known (the app's player), where `analyze` would decode the whole file.
 pub fn cached(file: &Path, opts: &AnalyzeOptions) -> Option<TrackReport> {
     let bytes = std::fs::read(entry(file, opts).ok()?).ok()?;
     let mut report = serde_json::from_slice::<TrackReport>(&bytes).ok()?;

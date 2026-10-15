@@ -1,15 +1,6 @@
 <script lang="ts">
-  // The captions over the picture while the editor plays (5d): the Captions panel's "Preview
-  // captions" toggle. It shows the cues the SRT export cuts (the `caption_cues` command runs the
-  // same `srt::cues`), not a second cutting of the words here, so what is seen is what Resolve gets,
-  // cue for cue: people talking at once in one caption a speaker per block (5e), each line in its
-  // speaker's colour. Each block sits where the engine places it (5g, `export/layout.rs`: stacked,
-  // side by side or top and bottom, the protagonist kept in place), which is where the Resolve send
-  // puts that speaker's Text+, in the font, size and outline it gets. With 5l's highlight the word
-  // being said is lit as the animated caption lights it in Resolve (from when it is said until the
-  // next one is), and with an animation each caption comes in and goes out as it does there.
-  // Cues are on the edited (output) timeline, so the playhead's output time picks one; while the
-  // whole recording plays, a cut stretch shows none, since it is not in the export.
+  // The captions over the picture while the editor plays: the cues the SRT export cuts, placed where
+  // the engine places them, so what is seen is what Resolve gets, cue for cue.
   import { untrack } from "svelte";
   import * as api from "./api";
   import { animationProgress, animationStyle, captionFace, captionStyle, highlightColors } from "./captionStyle";
@@ -28,17 +19,8 @@
   const captions = $derived(edit?.captions ?? null);
   const on = $derived(!!captions?.preview && !!edit?.editable);
 
-  // The cues, sorted and never overlapping (the export's `settle`), so a binary search finds the one
-  // on screen. Asked again only when something that shapes them changes: the kept ranges, the frame
-  // rate, how cues are cut (with 5i's words per caption), who says what (`speakersKey`: the
-  // turns, which follow a new transcript or a re-hearing), what words say (`fixesKey`: a word
-  // fixed in the transcript, 5h), where blocks go (size, position, layout, protagonist, 5g, and
-  // the picture's shape: side by side, lines are wrapped to the columns' width), and 5j's text
-  // options, which change the words cut, and 5k's translation: its language, and the background
-  // run's progress (`translated`, moved every few dozen sentences and when a run ends, so a long
-  // run does not re-cut the captions every batch).
-  // Font, outline, bold, italic, underline, colours and names are drawn here from the edit state,
-  // so toggling them costs no new cutting of a long transcript.
+  // The cues, sorted and never overlapping, so a binary search finds the one on screen. Asked again
+  // only when something that shapes the cut changes; looks drawn from the edit state need no re-cut.
   // A reply older than a newer request is dropped.
   let translated = $state(0);
   let lastDone = 0;
@@ -57,7 +39,7 @@
     if (!on || !edit || !captions) return null;
     const fps = edit.fps ? `${edit.fps.num}/${edit.fps.den}` : "";
     const aspect = picture.w > 0 ? (picture.h / picture.w).toFixed(3) : "";
-    // The highlight too: the engine only finds the words on the lines with it on (5l).
+    // The highlight too: the engine only finds the words on the lines with it on.
     const place = `${captions.size}|${captions.position}|${captions.layout}|${captions.protagonist}|${aspect}|${captions.highlight}`;
     // JSON for the lists: entries may hold any separator a plain join would use.
     const text = JSON.stringify([
@@ -81,8 +63,7 @@
     }
     const n = ++asked;
     // The aspect itself is read untracked: `shape` already holds it to three decimals, and reading
-    // the picture's size here would ask for a new cut of the whole transcript on every tick of a
-    // window resize that keeps its shape (5q).
+    // the picture's size here would re-cut the whole transcript on every tick of a resize.
     const aspect = untrack(() => (picture.w > 0 ? picture.h / picture.w : 9 / 16));
     api
       .captionCues(aspect)
@@ -116,10 +97,8 @@
 
   type Part = api.Cue["parts"][number];
 
-  /** The word lit at output second `t` (5l), as the animated caption lights it: its highlight is
-   * a stepped spline with a key where each word starts, so a word stays lit until the next one
-   * starts (its own end does not unlight it), the last until the caption ends, and the first is
-   * lit from the caption's start, a spline holding its first key before it. */
+  /** The word lit at output second `t`, as Resolve's stepped highlight spline lights it: lit until
+   * the next word starts, the last until the caption ends, the first from the caption's start. */
   function lit(part: Part, t: number): number | null {
     let w: number | null = part.words.length > 0 ? part.words[0].word : null;
     for (const s of part.words) if (s.start <= t) w = s.word;

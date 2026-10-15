@@ -1,12 +1,36 @@
-//! The frameless window's one native piece (2i): Windows 11's snap layouts.
-//!
-//! The title bar is drawn by the page, and Windows shows its layout flyout only while the pointer
-//! rests on a native maximise button (`HTMAXBUTTON` from `WM_NCHITTEST`). The bar's button lives
-//! inside WebView2's own child window, which takes the pointer before the frame could answer, so
-//! the page asks for the flyout instead when the pointer rests on its maximise button, and this
-//! sends Win+Z, the shell's own shortcut for it. Rejected: subclassing the window to answer
-//! `HTMAXBUTTON` (the WebView's child gets the mouse first), and a native caption strip above the
-//! WebView (painted on its own, splitting the page in two).
+//! The main window: frameless over the video, and its one native piece, Windows 11's snap layouts.
+//! The page's maximise button sits in WebView2's child window, which takes the pointer before the
+//! frame could answer `HTMAXBUTTON`, so the page asks for the flyout and this sends Win+Z.
+
+use tauri::window::Color;
+use tauri::{WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+
+use crate::testmode;
+
+/// The app's dark background (`--panel-solid` in app.css), shown wherever no video is drawn.
+const BACKGROUND: Color = Color(16, 17, 20, 0);
+
+/// Builds the main window, before the player attaches to it. Alpha 0 makes only the WebView
+/// transparent (not `.transparent(true)`, which shows the desktop through). Frameless: the page
+/// draws the title bar. No shadow: its hidden frame made captures of the window come back blank.
+pub fn create(app: &tauri::App, test: bool) -> tauri::Result<WebviewWindow> {
+    let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+        .title("Junctur")
+        .decorations(false)
+        .shadow(false)
+        .inner_size(1280.0, 800.0)
+        .min_inner_size(640.0, 400.0)
+        .background_color(BACKGROUND);
+    if test {
+        // Built hidden and moved before it is shown, so it never flashes on screen.
+        builder = builder.visible(false).focused(false).skip_taskbar(true);
+    }
+    let window = builder.build()?;
+    if test {
+        testmode::place(&window)?;
+    }
+    Ok(window)
+}
 
 /// Opens the snap layouts flyout for `window`, only while it is the foreground window: Win+Z goes
 /// to whichever window has the foreground, never to one the user is not in.

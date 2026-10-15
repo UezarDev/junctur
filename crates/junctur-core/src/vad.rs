@@ -13,6 +13,8 @@ use crate::runtime;
 use crate::Result;
 
 pub const RATE: u32 = 16_000;
+/// A minute of samples: a whole number of frames, so reads of it never split one.
+pub const MINUTE: usize = RATE as usize * 60;
 pub const FRAME: usize = 512;
 const CONTEXT: usize = 64;
 pub const FRAME_SECONDS: f64 = FRAME as f64 / RATE as f64;
@@ -33,7 +35,7 @@ pub struct Region {
 pub struct Vad {
     session: Session,
     /// The model's inputs, made once and written in place frame by frame: a 30 h track is 3.4
-    /// million frames, and building three tensors for each was most of the allocation in VAD.
+    /// million frames, too many to build three tensors for each.
     input: Tensor<f32>,
     state: Tensor<f32>,
     sr: Tensor<i64>,
@@ -96,13 +98,9 @@ pub fn regions(probs: &[f32], offset: f64) -> Vec<Region> {
     if let Some(s) = start {
         raw.push(span(s, probs.len(), offset));
     }
-    let mut merged: Vec<Region> = Vec::new();
-    for r in raw {
-        match merged.last_mut() {
-            Some(last) if r.start - last.end < MIN_GAP_S => last.end = r.end,
-            _ => merged.push(r),
-        }
-    }
+    // The raw spans come from one forward scan, so a joined one's end is the later span's.
+    debug_assert!(raw.windows(2).all(|w| w[0].end <= w[1].start));
+    let mut merged = crate::spans::joined(raw, crate::spans::Join::Within(MIN_GAP_S));
     merged.retain(|r| r.end - r.start >= MIN_SPEECH_S);
     merged
 }
@@ -133,8 +131,9 @@ pub fn normalize(samples: &[f32]) -> Vec<f32> {
     if rms.is_empty() {
         return Vec::new();
     }
-    rms.sort_by(f32::total_cmp);
-    let loud = rms[(rms.len() * 95 / 100).min(rms.len() - 1)];
+    // The one percentile needs only its own place in the order, not a full sort.
+    let at = (rms.len() * 95 / 100).min(rms.len() - 1);
+    let loud = *rms.select_nth_unstable_by(at, f32::total_cmp).1;
     if loud <= 0.0 {
         return samples.to_vec();
     }
@@ -169,6 +168,56 @@ mod tests {
         let r = regions(&p, 10.0);
         assert_eq!(r.len(), 1);
         assert!((r[0].start - (10.0 + FRAME_SECONDS)).abs() < 1e-9);
+    }
+
+    /// The gain from the percentile picked in place is the one sorting every RMS gave, ties and
+    /// silent frames included, so the samples come out bit for bit the same.
+    #[test]
+    fn normalize_matches_the_sorted_percentile() {
+        let sorted = |samples: &[f32]| -> Vec<f32> {
+            let mut rms: Vec<f32> = samples
+                .chunks(FRAME)
+                .map(|c| (c.iter().map(|x| x * x).sum::<f32>() / c.len() as f32).sqrt())
+                .collect();
+            if rms.is_empty() {
+                return Vec::new();
+            }
+            rms.sort_by(f32::total_cmp);
+            let loud = rms[(rms.len() * 95 / 100).min(rms.len() - 1)];
+            if loud <= 0.0 {
+                return samples.to_vec();
+            }
+            let gain = (0.1 / loud).clamp(1.0, 1000.0);
+            samples
+                .iter()
+                .map(|x| (x * gain).clamp(-1.0, 1.0))
+                .collect()
+        };
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        for (len, levels) in [
+            (FRAME * 37 + 5, 3),
+            (FRAME * 100, 1),
+            (FRAME * 20, 7),
+            (7, 2),
+        ] {
+            // Few levels, so many frames share an RMS; every fifth frame silent.
+            let x: Vec<f32> = (0..len)
+                .map(|i| {
+                    let frame = i / FRAME;
+                    if frame.is_multiple_of(5) {
+                        0.0
+                    } else {
+                        let level = ((frame * 7919) % levels + 1) as f32 * 1e-3;
+                        if i.is_multiple_of(2) {
+                            level
+                        } else {
+                            -level
+                        }
+                    }
+                })
+                .collect();
+            assert_eq!(bits(&normalize(&x)), bits(&sorted(&x)), "{len} {levels}");
+        }
     }
 
     #[test]

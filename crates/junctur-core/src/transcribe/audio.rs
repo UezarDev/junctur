@@ -1,12 +1,6 @@
 //! Chunk audio for Whisper: each track decoded once, front to back, on a thread of its own that
-//! hands Whisper one group of chunks at a time.
-//!
-//! One ffmpeg per chunk (1b) seeked into the whole recording for every few seconds of speech:
-//! ~0.3 s to open a 5-track MP4, ~2k times on a 30 h track, with the GPU waiting each time. A cached
-//! 16 kHz file was rejected for disk: 6.9 GB of f32 per 30 h track (16-bit would quantize a Discord
-//! track recorded at -70 dB to a few steps). Read forward from one seek, a chunk's sample `i` is
-//! time `start + i / 16000` on the decoder's timeline to within a sample, where each per-chunk seek
-//! could land differently.
+//! hands Whisper one group of chunks at a time. One seek per track keeps the GPU from waiting on an
+//! ffmpeg start per chunk, and every chunk's sample `i` exactly at `start + i / 16000`.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,13 +20,13 @@ pub struct Group {
 }
 
 /// Audio a language is detected on: Whisper's whole window. A short "sí" alone is a coin toss
-/// between Spanish and English (1f: turbo tagged 16 of 47 short chunks English); 30 s is not.
+/// between Spanish and English; 30 s is not.
 pub const GROUP_AUDIO: f64 = 30.0;
 /// A group never reaches further than this, so a recording that switches language is followed.
 pub const GROUP_SPAN: f64 = 120.0;
 
 /// Group each track's chunks (in time order) for language detection. A group never crosses into
-/// another piece of the recording (2j, [`super::piece`]), so a piece is whole when its last group is.
+/// another piece of the recording ([`super::piece`]), so a piece is whole when its last group is.
 pub fn groups(work: &[(usize, Chunk)]) -> Vec<Group> {
     let mut out: Vec<Group> = Vec::new();
     for &(track, c) in work {
@@ -240,7 +234,7 @@ mod tests {
         // A chunk alone over half the window still gets its own group.
         assert_eq!(groups(&[(0, c(0.0, 28.0)), (0, c(29.0, 57.0))]).len(), 2);
         assert!(groups(&[]).is_empty());
-        // Close in time and short, but on either side of 5:00: two pieces, two groups (2j).
+        // Close in time and short, but on either side of 5:00: two pieces, two groups.
         assert_eq!(
             groups(&[(0, c(290.0, 299.0)), (0, c(300.5, 305.0))]).len(),
             2

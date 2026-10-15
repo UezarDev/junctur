@@ -1,6 +1,6 @@
 <script lang="ts">
-  // A track's Mute or Solo button (2g), shared by the lanes' headers and the portrait strips so
-  // both say and do the same: playback only; mutes are remembered per recording, solos are not.
+  // A track's Mute or Solo button, shared by the lanes' headers and the portrait strips so both
+  // behave alike: playback only; mutes are remembered per recording, solos are not.
   import * as api from "./api";
 
   let {

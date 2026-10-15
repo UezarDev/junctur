@@ -1,21 +1,6 @@
-//! Words the user retimed (2w): a word's start and end where a moved cut edge put them, kept in the
-//! edit list as `time <track> <start>[+<n>] <new start> <new end>` and used wherever a word's time
-//! is (the transcript's kept and cut, the playhead's word, the caption preview, the SRT, the send
-//! to Resolve, the sentences translated).
-//!
-//! The point of moving a cut's edge is to fix a word Whisper timed badly, which the cut then halved:
-//! moving only the cut left the word's own span where Whisper put it, so the next word, now inside
-//! the kept frames by its middle, showed as kept (Uezar: "it seems to be moving just the cut for the
-//! video, not the domain of the word"). So the word moves with the edge, and the transcription stays
-//! as it was: the override is the user's edit, in the edit list beside the text fixes (5h) for the
-//! same reasons (saved with every other edit, kept through re-cuts, backed up), not written into
-//! the transcript, a cache a re-run replaces whole.
-//!
-//! A word is named exactly as a fix names it: its track, its start as Whisper heard it to the
-//! millisecond, and which of that millisecond's words on the track it is (5w). Never by its new
-//! start, which the next move changes, and which the counting of `nth` (in heard order) cannot see.
-//! A module of its own rather than more of `fixes.rs`: a fix is text and is read where text is, an
-//! override is times and is read before a word is placed on the timeline at all.
+//! Words the user retimed by moving a cut's edge, kept in the edit list (not the transcript, a cache
+//! a re-run replaces) as `time <track> <start>[+<n>] <new start> <new end>`. A word is named by its
+//! heard start, as a fix is, never by its new start, which the next move changes.
 
 use std::collections::HashMap;
 
@@ -54,7 +39,7 @@ pub fn to_ms(s: f64) -> f64 {
 
 /// Sets the time of the word heard on `track` at `start` (the `nth` of that millisecond), heard
 /// from `heard.0` to `heard.1`, to `from..to`, all rounded to the millisecond as the list writes
-/// them, so the list in play equals the one read back (2w repair). Its time as heard
+/// them, so the list in play equals the one read back. Its time as heard
 /// again takes the override away. Kept in time order. Whether anything changed. Refused for a span
 /// that does not run forwards: a word's middle is what places it, and a word with none has no place.
 pub fn set_time(
@@ -97,8 +82,8 @@ pub fn set_time(
 }
 
 /// The list's order: by heard start to the millisecond (as written), then track, then which word
-/// of the millisecond: the same order before writing and after reading (2w repair: by the start's
-/// last bits, two tracks' words of one millisecond swapped places on every round trip).
+/// of the millisecond: the same order before writing and after reading (sorting by the start's
+/// last bits would swap two tracks' words of one millisecond on every round trip).
 pub(super) fn sort(times: &mut [Retime]) {
     times.sort_by_key(|t| (millis(t.start), t.track, t.nth));
 }
@@ -198,7 +183,7 @@ mod tests {
 
     #[test]
     fn two_tracks_of_one_millisecond_keep_their_order_through_the_list() {
-        // 2w repair: sorted by the start's last bits, these swapped places on each round trip.
+        // Sorted by the start's last bits, these would swap places on each round trip.
         let mut t = vec![
             Retime {
                 track: 1,
@@ -221,7 +206,7 @@ mod tests {
 
     #[test]
     fn words_of_one_millisecond_are_told_apart_and_tracks_counted_apart() {
-        // As fixes are (5w): "en" and "él" at one start, another track's word between.
+        // As fixes are: "en" and "él" at one start, another track's word between.
         let t = vec![Retime {
             track: 0,
             start: 54.944,

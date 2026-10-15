@@ -90,8 +90,8 @@ pub struct PacketTime {
     pub key: bool,
 }
 
-/// The first video stream's packets in decode order. One pass over the packet index (~7 s for
-/// 1h45 of 1080p30); packets without a time are skipped.
+/// The first video stream's packets in decode order, in one pass over the packet index; packets
+/// without a time are skipped.
 pub fn video_packets(file: &Path) -> Result<Vec<PacketTime>> {
     let out = ffprobe(
         file,

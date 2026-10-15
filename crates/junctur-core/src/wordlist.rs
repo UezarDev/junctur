@@ -1,12 +1,8 @@
-//! The user's word list (5h): names and recurring terms Whisper is told before every chunk it hears,
-//! so they come out spelled the user's way. One list for every recording, kept in `config.json`
-//! ([`crate::config::Config::words`]); the app's Settings edits it and a word fixed in a transcript
-//! joins it at the top ([`learned`], [`add_first`]): when the list is longer than Whisper's prompt
-//! the first entries win, so the word just fixed is one Whisper is told.
-//!
-//! A module of its own so the rules (what an entry is, what a fix adds, how a long list is cut to
-//! Whisper's prompt) are one place for the config file, the app and the transcriber, and testable
-//! without a model.
+//! The user's word list: names and terms Whisper is told before every chunk, so they come out
+//! spelled the user's way. The rules (what an entry is, what a fix adds, how a long list is cut to
+//! the prompt) live here once for the config file, the app and the transcriber.
+
+use crate::text::bare;
 
 /// Longest entry kept, in characters: a name or a short phrase, not a paragraph.
 pub const MAX_ENTRY: usize = 100;
@@ -15,12 +11,7 @@ pub const MAX_ENTRY: usize = 100;
 /// line break would split it in Settings) as spaces, runs of space as one, at most [`MAX_ENTRY`]
 /// characters; `None` when nothing is left.
 pub fn entry(raw: &str) -> Option<String> {
-    let spaced: String = raw
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
-    let joined = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
-    let cut: String = joined.chars().take(MAX_ENTRY).collect();
+    let cut: String = crate::text::squeezed(raw).chars().take(MAX_ENTRY).collect();
     let cut = cut.trim_end().to_string();
     (!cut.is_empty()).then_some(cut)
 }
@@ -50,11 +41,6 @@ pub fn add_first(list: &mut Vec<String>, raw: &str) -> bool {
     }
 }
 
-/// `s` without the punctuation around it (`"Uezar,"` is the name `Uezar`).
-fn bare(s: &str) -> &str {
-    s.trim_matches(|c: char| !c.is_alphanumeric())
-}
-
 /// What a word fixed from `heard` to `fixed` adds to the list: the fixed spelling without the
 /// punctuation around it; `None` when that is empty or the fix only changes the punctuation around
 /// what was heard. A change of case is learned: a name heard in lower case (`tsunheto`) is the
@@ -67,12 +53,9 @@ pub fn learned(heard: &str, fixed: &str) -> Option<String> {
     entry(new)
 }
 
-/// What a run of words heard as `heard` and retyped as `fixed` adds to the list (5x): each word of
-/// the new text not among the heard words, compared as [`learned`] compares one (without the
-/// punctuation around it, case kept), in the order typed, each once. A word that starts a sentence
-/// (the first, or one after `.`, `?` or `!`) and differs from a heard word only in case is the
-/// sentence's capital, not a name, and adds nothing. A sentence whose words only moved, or only
-/// changed punctuation, adds nothing.
+/// What a run of words heard as `heard` and retyped as `fixed` adds to the list: each new word not
+/// among the heard ones (compared as [`learned`] does), in the order typed, each once. A sentence's
+/// capital (a heard word recased at a sentence start) is not a name and adds nothing.
 pub fn learned_all(heard: &str, fixed: &str) -> Vec<String> {
     let was: Vec<&str> = heard.split_whitespace().map(bare).collect();
     let mut out: Vec<String> = Vec::new();
@@ -95,7 +78,7 @@ pub fn learned_all(heard: &str, fixed: &str) -> Vec<String> {
     out
 }
 
-/// The words a recording's transcript heard, as a fix's new words are compared with them (5aa): each
+/// The words a recording's transcript heard, as a fix's new words are compared with them: each
 /// without the punctuation around it, lower-cased ([`crate::edit::likeness`]). A fix teaches the word
 /// list only words the recording never heard: a retyped sentence's common words ("went", "home") would
 /// otherwise push the names out of Whisper's ~223-token prompt ([`prompt`] keeps the first entries).
@@ -124,7 +107,7 @@ impl Heard {
 }
 
 /// [`learned`], for a word of a recording that heard `recording`: the spelling only when it has a word
-/// the recording never heard, or when it changes nothing but the heard word's case (5h's name heard in
+/// the recording never heard, or when it changes nothing but the heard word's case (a name heard in
 /// lower case, `tsunheto` to `Tsunheto`: heard, but not as the user spells it).
 pub fn learned_in(heard: &str, fixed: &str, recording: &Heard) -> Option<String> {
     let e = learned(heard, fixed)?;
@@ -184,116 +167,4 @@ pub fn prompt(list: &[String], budget: usize, tokens: impl Fn(&str) -> usize) ->
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn list(words: &[&str]) -> Vec<String> {
-        words.iter().map(|w| w.to_string()).collect()
-    }
-
-    #[test]
-    fn entries_are_trimmed_cleaned_and_never_repeated() {
-        assert_eq!(entry("  Tsun\u{0}heto \n"), Some("Tsun heto".into()));
-        assert_eq!(entry(" \t"), None);
-        assert_eq!(entry(&"a".repeat(150)).unwrap().chars().count(), MAX_ENTRY);
-        assert_eq!(
-            normalize(&list(&["Uezar", " ", "Delay", "Uezar ", "uezar"])),
-            list(&["Uezar", "Delay", "uezar"])
-        );
-        let mut l = list(&["Uezar"]);
-        assert!(!add_first(&mut l, " Uezar"));
-        assert!(add_first(&mut l, "Tsunheto"));
-        assert!(!add_first(&mut l, "   "));
-        assert_eq!(l, list(&["Tsunheto", "Uezar"]), "a new word goes first");
-        // So it reaches Whisper even when the list is full: a later fix is told, the oldest is cut.
-        let chars = |s: &str| s.chars().count();
-        assert!(add_first(&mut l, "Delay"));
-        let p = prompt(&l, 15, chars);
-        assert_eq!(p.text, "Delay, Tsunheto");
-        assert_eq!(p.left_out, list(&["Uezar"]));
-    }
-
-    #[test]
-    fn a_retyped_sentence_adds_its_new_words_in_order() {
-        // 5x: every word not heard, once, in the order typed.
-        assert_eq!(
-            learned_all("the wezar went hom", "Uezar went home, Uezar!"),
-            ["Uezar", "home"]
-        );
-        // A sentence's capital is not a name; a name's capital is.
-        assert_eq!(learned_all("so tsunheto", "So, Tsunheto."), ["Tsunheto"]);
-        assert!(learned_all("ok. so? yes", "Ok. So? Yes").is_empty());
-        assert_eq!(learned_all("ok. so", "ok so Ok"), ["Ok"]);
-        assert!(learned_all("hola amigos", "amigos, hola.").is_empty());
-        assert!(learned_all("eh eh", "... !").is_empty());
-    }
-
-    #[test]
-    fn a_fix_teaches_only_words_the_recording_never_heard() {
-        // 5aa: a retyped sentence's common words stay out of the list, names go in.
-        let rec = Heard::new([
-            " the",
-            " Wezar,",
-            " went",
-            " home.",
-            " tsunheto",
-            " del",
-            " ay",
-        ]);
-        assert_eq!(
-            learned_all_in("the wezar went hom", "Uezar went home, Uezar!", &rec),
-            ["Uezar"]
-        );
-        // A name heard in lower case is still learned with its capital, in a sentence or alone.
-        assert_eq!(
-            learned_all_in("so tsunheto", "So, Tsunheto.", &rec),
-            ["Tsunheto"]
-        );
-        assert_eq!(
-            learned_in("tsunheto", "Tsunheto", &rec),
-            Some("Tsunheto".into())
-        );
-        // One word fixed to a word heard elsewhere teaches nothing; to a new one, it does.
-        assert_eq!(learned_in("hom", "home", &rec), None);
-        assert_eq!(learned_in("Bane,", "Vayne,", &rec), Some("Vayne".into()));
-        // A phrase is new when any of its words is.
-        assert_eq!(learned_in("delay", "Del Ay", &rec), None);
-        assert_eq!(learned_in("delay", "Del Rey", &rec), Some("Del Rey".into()));
-    }
-
-    #[test]
-    fn a_fix_adds_its_spelling_not_its_punctuation_or_case() {
-        assert_eq!(learned("Wezar,", "Uezar,"), Some("Uezar".into()));
-        assert_eq!(learned("tsun eto", "Tsunheto."), Some("Tsunheto".into()));
-        assert_eq!(
-            learned("tsunheto", "Tsunheto"),
-            Some("Tsunheto".into()),
-            "case"
-        );
-        assert_eq!(learned("Uezar", "Uezar."), None, "punctuation only");
-        assert_eq!(learned(" Uezar,", "Uezar"), None, "punctuation only");
-        assert_eq!(learned("eh", "..."), None, "nothing left");
-        assert_eq!(learned("del ay", "Delay"), Some("Delay".into()));
-    }
-
-    #[test]
-    fn a_long_list_keeps_its_first_entries_that_fit() {
-        // One token per character, for the test.
-        let chars = |s: &str| s.chars().count();
-        let l = list(&["Uezar", "Delay", "Tsunheto", "Junctur"]);
-        let p = prompt(&l, 100, chars);
-        assert_eq!(p.text, "Uezar, Delay, Tsunheto, Junctur");
-        assert_eq!((p.kept, p.left_out.len()), (4, 0));
-        // "Uezar, Delay" is 12; with ", Tsunheto" 22.
-        let p = prompt(&l, 21, chars);
-        assert_eq!(p.text, "Uezar, Delay");
-        assert_eq!(p.left_out, list(&["Tsunheto", "Junctur"]));
-        // A later short entry does not jump the queue: the order is fixed.
-        let p = prompt(&list(&["Uezar", "Tsunheto", "Ok"]), 13, chars);
-        assert_eq!((p.text.as_str(), p.kept), ("Uezar", 1));
-        // Nothing fits, or nothing to say.
-        assert_eq!(prompt(&l, 3, chars).text, "");
-        assert_eq!(prompt(&[], 100, chars).kept, 0);
-        assert_eq!(prompt(&list(&[" ", "\n"]), 100, chars).text, "");
-    }
-}
+mod tests;

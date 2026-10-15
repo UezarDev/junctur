@@ -1,17 +1,6 @@
-//! Captions in another language than the one spoken (5k), made on this machine.
-//!
-//! What is translated is caption text, a sentence at a time ([`crate::export::srt::sentences`]: the
-//! kept words of one speaker up to a sentence end, a pause or a word limit), never the audio and
-//! never the transcript: the translated words are spread over the time their sentence was said, so
-//! timing, speakers and cuts carry over, and the transcript and the edit list keep the words as
-//! spoken. Rejected: Whisper's own translate task, which only writes English and is a decoding of
-//! the audio, so it would mean transcribing the recording a second time, its words not the
-//! transcript's ones the cuts are made on.
-//!
-//! One local model for every pair of languages, run through ONNX Runtime like the speech models
-//! ([`model`]), fetched on first use. Translations are kept in the project folder ([`cache`]) and
-//! made in [`run`], which the CLI calls before writing captions and the app runs in the background;
-//! cue cutting only looks them up, so the preview never waits on the model.
+//! Captions translated on this machine, a caption sentence at a time over the time it was said, so
+//! timing, speakers and cuts carry over (not the audio: cuts are made on the transcript's words).
+//! Made ahead in [`run`] and kept in [`cache`]; cue cutting only looks them up, never waiting.
 
 mod cache;
 mod languages;
@@ -57,21 +46,14 @@ pub struct Done {
 /// preview picks it up.
 const SAVE_EVERY: Duration = Duration::from_secs(3);
 
-/// Sentences decoded together ([`model::Model::translate_batch`]): measured on CPU, 8 at a time
-/// take 0.29 s a sentence against 1.21 s one by one.
+/// Sentences decoded together ([`model::Model::translate_batch`]): on CPU about four times faster a
+/// sentence than one by one.
 const BATCH: usize = 8;
 
-/// Translates into `to` every sentence of `sentences` the project's translations lack (or hold
-/// from another language than it is heard in now), saving them in `project` as it goes.
-/// `segments` (the transcript's) say which language each was said in. `progress` hears `(done, to
-/// do)` as sentences are done; `stop` set ends it after the batch in hand, or a model download
-/// under way. The model is opened only when a sentence needs it. What was done is saved even when
-/// the model fails part way.
-///
-/// Only what is known is kept: a sentence whose language cannot be told (no segment on its track)
-/// and one the model gives nothing usable for, even on a second try, are left untranslated and
-/// counted ([`Done::unknown`], [`Done::failed`]), so a later run tries them again. A translations
-/// file that is there but does not read is an error, never written over.
+/// Translates into `to` every sentence the project's translations lack (or hold from another
+/// language than `segments` now say it was heard in), saving as it goes, even when the model fails.
+/// `stop` ends it after the batch in hand; sentences of unknown language or failed twice are left
+/// for a later run ([`Done::unknown`], [`Done::failed`]). An unreadable translations file errors.
 pub fn run(
     project: &Path,
     cache_dir: &Path,
@@ -98,11 +80,12 @@ pub fn run(
     // Each sentence still needing it once, with the language it was said in.
     let mut seen = std::collections::HashSet::new();
     let mut todo: Vec<(&str, &str)> = Vec::new();
+    let languages = Spoken::new(segments);
     for s in sentences {
         if !seen.insert(s.text.as_str()) {
             continue;
         }
-        match spoken(segments, s.track, s.start) {
+        match languages.at(s.track, s.start) {
             None if cache.get(to, &s.text).is_none() => done.unknown += 1,
             None => {}
             Some(heard) if cache.needs(heard, to, &s.text) => todo.push((s.text.as_str(), heard)),
@@ -127,9 +110,15 @@ pub fn run(
     }
     // Like lengths together, so a batch pads little.
     work.sort_by_key(|(text, _)| text.len());
-    let result = translate(
-        &mut cache, cache_dir, project, to, &work, &mut done, total, progress, stop,
-    );
+    let shared = Batches {
+        cache_dir,
+        project,
+        to,
+        total,
+        progress,
+        stop,
+    };
+    let result = translate(&mut cache, &work, &mut done, shared);
     if total > 0 {
         cache.save(project)?;
     }
@@ -142,20 +131,33 @@ pub fn run(
     }
 }
 
-/// The batches of [`run`], into `cache`; each row the model failed is tried again alone, with
-/// the loop guard, after the batches.
-#[allow(clippy::too_many_arguments)]
+/// What every batch of a [`run`] shares: where the model and the translations are kept, the
+/// language translated into, how many sentences the run has, and its progress and stop.
+struct Batches<'a> {
+    cache_dir: &'a Path,
+    project: &'a Path,
+    to: &'a str,
+    total: usize,
+    progress: &'a mut dyn FnMut(usize, usize),
+    stop: &'a AtomicBool,
+}
+
+/// The batches of [`run`] over `work`, into `cache`; each row the model failed is tried again
+/// alone, with the loop guard, after the batches.
 fn translate(
     cache: &mut Translations,
-    cache_dir: &Path,
-    project: &Path,
-    to: &str,
     work: &[(&str, &str)],
     done: &mut Done,
-    total: usize,
-    progress: &mut dyn FnMut(usize, usize),
-    stop: &AtomicBool,
+    shared: Batches,
 ) -> Result<()> {
+    let Batches {
+        cache_dir,
+        project,
+        to,
+        total,
+        progress,
+        stop,
+    } = shared;
     let mut model: Option<model::Model> = None;
     let mut saved = Instant::now();
     let mut again: Vec<(&str, &str)> = Vec::new();
@@ -210,6 +212,76 @@ pub fn spoken(segments: &[Segment], track: usize, t: f64) -> Option<&str> {
         .map(|s| s.lang.as_str())
 }
 
+/// [`spoken`] for many sentences: each track's segments in transcript order, answered by binary
+/// search when their starts and ends never go down (a transcript's normally do not), else by
+/// scanning that track's segments.
+pub struct Spoken<'a> {
+    tracks: std::collections::HashMap<usize, Track<'a>>,
+}
+
+struct Track<'a> {
+    segments: Vec<&'a Segment>,
+    sorted: bool,
+}
+
+impl<'a> Spoken<'a> {
+    pub fn new(segments: &'a [Segment]) -> Self {
+        let mut tracks: std::collections::HashMap<usize, Track> = Default::default();
+        for s in segments {
+            tracks
+                .entry(s.track)
+                .or_insert_with(|| Track {
+                    segments: Vec::new(),
+                    sorted: true,
+                })
+                .segments
+                .push(s);
+        }
+        for t in tracks.values_mut() {
+            t.sorted = t
+                .segments
+                .windows(2)
+                .all(|w| w[0].start <= w[1].start && w[0].end <= w[1].end)
+                && t.segments
+                    .iter()
+                    .all(|s| !s.start.is_nan() && !s.end.is_nan());
+        }
+        Self { tracks }
+    }
+
+    /// What [`spoken`] says for `track` at `t`.
+    pub fn at(&self, track: usize, t: f64) -> Option<&'a str> {
+        let tr = self.tracks.get(&track)?;
+        let seg = &tr.segments;
+        if !tr.sorted || t.is_nan() {
+            return seg
+                .iter()
+                .min_by(|a, b| distance(a, t).total_cmp(&distance(b, t)))
+                .map(|s| s.lang.as_str());
+        }
+        // Before `p` every segment starts at or before `t`, so is `max(0, t - end)` away, which
+        // never grows with the index: the least is the last one's, first reached at `q`. From
+        // `p` on the distance never shrinks, so `p` is the nearest there. Ties go to the earlier.
+        let p = seg.partition_point(|s| s.start <= t);
+        let before = p.checked_sub(1).map(|last| {
+            let d = distance(seg[last], t);
+            (seg[..p].partition_point(|s| distance(s, t) > d), d)
+        });
+        let after = seg.get(p).map(|s| (p, distance(s, t)));
+        let best = match (before, after) {
+            (Some(b), Some(a)) => {
+                if a.1 < b.1 {
+                    a
+                } else {
+                    b
+                }
+            }
+            (b, a) => b.or(a)?,
+        };
+        Some(seg[best.0].lang.as_str())
+    }
+}
+
 fn distance(s: &Segment, t: f64) -> f64 {
     if t < s.start {
         s.start - t
@@ -221,152 +293,4 @@ fn distance(s: &Segment, t: f64) -> f64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn seg(track: usize, start: f64, end: f64, lang: &str) -> Segment {
-        Segment {
-            track,
-            start,
-            end,
-            lang: lang.into(),
-            model: String::new(),
-            words: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn a_sentence_takes_its_segments_language() {
-        let s = [
-            seg(0, 0.0, 10.0, "es"),
-            seg(0, 10.0, 20.0, "en"),
-            seg(1, 0.0, 30.0, "fr"),
-        ];
-        assert_eq!(spoken(&s, 0, 5.0), Some("es"));
-        assert_eq!(spoken(&s, 0, 15.0), Some("en"));
-        assert_eq!(spoken(&s, 0, 25.0), Some("en"), "nearest");
-        assert_eq!(spoken(&s, 1, 5.0), Some("fr"));
-        assert_eq!(spoken(&s, 2, 5.0), None);
-    }
-
-    #[test]
-    fn sentences_already_in_the_target_language_are_kept_without_the_model() {
-        let d = std::env::temp_dir().join(format!("junctur-tr-run-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        let segments = [seg(0, 0.0, 10.0, "en"), seg(0, 10.0, 20.0, "haw")];
-        let sentences = [
-            Sentence {
-                track: 0,
-                start: 1.0,
-                text: "Hello there.".into(),
-            },
-            Sentence {
-                track: 0,
-                start: 12.0,
-                text: "Aloha.".into(),
-            },
-            Sentence {
-                track: 0,
-                start: 2.0,
-                text: "Hello there.".into(),
-            },
-            // No segment on its track: its language is not known, so it is not kept.
-            Sentence {
-                track: 1,
-                start: 2.0,
-                text: "Who?".into(),
-            },
-        ];
-        let mut seen = Vec::new();
-        // A cache dir with no model in it: opening the model would fail the run.
-        let none = d.join("no-models");
-        let done = run(
-            &d,
-            &none,
-            "en",
-            &sentences,
-            &segments,
-            &mut |a, b| seen.push((a, b)),
-            &AtomicBool::new(false),
-        )
-        .unwrap();
-        assert_eq!(
-            done,
-            Done {
-                kept: 2,
-                unknown: 1,
-                ..Done::default()
-            }
-        );
-        assert_eq!(seen, [(0, 2), (2, 2)]);
-        let t = Translations::load(&d);
-        assert_eq!(t.get("en", "Aloha."), Some("Aloha."));
-        assert_eq!(t.get("en", "Who?"), None);
-        // Nothing left: a second run does nothing.
-        let again = run(
-            &d,
-            &none,
-            "en",
-            &sentences,
-            &segments,
-            &mut |_, _| {},
-            &AtomicBool::new(false),
-        )
-        .unwrap();
-        assert_eq!(
-            again,
-            Done {
-                unknown: 1,
-                ..Done::default()
-            }
-        );
-        // A transcript that read as nothing is an error, not every sentence kept as said.
-        assert!(run(
-            &d,
-            &none,
-            "fr",
-            &sentences,
-            &[],
-            &mut |_, _| {},
-            &AtomicBool::new(false)
-        )
-        .is_err());
-        // Stopped before the first: nothing done, nothing opened.
-        let stopped = run(
-            &d,
-            &none,
-            "fr",
-            &sentences,
-            &segments,
-            &mut |_, _| {},
-            &AtomicBool::new(true),
-        )
-        .unwrap();
-        assert!(stopped.cancelled && stopped.translated == 0);
-        // A translations file that does not read is an error, and left as it is.
-        std::fs::write(d.join(cache::FILE), "{").unwrap();
-        assert!(run(
-            &d,
-            &none,
-            "en",
-            &sentences,
-            &segments,
-            &mut |_, _| {},
-            &AtomicBool::new(false)
-        )
-        .is_err());
-        assert_eq!(std::fs::read_to_string(d.join(cache::FILE)).unwrap(), "{");
-        assert!(run(
-            &d,
-            &none,
-            "xx",
-            &[],
-            &[],
-            &mut |_, _| {},
-            &AtomicBool::new(false)
-        )
-        .is_err());
-        let _ = std::fs::remove_dir_all(&d);
-    }
-}
+mod tests;

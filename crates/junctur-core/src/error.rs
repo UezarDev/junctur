@@ -20,7 +20,7 @@ pub enum Error {
     Download(String),
     /// ONNX Runtime refused to load or run a model.
     Model(String),
-    /// The user stopped it (a model download for a cancelled translation, 5k).
+    /// The user stopped it (e.g. a model download for a cancelled translation).
     Cancelled,
     /// An edit list that cannot be read, or a stage asked for before its inputs exist.
     Edit(String),

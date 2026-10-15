@@ -1,15 +1,8 @@
-// The page is never reloaded by hand (2q). WebView2's browser keys (F5, Ctrl+R, Ctrl+Shift+R) and
-// its default context menu's Refresh reloaded it: the app went on (mpv playing, the recording open)
-// while the page started over, and before 2q it came back with an empty Transcript and Properties.
-// A page that reloads anyway (a dev build's Vite, a crash) reattaches to the open recording
-// (App.svelte `reattach`). Turning WebView2's browser keys off instead is not reachable from Tauri
-// 2.12, and would take F12 / Ctrl+Shift+I, the dev build's DevTools, with them; those stay.
+// The page is never reloaded by hand: the app goes on (mpv playing, the recording open) while the
+// page starts over. Tauri cannot turn WebView2's browser keys off without losing DevTools' F12 too.
 
-/** A key that reloads the page in WebView2: F5 with any modifier, Ctrl (Cmd) + R with or without
- * Shift, and a keyboard's own Refresh key. R is the letter (`key`), as WebView2 reloads on Windows'
- * virtual key, which follows the layout: on Dvorak or Colemak the letter R is not on the physical
- * R key (`code` KeyR). The physical key too, for layouts with no Latin letters (Russian's "к" sits
- * there, and Windows still calls it VK_R). */
+/** A key that reloads the page in WebView2: F5, Ctrl (Cmd) + R with or without Shift, and Refresh.
+ * R is checked as the letter (`key`, for Dvorak) and as the physical key (non-Latin layouts). */
 export function reloads(e: Pick<KeyboardEvent, "code" | "key" | "ctrlKey" | "metaKey" | "altKey">): boolean {
   if (e.code === "F5" || e.key === "F5" || e.code === "BrowserRefresh" || e.key === "BrowserRefresh") return true;
   return (e.ctrlKey || e.metaKey) && !e.altKey && (e.key.toLowerCase() === "r" || e.code === "KeyR");

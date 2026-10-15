@@ -9,10 +9,10 @@ use serde::{Deserialize, Serialize};
 pub const FRAME_SECONDS: f64 = 0.1;
 /// dBFS reported for digital silence instead of -inf.
 pub const FLOOR_DB: f64 = -120.0;
-/// A frame below this is "near-silent". -45 dB is the line the 2026-10-09 file survey used.
+/// A frame below this is "near-silent".
 pub const NEAR_SILENT_DB: f64 = -45.0;
-/// A track whose loudest frame stays below this is treated as silent and dropped. The silent
-/// third track of the 3-track recording measured -91 dB; real faint audio peaks far above this.
+/// A track whose loudest frame stays below this is treated as silent and dropped; real faint audio
+/// peaks far above it.
 pub const SILENT_PEAK_DB: f64 = -80.0;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -90,11 +90,8 @@ fn mean(a: &[f32]) -> f64 {
 }
 
 /// How well `target` is explained as a weighted sum of `parts` (least squares, zero lag).
-/// Returns the residual energy as a share of the target's energy (near 0 means the fit is exact)
-/// and the fitted weights. None when the system is degenerate (silent target or parts).
-///
-/// The weights matter: when A = B + C, B = A - C fits just as exactly, so a caller deciding which
-/// track is the mix must also require non-negative weights.
+/// Returns the residual energy share of the target (near 0: exact) and the weights; None when
+/// degenerate. As B = A - C fits as exactly as A = B + C, finding the mix needs weights >= 0.
 pub fn sum_fit(target: &[f32], parts: &[&[f32]]) -> Option<(f64, Vec<f64>)> {
     let k = parts.len();
     let n = parts.iter().map(|p| p.len()).chain([target.len()]).min()?;

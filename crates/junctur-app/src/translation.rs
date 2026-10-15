@@ -1,12 +1,6 @@
-//! Translating the open recording's captions in the background (5k): the model takes about a
-//! quarter of a second a sentence on the CPU, so a long recording takes minutes to an hour, which
-//! must never hold up the editor. One run at a time, on its own thread, saving as it goes
-//! (`translate::run`), its progress sent to the page as [`EVENT`] and cancellable; the preview
-//! shows what is translated so far, and an export or a send waits for all of it
-//! (`export::untranslated`).
-//!
-//! Its own module because the run outlives the command that started it, as an analysis run does
-//! (`analysis.rs`), but needs none of that lane's queueing: a new run replaces the one going.
+//! Translating the open recording's captions in the background, since a long recording takes
+//! minutes to an hour: one cancellable run at a time on its own thread, its progress sent as
+//! [`EVENT`]. Its own module because the run outlives its command; a new run replaces the old.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
