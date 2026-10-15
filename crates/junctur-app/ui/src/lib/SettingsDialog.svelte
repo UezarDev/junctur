@@ -163,7 +163,7 @@
 
       <Section
         title="Smart keep"
-        info="Laya, a decision model, reads every part of a recording against the kind of video you describe (Properties, Smart keep) and suggests what to keep; nothing is applied until you accept. Out of the box its choices are weak: it improves from your decisions. The first use fetches about 680 MB of model."
+        info="Talk stays as the cut leaves it; a silent stretch with a moment busier than the recording usually is (its game audio, or the fight labels) is suggested as a keep, whole, more or fewer as the kind of video you describe asks (Properties, Smart keep). Nothing is applied until you accept, and nothing is downloaded."
       >
         <Field
           label="Judge every analysed recording"

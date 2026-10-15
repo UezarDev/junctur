@@ -1,14 +1,14 @@
-//! Smart keep in the app (phase 3b): what the Properties section and the Suggestions lane show of
-//! Laya's judgement of a recording, the user's answers turned into edits of the list in play, and
-//! Laya's judging run on a thread of its own. A module because the view gathers from five files
-//! of the project and the run outlives its command.
+//! Smart keep in the app (phases 3b and 3d): what the Properties section and the Suggestions lane
+//! show of the rules' suggested keeps for a recording, the user's answers turned into edits of the
+//! list in play, and the keep run on a thread of its own. A module because the view gathers from
+//! four files of the project and the run outlives its command.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use junctur_core::config;
 use junctur_core::edit::{frames_ceil, frames_floor};
-use junctur_core::keep::{self, Fit, Item, ItemState, Summary};
+use junctur_core::keep::{self, rules, Item, ItemState, Summary};
 use junctur_core::pipeline::{self, Project, StageName, StageState};
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +16,7 @@ use crate::analysis::Editing;
 use crate::lock::lock;
 use crate::player::Core;
 
-/// The event a judging run's progress is sent as.
+/// The event a keep run's progress is sent as.
 pub const EVENT: &str = "keep";
 
 #[derive(Debug, Clone, Serialize)]
@@ -25,7 +25,7 @@ pub struct Preset {
     pub prompt: &'static str,
 }
 
-/// Where the latest judging run is.
+/// Where the latest keep run is.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Run {
@@ -47,19 +47,23 @@ pub struct KeepView {
     /// Smart keep is on in Settings: a recording without a prompt is judged with the last one.
     pub on: bool,
     pub presets: Vec<Preset>,
-    /// Laya judges once the transcript is done.
+    /// Smart keep runs once the transcript is done.
     pub transcribed: bool,
-    /// The prompt Laya judged with, and how many parts; `None` before it judged.
+    /// The prompt the rules read, and how many spans they keep; `None` before they ran.
     pub judged_prompt: Option<String>,
     pub parts: usize,
+    /// How that prompt was read ([`rules::Strictness::describe`]).
+    pub reading: Option<String>,
+    /// Smart keep's file is an old run's (another prompt, smart keep off, or the last run failed):
+    /// none of it is shown ([`pipeline::judged_now`], 3e).
+    pub outdated: bool,
     pub items: Vec<Item>,
     pub summary: Summary,
-    pub fit: Fit,
-    /// The judging run, when it is this recording's.
+    /// The keep run, when it is this recording's.
     pub run: Option<Run>,
 }
 
-/// One judging run at a time, whichever recording: Laya holds a GPU's gigabyte while it runs.
+/// One keep run at a time, whichever recording: a run may decode a recording's game track.
 #[derive(Default)]
 pub struct Judging {
     run: Arc<Mutex<Run>>,
@@ -72,7 +76,7 @@ impl Judging {
         (Path::new(&r.file) == file).then_some(r)
     }
 
-    /// Judges `file` with `prompt` on a thread of its own, `editing` held so no analysis of it
+    /// Runs smart keep on `file` with `prompt` on a thread of its own, `editing` held so no analysis of it
     /// starts meanwhile; `notify` hears every line and the end. Refused while another run is on.
     pub fn start(
         &self,
@@ -85,7 +89,9 @@ impl Judging {
         let first = {
             let mut r = lock(&self.run);
             if r.running {
-                return Err("Laya is judging another recording: wait for it to finish".into());
+                return Err(
+                    "smart keep is reading another recording: wait for it to finish".into(),
+                );
             }
             *r = Run {
                 file: file.display().to_string(),
@@ -114,7 +120,7 @@ impl Judging {
                     tell(&|r| r.line = Some(line.to_string()));
                 })
             }))
-            .unwrap_or_else(|_| Err("Laya stopped on an internal error".into()));
+            .unwrap_or_else(|_| Err("smart keep stopped on an internal error".into()));
             tell(&|r| {
                 r.running = false;
                 r.error = result.as_ref().err().cloned();
@@ -153,15 +159,9 @@ pub fn set_prompt(file: &Path, cache_dir: Option<PathBuf>, prompt: &str) -> Resu
     Ok(())
 }
 
-/// What `file`'s project says now. Collects its pairs as the list and the answers stand
-/// ([`pipeline::learn`]), so a hand edit counts the next time the page reads this, which it does
-/// after every edit.
-pub fn view(
-    file: &Path,
-    cache_dir: Option<PathBuf>,
-    run: Option<Run>,
-    pairs: Option<&Path>,
-) -> Result<KeepView, String> {
+/// What `file`'s project says now: read again after every edit, so a hand edit stops a suggestion
+/// at once.
+pub fn view(file: &Path, cache_dir: Option<PathBuf>, run: Option<Run>) -> Result<KeepView, String> {
     let p = Project::open(file, cache_dir, None).map_err(|e| e.to_string())?;
     let choices = keep::load_choices(&p.dir).map_err(|e| e.to_string())?;
     let settings = config::load().map(|c| c.keep).unwrap_or_default();
@@ -180,29 +180,29 @@ pub fn view(
         transcribed,
         judged_prompt: None,
         parts: 0,
+        reading: None,
+        outdated: false,
         items: Vec::new(),
         summary: Summary::default(),
-        fit: Fit::default(),
         run,
     };
-    let (Some(judged), Ok(list)) = (keep::load(&p.dir), p.edit()) else {
+    let Ok(list) = p.edit() else {
         return Ok(v);
     };
-    let s = pipeline::standing(&p, &judged, &list, &choices, pairs, &mut |l: &str| say(l));
-    v.judged_prompt = Some(judged.prompt.clone());
+    let Some(judged) = pipeline::judged_now(&p, &choices, &settings) else {
+        v.outdated = keep::load(&p.dir).is_some();
+        return Ok(v);
+    };
+    let s = pipeline::standing(&p, &judged, &list, &choices);
+    v.reading = Some(rules::Strictness::read(&judged.prompt).describe());
+    v.judged_prompt = Some(judged.prompt);
     v.parts = judged.parts.len();
     v.items = s.items;
     v.summary = s.summary;
-    v.fit = s.fit;
     Ok(v)
 }
 
-/// A log line of [`pipeline::standing`]'s, on the app's stderr.
-fn say(line: &str) {
-    eprintln!("junctur-app {line}");
-}
-
-/// What the user does with Laya's suggestions.
+/// What the user does with smart keep's suggestions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Action {
@@ -225,16 +225,16 @@ pub fn answer(
     cache_dir: Option<PathBuf>,
     action: Action,
     at: Option<(f64, f64)>,
-    pairs: Option<&Path>,
 ) -> Result<(), String> {
     let path = file.ok_or("no recording is open")?;
     let p = Project::open(Path::new(path), cache_dir, None).map_err(|e| e.to_string())?;
     let mut choices = keep::load_choices(&p.dir).map_err(|e| e.to_string())?;
-    let judged = keep::load(&p.dir).ok_or("Laya has not judged this recording")?;
+    let settings = config::load().map(|c| c.keep).unwrap_or_default();
+    let judged = pipeline::judged_now(&p, &choices, &settings)
+        .ok_or("smart keep has no suggestions for this recording's prompt: judge it again")?;
     let list = p.edit().map_err(|e| e.to_string())?;
     // As the lane was shown them: Accept all takes exactly these.
-    let pipeline::Standing { auto, items, .. } =
-        pipeline::standing(&p, &judged, &list, &choices, pairs, &mut |l: &str| say(l));
+    let pipeline::Standing { auto, items, .. } = pipeline::standing(&p, &judged, &list, &choices);
     let now = list.keep.as_slice();
     let near =
         |i: &&Item| at.is_some_and(|(a, b)| (i.start - a).abs() < 1e-3 && (i.end - b).abs() < 1e-3);

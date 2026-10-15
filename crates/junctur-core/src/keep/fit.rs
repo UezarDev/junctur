@@ -10,14 +10,18 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::laya::p_keep;
-
 /// Fewer pairs, or fewer of either answer, keep the defaults: two numbers from a handful of
 /// decisions would swing with every click.
 pub const MIN_PAIRS: usize = 20;
 pub const MIN_EACH: usize = 5;
 /// "Uncertain": a calibrated chance this close to one half.
 pub const UNCERTAIN: f64 = 0.1;
+
+/// The sigmoid of `margin` at temperature `t`: Laya's chance a part stays, or how sure the rules are
+/// of a stretch. Here, not in `laya`, so the rules read margins without reaching into Laya (3e).
+pub fn p_keep(margin: f64, t: f64) -> f64 {
+    1.0 / (1.0 + (-margin / t).exp())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Fit {

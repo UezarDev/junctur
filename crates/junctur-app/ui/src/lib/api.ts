@@ -315,14 +315,17 @@ export interface Labels {
   pieces: LabelledPiece[];
 }
 
-/** A part Laya would do otherwise than the edit list (junctur-core keep::Item). */
+/** A part smart keep would do otherwise than the edit list (junctur-core keep::Item). */
 export interface KeepItem {
   start: number;
   end: number;
   kind: "talk" | "silent";
-  /** The calibrated chance it stays. */
+  /**
+   * How sure smart keep is, 0.5 to 0.98: from the rules, how far the stretch's best moment stands above
+   * the best one left out, not a chance it stays (3e). Read through `uncertain`.
+   */
   p: number;
-  /** Laya's choice: keep it, or cut it. */
+  /** Its choice: keep it, or cut it (the rules only ever suggest keeps). */
   keep: boolean;
   /** Near one half: Review's "Uncertain" goes through these. */
   uncertain: boolean;
@@ -330,7 +333,7 @@ export interface KeepItem {
   state: "suggested" | "accepted";
 }
 
-/** Laya's judging run (src/smartkeep.rs). */
+/** Smart keep's run (src/smartkeep.rs). */
 export interface KeepRun {
   file: string;
   running: boolean;
@@ -338,7 +341,7 @@ export interface KeepRun {
   error: string | null;
 }
 
-/** Smart keep for a recording: its prompt, Laya's suggestions and what it has learnt. */
+/** Smart keep for a recording: its prompt and its suggestions. */
 export interface KeepView {
   /** The recording's own prompt, and the last one set on any (offered when it has none). */
   prompt: string | null;
@@ -346,13 +349,15 @@ export interface KeepView {
   on: boolean;
   presets: { name: string; prompt: string }[];
   transcribed: boolean;
-  /** The prompt Laya judged with; null before it judged. */
+  /** The prompt smart keep read; null before it ran. */
   judgedPrompt: string | null;
   parts: number;
   items: KeepItem[];
   summary: { cut: number; cutS: number; keep: number; keepS: number; uncertain: number; accepted: number };
-  /** Laya's own chance where the decision turns, its temperature, and the decisions they come from. */
-  fit: { temperature: number; cutoff: number; turn: number; pairs: number };
+  /** How that prompt was read: how strict, how much of the silence. */
+  reading: string | null;
+  /** Smart keep's last suggestions are an old run's (another prompt, off, or it failed): none shown. */
+  outdated: boolean;
   run: KeepRun | null;
 }
 
@@ -735,11 +740,11 @@ export const saveSettings = (settings: Settings) => invoke<SettingsView>("save_s
 /** The Captions panel's "Save as default". */
 export const saveCaptionDefaults = (captions: Captions) =>
   invoke<SettingsView>("save_caption_defaults", { captions });
-/** Smart keep for `path`: its prompt, Laya's suggestions, the fit and the judging run. */
+/** Smart keep for `path`: its prompt, its suggestions and its run. */
 export const keepView = (path: string) => invoke<KeepView>("keep_view", { path });
 /** Keeps `prompt` as `path`'s own (and as the last one), without judging. */
 export const keepPrompt = (path: string, prompt: string) => invoke<void>("keep_prompt", { path, prompt });
-/** Keeps `prompt` as `path`'s and has Laya judge it in the background (`onKeep` tells how far). */
+/** Keeps `prompt` as `path`'s and runs smart keep on it in the background (`onKeep` tells how far). */
 export const keepJudge = (path: string, prompt: string) => invoke<KeepRun>("keep_judge", { path, prompt });
 /** Accepts every suggestion, or accepts, dismisses or undoes the part `start` to `end`. */
 export const keepAnswer = (action: KeepAction, start?: number, end?: number) =>

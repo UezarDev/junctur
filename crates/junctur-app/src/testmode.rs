@@ -260,9 +260,8 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
         Action::Edit(step) => return edit(&|e| e.edit(e.file(), *step)),
         Action::KeepAll => {
             return edit(&|e| {
-                let pairs = junctur_core::keep::pairs_path();
                 let all = crate::smartkeep::Action::AcceptAll;
-                crate::smartkeep::answer(e, e.file(), None, all, None, pairs.as_deref())
+                crate::smartkeep::answer(e, e.file(), None, all, None)
             })
         }
         Action::Rename(id, name) => return edit(&|e| e.rename_speaker(e.file(), *id, name)),

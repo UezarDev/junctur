@@ -26,7 +26,8 @@ pub struct Item {
     pub start: f64,
     pub end: f64,
     pub kind: Kind,
-    /// P(keep) at the fitted temperature.
+    /// Sigmoid of the margin at the fit: Laya's calibrated P(keep), or how sure the rules are (0.5 at
+    /// the line to 0.98 at the top), which is no chance (3e).
     pub p: f64,
     /// Laya's choice: keep (true) or cut.
     pub keep: bool,
@@ -151,6 +152,7 @@ pub fn accept(
             keep: i.keep,
             how: How::Accepted,
             bulk,
+            spans: super::rules::SPANS,
         });
     }
     edits.sort_by_key(|e| e.2);
@@ -165,6 +167,7 @@ pub fn dismiss(item: &Item, choices: &mut Choices) {
         keep: !item.keep,
         how: How::Dismissed,
         bulk: false,
+        spans: super::rules::SPANS,
     });
 }
 

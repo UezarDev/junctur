@@ -17,7 +17,7 @@ export const ROW_MAX = 52;
 export const ROW_THIN = 26;
 /** The Labels lane: one thin row of the silent parts' labels, when the recording has them. */
 export const LABELS_ROW = 18;
-/** The Suggestions lane: Laya's suggested keeps and cuts, when it has judged the recording. */
+/** The Suggestions lane: smart keep's suggested keeps, once it has run on the recording. */
 export const KEEP_ROW = 18;
 const VIDEO_MIN = 120;
 /** What a portrait side area needs to be worth drawing. */
@@ -64,7 +64,7 @@ export interface Input {
   speakers: number;
   /** The recording has labels for its silent parts (a Labels lane). */
   labels?: boolean;
-  /** Laya has judged the recording (a Suggestions lane). */
+  /** Smart keep has run on the recording (a Suggestions lane). */
   keep?: boolean;
 }
 

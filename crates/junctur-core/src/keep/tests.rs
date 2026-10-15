@@ -282,6 +282,7 @@ fn choices_read_back_and_a_broken_file_is_an_error() {
         keep: true,
         how: How::Accepted,
         bulk: true,
+        spans: rules::SPANS,
     });
     c.set(Answer {
         start: 1.0,
@@ -289,8 +290,25 @@ fn choices_read_back_and_a_broken_file_is_an_error() {
         keep: false,
         how: How::Dismissed,
         bulk: false,
+        spans: rules::SPANS,
     });
     assert_eq!(c.answers.len(), 1);
+    // One given to another kind of span (Laya's, 3d's padded windows': none) is kept and not read.
+    c.set(Answer {
+        start: 1.0,
+        end: 2.0,
+        keep: true,
+        how: How::Accepted,
+        bulk: false,
+        spans: 0,
+    });
+    assert_eq!(c.answers.len(), 2);
+    let part = Part {
+        start: 1.0,
+        end: 2.0,
+        kind: Kind::Silent,
+    };
+    assert_eq!(c.answer(&part).map(|a| a.how), Some(How::Dismissed));
     save_choices(&dir, &c).unwrap();
     assert_eq!(load_choices(&dir).unwrap(), c);
     std::fs::write(dir.join(CHOICES), "nope").unwrap();
@@ -380,4 +398,22 @@ fn a_talk_cut_stops_at_a_silent_neighbour_the_user_kept_by_hand() {
         accept(&talk, &j, (&auto, &now), &mut c, false),
         [(10.0, 20.4, false)]
     );
+}
+
+#[test]
+fn only_the_rules_keep_json_is_read_and_a_laya_one_is_none() {
+    let dir = crate::test_support::scratch("keep", "load");
+    // 3b's file: Laya's cuts of talk are never shown again.
+    let (laya_judged, _) = sample();
+    save(&dir, &laya_judged).unwrap();
+    assert_eq!(load(&dir), None);
+    // The rules' file, and one of an older rules version.
+    let mut ruled = judged(&[(0.0, 10.0, Kind::Silent, 2.0)]);
+    ruled.model = rules::NAME.into();
+    ruled.version = rules::VERSION;
+    save(&dir, &ruled).unwrap();
+    assert_eq!(load(&dir), Some(ruled.clone()));
+    ruled.version = rules::VERSION + 1;
+    save(&dir, &ruled).unwrap();
+    assert_eq!(load(&dir), None);
 }

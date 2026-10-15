@@ -54,7 +54,7 @@ junctur separate <file> [--track <n>] [--start <s>] [--duration <s>] [--cpu] [--
 junctur analyze <file> [--project <dir>] [--cpu] [--force] [--no-transcript] [--no-speakers]
                        [--labels] [--keep <prompt>] [--model auto|large-v3-turbo|large-v3|large-v3-q5_0]
                        [cut flags]
-junctur judge <file> [--prompt <prompt>] [--agreement] [--project <dir>] [--cpu] [--force]
+junctur judge <file> [--prompt <prompt>] [--project <dir>]
 junctur status <file> [--project <dir>]
 junctur cut <file> [--project <dir>] [cut flags]
 junctur export <file> [--fcpxml <out.fcpxml>] [--srt <out.srt>] [--project <dir>]
@@ -69,7 +69,7 @@ in the cache unless `--project <dir>` puts it somewhere else, for example a git 
 `analyze` also tells speakers apart (`--no-speakers` skips it): one speaker per speech track when OBS
 recorded the voices on their own tracks, otherwise by voice on the mix (CAM++ embeddings of 1.5 s
 windows, and pyannote's segmentation model for where two people talk at once). Both always run on the
-CPU, as tracks and speech do, also in a CUDA build, where only Whisper, the labels' picture model and Laya
+CPU, as tracks and speech do, also in a CUDA build, where only Whisper and the labels' picture model
 run on the GPU (`junctur separate` still separates on the GPU): on ONNX Runtime's CUDA provider CAM++'s
 embeddings were wrong, and every sentence became its own speaker. They are written into
 `edit.junctur` as `speaker <id> <name>` lines and `turn <start> <end> <id>` lines; turns of two people
@@ -88,20 +88,24 @@ menus, the client and the desktop well, and calls most of a League game "teamfig
 what tells a real fight from walking.
 
 Smart keep is off by default: give a recording a prompt saying what kind of video you are making (the
-app's Properties, `analyze --keep "<prompt>"`, or `judge --prompt`), or turn it on (`"keep": {"on": true}`,
-Settings) to judge every analysed recording with the last prompt used. Laya, a decision model (Convai
-Innovations' laya-multilingual, fp16 on ONNX Runtime), reads each part of the recording (the talk between
-the silent stretches, cut at its pauses into pieces of at most 30 s, with who says what; each silent piece
-with its labels and busy score) and the talk around it, and gives the chance it should stay. That chance
-goes into the edit list's score windows, the parts it would keep or cut otherwise than the list does are
-shown as suggestions (the app's Suggestions lane, Accept all, accept, dismiss or undo one, Review the
-uncertain ones), and nothing is applied until you accept it; a part you edited yourself is never
-suggested. Every answer and every hand edit of a part is kept as a pair in `keep_pairs.json` beside the
-config file, and the cutoff and temperature are fitted to them once there are 20. It runs after Whisper and
-judges again only the parts whose words, labels or prompt changed: about 11 s for the 1h45 sample on an RTX
-3060 (3.6 s to open), 1.2 GB of GPU memory, and a 680 MB download the first time. Out of the box its
-choices are weak (the phase's first test agreed with a hand-edited list no better than chance); `junctur
-judge --agreement` says how well it agrees with yours.
+app's Properties, `analyze --keep "<prompt>"` (with or without `--no-transcript`), or `judge --prompt`), or turn it on (`"keep": {"on": true}`,
+Settings) to run it on every analysed recording with the last prompt used. Talk stays as the automatic cut
+leaves it. The silent stretches are looked at in windows of at most 5 s, each ranked within this recording
+by how busy its game audio is (the game/PC track, else the mix) and by its share of the "fighting" and
+"teamfight" labels when there are labels; a window busier than usual on either counts, and a silent stretch
+holding one is suggested as a keep whole, so a long silence with a fight inside is kept in full. How many
+windows count is read from the prompt's words, in English or Spanish: "podcast", "only the talk" or "solo la
+charla" keep no silence; "highlights", "only the fights", "mejores momentos" the busiest 10%; "dead air",
+"whole stream", "tiempo muerto" the busiest 50%; anything else 25% (plurals read as their phrase; a negation
+such as "not only the fights" is read as its phrase). Windows tied at the line are taken in order, so the
+share holds. The stretches are suggestions (the app's Suggestions lane, Accept all, accept,
+dismiss or undo one, Review the close calls), and nothing is applied until you accept it; a part you edited
+yourself is never suggested. No model and no download: about 6 s for the 1h45 sample, most of it reading
+the game track when the app has not drawn its waveforms. On that sample, with 56 minutes of silence in 455
+stretches, the League preset (read as strict) suggests 67 stretches (587 s), Full VOD minus dead air (loose)
+253 (2275 s), Podcast-style talk none, a prompt with no cue 145 (1443 s). Phase 3b had Laya, a decision
+model, judge every part instead; it judged no better than chance, so smart keep no longer calls it (its
+code stays in the repo).
 
 Voices can be remembered once and recognised in every recording: in the app, select words only one
 person says and choose "Remember voice…", or `junctur voices <file> --add <name> --at 61-75,300-312`
@@ -269,7 +273,7 @@ Downloaded on first use into `<cache>/models/`, checked against pinned SHA-256 d
 | 3D-Speaker CAM++ (VoxCeleb) | speaker embeddings | Apache-2.0 |
 | pyannote segmentation-3.0 (k2-fsa's ONNX export) | overlapping speech | MIT |
 | SigLIP 2 base 224 px (onnx-community's export) | labels for the silent parts | Apache-2.0 |
-| Laya multilingual (Convai Innovations; our fp16 ONNX export, tokenizer from Convai) | smart keep | Apache-2.0 |
+| Laya multilingual (Convai Innovations; our fp16 ONNX export, tokenizer from Convai) | phase 3b's smart keep, no longer called | Apache-2.0 |
 | Whisper large-v3-turbo, large-v3 f16 or 5-bit large-v3, ggml (whisper.cpp) | transcription | MIT |
 
 ## Whisper models

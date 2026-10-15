@@ -1,4 +1,4 @@
-//! One judging run: every part's state built, the parts whose state, question and model were judged
+//! One judging run of Laya's (3b; smart keep runs [`super::rules`] now): every part's state built, the parts whose state, question and model were judged
 //! before taken from `keep.json`, and only the rest given to Laya.
 
 use std::collections::HashMap;
@@ -6,9 +6,9 @@ use std::path::Path;
 
 use super::fit::Fit;
 use super::laya::{self, Laya, Vocab};
-use super::parts::{self, Part};
+use super::parts;
 use super::state::{self, Context, Spoken};
-use super::{load, save, Judged, Judgement};
+use super::{read, save, Judged, Judgement};
 use crate::edit::{Speakers, Window};
 use crate::hash::Fnv;
 use crate::labels::Labels;
@@ -52,7 +52,7 @@ pub fn run(job: &Job, log: &mut dyn FnMut(&str)) -> Result<Judged> {
     let fits = |s: &str| vocab.fits(&head, s).unwrap_or(true);
     let states: Vec<String> = parts.iter().map(|p| state::fitted(&c, p, &fits)).collect();
     let hashes: Vec<String> = states.iter().map(|s| hash(&q, s)).collect();
-    let before: HashMap<String, f64> = load(job.dir)
+    let before: HashMap<String, f64> = read(job.dir)
         .filter(|_| !job.force)
         .filter(|j| j.model == laya::NAME && j.version == state::VERSION)
         .map(|j| j.parts.into_iter().map(|p| (p.hash, p.margin)).collect())
@@ -157,18 +157,10 @@ fn hash(q: &laya::Question, state: &str) -> String {
 /// Each window's score, P(keep) of the parts it covers weighted by how much of it each covers; a
 /// window no part covers keeps its score. Windows are `len` seconds from their start.
 pub fn score_windows(windows: &mut [Window], len: f64, j: &Judged, fit: &Fit) {
-    let parts: Vec<(Part, f64)> = j
-        .parts
-        .iter()
-        .map(|p| (p.part(), fit.p(p.margin)))
-        .collect();
     for w in windows {
-        let (a, b) = (w.start, w.start + len);
-        let from = parts.partition_point(|(p, _)| p.end <= a);
         let (mut sum, mut cover) = (0.0, 0.0);
-        for (p, chance) in parts[from..].iter().take_while(|(p, _)| p.start < b) {
-            let over = (p.end.min(b) - p.start.max(a)).max(0.0);
-            sum += over * chance;
+        for (p, over) in super::overlap(&j.parts, w.start, w.start + len) {
+            sum += over * fit.p(p.margin);
             cover += over;
         }
         if cover > 0.0 {

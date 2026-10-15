@@ -1,7 +1,7 @@
 use super::*;
 use crate::test_support::scratch;
 use junctur_core::edit::{CutSettings, EditList, Range};
-use junctur_core::keep::{Judged, Judgement, Kind};
+use junctur_core::keep::{rules, Judged, Judgement, Kind};
 
 fn project(name: &str) -> (PathBuf, PathBuf, Project) {
     let d = scratch("keep", name);
@@ -36,14 +36,14 @@ fn part(start: f64, end: f64, kind: Kind, margin: f64) -> Judgement {
         kind,
         margin,
         state: String::new(),
-        hash: format!("{start}"),
+        hash: String::new(),
     }
 }
 
 #[test]
-fn before_laya_judged_the_view_has_the_prompt_and_no_suggestion() {
+fn before_smart_keep_ran_the_view_has_the_prompt_and_no_suggestion() {
     let (d, file, p) = project("fresh");
-    let v = view(&file, Some(d.join("cache")), None, None).unwrap();
+    let v = view(&file, Some(d.join("cache")), None).unwrap();
     assert_eq!((v.prompt, v.judged_prompt, v.parts), (None, None, 0));
     assert!(v.items.is_empty() && !v.transcribed);
     assert_eq!(v.presets.len(), keep::PRESETS.len());
@@ -55,38 +55,77 @@ fn before_laya_judged_the_view_has_the_prompt_and_no_suggestion() {
     let run = Run {
         file: file.display().to_string(),
         running: true,
-        line: Some("keep: 10% judged".into()),
+        line: Some("keep: starting".into()),
         error: None,
     };
-    let v = view(&file, Some(d.join("cache")), Some(run.clone()), None).unwrap();
+    let v = view(&file, Some(d.join("cache")), Some(run.clone())).unwrap();
     assert_eq!(v.prompt.as_deref(), Some("League"));
     assert_eq!(v.run, Some(run));
     let _ = std::fs::remove_dir_all(&d);
 }
 
 #[test]
-fn a_judged_recording_shows_its_suggestions_and_its_hand_edits_become_pairs() {
+fn the_rules_keeps_are_suggested_and_a_laya_file_shows_nothing() {
     let (d, file, p) = project("judged");
     // No speech found: the list itself stands for the automatic cut, so nothing is a hand edit yet.
     list(&p, &[(10.0, 20.0), (30.0, 40.0)]);
-    let j = Judged {
-        model: "laya".into(),
-        prompt: "League".into(),
-        version: 1,
+    let mut j = Judged {
+        model: "laya-multilingual".into(),
+        prompt: "League highlights".into(),
+        version: 2,
         parts: vec![
             part(0.0, 10.0, Kind::Silent, 2.0),
-            part(10.0, 20.0, Kind::Talk, 1.0),
-            part(20.0, 30.0, Kind::Silent, -1.0),
-            part(30.0, 40.0, Kind::Talk, -2.0),
+            part(10.0, 20.0, Kind::Talk, -2.0),
+            part(20.0, 30.0, Kind::Silent, 0.1),
         ],
     };
+    keep::save_choices(
+        &p.dir,
+        &keep::Choices {
+            prompt: Some("League highlights".into()),
+            answers: vec![],
+        },
+    )
+    .unwrap();
+    // 3b's file, with a cut of talk in it: not read, nothing suggested.
     keep::save(&p.dir, &j).unwrap();
-    let pairs = d.join("pairs.json");
-    let v = view(&file, Some(d.join("cache")), None, Some(&pairs)).unwrap();
-    assert_eq!((v.judged_prompt.as_deref(), v.parts), (Some("League"), 4));
-    let at: Vec<(f64, bool)> = v.items.iter().map(|i| (i.start, i.keep)).collect();
-    assert_eq!(at, [(0.0, true), (30.0, false)]);
-    assert_eq!((v.summary.keep, v.summary.cut), (1, 1));
-    assert!(keep::load_pairs(&pairs).unwrap().is_empty());
+    let v = view(&file, Some(d.join("cache")), None).unwrap();
+    assert_eq!((v.judged_prompt, v.parts, v.items.len()), (None, 0, 0));
+    // The rules' spans are keeps of silence only.
+    j.model = rules::NAME.into();
+    j.version = rules::VERSION;
+    j.parts.remove(1);
+    keep::save(&p.dir, &j).unwrap();
+    let v = view(&file, Some(d.join("cache")), None).unwrap();
+    assert_eq!(
+        (v.judged_prompt.as_deref(), v.parts),
+        (Some("League highlights"), 2)
+    );
+    assert_eq!(
+        v.reading.as_deref(),
+        Some("strict, every silent stretch holding the busiest 10% of the silent windows")
+    );
+    let at: Vec<(f64, bool, bool)> = v
+        .items
+        .iter()
+        .map(|i| (i.start, i.keep, i.uncertain))
+        .collect();
+    assert_eq!(at, [(0.0, true, false), (20.0, true, true)]);
+    assert_eq!(
+        (v.summary.keep, v.summary.cut, v.summary.uncertain),
+        (2, 0, 1)
+    );
+    assert!(!v.outdated);
+    // The prompt changed since it ran: its stretches are not shown, and the view says why (3e).
+    keep::save_choices(
+        &p.dir,
+        &keep::Choices {
+            prompt: Some("A podcast".into()),
+            answers: vec![],
+        },
+    )
+    .unwrap();
+    let v = view(&file, Some(d.join("cache")), None).unwrap();
+    assert!(v.outdated && v.items.is_empty() && v.judged_prompt.is_none());
     let _ = std::fs::remove_dir_all(&d);
 }

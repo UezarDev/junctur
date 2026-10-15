@@ -272,10 +272,7 @@ fn in_batches(
     Ok(out)
 }
 
-/// The chance a part with `margin` stays, at temperature `t`.
-pub fn p_keep(margin: f64, t: f64) -> f64 {
-    1.0 / (1.0 + (-margin / t).exp())
-}
+pub use super::fit::p_keep;
 
 #[cfg(test)]
 mod tests;

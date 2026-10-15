@@ -1,15 +1,18 @@
-//! Smart keep (phase 3b): the user says what kind of video they are making, and Laya, a decision
-//! model, reads every part of the recording (who says what, or the labels and game audio where
-//! nobody talks) and gives the chance it should stay. Its choices are suggestions the user accepts,
-//! dismisses or undoes; every one of those, and every hand edit of a part, is a training pair that
-//! refits the cutoff and temperature. A module of its own because it spans a model, the transcript,
-//! the labels and the edit list; the pipeline only calls [`run`] as its `keep` stage.
+//! Smart keep: the user says what kind of video they are making, and the parts where nobody talks that
+//! are busier than the recording usually is are suggested as keeps ([`rules`], phase 3d); talk stays
+//! as the automatic cut leaves it. The suggestions are what the user accepts, dismisses or undoes
+//! ([`suggest`]). Phase 3b had Laya, a decision model, judge every part instead, and learn a cutoff
+//! and temperature from the user's answers ([`laya`], [`run`], [`state`], [`fit`], [`learn`],
+//! [`agreement`]): that code stays here, but smart keep no longer calls it, since base Laya judged no
+//! better than chance (ideas.md). A module of its own because it spans the labels, the audio and the
+//! edit list; the pipeline only runs the rules as its `keep` stage.
 
 mod agreement;
 pub mod fit;
 pub mod laya;
 mod learn;
 pub mod parts;
+pub mod rules;
 mod run;
 pub mod state;
 mod suggest;
@@ -27,7 +30,7 @@ pub use suggest::{accept, dismiss, suggestions, undo, Item, ItemState, Summary};
 
 use crate::Result;
 
-/// Laya's answers for a recording, in the project folder: a cache, judged again when it is gone.
+/// Smart keep's suggested keeps for a recording, in the project folder: rebuilt by every keep run.
 pub const FILE: &str = "keep.json";
 /// The user's prompt and answers for a recording, in the project folder: theirs, never rebuilt.
 pub const CHOICES: &str = "keep_choices.json";
@@ -59,13 +62,13 @@ pub struct Settings {
     pub last: Option<String>,
 }
 
-/// What Laya made of a recording.
+/// What smart keep made of a recording: the rules' busy silent stretches, or (3b) Laya's every part.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Judged {
-    /// The model ([`laya::NAME`]).
+    /// Who judged: [`rules::NAME`], or [`laya::NAME`] in a file 3b wrote.
     pub model: String,
     pub prompt: String,
-    /// The question's and the state's version ([`state::VERSION`]).
+    /// The judge's version ([`rules::VERSION`], [`state::VERSION`]).
     pub version: u32,
     pub parts: Vec<Judgement>,
 }
@@ -76,11 +79,13 @@ pub struct Judgement {
     pub start: f64,
     pub end: f64,
     pub kind: Kind,
-    /// Laya's keep logit minus its cut logit: P(keep) is sigmoid(margin / T) ([`Fit`]).
+    /// Laya's keep logit minus its cut logit, or how sure the rules are of a span (0 at the line to 4
+    /// at the top): P(keep) is sigmoid(margin / T) ([`Fit`]).
     pub margin: f64,
-    /// What it read, kept for the pairs (and Phase 4's fine-tune).
+    /// What Laya read (kept for its pairs), or why the rules keep it.
     pub state: String,
-    /// Of the model, the question and the state: a part whose hash is the same is not judged again.
+    /// Laya's: of the model, the question and the state, a part whose hash is the same is not judged
+    /// again. Empty from the rules.
     pub hash: String,
 }
 
@@ -114,10 +119,19 @@ pub struct Answer {
     /// about this part, so it is no training pair ([`collect`]).
     #[serde(default, skip_serializing_if = "is_false")]
     pub bulk: bool,
+    /// The kind of span it answers ([`rules::SPANS`]). Laya's answers and those to 3d's first padded
+    /// windows carry none (0) and are not read now: matched by their times alone, one could stand
+    /// for a stretch of the same times it never saw (3e). They stay in the file.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub spans: u32,
 }
 
 fn is_false(b: &bool) -> bool {
     !b
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,8 +144,11 @@ pub enum How {
 }
 
 impl Choices {
+    /// `p`'s answer, given to the rules' spans as they are now ([`Answer::spans`]).
     pub fn answer(&self, p: &Part) -> Option<&Answer> {
-        self.answers.iter().find(|a| same(a.start, a.end, p))
+        self.answers
+            .iter()
+            .find(|a| a.spans == rules::SPANS && same(a.start, a.end, p))
     }
 
     /// `p`'s answer while the list (`now`, sorted) still does what it says. One the list no longer
@@ -149,7 +166,8 @@ impl Choices {
             end: a.end,
             kind: Kind::Talk,
         };
-        self.answers.retain(|x| !same(x.start, x.end, &p));
+        self.answers
+            .retain(|x| x.spans != a.spans || !same(x.start, x.end, &p));
         self.answers.push(a);
         self.answers.sort_by(|x, y| x.start.total_cmp(&y.start));
     }
@@ -174,8 +192,15 @@ pub fn prompt_for(choices: &Choices, settings: &Settings) -> Option<String> {
     own.or(last).map(str::to_string)
 }
 
-/// Laya's answers in project folder `dir`; `None` when there are none or they do not read.
+/// Smart keep's suggested keeps in project folder `dir`, as the rules wrote them; `None` when there
+/// are none, they do not read, or Laya wrote them (3b): its cuts of talk are never shown again, and the
+/// next keep run writes the rules'.
 pub fn load(dir: &Path) -> Option<Judged> {
+    read(dir).filter(|j| j.model == rules::NAME && j.version == rules::VERSION)
+}
+
+/// `keep.json` in `dir` whoever wrote it.
+fn read(dir: &Path) -> Option<Judged> {
     serde_json::from_slice(&std::fs::read(dir.join(FILE)).ok()?).ok()
 }
 
@@ -203,7 +228,17 @@ pub fn save_choices(dir: &Path, c: &Choices) -> Result<()> {
     Ok(())
 }
 
-/// One line for the log.
+/// The parts of `parts` (in time order, apart) that `a..b` overlaps, each with the seconds it covers:
+/// the walk both window scorings make, the rules' ([`rules::score_windows`]) and Laya's.
+fn overlap(parts: &[Judgement], a: f64, b: f64) -> impl Iterator<Item = (&Judgement, f64)> {
+    let from = parts.partition_point(|p| p.end <= a);
+    parts[from..]
+        .iter()
+        .take_while(move |p| p.start < b)
+        .map(move |p| (p, (p.end.min(b) - p.start.max(a)).max(0.0)))
+}
+
+/// One line for Laya's log (3b).
 pub fn summary(j: &Judged, fit: &Fit) -> String {
     let keep = j.parts.iter().filter(|p| fit.keeps(p.margin)).count();
     let unsure = j.parts.iter().filter(|p| fit.uncertain(p.margin)).count();

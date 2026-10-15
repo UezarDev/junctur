@@ -64,7 +64,7 @@ pub fn analyze(a: Args) -> Result<(), String> {
     if a.has("--labels") {
         opts.labels.on = true;
     }
-    // Laya judges this run with this prompt, kept as the recording's and as the last one.
+    // Smart keep reads this run with this prompt, kept as the recording's and as the last one.
     opts.keep.prompt = a.value("--keep").map(str::to_string);
     if let Some(prompt) = &opts.keep.prompt {
         crate::judge::remember(prompt);
