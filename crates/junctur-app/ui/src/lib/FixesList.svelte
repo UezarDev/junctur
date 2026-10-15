@@ -3,10 +3,11 @@
   // open: the way out of fixes that went where they should not (Uezar's sentence on 421 words, put
   // there by a field that saved what nobody typed and by 5aa's spread to every word heard alike).
   // Grouped by what they say, the biggest group first, since a wrong fix comes as one text on many
-  // places; a group opens to its places, each with its time, what was heard there and a jump. Ticked
-  // places or groups go back to what was heard in one save (kept as heard, as Undo those does, so
-  // Correct's spread does not bring them back). Chosen over an undo of recent fixes: fixes are no
-  // undo steps (5h), and the wrong ones here were made far apart, between good ones.
+  // places; a group opens to its places, each with its time, what was heard there and a jump. The
+  // ticked places or groups the filter shows go back to what was heard in one save (kept as heard,
+  // as Undo those does, so Correct's spread does not bring them back). Chosen over an undo of recent
+  // fixes: fixes are no undo steps (5h), and the wrong ones here were made far apart, between good
+  // ones.
   //
   // Fixes of the heard text (Undo those, a removal, Looks right) are not listed: their words read as
   // heard already. Read again whenever the list's fixes change.
@@ -32,8 +33,11 @@
   let filter = $state("");
   let said = $state<string | null>(null);
   let busy = $state(false);
-  // By place in `all` (read again after every change, so ticks are cleared then).
-  const ticked = new SvelteSet<number>();
+  // By the fix itself, not its place in `all`, so a list read again (any change to the fixes) keeps
+  // the ticks of fixes still in it; only ticks the filter shows are removed.
+  const ticked = new SvelteSet<string>();
+  const idOf = (f: api.Fix) =>
+    [f.track, f.start, f.nth, f.through?.start ?? "", f.through?.nth ?? "", f.text].join("|");
   const opened = new SvelteSet<string>();
 
   $effect(() => {
@@ -44,7 +48,8 @@
         if (gone) return;
         all = l;
         loading = false;
-        ticked.clear();
+        const still = new Set(l.map((f) => idOf(f.fix)));
+        for (const t of [...ticked]) if (!still.has(t)) ticked.delete(t);
       },
       (e) => {
         if (gone) return;
@@ -85,6 +90,8 @@
     return out.sort((a, b) => b.places.length - a.places.length || a.text.localeCompare(b.text));
   });
   const listed = $derived(groups.reduce((n, g) => n + g.places.length, 0));
+  // The ticked places the filter shows: what Remove takes back.
+  const chosen = $derived(groups.flatMap((g) => g.places).filter((k) => ticked.has(idOf(all[k].fix))));
 
   function heardLine(g: Group): string {
     const shown = g.heard.slice(0, 4).map(([h, n]) => (n > 1 ? `${h} (${n.toLocaleString()})` : h));
@@ -92,18 +99,16 @@
   }
 
   function groupState(g: Group): "all" | "some" | "none" {
-    const n = g.places.filter((k) => ticked.has(k)).length;
+    const n = g.places.filter((k) => ticked.has(idOf(all[k].fix))).length;
     return n === 0 ? "none" : n === g.places.length ? "all" : "some";
   }
   function tickGroup(g: Group, on: boolean) {
-    for (const k of g.places) {
-      if (on) ticked.add(k);
-      else ticked.delete(k);
-    }
+    for (const k of g.places) tick(k, on);
   }
   function tick(k: number, on: boolean) {
-    if (on) ticked.add(k);
-    else ticked.delete(k);
+    const id = idOf(all[k].fix);
+    if (on) ticked.add(id);
+    else ticked.delete(id);
   }
   function toggle(text: string) {
     if (opened.has(text)) opened.delete(text);
@@ -111,7 +116,7 @@
   }
 
   async function remove() {
-    const fixes = [...ticked].map((k) => all[k].fix);
+    const fixes = chosen.map((k) => all[k].fix);
     if (!fixes.length || busy) return;
     busy = true;
     said = null;
@@ -121,7 +126,7 @@
         n === fixes.length
           ? `${n.toLocaleString()} fix${n === 1 ? "" : "es"} taken back: those words read as heard.`
           : `${n.toLocaleString()} of ${fixes.length.toLocaleString()} taken back; the others changed meanwhile.`;
-      ticked.clear();
+      for (const f of fixes) ticked.delete(idOf(f));
     } catch (e) {
       onError(String(e));
     } finally {
@@ -142,8 +147,8 @@
 <div class="fixes">
   <div class="bar">
     <input class="filter" placeholder="Filter by text or heard words" bind:value={filter} aria-label="Filter the fixes" />
-    <button disabled={!ticked.size || busy} onclick={() => void remove()} title="Take the ticked fixes back to what was heard there"
-      >{busy ? "Removing…" : `Remove ${ticked.size ? ticked.size.toLocaleString() : ""}`}</button
+    <button disabled={!chosen.length || busy} onclick={() => void remove()} title="Take the ticked fixes shown back to what was heard there"
+      >{busy ? "Removing…" : `Remove ${chosen.length ? chosen.length.toLocaleString() : ""}`}</button
     >
     <button class="x" onclick={onClose} title="Back to the transcript" aria-label="Close the list of fixes">×</button>
   </div>
@@ -178,7 +183,7 @@
         {#each g.places as k (k)}
           {@const f = all[k]}
           <div class="place">
-            <input type="checkbox" checked={ticked.has(k)} onchange={(e) => tick(k, e.currentTarget.checked)} aria-label="Tick this place" />
+            <input type="checkbox" checked={ticked.has(idOf(f.fix))} onchange={(e) => tick(k, e.currentTarget.checked)} aria-label="Tick this place" />
             {#if f.first != null && f.last != null}
               {@const a = f.first}
               {@const b = f.last}

@@ -126,11 +126,14 @@
       return;
     }
     saving = true;
+    // Taken before the wait, so a blur or a new selection meanwhile does not save it a second time
+    // through `leave`; given back if the save fails, so leaving can still save what was typed.
+    openRun = null;
     try {
       onFixed(await api.fixWords(run.first, run.last, ends, draft));
-      openRun = null;
       retyping = false;
     } catch (e) {
+      if (retyping) openRun = run;
       onError(String(e));
     } finally {
       saving = false;
