@@ -27,7 +27,12 @@ fn a_run_reports_until_it_ends_and_is_not_started_twice() {
     let again = a.start(&file, notify.clone()).unwrap();
     assert_eq!(again.phase, Phase::Queued);
     assert!(
-        a.reanalyse(&file, Again::KeepList, notify).is_err(),
+        a.reanalyse(
+            &file,
+            Reanalysis::whole(Again::KeepList, Redo::NOTHING),
+            notify
+        )
+        .is_err(),
         "already running"
     );
     drop(held);
@@ -450,22 +455,58 @@ fn steps_from_two_threads_reach_notify_in_the_order_taken() {
     }
 }
 
-/// What each run of the test below was told about the user's list.
-static KEPT: Mutex<Vec<KeepList>> = Mutex::new(Vec::new());
+/// What a run of the tests below was asked, as the pipeline gets it.
+#[derive(Debug, Clone, PartialEq)]
+struct Asked {
+    keep: KeepList,
+    speakers: bool,
+    words: bool,
+    forget: Forget,
+    within: Option<(f64, f64)>,
+}
 
-/// A pipeline that only notes whether the run keeps the user's list.
+impl Asked {
+    fn of(o: &PipelineOptions) -> Self {
+        Asked {
+            keep: o.keep_list,
+            speakers: o.rehear,
+            words: o.retranscribe,
+            forget: o.forget,
+            within: o.within,
+        }
+    }
+}
+
+/// What each run of the test below was asked.
+static KEPT: Mutex<Vec<Asked>> = Mutex::new(Vec::new());
+
+/// A pipeline that only notes what the run was asked.
 fn noting_halves<'a>(
     _: &'a Project,
     o: &'a PipelineOptions,
     _: &mut dyn FnMut(&str),
     _: Steps,
 ) -> Result<Second<'a>, String> {
-    lock(&KEPT).push(o.keep_list);
+    lock(&KEPT).push(Asked::of(o));
     Ok(Box::new(|_, _, _, _| Ok(())))
 }
 
+/// The pop-up's ticks as the page sends them: Correct's defaults, everything redone and kept.
+fn ticks() -> crate::commands::Ask {
+    crate::commands::Ask {
+        words: true,
+        speakers: true,
+        keep_cuts: true,
+        keep_names: true,
+        keep_fixes: true,
+        within: None,
+        replace: false,
+    }
+}
+
 #[test]
-fn reanalyse_keeps_the_users_list_and_a_fresh_cut_asks_first() {
+fn the_pop_up_asks_each_part_apart_and_a_fresh_cut_asks_first() {
+    use crate::commands::Ask;
     let d = std::env::temp_dir().join(format!("junctur-app-reanalyse-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
@@ -474,33 +515,171 @@ fn reanalyse_keeps_the_users_list_and_a_fresh_cut_asks_first() {
     let mut a = Analysis::with_cache(d.join("cache"));
     a.halves = noting_halves;
     let p = Project::open(&file, Some(d.join("cache")), None).unwrap();
-    let ended = |a: &Analysis| wait_for("the run ends", || !a.busy(&file));
     let quiet = || -> Notify { Arc::new(|_: &Progress, _| {}) };
+    let go = |a: &Analysis, ask: Ask| {
+        let r = a.reanalyse(&file, ask.reanalysis(), quiet());
+        if matches!(&r, Ok(r) if r.progress.is_some()) {
+            wait_for("the run ends", || !a.busy(&file));
+        }
+        r
+    };
+    let asked = |keep, speakers, words| Asked {
+        keep,
+        speakers,
+        words,
+        forget: Forget::default(),
+        within: None,
+    };
     std::fs::write(p.edit_path(), "junctur-edit 1\nkeep x\n").unwrap();
-    // Re-analyse on a list the user edited starts at once and keeps it.
-    let r = a.reanalyse(&file, Again::KeepList, quiet()).unwrap();
+    // Correct's defaults: the list kept, the words and the speakers heard again.
+    let r = go(&a, ticks()).unwrap();
     assert!(!r.hand_edited && r.progress.is_some());
-    ended(&a);
-    assert_eq!(*lock(&KEPT), [KeepList::Whole]);
-    // A fresh cut over it is asked first: nothing started.
-    let r = a.reanalyse(&file, Again::Recut, quiet()).unwrap();
+    // Nothing ticked to redo: what the settings changed only (the old Re-analyse).
+    let nothing = Ask {
+        words: false,
+        speakers: false,
+        ..ticks()
+    };
+    go(&a, nothing).unwrap();
+    // Only the speakers, the words left as they are; only the words.
+    go(
+        &a,
+        Ask {
+            words: false,
+            ..ticks()
+        },
+    )
+    .unwrap();
+    go(
+        &a,
+        Ask {
+            speakers: false,
+            ..ticks()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        *lock(&KEPT),
+        [
+            asked(KeepList::Whole, true, true),
+            asked(KeepList::Whole, false, false),
+            asked(KeepList::Whole, true, false),
+            asked(KeepList::Whole, false, true),
+        ]
+    );
+    lock(&KEPT).clear();
+    // A fresh cut over the user's list is asked first: nothing started.
+    let fresh = Ask {
+        keep_cuts: false,
+        ..ticks()
+    };
+    let r = go(&a, fresh).unwrap();
     assert!(r.hand_edited && r.progress.is_none());
     assert!(!a.busy(&file));
     // Told to replace it: re-cut.
-    let r = a.reanalyse(&file, Again::RecutOverEdits, quiet()).unwrap();
+    let r = go(
+        &a,
+        Ask {
+            replace: true,
+            ..fresh
+        },
+    )
+    .unwrap();
     assert!(!r.hand_edited && r.progress.is_some());
-    ended(&a);
-    assert_eq!(*lock(&KEPT), [KeepList::Whole, KeepList::No]);
     // Nothing of the user's to lose: a fresh cut starts without asking.
     std::fs::remove_file(p.edit_path()).unwrap();
-    let r = a.reanalyse(&file, Again::Recut, quiet()).unwrap();
-    assert!(!r.hand_edited && r.progress.is_some());
-    ended(&a);
-    assert_eq!(*lock(&KEPT), [KeepList::Whole, KeepList::No, KeepList::No]);
+    assert!(go(&a, fresh).unwrap().progress.is_some());
+    assert_eq!(
+        *lock(&KEPT),
+        [
+            asked(KeepList::No, true, true),
+            asked(KeepList::No, true, true)
+        ]
+    );
+    lock(&KEPT).clear();
+    // Transcribed again ignoring the fixes; names and voices afresh, which hears the speakers
+    // again even unticked.
+    go(
+        &a,
+        Ask {
+            speakers: false,
+            keep_fixes: false,
+            ..ticks()
+        },
+    )
+    .unwrap();
+    go(
+        &a,
+        Ask {
+            keep_names: false,
+            ..nothing
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        *lock(&KEPT),
+        [
+            Asked {
+                forget: Forget {
+                    names: false,
+                    fixes: true
+                },
+                ..asked(KeepList::Whole, false, true)
+            },
+            Asked {
+                forget: Forget {
+                    names: true,
+                    fixes: false
+                },
+                ..asked(KeepList::Whole, true, false)
+            },
+        ]
+    );
+    lock(&KEPT).clear();
+    // A selection: its words transcribed again and its cut made again, over the stretch only.
+    let within = Some([12.5, 30.0]);
+    go(
+        &a,
+        Ask {
+            speakers: false,
+            keep_cuts: false,
+            within,
+            ..ticks()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        *lock(&KEPT),
+        [Asked {
+            within: Some((12.5, 30.0)),
+            ..asked(KeepList::No, false, true)
+        }]
+    );
+    // The speakers are heard over the whole recording only: a selection asking for them, or for
+    // the names afresh, is refused rather than run over the whole timeline; so is one asking
+    // nothing, and an empty one.
+    for ask in [
+        Ask { within, ..ticks() },
+        Ask {
+            speakers: false,
+            keep_names: false,
+            within,
+            ..ticks()
+        },
+        Ask { within, ..nothing },
+        Ask {
+            speakers: false,
+            within: Some([3.0, 3.0]),
+            ..ticks()
+        },
+    ] {
+        assert!(go(&a, ask).is_err(), "{ask:?}");
+    }
+    assert_eq!(lock(&KEPT).len(), 1, "none of those started");
     let _ = std::fs::remove_dir_all(&d);
 }
 
-static ASKED: Mutex<Vec<(KeepList, bool, bool)>> = Mutex::new(Vec::new());
+static ASKED: Mutex<Vec<Asked>> = Mutex::new(Vec::new());
 static HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// A first half noting what the run was asked to do, held while `HOLD` is set.
@@ -510,7 +689,7 @@ fn asked_halves<'a>(
     _: &mut dyn FnMut(&str),
     _: Steps,
 ) -> Result<Second<'a>, String> {
-    lock(&ASKED).push((o.keep_list, o.rehear, o.retranscribe));
+    lock(&ASKED).push(Asked::of(o));
     while HOLD.load(std::sync::atomic::Ordering::SeqCst) {
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -518,8 +697,7 @@ fn asked_halves<'a>(
 }
 
 #[test]
-fn correct_hears_the_speakers_and_the_words_again_keeping_the_list() {
-    // Correct is Re-analyse with speakers and words heard again; a second one is refused.
+fn a_second_reanalysis_is_refused_while_the_first_runs() {
     let d = std::env::temp_dir().join(format!("junctur-app-correct-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
@@ -528,22 +706,26 @@ fn correct_hears_the_speakers_and_the_words_again_keeping_the_list() {
     let mut a = Analysis::with_cache(d.join("cache"));
     a.halves = asked_halves;
     let quiet = || -> Notify { Arc::new(|_: &Progress, _| {}) };
+    let correct = || Reanalysis::whole(Again::KeepList, Redo::ALL);
     HOLD.store(true, std::sync::atomic::Ordering::SeqCst);
-    let r = a.correct(&file, quiet()).unwrap();
-    assert!(r.phase.busy());
+    let r = a.reanalyse(&file, correct(), quiet()).unwrap();
+    assert!(r.progress.unwrap().phase.busy());
     wait_for("the run asks", || !lock(&ASKED).is_empty());
-    assert!(a.correct(&file, quiet()).is_err(), "already being analysed");
+    assert!(
+        a.reanalyse(&file, correct(), quiet()).is_err(),
+        "already being analysed"
+    );
     HOLD.store(false, std::sync::atomic::Ordering::SeqCst);
-    wait_for("the run ends", || !a.busy(&file));
-    // A plain Re-analyse hears nothing again that answers the settings.
-    a.reanalyse(&file, Again::KeepList, quiet()).unwrap();
     wait_for("the run ends", || !a.busy(&file));
     assert_eq!(
         *lock(&ASKED),
-        [
-            (KeepList::Whole, true, true),
-            (KeepList::Whole, false, false)
-        ]
+        [Asked {
+            keep: KeepList::Whole,
+            speakers: true,
+            words: true,
+            forget: Forget::default(),
+            within: None,
+        }]
     );
     let _ = std::fs::remove_dir_all(&d);
 }

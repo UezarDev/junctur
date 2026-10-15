@@ -73,7 +73,7 @@ enum Action {
     Srt(String),
     Enroll(usize, usize, String),
     Forget(String),
-    /// Whether it is a fresh cut.
+    /// Whether it is a fresh cut (the words and speakers heard again), else nothing redone.
     Reanalyse(bool),
     /// Audio track (0-based) and whether to mute it.
     Mute(usize, bool),
@@ -232,11 +232,17 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
         let file = with_player(app, |p| p.file())?.ok_or("no file is open")?;
         let state = app.try_state::<App>().ok_or("app not set up")?;
         let notify = crate::commands::notifier(app.clone());
-        let r = state.analysis.reanalyse(
-            std::path::Path::new(&file),
-            crate::analysis::Again::from_flags(fresh, fresh),
-            notify,
-        )?;
+        use crate::analysis::{Again, Reanalysis, Redo};
+        // The pop-up with nothing ticked to redo and everything kept, or a fresh cut over the
+        // user's edits with the words and the speakers heard again.
+        let ask = if fresh {
+            Reanalysis::whole(Again::RecutOverEdits, Redo::ALL)
+        } else {
+            Reanalysis::whole(Again::KeepList, Redo::NOTHING)
+        };
+        let r = state
+            .analysis
+            .reanalyse(std::path::Path::new(&file), ask, notify)?;
         eprintln!(
             "junctur-app test: reanalyse started: {}",
             r.progress.is_some()

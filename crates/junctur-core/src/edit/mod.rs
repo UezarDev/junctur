@@ -9,12 +9,12 @@ mod carry;
 mod fixes;
 mod format;
 mod frames;
+mod heard;
 mod reduce;
 mod save;
 mod scores;
 mod speakers;
 mod splice;
-mod spread;
 mod times;
 mod worded;
 
@@ -36,14 +36,14 @@ pub use fixes::{
 };
 pub use format::{parse, FORMAT_VERSION};
 pub use frames::{frame_ranges, frame_span, frames_ceil, frames_floor};
+pub use heard::{likeness, placed, remove, Placed};
 pub use reduce::{keep_ranges, snap_boundary, word_span, Envelope, Kept, ENVELOPE_HOP};
 pub use save::{amend, backup_path, hold, save, unstamped, Amended, Held, Saved};
 pub use scores::windows;
 pub use speakers::{
     check_name, default_name, Labeller, Person, SpeakerName, Speakers, Turn, MAX_NAME,
 };
-pub use splice::{cut_span, keep_span};
-pub use spread::{keep_heard, likeness, spread, spread_with, Spread, SpreadIndex, Which};
+pub use splice::{cut_span, keep_span, replace_span};
 pub use times::{set_time, to_ms, Retime, Times};
 
 /// A kept stretch of the source, in seconds.

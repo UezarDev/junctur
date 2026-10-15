@@ -1,7 +1,8 @@
 <script lang="ts">
   // The Properties tab: the recording, the background transcription job, the analysis steps with
-  // their progress, the out-of-date notice and Re-analyse, smart keep, the speakers and the project
-  // folder.
+  // their progress, the out-of-date notice, smart keep, the speakers and the project folder.
+  // Analysing again is Correct's pop-up (the transcript's word bar), so it has no button of its own
+  // here.
   import * as api from "./api";
   import { clock } from "./time";
   import { busy as running, current, whole } from "./steps";
@@ -24,8 +25,6 @@
     keepFile = null,
     onKeepChanged = () => {},
     onReviewUncertain = () => {},
-    onReanalyse,
-    onFreshCut,
     onError,
   }: {
     player: api.PlayerState | null;
@@ -45,10 +44,6 @@
     keepFile?: string | null;
     onKeepChanged?: () => void;
     onReviewUncertain?: () => void;
-    /** Analyse again keeping the user's edits, speakers matched again. */
-    onReanalyse: () => void;
-    /** Analyse again and replace the cut with a fresh one (asks first when it is the user's). */
-    onFreshCut: () => void;
     onError: (message: string) => void;
   } = $props();
 
@@ -167,21 +162,9 @@
       {#if outdated.length > 0 && !busy}
         <div class="outdated">
           {#each outdated as why (why)}<p>{why}</p>{/each}
+          <p class="how">Correct, under the transcript, analyses it again with the settings now.</p>
         </div>
       {/if}
-      <button
-        class="again"
-        class:wanted={outdated.length > 0}
-        disabled={busy}
-        title="Runs what the settings changed and matches the speakers against the remembered voices again; your cut, names, fixed words and caption settings stay"
-        onclick={onReanalyse}>Re-analyse</button
-      >
-      <button
-        class="fresh"
-        disabled={busy}
-        title="Re-analyses and replaces your cut with a fresh one; your version is kept as a backup"
-        onclick={onFreshCut}>Start over with a fresh cut</button
-      >
     {/if}
   </section>
 
@@ -356,19 +339,10 @@
   .outdated p {
     margin: 0;
   }
-  .again {
-    margin-top: 8px;
-    width: 100%;
-  }
-  .again.wanted {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-  .fresh {
+  .outdated .how {
     margin-top: 4px;
-    width: 100%;
-    font-size: 12px;
     color: var(--muted);
+    font-size: 12px;
   }
   .people li {
     display: flex;

@@ -6,7 +6,7 @@
   import { onDestroy, untrack } from "svelte";
   import * as api from "./api";
   import * as sel from "./selection";
-  import { shownText, type Words } from "./transcript";
+  import { shownText, wordRef, type Words } from "./transcript";
 
   let {
     edit,
@@ -19,6 +19,7 @@
     retyping = $bindable(false),
     onFixed,
     onCorrect,
+    analysing = false,
   }: {
     edit: api.EditState | null;
     words: Words;
@@ -32,10 +33,12 @@
     onLooksRight?: (() => void) | null;
     /** The Fix text field is open (the panel opens it on a double-click). */
     retyping?: boolean;
-    /** What a fix did besides itself: the word list's new entries, the other places fixed. */
+    /** What a fix did besides itself: the word list's new entries. */
     onFixed: (r: api.Fixed) => void;
-    /** The Correct button. */
+    /** The Correct button: opens the pop-up. */
     onCorrect: () => Promise<void>;
+    /** The recording is being analysed: Correct waits until it is done. */
+    analysing?: boolean;
   } = $props();
 
   // A speaker the analysis named "Speaker 3" has no name set yet: remembering a voice under that
@@ -78,21 +81,27 @@
 
   // Fix text, for the stretch it was opened on. Leaving it any way saves what was typed; Escape and
   // the field's own × leave the text as it was. In the bar, as a virtual list's row has one height.
+  // A field left as it opened saves nothing, and every save (Enter's too) goes to the stretch it
+  // opened on, named by its end words as they were then, which the engine checks (5ae: a save by
+  // bare index wrote onto whatever words held it by then).
   let draft = $state("");
   let shown = "";
   let openFor: string | null = null;
   // The stretch the open field is for (plain: read by the teardown, after the props have moved on).
   let openRun: { first: number; last: number } | null = null;
+  let openEnds: [api.WordRef, api.WordRef] | null = null;
   let saving = $state(false);
   const one = $derived(runs.length === 1 ? { first: runs[0][0], last: runs[0][1] } : null);
   $effect(() => {
     const at = one ? `${one.first}-${one.last}` : null;
     if (!retyping) {
-      openFor = null;
-      openRun = null;
+      // Closed from outside (the header's Fixes, the selection gone): saved as any leaving is.
+      // Escape and a save on its way have let go of `openRun` already, so they save nothing here.
+      untrack(leave);
     } else if (openFor == null && at) {
       openFor = at;
       openRun = one;
+      openEnds = [wordRef(words, one!.first), wordRef(words, one!.last)];
       shown = shownText(words, one!);
       draft = shown;
     } else if (openFor !== at || !at) {
@@ -101,30 +110,43 @@
     }
   });
 
+  /** A failed save's message for a field already closed: what was typed, so it is not lost. */
+  const unsaved = (e: unknown, text: string) => `${String(e)} (not saved: "${text}")`;
+
   /** Saves what the open field holds for its own stretch, if it changed, and forgets the field. */
   function leave() {
     const run = openRun;
     openRun = null;
     openFor = null;
-    if (!run || draft.trim() === shown.trim()) return;
+    if (!run || !openEnds || draft.trim() === shown.trim()) return;
     const text = draft;
-    api.fixWords(run.first, run.last, text).then(onFixed, (e) => onError(String(e)));
+    api.fixWords(run.first, run.last, openEnds, text).then(onFixed, (e) => onError(unsaved(e, text)));
   }
   onDestroy(leave);
 
   async function saveText() {
-    if (!one || saving) return;
+    const run = openRun;
+    const ends = openEnds;
+    if (!run || !ends || saving) return;
     if (draft.trim() === shown.trim()) {
       retyping = false;
       return;
     }
     saving = true;
+    const text = draft;
+    // Taken before the wait, so a blur or a new selection meanwhile does not save it a second time
+    // through `leave`; given back if the save fails, so leaving can still save what was typed.
+    openRun = null;
     try {
-      onFixed(await api.fixWords(one.first, one.last, draft));
-      openRun = null;
+      onFixed(await api.fixWords(run.first, run.last, ends, text));
       retyping = false;
     } catch (e) {
-      onError(String(e));
+      // The field still open on these words keeps the text. Closed meanwhile (another selection):
+      // the text would be gone, so the message carries it.
+      if (retyping && openFor === `${run.first}-${run.last}`) {
+        openRun = run;
+        onError(String(e));
+      } else onError(unsaved(e, text));
     } finally {
       saving = false;
     }
@@ -177,7 +199,8 @@
   }
 </script>
 
-<div class="wordbar" class:idle={!selection}>
+<div class="wordbar">
+  <div class="body" class:idle={!selection}>
   {#if !selection}
     <div class="hint">Select words to cut, keep or fix them, or to say who says them</div>
   {/if}
@@ -280,40 +303,52 @@
         title="Someone not listed yet: name whoever says these words (only one person, the more the better)">New name…</button
       >
     {/if}
-    <button
-      class="correct"
-      disabled={busy || correcting}
-      onclick={async () => {
-        correcting = true;
-        try {
-          await onCorrect();
-        } finally {
-          correcting = false;
-        }
-      }}
-      title="Fix every word heard the same way as one you fixed, hear the speakers again, then transcribe the whole recording again with your word list (your cuts and edits stay)"
-      >{correcting ? "Correcting…" : "Correct"}</button
-    >
   </div>
   </div>
+  </div>
+  <!-- Outside the rows, so it is there with nothing selected too: it works on the whole
+       recording or on the selection, the timeline's included. -->
+  <button
+    class="correct"
+    disabled={busy || correcting || analysing}
+    onclick={async () => {
+      correcting = true;
+      try {
+        await onCorrect();
+      } finally {
+        correcting = false;
+      }
+    }}
+    title={analysing
+      ? "Analysing this recording: Correct waits until it is done"
+      : "Analyse this recording again, part by part: the words, the speakers or the cut, keeping what you choose of yours, over the selection or the whole timeline"}
+    >Correct…</button
+  >
 </div>
 
 <style>
   .wordbar {
-    position: relative;
     display: flex;
-    flex-direction: column;
-    gap: 6px;
+    align-items: center;
+    gap: 10px;
     padding: 8px 12px 10px;
     border-top: 1px solid var(--line);
     background: var(--panel-solid);
+  }
+  .body {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
   }
   .rows {
     display: flex;
     flex-direction: column;
     gap: 6px;
   }
-  .idle .rows {
+  .idle > .rows {
     visibility: hidden;
   }
   .hint {
@@ -321,7 +356,6 @@
     inset: 0;
     display: flex;
     align-items: center;
-    padding: 0 12px;
     color: var(--muted);
     font-size: 12px;
   }
@@ -353,15 +387,19 @@
   .person:hover:not(:disabled) {
     background: color-mix(in srgb, var(--c) 24%, transparent);
   }
-  .new,
-  .correct {
+  .new {
     padding: 2px 9px;
     font-size: 12px;
   }
-  .correct {
-    /* At the row's end, or the next line's end when the panel is narrow. */
-    margin-left: auto;
+  /* The bar's one big button, beside its rows: the way to analyse the recording again. */
+  .wordbar > .correct {
+    flex: none;
+    align-self: stretch;
+    padding: 6px 16px;
+    font-size: 14px;
     font-weight: 600;
+    border-color: var(--accent);
+    color: var(--accent);
   }
   .naming {
     display: inline-flex;

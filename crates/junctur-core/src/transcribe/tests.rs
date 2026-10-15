@@ -411,3 +411,235 @@ fn again_drops_a_partial_and_never_reuses_the_finished_transcript() {
     assert_eq!(load(&dir).unwrap().audio_s, 0.0);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+fn seg(track: usize, start: f64, end: f64, text: &str) -> Segment {
+    Segment {
+        track,
+        start,
+        end,
+        lang: "en".into(),
+        model: "large-v3-turbo".into(),
+        words: vec![Word {
+            start,
+            end: start + 0.3,
+            text: text.into(),
+            p: 1.0,
+            p_min: None,
+        }],
+    }
+}
+
+fn chunk(track: usize, start: f64, end: f64) -> (usize, Chunk) {
+    (track, Chunk { start, end })
+}
+
+#[test]
+fn a_stretch_heard_again_keeps_every_segment_it_does_not_touch() {
+    let work = [
+        chunk(0, 0.0, 10.0),
+        chunk(0, 20.0, 30.0),
+        chunk(0, 40.0, 50.0),
+        chunk(1, 22.0, 26.0),
+    ];
+    let old = vec![
+        seg(0, 0.0, 10.0, "a"),
+        seg(0, 20.0, 30.0, "b"),
+        seg(0, 40.0, 50.0, "c"),
+        seg(1, 22.0, 26.0, "d"),
+    ];
+    let texts = |segs: &[Segment]| segs.iter().map(|s| s.text()).collect::<Vec<_>>();
+    // The stretch touches the middle chunk of each track: both are heard again, whole.
+    assert_eq!(texts(&outside(old.clone(), &work, 25.0, 27.0)), ["a", "c"]);
+    // A stretch in a gap between chunks touches none: everything is kept.
+    assert_eq!(
+        texts(&outside(old.clone(), &work, 12.0, 18.0)),
+        ["a", "b", "c", "d"]
+    );
+    // An old transcript planned otherwise: a segment over two of today's chunks goes with the one
+    // the stretch touches, and the other chunk it overlapped is heard again too, so no word is
+    // there twice; a chunk with no segment of its own is heard, and the old one it overlaps goes.
+    let planned_otherwise = vec![
+        seg(0, 0.0, 25.0, "ab"),
+        seg(0, 41.0, 50.0, "c"),
+        seg(1, 22.0, 26.0, "d"),
+    ];
+    let kept = outside(planned_otherwise, &work, 1.0, 2.0);
+    assert_eq!(texts(&kept), ["d"]);
+}
+
+#[test]
+fn a_stretch_is_refused_without_a_transcript_that_answers_or_with_an_unfinished_run() {
+    let dir = std::env::temp_dir().join(format!("junctur-within-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let opts = TranscribeOptions {
+        again: true,
+        within: Some((12.0, 18.0)),
+        ..Default::default()
+    };
+    let sources = [Source {
+        track: 0,
+        regions: vec![
+            Region {
+                start: 1.0,
+                end: 9.0,
+            },
+            Region {
+                start: 21.0,
+                end: 29.0,
+            },
+        ],
+    }];
+    let run = |opts: &TranscribeOptions| {
+        transcribe(
+            &Job {
+                file: &dir.join("rec.mp4"),
+                sources: &sources,
+                total: 40.0,
+                project: &dir,
+                cache_dir: &dir,
+                opts,
+            },
+            &mut |_| {},
+            Reports {
+                reach: &mut |_, _| {},
+                transcribed: &mut |_| {},
+                between: &mut || {},
+            },
+        )
+    };
+    assert!(run(&opts).is_err(), "no transcript to splice into");
+    // The chunks as a whole run plans them, each with its segment.
+    let work = order(&sources, 40.0);
+    let old = Transcript {
+        choice: Choice {
+            model: "large-v3-turbo".into(),
+            device: Device::Cpu,
+            note: None,
+        },
+        languages: Languages::default().allowed,
+        segments: work
+            .iter()
+            .map(|&(t, c)| seg(t, c.start, c.end, "x"))
+            .collect(),
+        audio_s: 42.0,
+        elapsed_s: 0.0,
+        resumed_chunks: 0,
+    };
+    std::fs::write(path(&dir), serde_json::to_vec(&old).unwrap()).unwrap();
+    // A stretch with no speech in it hears nothing (no model is loaded) and keeps every word.
+    let t = run(&opts).unwrap();
+    assert_eq!(t.segments, old.segments);
+    assert!(!interrupted(&dir));
+    // Nothing given to Whisper this time, and the transcript still says the model that made it.
+    assert_eq!(t.audio_s, 0.0);
+    assert_eq!(t.choice.model, "large-v3-turbo");
+    // A transcript large-v3 made, the settings at `Auto` (which loads turbo): it answers them, and
+    // the stretch is heard by large-v3, the model the transcript goes on naming.
+    let mut by_best = old.clone();
+    by_best.choice.model = "large-v3".into();
+    std::fs::write(path(&dir), serde_json::to_vec(&by_best).unwrap()).unwrap();
+    assert_eq!(run(&opts).unwrap().choice.model, "large-v3");
+    std::fs::write(path(&dir), serde_json::to_vec(&old).unwrap()).unwrap();
+    // Another model asked for explicitly: one transcript would mix both, refused.
+    let other = TranscribeOptions {
+        model: ModelPref::LargeV3,
+        ..opts.clone()
+    };
+    assert!(run(&other).is_err());
+    // An unfinished run is finished first, never overwritten by a part.
+    std::fs::write(partial_path(&dir), "torn").unwrap();
+    let err = run(&opts).unwrap_err().to_string();
+    assert!(err.contains("nothing ticked to redo resumes it"), "{err}");
+    assert!(interrupted(&dir));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_stretch_is_heard_by_the_model_that_made_the_transcript() {
+    let made = |model: &str| Transcript {
+        choice: Choice {
+            model: model.into(),
+            device: Device::Cpu,
+            note: None,
+        },
+        languages: Languages::default().allowed,
+        segments: vec![],
+        audio_s: 0.0,
+        elapsed_s: 0.0,
+        resumed_chunks: 0,
+    };
+    // `Auto` would load turbo; a transcript large-v3 made is heard again by large-v3.
+    assert_eq!(
+        stretch_model(&made("large-v3")).unwrap(),
+        ModelPref::LargeV3
+    );
+    assert_eq!(
+        stretch_model(&made("large-v3-q5_0")).unwrap(),
+        ModelPref::LargeV3Q5
+    );
+    assert_eq!(
+        stretch_model(&made("large-v3-turbo")).unwrap(),
+        ModelPref::LargeV3Turbo
+    );
+    assert!(stretch_model(&made("medium")).is_err());
+}
+
+#[test]
+fn a_stretch_splices_its_chunks_heard_again_into_the_rest_once_each() {
+    // What a stretch's run ends with: the kept segments and those heard again, each chunk once.
+    let work = [
+        chunk(0, 0.0, 10.0),
+        chunk(0, 20.0, 30.0),
+        chunk(0, 40.0, 50.0),
+        chunk(1, 22.0, 26.0),
+    ];
+    let old: Vec<Segment> = work
+        .iter()
+        .map(|&(t, c)| seg(t, c.start, c.end, "old"))
+        .collect();
+    let mut done = outside(old, &work, 24.0, 25.0);
+    let have = starts(&done);
+    // Whisper hears exactly the chunks with no kept segment.
+    let heard: Vec<(usize, Chunk)> = work
+        .iter()
+        .copied()
+        .filter(|(t, c)| !have.contains(&(*t, at(c.start))))
+        .collect();
+    assert_eq!(heard, [chunk(0, 20.0, 30.0), chunk(1, 22.0, 26.0)]);
+    done.extend(heard.iter().map(|&(t, c)| seg(t, c.start, c.end, "new")));
+    sort(&mut done);
+    let spliced: Vec<(usize, f64, String)> =
+        done.iter().map(|s| (s.track, s.start, s.text())).collect();
+    assert_eq!(
+        spliced,
+        [
+            (0, 0.0, "old".to_string()),
+            (0, 20.0, "new".to_string()),
+            (1, 22.0, "new".to_string()),
+            (0, 40.0, "old".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn a_stretch_finds_its_chunks_in_a_long_recording_without_reading_them_all() {
+    // 30 h of chunks a few seconds apart: indexed by track and start, the stretch's chunks are found
+    // at once, and every other segment kept.
+    let work: Vec<(usize, Chunk)> = (0..40_000)
+        .map(|i| chunk(i % 2, i as f64 * 2.7, i as f64 * 2.7 + 2.0))
+        .collect();
+    let old: Vec<Segment> = work
+        .iter()
+        .map(|&(t, c)| seg(t, c.start, c.end, "x"))
+        .collect();
+    let t0 = std::time::Instant::now();
+    let kept = outside(old, &work, 1000.0, 1010.0);
+    assert!(t0.elapsed() < std::time::Duration::from_secs(5));
+    // The chunks starting within 1000 - 2 .. 1010 overlap the stretch.
+    let gone = work
+        .iter()
+        .filter(|(_, c)| c.start < 1010.0 && c.end > 1000.0)
+        .count();
+    assert_eq!(kept.len(), work.len() - gone);
+}

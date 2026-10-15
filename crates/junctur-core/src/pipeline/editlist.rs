@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use super::{
-    not_analysed, speakers_for, speech, tracks_options, Found, KeepList, Project, Speech,
+    not_analysed, speakers_for, speech, tracks_options, Forget, Found, KeepList, Project, Speech,
     StageName, StageState, EDIT_FILE,
 };
 use crate::edit::{self, CutSettings, EditList, Speakers};
@@ -14,10 +14,18 @@ use crate::tracks::{self, TrackReport};
 use crate::transcribe::{self, Transcript};
 use crate::{Error, Result};
 
-/// The `edit` stage's write: unless `keep` is [`KeepList::No`], a list holding the user's edits is
-/// kept with only its speakers replaced, through [`edit::amend`]; one that does not parse is re-cut
-/// with [`KeepList::Edits`] and fails the stage with [`KeepList::Whole`]. Decided again under the
-/// writer lock ([`Draft::recheck`]), since `d` was drafted outside it.
+/// What the `edit` stage does with the list on disk: what becomes of one holding the user's edits,
+/// over which stretch, and what of the user's it drops ([`KeepList`], `PipelineOptions::within`,
+/// [`Forget`]).
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct Rewrite {
+    pub(super) keep: KeepList,
+    pub(super) within: Option<(f64, f64)>,
+    pub(super) forget: Forget,
+}
+
+/// [`rewrite`] with nothing but `keep` asked: a plain re-analysis's and a resumed run's write.
+#[cfg(test)]
 pub(super) fn keep_or_write(
     p: &Project,
     d: Draft,
@@ -25,17 +33,90 @@ pub(super) fn keep_or_write(
     keep: KeepList,
     log: &mut dyn FnMut(&str),
 ) -> Result<EditList> {
+    let how = Rewrite {
+        keep,
+        ..Rewrite::default()
+    };
+    rewrite(p, d, found, &how, log)
+}
+
+/// What `how` changes in a list besides its speakers: the kept ranges inside its stretch made the
+/// fresh cut's (`fresh`) when the cut is not kept, and the fixes and word times dropped (inside it,
+/// or everywhere) when forgotten.
+fn reshape(e: &mut EditList, fresh: &[edit::Range], how: &Rewrite) {
+    if let (KeepList::No, Some((a, b))) = (how.keep, how.within) {
+        e.keep = edit::replace_span(&e.keep, fresh, a, b);
+    }
+    if how.forget.fixes {
+        let inside = |start: f64| how.within.is_none_or(|(a, b)| start >= a && start < b);
+        e.fixes.retain(|f| !inside(f.start));
+        e.times.retain(|t| !inside(t.start));
+    }
+}
+
+/// The speakers a list gets from `found` over the ones it had, `None` keeping them: named as it
+/// named them, or afresh when `forget.names`.
+fn respoken(found: Option<&Found>, had: &Speakers, forget: Forget) -> Option<Speakers> {
+    found?;
+    Some(speakers_for(found, (!forget.names).then_some(had)))
+}
+
+/// The `edit` stage's write. Unless `how.keep` is [`KeepList::No`], a list holding the user's edits
+/// is kept with only its speakers replaced, through [`edit::amend`]; one that does not parse is
+/// re-cut with [`KeepList::Edits`] and fails the stage with [`KeepList::Whole`]. A run over a
+/// stretch always amends the list there, re-cutting only inside the stretch. What `how.forget`
+/// drops goes either way, a list of the user's backed up first when it loses more than its
+/// speakers. Decided again under the writer lock ([`Draft::recheck`]), since `d` was drafted
+/// outside it.
+pub(super) fn rewrite(
+    p: &Project,
+    d: Draft,
+    found: Option<&Found>,
+    how: &Rewrite,
+    log: &mut dyn FnMut(&str),
+) -> Result<EditList> {
+    if how.forget.names && found.is_none() {
+        // Asked for, not silently skipped: the names stay only when the user can see why.
+        return Err(Error::Edit(
+            "the speakers could not be heard, so they cannot be named afresh: the edit list is left as it was".into(),
+        ));
+    }
     let _writing = edit::hold();
-    let d = d.recheck(p);
-    if keep != KeepList::No && d.users {
-        let amended = edit::amend(&p.edit_path(), |e| {
-            if found.is_some() {
-                e.speakers = speakers_for(found, Some(&e.speakers));
+    let mut d = d.recheck(p);
+    let partial = how.within.is_some();
+    if (how.keep != KeepList::No && d.users) || (partial && d.old.is_some()) {
+        let fresh = d.list.keep.clone();
+        let change = |e: &mut EditList| {
+            if let Some(s) = respoken(found, &e.speakers, how.forget) {
+                e.speakers = s;
             }
-        })?;
+            reshape(e, &fresh, how);
+        };
+        // A list of the user's that loses more than its speakers (its cut in the stretch, its
+        // fixes, its names) is kept first, as a fresh cut keeps it.
+        let more = how.forget.any() || (partial && how.keep == KeepList::No);
+        if d.users && more {
+            let old = d.old.as_deref().unwrap_or_default();
+            let changes = edit::parse(edit::unstamped(old)).is_ok_and(|mut e| {
+                let mut only_speakers = e.clone();
+                if let Some(s) = respoken(found, &e.speakers, Forget::default()) {
+                    only_speakers.speakers = s;
+                }
+                change(&mut e);
+                e != only_speakers
+            });
+            if changes {
+                back_up(&p.dir, old)?;
+            }
+        }
+        let amended = edit::amend(&p.edit_path(), change)?;
         match amended {
             edit::Amended::Written(e) => {
-                log("edit list: it holds your edits, kept with the speakers matched again");
+                log(if partial {
+                    "edit list: analysed again in the stretch, the rest kept"
+                } else {
+                    "edit list: it holds your edits, kept with the speakers matched again"
+                });
                 return Ok(e);
             }
             edit::Amended::Same(e) => {
@@ -43,15 +124,22 @@ pub(super) fn keep_or_write(
                 return Ok(e);
             }
             edit::Amended::Left => match p.edit() {
+                _ if partial && how.keep == KeepList::No => {
+                    return Err(Error::Edit(
+                        "the edit list was edited outside Junctur, so a stretch of it cannot be cut again: analyse the whole timeline, which keeps it as a backup".into(),
+                    ));
+                }
                 Ok(kept) => {
-                    log(
-                        "edit list: edited outside Junctur, kept as it is with the speakers it had",
-                    );
+                    log(if how.forget.any() {
+                        "edit list: edited outside Junctur, kept as it is with the speakers, names and fixed words it had"
+                    } else {
+                        "edit list: edited outside Junctur, kept as it is with the speakers it had"
+                    });
                     return Ok(kept);
                 }
-                Err(e) if keep == KeepList::Whole => {
+                Err(e) if how.keep == KeepList::Whole => {
                     return Err(Error::Edit(format!(
-                        "{e}. It is left as it is: fix it, or start over with a fresh cut, which keeps it as a backup"
+                        "{e}. It is left as it is: fix it, or analyse again with Cuts unticked (Correct), which keeps it as a backup"
                     )));
                 }
                 Err(_) => {}
@@ -59,6 +147,21 @@ pub(super) fn keep_or_write(
             edit::Amended::Missing => {}
         }
     }
+    // The draft already carries the old list's names and fixes ([`draft`]); what is forgotten goes.
+    // (Its stretch, if any, is cut again from the draft itself: the same ranges.)
+    if let Some(s) = respoken(found, &Speakers::default(), how.forget).filter(|_| how.forget.names)
+    {
+        // A list Junctur would write but for a rename is not the user's ([`is_generated`]), so
+        // the re-cut would not keep it: its names are kept here instead of lost.
+        if !d.users && s != d.list.speakers {
+            if let Some(old) = &d.old {
+                back_up(&p.dir, old)?;
+            }
+        }
+        d.list.speakers = s;
+    }
+    let fresh = d.list.keep.clone();
+    reshape(&mut d.list, &fresh, how);
     write_draft(p, d)
 }
 

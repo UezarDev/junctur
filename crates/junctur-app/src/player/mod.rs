@@ -13,7 +13,7 @@ mod speakers;
 mod words;
 
 pub use speakers::TurnsView;
-pub use words::FixDone;
+pub use words::{FixDone, WordRef};
 
 use events::{event_loop, Shared};
 use playback::Loads;

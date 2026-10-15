@@ -2,7 +2,7 @@
   // The transcript beside the video: kept words in order, cut runs folded, the playhead's word lit
   // and followed. Rows have one fixed height and only those on screen are in the DOM, so a long
   // transcript scrolls like a short one; a resize or fold toggle only repacks the rows.
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { SvelteSet } from "svelte/reactivity";
   import * as api from "./api";
   import * as sel from "./selection";
@@ -16,10 +16,12 @@
     tokens,
     widen,
     wordAt,
+    wordRef,
     type Stretch,
     type Token,
     type Words,
   } from "./transcript";
+  import FixesList from "./FixesList.svelte";
   import WordBar from "./WordBar.svelte";
 
   let {
@@ -60,8 +62,9 @@
     reviewing?: boolean;
     onSelect: (s: sel.Selection | null) => void;
     onError: (message: string) => void;
-    /** The Correct button: asks, starts the run; its answer, or null when not started. */
-    correct: () => Promise<api.Corrected | null>;
+    /** The Correct button: opens the pop-up; what its run started and what it is doing, or null
+     * when none started. */
+    correct: () => Promise<{ r: api.Corrected; doing: string } | null>;
   } = $props();
 
   const ROW = 24;
@@ -196,6 +199,12 @@
   // decides). The new text comes back through the edit state's fixes key (App.svelte).
   let fixing = $state<number | null>(null);
   let fixDraft = $state("");
+  // What the open field showed when it opened, and its word as the engine names it (5ae). Leaving
+  // saves only what was typed, never measured against the word as it is by then: a field left
+  // alone while its word changed under it (a re-transcription's words) wrote its old text back onto
+  // that index on a click away. The engine refuses the save when the index names another word now.
+  let fixFrom = "";
+  let fixRef: api.WordRef = { at: 0, track: 0, nth: 0 };
   // `fixing` as a plain variable, for the field's own teardown and blur: Svelte gives an effect's
   // teardown the state from before the change, so a `$state` would still name the field just closed.
   let fixOpen: number | null = null;
@@ -253,7 +262,8 @@
     // typed there is saved first, as leaving it does.
     if (fixing != null) finishFix(true);
     fixing = fixOpen = i;
-    fixDraft = words.text[i];
+    fixDraft = fixFrom = words.text[i];
+    fixRef = wordRef(words, i);
   }
   // The field's row can scroll out of the rendered window (the list is virtual) and take the field
   // with it, without a blur: what was typed is saved then, as leaving the field does, so `fixing`
@@ -270,9 +280,10 @@
   function finishFix(save: boolean) {
     const i = fixing;
     fixing = fixOpen = null;
-    if (!save || i == null || !words || fixDraft.trim() === words.text[i]) return;
+    if (!save || i == null || fixDraft.trim() === fixFrom.trim()) return;
     const text = fixDraft;
-    call(async () => tellFixed(await api.fixWord(i, text)));
+    const word = fixRef;
+    call(async () => tellFixed(await api.fixWord(i, word, text)));
   }
 
   // A fix whose spelling joined the word list says so for a moment in the header; a retyped
@@ -294,35 +305,10 @@
     if (all.length) flash(`${all.map((e) => `"${e}"`).join(", ")} added to the word list`);
   }
 
-  // What a fix also did elsewhere, under the header for a while ("Also fixed 2 other places" with
-  // Undo those), or what Correct started, which stays until dismissed as its run goes on.
-  const NOTE_MS = 20000;
-  let note = $state<{ text: string; others: api.Fix[]; heard: string[] } | null>(null);
-  let noteTimer = 0;
-  function tell(text: string, others: api.Fix[] = [], heard: string[] = [], stay = false) {
-    if (!mounted) return;
-    note = { text, others, heard };
-    clearTimeout(noteTimer);
-    if (!stay) noteTimer = window.setTimeout(() => (note = null), NOTE_MS);
-  }
-  function places(n: number): string {
-    return `${n.toLocaleString()} other place${n === 1 ? "" : "s"}`;
-  }
+  // What Correct started, under the header until dismissed as its run goes on.
+  let note = $state<string | null>(null);
   function tellFixed(r: api.Fixed) {
     tellLearned(r.learned);
-    if (r.others.length) tell(`Also fixed ${places(r.others.length)} heard the same way.`, r.others, r.heard);
-  }
-  // Kept as heard rather than taken away: a later Correct, or the spread after its transcription,
-  // would otherwise give those words the fix again.
-  async function undoOthers() {
-    const n = note;
-    note = null;
-    if (!n?.others.length) return;
-    await call(async () => {
-      if ((await api.keepHeard(n.others, n.heard)) === 0) {
-        tell("Nothing to undo: those fixes have moved onto the new transcript, or were changed since.");
-      }
-    });
   }
 
   // Fixes a re-transcription could not put on any word: listed once it ends, and on opening, until
@@ -361,18 +347,9 @@
     return [listed, ...notes].filter((t) => t).join(" ");
   });
   async function correctAll() {
-    const r = await correct();
-    if (!r) return;
-    const unclear = r.unclear.length
-      ? ` Fixed two ways, left as heard: ${r.unclear.map((u) => `"${u}"`).join(", ")}.`
-      : "";
-    const n = r.others.length;
-    tell(
-      `Correcting: ${n ? `fixed ${places(n)} heard the same way; ` : ""}hearing the speakers and the words again (Properties shows how far).${unclear}`,
-      r.others,
-      r.heard,
-      true,
-    );
+    const started = await correct();
+    if (!started || !mounted) return;
+    note = `Correcting: ${started.doing} (Properties shows how far).`;
   }
 
   const first = $derived(Math.max(0, Math.floor(top / ROW) - OVERSCAN));
@@ -415,6 +392,33 @@
       pausedUntil = performance.now() + FOLLOW_PAUSE_MS;
     }
   }
+  // The list of the recording's fixes (5ae), shown in place of the words while open; its jump
+  // closes it and goes to the place as the flagged words' steps do.
+  let listing = $state(false);
+  // Closed whenever it cannot show (review, no words, a list not editable), or it came back in
+  // place of the words, the word bar hidden, once review ended.
+  $effect(() => {
+    if (reviewing || !words || !edit?.editable) listing = false;
+  });
+  // The words hidden under the list lose their scroll position (a hidden element has none) while
+  // `top` keeps it: put back when the list closes, or the rows drawn for `top` sit out of view.
+  const away = $derived(listing && !!words && !!edit?.editable && !reviewing);
+  let wasAway = false;
+  $effect(() => {
+    if (wasAway && !away && scroller) {
+      ours = Math.round(top);
+      scroller.scrollTop = top;
+    }
+    wasAway = away;
+  });
+  async function jumpTo(first: number, last: number) {
+    if (!words) return;
+    listing = false;
+    await tick();
+    goTo(first);
+    if (last > first) onSelect(sel.words(first, last));
+  }
+
   // Confirms the selected flagged word (it keeps what Whisper heard) and goes on to the next; with
   // none after it the header says so and the selection goes, so the end is seen.
   function looksRight() {
@@ -478,11 +482,31 @@
     if (i >= 0) {
       e.preventDefault();
       fixAt(i, selection);
-    } else if (selection?.kind === "words" && edit?.editable && !reviewing && sel.pairs(selection).length === 1) {
-      // The word bar shows its actions with Fix text enabled (one stretch selected).
+    } else if (
+      selection?.kind === "words" &&
+      edit?.editable &&
+      !reviewing &&
+      sel.pairs(selection).length === 1 &&
+      inSight(sel.runs(selection)[0])
+    ) {
+      // The word bar shows its actions with Fix text enabled (one stretch selected). Only for a
+      // selection in sight (5ae): a click on no word leaves the selection where it was, and F2
+      // opened Fix text holding a sentence fixed long before, for words out of view.
       e.preventDefault();
       retyping = true;
     }
+  }
+
+  /** Whether a word of `r` is in a row on screen (5ae). */
+  function inSight(r: sel.Run): boolean {
+    if (!laid) return false;
+    const from = Math.floor(top / ROW);
+    const to = Math.ceil((top + height) / ROW) - 1;
+    for (let i = r.first; i <= r.last && i < laid.rowOf.length; i++) {
+      const row = laid.rowOf[i];
+      if (row >= from && row <= to) return true;
+    }
+    return false;
   }
 
   async function call(f: () => Promise<unknown>) {
@@ -591,6 +615,8 @@
     mounted = true;
     let timer = 0;
     const ro = new ResizeObserver(() => {
+      // Hidden (the list of fixes in its place, the tab away): no size to lay the words out for.
+      if (scroller.clientWidth === 0 && scroller.clientHeight === 0) return;
       height = scroller.clientHeight;
       clearTimeout(timer);
       // The first size at once, later ones once the resize settles.
@@ -610,7 +636,6 @@
       clearTimeout(timer);
       mounted = false;
       clearTimeout(learnedTimer);
-      clearTimeout(noteTimer);
       ro.disconnect();
     };
   });
@@ -631,9 +656,28 @@
     {:else if words}
       <span class="muted">{words.text.length.toLocaleString()} words</span>
     {/if}
+    {#if words && edit?.editable && !reviewing}
+      <button
+        class="list-fixes"
+        class:on={listing}
+        onclick={() => {
+          // A field open goes as leaving it does (what was typed is saved), not back with the words.
+          if (!listing) {
+            retyping = false;
+            if (fixing != null) finishFix(true);
+          }
+          listing = !listing;
+        }}
+        title={listing ? "Back to the transcript" : "Every fix of this recording, by text: go to one, or take wrong ones back"}
+        >Fixes</button
+      >
+    {/if}
   </header>
+  {#if listing && words && edit?.editable && !reviewing}
+    <FixesList {edit} {words} onJump={(a, b) => void jumpTo(a, b)} onClose={() => (listing = false)} {onError} />
+  {/if}
   {#if setAside.length}
-    <div class="spread" role="status">
+    <div class="notice" role="status">
       <span class="grow"
         >{asideLine}</span
       >
@@ -641,23 +685,15 @@
     </div>
   {/if}
   {#if note}
-    <div class="spread" role="status">
-      <span class="grow">{note.text}</span>
-      {#if note.others.length}
-        <button
-          disabled={analysing && !listed}
-          onclick={() => void undoOthers()}
-          title={analysing && !listed
-            ? "Once the speakers are heard again (the edit list is busy until then)"
-            : "Leave the other places as they were heard; the one you typed stays fixed"}>Undo those</button
-        >
-      {/if}
+    <div class="notice" role="status">
+      <span class="grow">{note}</span>
       <button class="x" onclick={() => (note = null)} aria-label="Dismiss">×</button>
     </div>
   {/if}
   <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
   <div
     class="scroll"
+    class:away={away}
     bind:this={scroller}
     onscroll={onScroll}
     onwheel={() => (pausedUntil = performance.now() + FOLLOW_PAUSE_MS)}
@@ -677,8 +713,11 @@
             ? "Transcribing: the words show here five minutes at a time. Cut and keep on the timeline meanwhile."
             : analysing
               ? "Analysing this recording: the transcript shows here when it is done."
-              : "No transcript for this recording yet. Re-analyse it (project panel) to edit by text."}
+              : "No transcript for this recording yet. Correct analyses it again, to edit by text."}
       </p>
+      {#if !analysing && !loading}
+        <p class="note"><button class="correct" onclick={() => void correctAll()}>Correct…</button></p>
+      {/if}
     {:else if laid}
       <div class="spacer" style:height="{laid.rows.length * ROW}px">
         {#each visible as { index, row } (index)}
@@ -790,7 +829,7 @@
   </div>
   <!-- Kept while nothing is selected: a bar that came with the selection shrank the scroller
        between a double-click's two presses. -->
-  {#if words && edit?.editable && !reviewing}
+  {#if words && edit?.editable && !reviewing && !listing}
     <WordBar
       {edit}
       {words}
@@ -801,6 +840,7 @@
       checks={toCheck.length > 0}
       onFixed={tellFixed}
       onCorrect={correctAll}
+      {analysing}
       onLooksRight={checking >= 0 ? looksRight : null}
     />
   {/if}
@@ -832,7 +872,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .spread {
+  .notice {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -841,11 +881,11 @@
     color: var(--muted);
     border-bottom: 1px solid var(--line);
   }
-  .spread .grow {
+  .notice .grow {
     flex: 1;
     min-width: 0;
   }
-  .spread button {
+  .notice button {
     padding: 2px 8px;
     font-size: 12px;
   }
@@ -854,6 +894,20 @@
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
+  }
+  .scroll.away {
+    display: none;
+  }
+  .list-fixes {
+    margin-left: 8px;
+    padding: 0 8px;
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 18px;
+  }
+  .list-fixes.on {
+    color: var(--on-accent);
+    background: var(--accent);
   }
   .note {
     margin: 16px 12px;
@@ -977,5 +1031,12 @@
     height: 20px;
     font-size: 12px;
     font-weight: 600;
+  }
+  /* The empty transcript's way to analyse again, as the word bar's Correct looks. */
+  .note .correct {
+    padding: 4px 14px;
+    font-weight: 600;
+    border-color: var(--accent);
+    color: var(--accent);
   }
 </style>

@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use junctur_core::config;
+pub use junctur_core::pipeline::Forget;
 use junctur_core::pipeline::{self, KeepList, PipelineOptions, Project};
 use serde::Serialize;
 
@@ -35,8 +36,49 @@ pub const LANE_EVENT: &str = "transcription";
 struct How {
     /// What becomes of an edit list holding the user's edits.
     keep_list: KeepList,
-    /// Hear the speakers and the words again (the Correct button).
-    correct: bool,
+    /// What is heard again rather than reused.
+    redo: Redo,
+    /// What of the user's is dropped rather than carried.
+    forget: Forget,
+    /// Only this stretch, in source seconds.
+    within: Option<(f64, f64)>,
+}
+
+impl How {
+    /// A run that asks for nothing beyond what the settings changed, keeping the list
+    /// (`keep_list`).
+    fn plain(keep_list: KeepList) -> Self {
+        How {
+            keep_list,
+            redo: Redo::NOTHING,
+            forget: Forget::default(),
+            within: None,
+        }
+    }
+}
+
+/// What a run hears again from the audio instead of reusing, each apart from the other and from
+/// what becomes of the list ([`Again`]): one flag for both left a fresh cut unable to ask for either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Redo {
+    /// Transcribe the recording again, the fixes carried onto the new words
+    /// (`PipelineOptions::retranscribe`).
+    pub words: bool,
+    /// Hear the speakers again, cut at the user's pins (`PipelineOptions::rehear`).
+    pub speakers: bool,
+}
+
+impl Redo {
+    /// Reuse whatever still answers the settings.
+    pub const NOTHING: Redo = Redo {
+        words: false,
+        speakers: false,
+    };
+    /// Hear both again (Correct's defaults).
+    pub const ALL: Redo = Redo {
+        words: true,
+        speakers: true,
+    };
 }
 
 /// What a re-analysis does with the user's edit list.
@@ -50,14 +92,43 @@ pub enum Again {
     RecutOverEdits,
 }
 
-impl Again {
-    /// The page's `fresh` (re-cut) and `replace` (over the user's edits) flags.
-    pub fn from_flags(fresh: bool, replace: bool) -> Self {
-        match (fresh, replace) {
-            (false, _) => Again::KeepList,
-            (true, false) => Again::Recut,
-            (true, true) => Again::RecutOverEdits,
+/// What the Correct pop-up asks of a re-analysis: what becomes of the list, what is heard again,
+/// what of the user's is dropped instead of carried, and over which stretch.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Reanalysis {
+    pub again: Again,
+    pub redo: Redo,
+    pub forget: Forget,
+    /// The selection, in source seconds; `None` for the whole timeline.
+    pub within: Option<(f64, f64)>,
+}
+
+impl Reanalysis {
+    /// The whole timeline, the list's fate `again` and `redo` heard again, nothing forgotten.
+    pub fn whole(again: Again, redo: Redo) -> Self {
+        Reanalysis {
+            again,
+            redo,
+            forget: Forget::default(),
+            within: None,
         }
+    }
+
+    /// Why a selection cannot be analysed again as asked, for the page; `None` when it can or the
+    /// run is over the whole timeline. The speakers are heard over the whole recording only (the
+    /// core refuses a stretch with them too), and a selection asking nothing would do nothing.
+    pub fn refused(&self) -> Option<&'static str> {
+        let (a, b) = self.within?;
+        if !(a.is_finite() && b.is_finite() && a < b) {
+            return Some("the selection is empty");
+        }
+        if self.redo.speakers || self.forget.names {
+            return Some("the speakers are heard over the whole recording only: analyse the whole timeline to hear them again");
+        }
+        if !self.redo.words && self.again == Again::KeepList && !self.forget.fixes {
+            return Some("nothing to redo in the selection");
+        }
+        None
     }
 }
 
@@ -195,14 +266,7 @@ impl Analysis {
     /// Analyses `file` in the background, keeping an edit list with the user's edits; a run already
     /// waiting or running is returned as it is.
     pub fn start(&self, file: &Path, notify: Notify) -> Result<Progress, String> {
-        self.start_with(
-            file,
-            notify,
-            How {
-                keep_list: KeepList::Edits,
-                correct: false,
-            },
-        )
+        self.start_with(file, notify, How::plain(KeepList::Edits))
     }
 
     fn start_with(&self, file: &Path, notify: Notify, how: How) -> Result<Progress, String> {
@@ -247,17 +311,21 @@ impl Analysis {
         Ok(first)
     }
 
-    /// Analyses `file` again with the settings now ([`Again`]).
+    /// Analyses `file` again with the settings now, as `ask` says (the Correct pop-up). Refused
+    /// while being analysed, and for a selection it cannot do ([`Reanalysis::refused`]).
     pub fn reanalyse(
         &self,
         file: &Path,
-        again: Again,
+        ask: Reanalysis,
         notify: Notify,
     ) -> Result<Reanalysed, String> {
         if self.busy(file) {
             return Err("this recording is already being analysed".into());
         }
-        if again == Again::Recut {
+        if let Some(why) = ask.refused() {
+            return Err(why.into());
+        }
+        if ask.again == Again::Recut {
             let p = Project::open(file, self.cache_dir.clone(), None).map_err(|e| e.to_string())?;
             if pipeline::hand_edited(&p).map_err(|e| e.to_string())? {
                 return Ok(Reanalysed {
@@ -266,36 +334,28 @@ impl Analysis {
                 });
             }
         }
+        // Naming the speakers afresh hears them again: the pins that cut the old hearing are
+        // not used.
+        let redo = Redo {
+            speakers: ask.redo.speakers || ask.forget.names,
+            ..ask.redo
+        };
         Ok(Reanalysed {
             progress: Some(self.start_with(
                 file,
                 notify,
                 How {
-                    keep_list: match again {
+                    keep_list: match ask.again {
                         Again::KeepList => KeepList::Whole,
                         Again::Recut | Again::RecutOverEdits => KeepList::No,
                     },
-                    correct: false,
+                    redo,
+                    forget: ask.forget,
+                    within: ask.within,
                 },
             )?),
             hand_edited: false,
         })
-    }
-
-    /// The Correct button's run: Re-analyse keeping the user's list, with the speakers heard and
-    /// the words transcribed again, fixes carried onto the new words. Refused while being analysed.
-    pub fn correct(&self, file: &Path, notify: Notify) -> Result<Progress, String> {
-        if self.busy(file) {
-            return Err("this recording is already being analysed".into());
-        }
-        self.start_with(
-            file,
-            notify,
-            How {
-                keep_list: KeepList::Whole,
-                correct: true,
-            },
-        )
     }
 
     /// Pauses or resumes the transcription lane after the current chunk; whether anything changed.

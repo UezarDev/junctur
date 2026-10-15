@@ -493,11 +493,6 @@ export interface Transcription {
   jobs: Progress[];
 }
 
-export interface Reanalysed {
-  progress: Progress | null;
-  /** A fresh cut was asked for and nothing started: the edit list holds the user's edits, so ask first. */
-  handEdited: boolean;
-}
 
 export const startupFile = () => invoke<string | null>("startup_file");
 export const playerState = () => invoke<PlayerState>("player_state");
@@ -508,13 +503,6 @@ export const currentRecording = () => invoke<Opened | null>("current_recording")
 export const recent = () => invoke<Recent[]>("recent");
 export const forgetRecent = (path: string) => invoke<void>("forget_recent", { path });
 export const analysis = (path: string) => invoke<Progress | null>("analysis", { path });
-/**
- * Analyses `path` again: the user's edit list is kept, with the speakers matched again against
- * the remembered voices. With `fresh` the list is re-cut instead; then, without `replace`, a list with
- * the user's edits starts nothing.
- */
-export const reanalyse = (path: string, fresh: boolean, replace: boolean) =>
-  invoke<Reanalysed>("reanalyse", { path, fresh, replace });
 export const transcription = () => invoke<Transcription>("transcription");
 /** Pauses or resumes the transcription lane, from any recording. */
 export const pauseTranscription = (paused: boolean) =>
@@ -554,10 +542,14 @@ export const editFrames = (start: number, end: number, keep: boolean) =>
  * of the list (review's clips are not always its ranges) is the frame edit alone. */
 export const moveEdge = (step: { start: number; end: number; keep: boolean }, from: number) =>
   invoke<void>("move_edge", { start: step.start, end: step.end, keep: step.keep, from });
+/** Moves word `word`'s own start or end to source frame `to` (its edge dragged on the lanes),
+ * its neighbour on its track trimmed if run into, as one undo step; no cut moves. */
+export const retimeWord = (word: number, side: "start" | "end", to: number) =>
+  invoke<void>("retime_word", { word, side, to });
 /** Renames speaker `id` in the edit list (saved at once, not an undo step). */
 export const renameSpeaker = (id: number, name: string) =>
   invoke<void>("rename_speaker", { id, name });
-/** A word fix as the edit list holds it: handed back to `keepHeard` as it came. */
+/** A word fix as the edit list holds it: handed back to `removeFixes` as it came. */
 export interface Fix {
   track: number;
   start: number;
@@ -565,28 +557,46 @@ export interface Fix {
   through?: { start: number; nth: number };
   text: string;
 }
-/** What a fix did besides itself: the entries the word list gained, and the fixes also made on
- * the words heard like it with what each was heard as ("Also fixed N other places", whose Undo is
- * `keepHeard(others, heard)`). */
+/** What a fix did besides itself: the entries the word list gained. */
 export interface Fixed {
   learned: string[];
-  others: Fix[];
-  heard: string[];
 }
-/** Fixes the spelling of word `index` (empty or the heard text again removes the fix), and every
- * other word heard like it. Saved at once, not an undo step. */
-export const fixWord = (index: number, text: string) => invoke<Fixed>("fix_word", { index, text });
+/** A word as the page named it when its fix field opened (5ae): heard start (whole ms), track and
+ * place among that track's words starting in that millisecond (`transcript.wordRef`). */
+export interface WordRef {
+  at: number;
+  track: number;
+  nth: number;
+}
+/** Fixes the spelling of word `index` (empty or the heard text again removes the fix), and only
+ * that word. Saved at once, not an undo step. Refused when `index` is no longer the
+ * word `word` names (5ae). */
+export const fixWord = (index: number, word: WordRef, text: string) =>
+  invoke<Fixed>("fix_word", { index, word, text });
 /** Marks word `index` as checked: it keeps what Whisper heard and is no longer flagged. Saved at
  * once, not an undo step. */
 export const confirmWord = (index: number) => invoke<void>("confirm_word", { index });
 /** Fixes words `first..=last` as one text (empty or the heard words again clears their fixes),
- * and the same words heard elsewhere. Refused, saying why, across two voice tracks or two
+ * and only those words. Refused, saying why, across two voice tracks or two
  * people. Saved at once, not an undo step. */
-export const fixWords = (first: number, last: number, text: string) =>
-  invoke<Fixed>("fix_words", { first, last, text });
-/** Takes back fixes a fix made on other words, those still as made: the words keep what they
- * were heard as, and no later spread or Correct gives them the fix again. */
-export const keepHeard = (others: Fix[], heard: string[]) => invoke<number>("keep_heard", { others, heard });
+export const fixWords = (first: number, last: number, ends: [WordRef, WordRef], text: string) =>
+  invoke<Fixed>("fix_words", { first, last, ends, text });
+/** A fix of the recording's list where the transcript has it (5ae: the list of fixes). */
+export interface ListedFix {
+  fix: Fix;
+  /** Its first and last words' indices; null when it is on no word now. */
+  first: number | null;
+  last: number | null;
+  /** Its words as heard. */
+  heard: string;
+  /** A fix of the heard text (Looks right): the words read as heard. */
+  asHeard: boolean;
+}
+/** Every fix of the open recording's list with its words (5ae). */
+export const fixesList = () => invoke<ListedFix[]>("fixes_list");
+/** Takes `fixes` (as `fixesList` gave them) out of the list, those still as listed, so their words
+ * read as heard; how many (5ae). Saved at once, not an undo step. */
+export const removeFixes = (fixes: Fix[]) => invoke<number>("remove_fixes", { fixes });
 /** A fix a re-transcription could not put on any word: Whisper hears something else there now. */
 export interface SetAside {
   track: number;
@@ -605,18 +615,34 @@ export interface SetAside {
 export const fixesSetAside = () => invoke<SetAside[]>("fixes_set_aside");
 /** Forgets `seen`, as `fixesSetAside` gave them: any set aside since stay listed. */
 export const forgetFixesSetAside = (seen: SetAside[]) => invoke<void>("forget_fixes_set_aside", { seen });
-/** What the Correct button started. */
-export interface Corrected {
-  progress: Progress;
-  /** The fixes made on words heard like a fixed one, and what each was heard as. */
-  others: Fix[];
-  heard: string[];
-  /** Heard texts fixed two ways, left as heard. */
-  unclear: string[];
+/** What the Correct pop-up asks for. */
+export interface Ask {
+  /** Transcribe the words again. */
+  words: boolean;
+  /** Hear the speakers again. */
+  speakers: boolean;
+  /** Keep the cut; unticked, a fresh one (asks first over the user's edits). */
+  keepCuts: boolean;
+  /** Keep the speakers' names and the seconds pinned to people; unticked, named afresh. */
+  keepNames: boolean;
+  /** Keep the fixed words and word times, moved onto new words; unticked, dropped. */
+  keepFixes: boolean;
+  /** The selection in source seconds; null for the whole timeline. */
+  within: [number, number] | null;
+  /** Re-cut even over the user's edits (asked). */
+  replace: boolean;
 }
-/** The Correct button: every fix given to the words heard like it, then the open recording's
- * speakers heard again and its words transcribed again with the word list, the user's edits kept. */
-export const correct = () => invoke<Corrected>("correct");
+/** What the Correct pop-up's run did. */
+export interface Corrected {
+  /** The run, when one started. */
+  progress: Progress | null;
+  /** The cut was to be made afresh and nothing started: the edit list holds the user's edits, so ask first. */
+  handEdited: boolean;
+}
+/** The Correct pop-up: analyses `path` again as `ask` says; the fixes and word times kept move onto
+ * the new words, and no other word is given a fix. Refused while analysed, and for a selection with
+ * the speakers asked for (they are heard over the whole recording only). */
+export const reanalyse = (path: string, ask: Ask) => invoke<Corrected>("reanalyse", { path, ask });
 /** Sets speaker `id`'s caption colour (`#RRGGBB`). */
 export const recolorSpeaker = (id: number, color: string) =>
   invoke<void>("recolor_speaker", { id, color });

@@ -179,8 +179,7 @@ pub(super) fn not_again(p: &Project, log: &mut dyn FnMut(&str)) {
 
 /// After a re-transcription ([`AGAIN_FILE`] there): the fixes and retimes, read against the old
 /// transcript ([`BEFORE_FILE`]) at the end so edits made during the run count, move onto the new
-/// words ([`edit::carry`], [`edit::carry_times`]) and fixes spread ([`edit::spread`]); what lands on
-/// no word is set aside ([`SET_ASIDE_FILE`]). Nothing is carried with no old copy or no new words.
+/// words ([`edit::carry`], [`edit::carry_times`]); what lands on no word is set aside ([`SET_ASIDE_FILE`]). Nothing is carried with no old copy or no new words.
 /// The mark and copy always go, or they would ask for another re-transcription.
 pub(super) fn carry_fixes(p: &Project, t: &Transcript, log: &mut dyn FnMut(&str)) {
     let mark = p.dir.join(AGAIN_FILE);
@@ -229,46 +228,28 @@ pub(super) fn carry_fixes(p: &Project, t: &Transcript, log: &mut dyn FnMut(&str)
 struct Carry {
     fixes: edit::CarryReport,
     times: edit::TimesReport,
-    spread: edit::Spread,
 }
 
-/// How much of a carry the list could take ([`carry_onto`]).
-#[derive(PartialEq)]
-enum Took {
-    /// Carried and spread.
-    All,
-    /// Carried; the spread would not have read back.
-    Carried,
-    /// Nothing: left as it was.
-    Nothing,
-}
-
-/// The fixes and retimes of `e` moved from `before`'s words onto `words`, every fix spread after
-/// when `spread`.
+/// The fixes and retimes of `e` moved from `before`'s words onto `words`. Nothing is given to
+/// other words: a fix is on the words the user fixed.
 fn carry_all(
     e: &mut EditList,
     before: &[(usize, &transcribe::Word)],
     words: &[(usize, &transcribe::Word)],
-    spread: bool,
 ) -> Carry {
     // The retimes are read with the fixes as they are on the old words (a word heard now as its fix
     // is the same word).
     let timed = edit::snapshot_times(&e.times, &e.fixes, before);
     let carried = edit::snapshot(&e.fixes, before);
-    let mut done = Carry {
+    Carry {
         fixes: edit::carry(&mut e.fixes, &carried, words),
         times: edit::carry_times(&mut e.times, &timed, words),
-        ..Carry::default()
-    };
-    if spread {
-        done.spread = edit::spread(&mut e.fixes, words, edit::Which::All);
     }
-    done
 }
 
 /// [`carry_fixes`]' work on the list, `before` and `words` the old and new transcripts. A result
-/// the parser would refuse ([`EditList::checked_text`]) is retried without the spread, keeping its
-/// set-aside; if that fails too, the list stays as it was and nothing is set aside.
+/// the parser would refuse ([`EditList::checked_text`]) is not written: the list stays as it was and
+/// nothing is set aside, said in a note.
 fn carry_onto(
     p: &Project,
     before: &[(usize, &transcribe::Word)],
@@ -276,16 +257,14 @@ fn carry_onto(
     log: &mut dyn FnMut(&str),
 ) {
     let mut done = Carry::default();
-    let mut took = Took::Nothing;
+    let mut took = false;
     let amended = edit::amend(&p.edit_path(), |e| {
         let was = (e.fixes.clone(), e.times.clone());
-        for (spread, how) in [(true, Took::All), (false, Took::Carried)] {
-            let d = carry_all(e, before, words, spread);
-            if e.checked_text().is_ok() {
-                (done, took) = (d, how);
-                return;
-            }
-            (e.fixes, e.times) = was.clone();
+        let d = carry_all(e, before, words);
+        if e.checked_text().is_ok() {
+            (done, took) = (d, true);
+        } else {
+            (e.fixes, e.times) = was;
         }
     });
     // A track the new transcript has no words on: its fixes are set aside as not heard, not as
@@ -300,15 +279,11 @@ fn carry_onto(
     };
     let mut aside: Vec<SetAside> = Vec::new();
     match amended {
-        Ok(edit::Amended::Written(_) | edit::Amended::Same(_)) if took == Took::Nothing => {
+        Ok(edit::Amended::Written(_) | edit::Amended::Same(_)) if !took => {
             log("edit list: carrying the fixed words would give a list that does not read back; they are left as they were");
             aside.push(SetAside::note("Correct could not move your fixed words and word times onto the new transcript (the edit list would not have read back); they are where they were, and some may now show on other words."));
         }
         Ok(edit::Amended::Written(_) | edit::Amended::Same(_)) => {
-            if took == Took::Carried {
-                log("edit list: spreading the fixed words would give a list that does not read back; carried without spreading");
-                aside.push(SetAside::note("Correct moved your fixed words onto the new transcript but did not give them to the other words heard the same way (the edit list would not have read back)."));
-            }
             log(&carried_line(&done));
             for g in &done.fixes.gone {
                 log(&format!(
@@ -374,20 +349,13 @@ fn keep_set_aside(p: &Project, new: Vec<SetAside>) -> Result<()> {
 
 /// The log line on fixes carried onto a new transcript.
 fn carried_line(c: &Carry) -> String {
-    let (r, s, t) = (&c.fixes, &c.spread, &c.times);
+    let (r, t) = (&c.fixes, &c.times);
     let mut line = format!(
-        "fixed words: {} kept on their words, {} no longer needed, {} set aside; {} more place(s) fixed",
+        "fixed words: {} kept on their words, {} no longer needed, {} set aside",
         r.kept,
         r.right,
-        r.gone.len(),
-        s.added.len()
+        r.gone.len()
     );
-    if !s.unclear.is_empty() {
-        line.push_str(&format!(
-            "; fixed two ways, left as heard: {}",
-            s.unclear.join(", ")
-        ));
-    }
     if t.kept + t.right + t.gone.len() > 0 {
         line.push_str(&format!(
             "; word times: {} kept on their words, {} no longer needed, {} set aside",

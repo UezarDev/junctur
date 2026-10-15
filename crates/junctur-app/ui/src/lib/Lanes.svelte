@@ -7,7 +7,7 @@
   import MuteSolo from "./MuteSolo.svelte";
   import { RULER } from "./layout";
   import { meter } from "./meters";
-  import type { Selection } from "./selection";
+  import type { Selection, WordEdge } from "./selection";
   import type { Talk } from "./talking";
   import { clampEdge, dragged, edgeNear, type Edge } from "./nudge";
   import * as sg from "./suggestions";
@@ -32,6 +32,7 @@
     thin,
     wavesVersion,
     spans,
+    wordEdges = [],
     edges = true,
     onView,
     onSelect,
@@ -63,6 +64,8 @@
     wavesVersion: number;
     /** The selection, a span per stretch. */
     spans: { start: number; end: number }[];
+    /** The selection's own word edges that can be dragged (`selection.ts` `wordEdges`). */
+    wordEdges?: WordEdge[];
     /** Cut edges can be dragged (not while reviewing: review moves its clip's edges itself). */
     edges?: boolean;
     onView: (start: number, len: number) => void;
@@ -376,7 +379,9 @@
     paint();
   });
 
-  // Pointer: a click seeks, a drag on a lane selects, a drag on the ruler scrubs.
+  // Pointer: a click seeks, a drag on a lane selects, a drag on the ruler scrubs. A press that
+  // moves more than CLICK px is a drag.
+  const CLICK = 3;
   let down: { x: number; t: number; ruler: boolean; moved: boolean } | null = null;
   let queued: number | null = null;
   let frame = 0;
@@ -409,10 +414,15 @@
   // is one undo step, then the preview plays from PREROLL before where the edge landed.
   const GRAB = 8;
   const PREROLL = 1.5;
-  let hover = $state.raw<Edge | null>(null);
-  let drag = $state.raw<{ edge: Edge; to: number } | null>(null);
-  // Where the pointer last was during a drag, so a zoom or pan under it moves the edge with it.
+  // A cut's edge, or a selected word's own edge: `word` set, `at` -1, `frame` where the word's
+  // edge is now (not a whole frame: Whisper's times are milliseconds).
+  type Handle = Edge & { word?: WordEdge };
+  let hover = $state.raw<Handle | null>(null);
+  let drag = $state.raw<{ edge: Handle; to: number } | null>(null);
+  // Where the pointer last was during a drag, so a zoom or pan under it moves the edge with it,
+  // and where the drag was pressed.
   let dragX = 0;
+  let dragFrom = 0;
   // A drag's edit sent and its new list not yet here: no edge is offered until it is, since one
   // grabbed from the old list would be placed by frames that have moved. Cleared by the next edit
   // list, by a failure, or after WAIT ms if no list comes (the edit changed nothing).
@@ -423,18 +433,41 @@
     waiting = false;
     clearTimeout(waitTimer);
   }
-  function edgeAt(clientX: number, clientY: number): Edge | null {
+  // The same for a word's edge: its drag's retime sent, no word edge is offered until the
+  // words fetched again move the edges (`wordEdges` no longer what it was at the release), or after
+  // WAIT ms (the retime changed nothing). The edit list comes first and moves no word edge.
+  let waitWords: string | null = null;
+  let wordTimer = 0;
+  // The word edges as one value, which changes only when an edge does.
+  const wordsAt = $derived(wordEdges.map((g) => `${g.word}:${g.side}:${g.at}:${g.lo}:${g.hi}`).join(","));
+  function edgeAt(clientX: number, clientY: number, alt: boolean): Handle | null {
     const fps = edit?.fps;
-    if (waiting || !edges || !fps || !edit?.editable || !edit.ranges.length || width <= 0) return null;
+    if (!edges || !fps || !edit?.editable || width <= 0) return null;
     // One read of the box per pointer move.
     const r = body.getBoundingClientRect();
     if (clientY - r.top < RULER) return null;
     const perSecond = fps.num / fps.den;
-    const t = view.start + ((clientX - r.left) / Math.max(1, r.width)) * view.len;
-    return edgeNear(edit, t * perSecond, (GRAB * view.len * perSecond) / width);
+    const f = (view.start + ((clientX - r.left) / Math.max(1, r.width)) * view.len) * perSecond;
+    const slack = (GRAB * view.len * perSecond) / width;
+    const cut = waiting || !edit.ranges.length ? null : edgeNear(edit, f, slack);
+    let word: Handle | null = null;
+    if (waitWords === null || waitWords !== wordsAt) {
+      for (const g of wordEdges) {
+        const frame = g.at * perSecond;
+        if (Math.abs(frame - f) <= slack && (!word || Math.abs(frame - f) < Math.abs(word.frame - f))) {
+          word = { at: -1, frame, lo: g.lo, hi: g.hi, word: g };
+        }
+      }
+    }
+    if (!word || !cut) return word ?? cut;
+    // Both in reach (the pads leave a word's edge a fraction of a second from its cut's, inside
+    // GRAB at most zooms): the nearer, the cut's at the same distance, the word's with Alt held.
+    if (alt) return word;
+    return Math.abs(word.frame - f) < Math.abs(cut.frame - f) ? word : cut;
   }
-  const sameEdge = (a: Edge | null, b: Edge | null) => a === b || (!!a && !!b && a.at === b.at && a.frame === b.frame);
-  function setHover(g: Edge | null) {
+  const sameEdge = (a: Handle | null, b: Handle | null) =>
+    a === b || (!!a && !!b && a.at === b.at && a.frame === b.frame && a.word?.side === b.word?.side);
+  function setHover(g: Handle | null) {
     if (!sameEdge(g, hover)) hover = g;
   }
   // The dragged edge under `clientX`, assigned only when it lands on another frame.
@@ -448,6 +481,7 @@
   // A handle shown for an edit list or a window that has since changed would be in the wrong place.
   $effect(() => {
     void edit;
+    void wordsAt;
     void view.start;
     void view.len;
     void edges;
@@ -467,13 +501,19 @@
       if (drag) dragTo(dragX);
     });
   });
-  function release(d: { edge: Edge; to: number }, clientX: number) {
+  function release(d: { edge: Handle; to: number }, clientX: number) {
     const fps = edit?.fps;
     if (!edit || !fps) return;
-    if (d.to === d.edge.frame) {
+    if (d.to === Math.round(d.edge.frame)) {
+      // Dragged away and back: nothing moves and the selection stays.
+      if (Math.abs(clientX - dragFrom) > CLICK) return;
       // Let go where it started: a click, which seeks.
       void call(() => api.seek(clampT(timeAt(clientX)), true));
       onSelect(null);
+      return;
+    }
+    if (d.edge.word) {
+      releaseWord(d.edge.word, clampEdge(d.edge, d.to), fps);
       return;
     }
     // The same edge with the same room: a list that changed elsewhere (an undo, an outside edit)
@@ -503,6 +543,29 @@
     }
   }
 
+  // Word `g`'s own edge to frame `to`, then the preview from PREROLL before it, as for a cut's.
+  function releaseWord(g: WordEdge, to: number, fps: api.Fps) {
+    // The same word edge where it was: words fetched again meanwhile (another edit) would make it
+    // another place.
+    if (!wordEdges.some((x) => x.word === g.word && x.side === g.side && x.at === g.at)) {
+      onError("The word moved while its edge was being dragged; nothing was moved. Drag it again.");
+      return;
+    }
+    waitWords = wordsAt;
+    clearTimeout(wordTimer);
+    wordTimer = window.setTimeout(() => (waitWords = null), WAIT);
+    void (async () => {
+      try {
+        await api.retimeWord(g.word, g.side, to);
+      } catch (e) {
+        waitWords = null;
+        onError(String(e));
+        return;
+      }
+      await call(() => api.playFrom(Math.max(0, toSeconds(to, fps) - PREROLL)));
+    })();
+  }
+
   function pointerDown(e: PointerEvent) {
     if (e.button !== 0 || !player?.path) return;
     // A suggestion clicked opens its menu; a click anywhere else closes one.
@@ -514,10 +577,11 @@
     }
     picked = null;
     body.setPointerCapture(e.pointerId);
-    const g = edgeAt(e.clientX, e.clientY);
+    const g = edgeAt(e.clientX, e.clientY, e.altKey);
     if (g) {
-      drag = { edge: g, to: g.frame };
+      drag = { edge: g, to: Math.round(g.frame) };
       dragX = e.clientX;
+      dragFrom = e.clientX;
       hover = null;
       return;
     }
@@ -530,14 +594,14 @@
       return;
     }
     if (!down) {
-      setHover(edgeAt(e.clientX, e.clientY));
+      setHover(edgeAt(e.clientX, e.clientY, e.altKey));
       const p = pieceAt(e.clientX, e.clientY);
       if (p !== hoverPiece) hoverPiece = p;
       const it = itemAt(e.clientX, e.clientY);
       if (it !== hoverItem) hoverItem = it;
       return;
     }
-    if (Math.abs(e.clientX - down.x) > 3) down.moved = true;
+    if (Math.abs(e.clientX - down.x) > CLICK) down.moved = true;
     if (!down.moved) return;
     if (down.ruler) scrub(clampT(timeAt(e.clientX)));
     else select(down.t, timeAt(e.clientX));
@@ -547,7 +611,7 @@
       const d = drag;
       drag = null;
       release(d, e.clientX);
-      setHover(edgeAt(e.clientX, e.clientY));
+      setHover(edgeAt(e.clientX, e.clientY, e.altKey));
       return;
     }
     if (!down) return;
@@ -585,7 +649,8 @@
     const f = drag ? drag.to : hover?.frame;
     if (f == null) return null;
     const px = x(toSeconds(f, fps));
-    return px >= 0 && px <= width ? { px, label: drag ? timecode(f, fps) : null } : null;
+    const word = !!(drag ? drag.edge.word : hover?.word);
+    return px >= 0 && px <= width ? { px, label: drag ? timecode(f, fps) : null, word } : null;
   });
   const sel = $derived(
     spans.map((s) => ({ a: Math.max(0, x(s.start)), b: Math.min(width, x(s.end)) })).filter((s) => s.b > s.a),
@@ -670,7 +735,7 @@
     class:grabbing={!!grab}
     role="slider"
     tabindex="-1"
-    aria-label="Track lanes: click to seek, drag to select, drag a cut's edge to move it"
+    aria-label="Track lanes: click to seek, drag to select, drag a cut's edge or a selected word's edge to move it"
     aria-valuemin={0}
     aria-valuemax={duration}
     aria-valuenow={position ?? 0}
@@ -680,7 +745,7 @@
       <div class="sel" style:left="{s.a}px" style:width="{s.b - s.a}px"></div>
     {/each}
     {#if grab}
-      <div class="edge" class:on={!!drag} style:top="{RULER}px" style:transform="translateX({grab.px}px)">
+      <div class="edge" class:on={!!drag} class:word={grab.word} style:top="{RULER}px" style:transform="translateX({grab.px}px)">
         {#if grab.label}<span class="when mono" class:flip={grab.px > width - 96}>{grab.label}</span>{/if}
       </div>
     {/if}
@@ -828,6 +893,14 @@
   }
   .edge.on {
     background: color-mix(in srgb, var(--accent) 40%, white);
+  }
+  /* A selected word's own edge: the selection's blue, so it reads apart from a cut's. */
+  .edge.word {
+    background: rgba(150, 190, 255, 0.9);
+    box-shadow: 0 0 6px rgba(120, 170, 255, 0.7);
+  }
+  .edge.word.on {
+    background: rgb(200, 220, 255);
   }
   .when {
     position: absolute;

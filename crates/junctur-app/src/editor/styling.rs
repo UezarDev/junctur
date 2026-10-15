@@ -87,8 +87,6 @@ impl Editor {
             saved,
             unsnapped: false,
             skipped: 0,
-            others: Vec::new(),
-            heard: Vec::new(),
         }))
     }
 }

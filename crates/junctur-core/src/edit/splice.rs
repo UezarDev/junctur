@@ -44,6 +44,24 @@ pub fn keep_span(keep: &[Range], a: f64, b: f64, join: f64) -> Vec<Range> {
     normalize(out, join)
 }
 
+/// `keep` with what it keeps inside `[a, b]` replaced by what `fresh` keeps there (a re-cut of only
+/// that stretch): `keep` outside it as it was, `fresh` clipped to it.
+pub fn replace_span(keep: &[Range], fresh: &[Range], a: f64, b: f64) -> Vec<Range> {
+    let (a, b) = (ms(a), ms(b));
+    let mut out = cut_span(keep, a, b, 0.0);
+    out.extend(
+        fresh
+            .iter()
+            .map(|r| Range {
+                start: r.start.max(a),
+                end: r.end.min(b),
+            })
+            .filter(|r| r.end > r.start),
+    );
+    out.sort_by(|x, y| x.start.total_cmp(&y.start));
+    normalize(out, 0.0)
+}
+
 /// Sorted input to the file's form: on the millisecond grid, no empty ranges (the parser rejects
 /// `end <= start`), and ranges less than `join` apart merged.
 fn normalize(sorted: Vec<Range>, join: f64) -> Vec<Range> {
@@ -67,6 +85,25 @@ mod tests {
 
     fn r(start: f64, end: f64) -> Range {
         Range { start, end }
+    }
+
+    #[test]
+    fn a_stretch_is_cut_again_and_the_rest_left() {
+        let keep = [r(1.0, 5.0), r(8.0, 10.0)];
+        let fresh = [r(0.5, 3.0), r(4.0, 9.0)];
+        // Inside 2..6 the fresh cut's ranges, clipped; outside it the user's, joined where they
+        // touch.
+        assert_eq!(
+            replace_span(&keep, &fresh, 2.0, 6.0),
+            [r(1.0, 3.0), r(4.0, 6.0), r(8.0, 10.0)]
+        );
+        // Nothing fresh in the stretch: it is cut there.
+        assert_eq!(
+            replace_span(&keep, &[], 2.0, 9.0),
+            [r(1.0, 2.0), r(9.0, 10.0)]
+        );
+        // The whole recording: the fresh cut.
+        assert_eq!(replace_span(&keep, &fresh, 0.0, 10.0), fresh);
     }
 
     #[test]
