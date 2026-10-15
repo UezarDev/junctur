@@ -94,6 +94,64 @@ export function seconds(
   return [{ start: toSeconds(sel.start, fps), end: toSeconds(sel.end, fps) }];
 }
 
+/** A word edge the lanes let be dragged, with the frames it may be dragged between. */
+export interface WordEdge {
+  word: number;
+  side: "start" | "end";
+  /** Where it is now, in source seconds. */
+  at: number;
+  lo: number;
+  hi: number;
+}
+
+/**
+ * The edges of a selection of one stretch of words that can be dragged on the lanes: the start of
+ * its first word and the end of its last, each with the frames the engine clamps it to
+ * (`Words::retimed`): a frame inside the word's own other end, a frame inside the far end of its
+ * neighbour on its track (the nearest before it for a start, after it for an end, by the words'
+ * times now), the file's ends, and while transcribing (`until`, seconds) the words still to come.
+ * An edge with no room is left out. None for nothing, frames, or several stretches (which word an
+ * edge would move is not plain between them).
+ */
+export function wordEdges(
+  sel: Selection | null,
+  w: Words | null,
+  fps: api.Fps | null,
+  duration: number,
+  until: number | null,
+): WordEdge[] {
+  const joined = runs(sel);
+  if (!w || !fps || joined.length !== 1) return [];
+  const { first, last } = joined[0];
+  if (last >= w.start.length) return [];
+  const per = fps.num / fps.den;
+  const frame = 1 / per;
+  const s = (i: number) => w.start[i] / 1000;
+  const e = (i: number) => w.end[i] / 1000;
+  // Whole frames inside a span of seconds, a hair allowed for the milliseconds.
+  const up = (t: number) => Math.ceil(t * per - 1e-6);
+  const down = (t: number) => Math.floor(t * per + 1e-6);
+  // Word `j` before word `i` by start, list order breaking a tie.
+  const before = (j: number, i: number) => w.start[j] < w.start[i] || (w.start[j] === w.start[i] && j < i);
+  // The nearest word on word `i`'s track before it (`back`) or after it, by start, or -1.
+  const near = (i: number, back: boolean) => {
+    let best = -1;
+    for (let j = 0; j < w.start.length; j++) {
+      if (j === i || w.track[j] !== w.track[i] || before(j, i) !== back) continue;
+      if (best < 0 || before(j, best) !== back) best = j;
+    }
+    return best;
+  };
+  const prev = near(first, true);
+  const next = near(last, false);
+  const limit = next >= 0 ? e(next) - frame : until != null ? Math.min(duration, Math.max(until, e(last))) : duration;
+  const edges: WordEdge[] = [
+    { word: first, side: "start", at: s(first), lo: up(prev >= 0 ? s(prev) + frame : 0), hi: down(e(first) - frame) },
+    { word: last, side: "end", at: e(last), lo: up(s(last) + frame), hi: down(limit) },
+  ];
+  return edges.filter((g) => g.lo <= g.hi);
+}
+
 /** As the engine takes word runs: `[first, last]` pairs, sorted and joined. */
 export function pairs(sel: Selection | null): [number, number][] {
   return runs(sel).map((r) => [r.first, r.last]);

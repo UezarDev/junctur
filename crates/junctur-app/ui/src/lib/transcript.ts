@@ -122,6 +122,14 @@ export function together(w: Words, i: number): { first: number; last: number } |
   return last > first ? { first, last } : null;
 }
 
+/** Word `i` as a fix names it to the engine (5ae): heard start, track, and its place among the words
+ * of its track starting in that millisecond (the words are in heard order, so they sit together). */
+export function wordRef(w: Words, i: number): { at: number; track: number; nth: number } {
+  let nth = 0;
+  for (let j = i - 1; j >= 0 && w.heard[j] === w.heard[i]; j--) if (w.track[j] === w.track[i]) nth++;
+  return { at: Math.round(w.heard[i]), track: w.track[i], nth };
+}
+
 /** What words `first..=last` show now on the track of the first (a fix field's starting text): a
  * span's text once, a fixed word as fixed, the rest as heard. */
 export function shownText(w: Words, r: { first: number; last: number }): string {

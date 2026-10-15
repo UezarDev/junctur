@@ -170,11 +170,19 @@ words and press Delete to cut them (K keeps), restore a folded cut, or nudge a r
 above the timeline (shift-drag on the timeline selects a stretch). Boundaries snap into the pauses the way
 `junctur cut` places them, every edit is saved to `edit.junctur` at once, Ctrl+Z / Ctrl+Y undo and redo,
 and a list the app did not write itself is first kept as `edit.junctur.bak` (then `.bak2`, ...).
+A word Whisper timed badly can be put right on the track lanes: select it (or a run of words) and drag
+the blue span's start or end to where the word really starts or ends (Alt grabs the word's edge over a
+cut's edge beside it); the word's neighbour on its track is trimmed if run into, no cut moves, and the
+new time is a `time` line, one undo step, used by the transcript, the captions and the SRT.
 Double-click a misheard word, or point at it and press F2, to fix its spelling (F2 with no word under
-the pointer opens Fix text for the words selected): the fix is a `fix` line in `edit.junctur`, shown in the
+the pointer opens Fix text for the words selected, when they are in view; a field left as it opened
+saves nothing when you click away): the fix is a `fix` line in `edit.junctur`, shown in the
 transcript, the caption preview and the SRT, and the spelling joins the word list (below). Every other
 place the transcript has the same misheard word (case and punctuation aside) gets the same fix in the
-same save; a line under the panel's header says how many, with Undo those.
+same save; a line under the panel's header says how many, with Undo those. **Fixes**, in the panel's
+header, lists every fix of the recording grouped by its text (how many places, what they were heard
+as), each place with its time to go there; tick places or whole groups and Remove takes them back to
+what was heard (kept as heard, so a later spread does not bring them back).
 
 **Correct…**, the big button at the right of the word bar (there with nothing selected too, and in an
 empty transcript), analyses the recording again, part by part. Its pop-up has two things to redo,
@@ -184,7 +192,7 @@ empty transcript), analyses the recording again, part by part. Its pop-up has tw
 them as `edit.junctur.bak*`, as `junctur analyze` does), **Names and voices** (unticked, the speakers are
 heard again and named afresh, without your names or pins; the list and `speakers.json` are backed up,
 the remembered voices file is never touched) and **Corrected words** (your fixes and the word times set by
-moving a cut's edge; unticked, they are dropped, the list backed up, so "transcribe again ignoring my
+moving a cut's edge or a word's own edge; unticked, they are dropped, the list backed up, so "transcribe again ignoring my
 fixes" is one untick). It opens on everything redone and everything kept, and Re-analyse whole timeline
 does what is ticked: with nothing ticked to redo it reruns only what the settings changed, as after a
 model change. Re-analyse selection works on the stretch selected on the timeline, or the words selected

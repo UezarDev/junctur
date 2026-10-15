@@ -393,3 +393,39 @@ fn placing<'a>(
         times,
     }
 }
+
+#[test]
+fn a_words_own_edge_trims_the_neighbour_where_it_now_is_and_stops_at_the_words_to_come() {
+    const FPS: Fps = Fps { num: 30, den: 1 };
+    let words = Words::from_tracked(vec![
+        (0, word(50.0, 50.4, "a")),
+        (0, word(50.5, 50.9, "w")),
+        (0, word(51.5, 51.9, "b")),
+    ]);
+    // "a" was heard before "w" but is retimed after it.
+    let times = vec![Retime {
+        track: 0,
+        start: 50.0,
+        nth: 0,
+        from: 51.0,
+        to: 51.3,
+    }];
+    let spans = |t: Vec<Retime>| -> Vec<(f64, f64, f64)> {
+        t.iter().map(|r| (r.start, r.from, r.to)).collect()
+    };
+    // Its start has room: nothing on its track lies before it any more.
+    let t = words
+        .retimed(&times, 1, Side::Start, 1509, 60.0, FPS)
+        .unwrap();
+    assert_eq!(spans(t), [(50.0, 51.0, 51.3), (50.5, 50.3, 50.9)]);
+    // Its end runs into "a", where "a" now is, and trims it there; "b" is not reached.
+    let t = words
+        .retimed(&times, 1, Side::End, 1536, 60.0, FPS)
+        .unwrap();
+    assert_eq!(spans(t), [(50.0, 51.2, 51.3), (50.5, 50.5, 51.2)]);
+    // While transcribing, the last word's end stops where the words still to come start.
+    let mut so_far = Words::from_tracked(vec![(0, word(50.5, 50.9, "w"))]);
+    so_far.until = Some(52.0);
+    let t = so_far.retimed(&[], 0, Side::End, 1650, 60.0, FPS).unwrap();
+    assert_eq!(spans(t), [(50.5, 50.5, 52.0)]);
+}

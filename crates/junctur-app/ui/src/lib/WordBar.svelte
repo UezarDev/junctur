@@ -6,7 +6,7 @@
   import { onDestroy, untrack } from "svelte";
   import * as api from "./api";
   import * as sel from "./selection";
-  import { shownText, type Words } from "./transcript";
+  import { shownText, wordRef, type Words } from "./transcript";
 
   let {
     edit,
@@ -81,11 +81,15 @@
 
   // Fix text, for the stretch it was opened on. Leaving it any way saves what was typed; Escape and
   // the field's own × leave the text as it was. In the bar, as a virtual list's row has one height.
+  // A field left as it opened saves nothing, and every save (Enter's too) goes to the stretch it
+  // opened on, named by its end words as they were then, which the engine checks (5ae: a save by
+  // bare index wrote onto whatever words held it by then).
   let draft = $state("");
   let shown = "";
   let openFor: string | null = null;
   // The stretch the open field is for (plain: read by the teardown, after the props have moved on).
   let openRun: { first: number; last: number } | null = null;
+  let openEnds: [api.WordRef, api.WordRef] | null = null;
   let saving = $state(false);
   const one = $derived(runs.length === 1 ? { first: runs[0][0], last: runs[0][1] } : null);
   $effect(() => {
@@ -96,6 +100,7 @@
     } else if (openFor == null && at) {
       openFor = at;
       openRun = one;
+      openEnds = [wordRef(words, one!.first), wordRef(words, one!.last)];
       shown = shownText(words, one!);
       draft = shown;
     } else if (openFor !== at || !at) {
@@ -109,24 +114,29 @@
     const run = openRun;
     openRun = null;
     openFor = null;
-    if (!run || draft.trim() === shown.trim()) return;
+    if (!run || !openEnds || draft.trim() === shown.trim()) return;
     const text = draft;
-    api.fixWords(run.first, run.last, text).then(onFixed, (e) => onError(String(e)));
+    api.fixWords(run.first, run.last, openEnds, text).then(onFixed, (e) => onError(String(e)));
   }
   onDestroy(leave);
 
   async function saveText() {
-    if (!one || saving) return;
+    const run = openRun;
+    const ends = openEnds;
+    if (!run || !ends || saving) return;
     if (draft.trim() === shown.trim()) {
       retyping = false;
       return;
     }
     saving = true;
+    // Taken before the wait, so a blur or a new selection meanwhile does not save it a second time
+    // through `leave`; given back if the save fails, so leaving can still save what was typed.
+    openRun = null;
     try {
-      onFixed(await api.fixWords(one.first, one.last, draft));
-      openRun = null;
+      onFixed(await api.fixWords(run.first, run.last, ends, draft));
       retyping = false;
     } catch (e) {
+      if (retyping) openRun = run;
       onError(String(e));
     } finally {
       saving = false;
