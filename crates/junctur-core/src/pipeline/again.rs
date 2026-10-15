@@ -21,6 +21,12 @@ const HEARD: &[u8] = b"heard";
 /// so a run that stopped between that write and the carry would otherwise carry against the new words.
 pub(super) const BEFORE_FILE: &str = "transcript.before.json";
 
+/// The stretch (source seconds, `[a, b]` in JSON) a re-transcription asked for covers, when it is not
+/// the whole recording: the spread after its carry gives fixes only to words in it, so the words
+/// outside a selection stay as they were. Beside [`AGAIN_FILE`] and gone with it, so a resumed run
+/// knows its stretch too; none means the whole recording.
+pub(super) const WITHIN_FILE: &str = "transcribe-again.within";
+
 /// Fixes a re-transcription could not put on any word (Whisper heard something else there, or
 /// nothing), as they were, for the user to see and redo: kept until the app is told they were seen
 /// ([`forget_fixes_set_aside`]), each later run adding to them.
@@ -106,7 +112,12 @@ pub(super) fn hear_again(
     let mark = p.dir.join(AGAIN_FILE);
     if opts.retranscribe {
         if mark.is_file() {
-            // Asked for again: heard again, whatever the last ask got to.
+            // Asked for again: heard again, whatever the last ask got to. Its carry covers both
+            // asks: a stretch only when both were stretches, else the whole recording.
+            let both = within(p)
+                .zip(opts.within)
+                .map(|((a0, b0), (a1, b1))| (a0.min(a1), b0.max(b1)));
+            keep_within(p, both)?;
             crate::output::write_replacing(&mark, b"")?;
             log("transcribing again with the word list as it is now (the fixed words still on the transcript before the last ask)");
             return Ok(true);
@@ -119,9 +130,11 @@ pub(super) fn hear_again(
                 let _ = std::fs::remove_file(&before);
             }
         }
+        keep_within(p, opts.within)?;
         if let Err(e) = crate::output::write_replacing(&mark, b"") {
             // Nor a copy without its mark: nothing would ever remove it.
             let _ = std::fs::remove_file(&before);
+            let _ = std::fs::remove_file(p.dir.join(WITHIN_FILE));
             return Err(e.into());
         }
         log("transcribing again with the word list as it is now");
@@ -135,6 +148,29 @@ pub(super) fn hear_again(
         return Ok(false);
     }
     Ok(true)
+}
+
+/// The stretch the re-transcription asked for covers ([`WITHIN_FILE`]); `None` for the whole
+/// recording, and for a file that does not read (the spread then reaches every word, as before
+/// stretches existed).
+fn within(p: &Project) -> Option<(f64, f64)> {
+    let b = std::fs::read(p.dir.join(WITHIN_FILE)).ok()?;
+    let [a, b]: [f64; 2] = serde_json::from_slice(&b).ok()?;
+    Some((a, b))
+}
+
+/// Writes `stretch` as the re-transcription's ([`WITHIN_FILE`]), or removes the file for the
+/// whole recording.
+fn keep_within(p: &Project, stretch: Option<(f64, f64)>) -> Result<()> {
+    let path = p.dir.join(WITHIN_FILE);
+    match stretch {
+        Some((a, b)) => crate::output::write_replacing(&path, serde_json::to_vec(&[a, b])?)?,
+        None => match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        },
+    }
+    Ok(())
 }
 
 /// A re-transcription asked for has written its transcript: the mark says so ([`HEARD`], written by
@@ -166,7 +202,7 @@ pub(super) fn not_again(p: &Project, log: &mut dyn FnMut(&str)) {
     if transcribe::interrupted(&p.dir) || !p.dir.join(AGAIN_FILE).is_file() {
         return;
     }
-    for f in [AGAIN_FILE, BEFORE_FILE] {
+    for f in [AGAIN_FILE, BEFORE_FILE, WITHIN_FILE] {
         let path = p.dir.join(f);
         if let Err(e) = crate::output::remove_retrying(&path) {
             if path.exists() {
@@ -212,9 +248,9 @@ pub(super) fn carry_fixes(p: &Project, t: &Transcript, log: &mut dyn FnMut(&str)
     match old {
         Err(e) => left(&format!("the transcript before was not kept: {e}"), log),
         Ok(_) if words.is_empty() => left("the new transcript has no words", log),
-        Ok(old) => carry_onto(p, &old.in_order(), &words, log),
+        Ok(old) => carry_onto(p, &old.in_order(), &words, within(p), log),
     }
-    for f in [AGAIN_FILE, BEFORE_FILE] {
+    for f in [AGAIN_FILE, BEFORE_FILE, WITHIN_FILE] {
         let path = p.dir.join(f);
         if let Err(e) = crate::output::remove_retrying(&path) {
             if path.exists() {
@@ -244,12 +280,14 @@ enum Took {
 }
 
 /// The fixes and retimes of `e` moved from `before`'s words onto `words`, every fix spread after
-/// when `spread`.
+/// when `spread`, to the words in `stretch` only when there is one (a selection transcribed again:
+/// the words outside it stay as they were).
 fn carry_all(
     e: &mut EditList,
     before: &[(usize, &transcribe::Word)],
     words: &[(usize, &transcribe::Word)],
     spread: bool,
+    stretch: Option<(f64, f64)>,
 ) -> Carry {
     // The retimes are read with the fixes as they are on the old words (a word heard now as its fix
     // is the same word).
@@ -262,6 +300,15 @@ fn carry_all(
     };
     if spread {
         done.spread = edit::spread(&mut e.fixes, words, edit::Which::All);
+        if let Some((a, b)) = stretch {
+            let outside = |f: &edit::Fix| f.start < a || f.start >= b;
+            let (dropped, added): (Vec<edit::Fix>, Vec<edit::Fix>) =
+                std::mem::take(&mut done.spread.added)
+                    .into_iter()
+                    .partition(outside);
+            e.fixes.retain(|f| !dropped.contains(f));
+            done.spread.added = added;
+        }
     }
     done
 }
@@ -273,6 +320,7 @@ fn carry_onto(
     p: &Project,
     before: &[(usize, &transcribe::Word)],
     words: &[(usize, &transcribe::Word)],
+    stretch: Option<(f64, f64)>,
     log: &mut dyn FnMut(&str),
 ) {
     let mut done = Carry::default();
@@ -280,7 +328,7 @@ fn carry_onto(
     let amended = edit::amend(&p.edit_path(), |e| {
         let was = (e.fixes.clone(), e.times.clone());
         for (spread, how) in [(true, Took::All), (false, Took::Carried)] {
-            let d = carry_all(e, before, words, spread);
+            let d = carry_all(e, before, words, spread, stretch);
             if e.checked_text().is_ok() {
                 (done, took) = (d, how);
                 return;

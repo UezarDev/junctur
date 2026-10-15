@@ -1,5 +1,5 @@
-use super::again::{AGAIN_FILE, BEFORE_FILE, SET_ASIDE_FILE};
-use super::editlist::{back_up, is_generated, Draft};
+use super::again::{AGAIN_FILE, BEFORE_FILE, SET_ASIDE_FILE, WITHIN_FILE};
+use super::editlist::{back_up, is_generated, rewrite, Draft, Rewrite};
 use super::speaker_files::{set_aside, write_speakers};
 use super::*;
 use crate::edit::Speakers;
@@ -1032,5 +1032,278 @@ fn a_retranscription_carries_word_times_and_survives_being_stopped_or_asked_agai
     std::fs::create_dir(&mark).unwrap();
     assert!(hear_again(&p, &asked, &mut log).is_err());
     assert!(!before.exists());
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn a_stretch_is_cut_again_and_fixes_and_names_forgotten_only_as_asked() {
+    // The Correct pop-up's write: a selection re-cut leaves the cut outside it, fixes dropped in
+    // the stretch only, and names forgotten afresh; a list of the user's that loses anything is
+    // kept as a backup first.
+    let (d, p) = scratch_project("rewrite");
+    let turn = |start: f64, speaker| edit::Turn {
+        start,
+        end: start + 1.0,
+        speaker,
+    };
+    let mut mine = edit::parse(&list(CutSettings::default(), 2.0)).unwrap();
+    mine.keep.push(edit::Range {
+        start: 3.5,
+        end: 4.5,
+    });
+    mine.keep.push(edit::Range {
+        start: 7.0,
+        end: 8.0,
+    });
+    mine.speakers = Speakers::new(vec![turn(1.0, 1), turn(4.0, 2)], &[None, None], None);
+    mine.speakers.rename(2, "Ana");
+    edit::set_fix(&mut mine.fixes, 0, 1.25, 0, "uno", "one").unwrap();
+    edit::set_fix(&mut mine.fixes, 0, 4.25, 0, "anna", "Ana").unwrap();
+    edit::set_time(&mut mine.times, 0, 4.0, 0, (4.0, 4.3), (3.9, 4.3)).unwrap();
+    edit::save(&p.edit_path(), &mine).unwrap();
+    // The run's own cut: all of 0..5 and 6..9.
+    let fresh = || {
+        let mut e = edit::parse(&list(CutSettings::default(), 5.0)).unwrap();
+        e.keep.push(edit::Range {
+            start: 6.0,
+            end: 9.0,
+        });
+        e
+    };
+    let draft_now = || Draft {
+        list: fresh(),
+        old: std::fs::read_to_string(p.edit_path()).ok(),
+        users: true,
+    };
+    let found = Found {
+        people: vec![],
+        heard: None,
+        known: vec![],
+        method: Method::Voices,
+        tracks: vec![None, None],
+        turns: vec![turn(1.0, 1), turn(4.0, 2)],
+        speech: String::new(),
+        pins: vec![],
+    };
+    let mut log = |_: &str| {};
+    let r = |a: f64, b: f64| edit::Range { start: a, end: b };
+    let bak = |n: &str| p.dir.join(format!("edit.junctur.{n}"));
+
+    // Words only in the stretch, cut and fixes kept: the list is the user's, untouched but for
+    // the speakers, and nothing is backed up.
+    let kept = rewrite(
+        &p,
+        draft_now(),
+        Some(&found),
+        &Rewrite {
+            keep: KeepList::Whole,
+            within: Some((3.0, 5.0)),
+            forget: Forget::default(),
+        },
+        &mut log,
+    )
+    .unwrap();
+    assert_eq!(kept.keep, mine.keep);
+    assert_eq!(kept.fixes, mine.fixes);
+    assert!(!bak("bak").exists());
+
+    // The cut made again in 3..5 and the fixes dropped there: the fresh cut inside it, the
+    // user's ranges outside it, the fix at 1.25 kept, the one at 4.25 and the word time gone.
+    let recut = rewrite(
+        &p,
+        draft_now(),
+        Some(&found),
+        &Rewrite {
+            keep: KeepList::No,
+            within: Some((3.0, 5.0)),
+            forget: Forget {
+                names: false,
+                fixes: true,
+            },
+        },
+        &mut log,
+    )
+    .unwrap();
+    assert_eq!(recut.keep, [r(0.0, 2.0), r(3.0, 5.0), r(7.0, 8.0)]);
+    assert_eq!(recut.fixes.len(), 1);
+    assert_eq!(recut.fixes[0].start, 1.25);
+    assert!(recut.times.is_empty());
+    assert_eq!(recut.speakers.name(2), Some("Ana"), "names kept");
+    assert_eq!(
+        edit::parse(edit::unstamped(
+            &std::fs::read_to_string(bak("bak")).unwrap()
+        ))
+        .unwrap(),
+        mine
+    );
+
+    // Names afresh over the whole list: Ana is "Speaker 2" again, the cut and the fix left;
+    // backed up again.
+    let afresh = rewrite(
+        &p,
+        draft_now(),
+        Some(&found),
+        &Rewrite {
+            keep: KeepList::Whole,
+            within: None,
+            forget: Forget {
+                names: true,
+                fixes: false,
+            },
+        },
+        &mut log,
+    )
+    .unwrap();
+    assert_eq!(afresh.speakers.name(2), Some("Speaker 2"));
+    assert_eq!(afresh.keep, recut.keep);
+    assert_eq!(afresh.fixes, recut.fixes);
+    assert!(bak("bak2").exists());
+
+    // The fixes dropped everywhere with a fresh cut of the whole timeline: none left.
+    let all = rewrite(
+        &p,
+        draft_now(),
+        Some(&found),
+        &Rewrite {
+            keep: KeepList::No,
+            within: None,
+            forget: Forget {
+                names: false,
+                fixes: true,
+            },
+        },
+        &mut log,
+    )
+    .unwrap();
+    assert_eq!(all.keep, fresh().keep);
+    assert!(all.fixes.is_empty() && all.times.is_empty());
+
+    // A list edited outside Junctur cannot have a stretch cut again: refused, left as it is.
+    let by_hand = format!("# my notes\n{}", mine.to_text());
+    std::fs::write(p.edit_path(), &by_hand).unwrap();
+    let err = rewrite(
+        &p,
+        draft_now(),
+        Some(&found),
+        &Rewrite {
+            keep: KeepList::No,
+            within: Some((3.0, 5.0)),
+            forget: Forget::default(),
+        },
+        &mut log,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("outside Junctur"), "{err}");
+    assert_eq!(std::fs::read_to_string(p.edit_path()).unwrap(), by_hand);
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn a_stretch_is_refused_with_the_speakers_or_nothing_to_splice_into() {
+    let (d, p) = scratch_project("within-check");
+    let within = |o: PipelineOptions| PipelineOptions {
+        within: Some((1.0, 2.0)),
+        ..o
+    };
+    let err = |o: &PipelineOptions| check(&p, o).unwrap_err().to_string();
+    assert!(err(&within(PipelineOptions {
+        rehear: true,
+        ..Default::default()
+    }))
+    .contains("whole recording"));
+    assert!(err(&within(PipelineOptions {
+        forget: Forget {
+            names: true,
+            fixes: false
+        },
+        ..Default::default()
+    }))
+    .contains("whole recording"));
+    assert!(err(&within(PipelineOptions {
+        retranscribe: true,
+        ..Default::default()
+    }))
+    .contains("no transcript"));
+    // A transcript made with other languages than the settings ask would be mixed.
+    let mut t = transcript_of(&[(1.5, "hola")]);
+    t.languages = vec!["es".into()];
+    std::fs::write(transcribe::path(&p.dir), serde_json::to_vec(&t).unwrap()).unwrap();
+    assert!(err(&within(PipelineOptions {
+        retranscribe: true,
+        ..Default::default()
+    }))
+    .contains("another model or languages"));
+    // A stretch with only the cut or the fixes asks nothing of the transcript.
+    assert!(check(&p, &within(PipelineOptions::default())).is_ok());
+    assert!(err(&PipelineOptions {
+        within: Some((2.0, 2.0)),
+        ..Default::default()
+    })
+    .contains("empty"));
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn a_selection_transcribed_again_spreads_fixes_only_inside_it() {
+    // Re-analyse selection: the carry's spread gives a fix to the new words heard alike inside
+    // the stretch, never to words outside it, which stay as they were; the stretch is kept beside
+    // the mark for a resumed run and goes with it.
+    let (d, p) = scratch_project("carry-within");
+    let fix = |start: f64, text: &str| edit::Fix {
+        track: 0,
+        start,
+        nth: 0,
+        through: None,
+        text: text.into(),
+    };
+    let e = EditList {
+        source: p.file.clone(),
+        duration: 10.0,
+        settings: CutSettings::default(),
+        keep: vec![edit::Range {
+            start: 0.0,
+            end: 10.0,
+        }],
+        speakers: Default::default(),
+        captions: Default::default(),
+        fixes: vec![fix(1.0, "Vayne")],
+        times: Vec::new(),
+        windows: vec![],
+    };
+    std::fs::write(p.edit_path(), e.to_text()).unwrap();
+    let old = transcript_of(&[(1.0, " Bane"), (3.0, " Bane"), (7.0, " Ben")]);
+    std::fs::write(transcribe::path(&p.dir), serde_json::to_vec(&old).unwrap()).unwrap();
+    let mut log = |_: &str| {};
+    let whole = PipelineOptions {
+        retranscribe: true,
+        ..Default::default()
+    };
+    let stretch = PipelineOptions {
+        within: Some((6.0, 9.0)),
+        ..whole.clone()
+    };
+    let within = p.dir.join(WITHIN_FILE);
+    // Asked for the whole recording after a stretch: the carry covers everything.
+    assert!(hear_again(&p, &stretch, &mut log).unwrap());
+    assert!(within.is_file());
+    assert!(hear_again(&p, &whole, &mut log).unwrap());
+    assert!(!within.exists());
+    not_again(&p, &mut log);
+    // A stretch alone: the new words at 7 are heard "Bane" now and take the fix; the "Bane" at
+    // 3, outside the stretch, stays as heard.
+    assert!(hear_again(&p, &stretch, &mut log).unwrap());
+    let new = transcript_of(&[(1.0, " Bane"), (3.0, " Bane"), (7.0, " Bane")]);
+    std::fs::write(transcribe::path(&p.dir), serde_json::to_vec(&new).unwrap()).unwrap();
+    carry_fixes(&p, &new, &mut log);
+    let shown: Vec<(f64, String)> = p
+        .edit()
+        .unwrap()
+        .fixes
+        .iter()
+        .map(|f| (f.start, f.text.clone()))
+        .collect();
+    assert_eq!(shown, [(1.0, "Vayne".into()), (7.0, "Vayne".into())]);
+    assert!(!within.exists() && !p.dir.join(AGAIN_FILE).exists());
     std::fs::remove_dir_all(&d).unwrap();
 }

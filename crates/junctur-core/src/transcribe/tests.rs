@@ -411,3 +411,135 @@ fn again_drops_a_partial_and_never_reuses_the_finished_transcript() {
     assert_eq!(load(&dir).unwrap().audio_s, 0.0);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+fn seg(track: usize, start: f64, end: f64, text: &str) -> Segment {
+    Segment {
+        track,
+        start,
+        end,
+        lang: "en".into(),
+        model: "large-v3-turbo".into(),
+        words: vec![Word {
+            start,
+            end: start + 0.3,
+            text: text.into(),
+            p: 1.0,
+            p_min: None,
+        }],
+    }
+}
+
+fn chunk(track: usize, start: f64, end: f64) -> (usize, Chunk) {
+    (track, Chunk { start, end })
+}
+
+#[test]
+fn a_stretch_heard_again_keeps_every_segment_it_does_not_touch() {
+    let work = [
+        chunk(0, 0.0, 10.0),
+        chunk(0, 20.0, 30.0),
+        chunk(0, 40.0, 50.0),
+        chunk(1, 22.0, 26.0),
+    ];
+    let old = vec![
+        seg(0, 0.0, 10.0, "a"),
+        seg(0, 20.0, 30.0, "b"),
+        seg(0, 40.0, 50.0, "c"),
+        seg(1, 22.0, 26.0, "d"),
+    ];
+    let texts = |segs: &[Segment]| segs.iter().map(|s| s.text()).collect::<Vec<_>>();
+    // The stretch touches the middle chunk of each track: both are heard again, whole.
+    assert_eq!(texts(&outside(old.clone(), &work, 25.0, 27.0)), ["a", "c"]);
+    // A stretch in a gap between chunks touches none: everything is kept.
+    assert_eq!(
+        texts(&outside(old.clone(), &work, 12.0, 18.0)),
+        ["a", "b", "c", "d"]
+    );
+    // An old transcript planned otherwise: a segment over two of today's chunks goes with the one
+    // the stretch touches, and the other chunk it overlapped is heard again too, so no word is
+    // there twice; a chunk with no segment of its own is heard, and the old one it overlaps goes.
+    let planned_otherwise = vec![
+        seg(0, 0.0, 25.0, "ab"),
+        seg(0, 41.0, 50.0, "c"),
+        seg(1, 22.0, 26.0, "d"),
+    ];
+    let kept = outside(planned_otherwise, &work, 1.0, 2.0);
+    assert_eq!(texts(&kept), ["d"]);
+}
+
+#[test]
+fn a_stretch_is_refused_without_a_transcript_that_answers_or_with_an_unfinished_run() {
+    let dir = std::env::temp_dir().join(format!("junctur-within-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let opts = TranscribeOptions {
+        again: true,
+        within: Some((12.0, 18.0)),
+        ..Default::default()
+    };
+    let sources = [Source {
+        track: 0,
+        regions: vec![
+            Region {
+                start: 1.0,
+                end: 9.0,
+            },
+            Region {
+                start: 21.0,
+                end: 29.0,
+            },
+        ],
+    }];
+    let run = |opts: &TranscribeOptions| {
+        transcribe(
+            &Job {
+                file: &dir.join("rec.mp4"),
+                sources: &sources,
+                total: 40.0,
+                project: &dir,
+                cache_dir: &dir,
+                opts,
+            },
+            &mut |_| {},
+            Reports {
+                reach: &mut |_, _| {},
+                transcribed: &mut |_| {},
+                between: &mut || {},
+            },
+        )
+    };
+    assert!(run(&opts).is_err(), "no transcript to splice into");
+    // The chunks as a whole run plans them, each with its segment.
+    let work = order(&sources, 40.0);
+    let old = Transcript {
+        choice: Choice {
+            model: "large-v3-turbo".into(),
+            device: Device::Cpu,
+            note: None,
+        },
+        languages: Languages::default().allowed,
+        segments: work
+            .iter()
+            .map(|&(t, c)| seg(t, c.start, c.end, "x"))
+            .collect(),
+        audio_s: 42.0,
+        elapsed_s: 0.0,
+        resumed_chunks: 0,
+    };
+    std::fs::write(path(&dir), serde_json::to_vec(&old).unwrap()).unwrap();
+    // A stretch with no speech in it hears nothing (no model is loaded) and keeps every word.
+    let t = run(&opts).unwrap();
+    assert_eq!(t.segments, old.segments);
+    assert!(!interrupted(&dir));
+    // Another model asked for explicitly: one transcript would mix both, refused.
+    let other = TranscribeOptions {
+        model: ModelPref::LargeV3,
+        ..opts.clone()
+    };
+    assert!(run(&other).is_err());
+    // An unfinished run is finished first, never overwritten by a part.
+    std::fs::write(partial_path(&dir), "torn").unwrap();
+    assert!(run(&opts).is_err());
+    assert!(interrupted(&dir));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

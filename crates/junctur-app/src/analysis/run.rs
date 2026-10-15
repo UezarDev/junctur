@@ -71,6 +71,8 @@ impl Analysis {
         o.keep_list = how.keep_list;
         o.rehear = how.redo.speakers;
         o.retranscribe = how.redo.words;
+        o.forget = how.forget;
+        o.within = how.within;
         Ok(o)
     }
 

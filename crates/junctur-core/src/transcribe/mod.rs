@@ -82,6 +82,10 @@ pub struct TranscribeOptions {
     /// The user's word list, told to Whisper before every chunk. Not in the partial's header nor in
     /// [`answers`], so a changed list applies to the next run and never restarts or outdates one.
     pub words: Vec<String>,
+    /// Hear again only the chunks this stretch (source seconds) touches, the finished transcript's
+    /// other segments kept as they are ([`outside`]). Refused with no finished transcript, one that
+    /// does not answer these options, or an unfinished run to resume.
+    pub within: Option<(f64, f64)>,
 }
 
 /// Whether a finished transcript answers `opts`. `Auto` takes whatever model made it (rerunning
@@ -195,7 +199,21 @@ pub fn transcribe(
     // One transcription of a recording at a time across processes, so the app resuming on open never
     // runs a second Whisper on a partial the CLI is writing. The OS lets go if the process dies.
     let _mine = Transcribing::claim(project)?;
-    if opts.force {
+    // A stretch heard again: the finished transcript's segments it does not touch go in as done.
+    let mut kept: Option<Vec<Segment>> = None;
+    if let (Some(_), false) = (opts.within, opts.force) {
+        if partial.is_file() {
+            return Err(Error::Model(
+                "an earlier transcription of this recording is unfinished: it is finished before a part is transcribed again".into(),
+            ));
+        }
+        let old = load(project).filter(|t| reusable(t, opts)).ok_or_else(|| {
+            Error::Model(
+                "no transcript answering the settings to transcribe a part of again".into(),
+            )
+        })?;
+        kept = Some(old.segments);
+    } else if opts.force {
         let _ = std::fs::remove_file(&partial);
         let _ = std::fs::remove_file(path(project));
     } else if opts.again {
@@ -207,10 +225,24 @@ pub fn transcribe(
         return Ok(t);
     }
     let mut resume = resume_point(&partial, opts);
-    let done = std::mem::take(&mut resume.done);
-    let resumed_chunks = done.len();
-
     let work = order(sources, total);
+    let mut resumed_chunks = resume.done.len();
+    if let (Some(old), Some((a, b))) = (kept, opts.within) {
+        let all = old.len();
+        resume.done = outside(old, &work, a, b);
+        // Kept from the finished transcript, not resumed from an interrupted run.
+        resumed_chunks = 0;
+        log(&format!(
+            "transcribing again the {} of {} chunks between {} and {}",
+            all.saturating_sub(resume.done.len()),
+            all,
+            clock(a),
+            clock(b)
+        ));
+    }
+    let done = std::mem::take(&mut resume.done);
+    let carried = done.len();
+
     let audio_s = 0.0 + work.iter().map(|(_, c)| c.end - c.start).sum::<f64>();
     let t0 = Instant::now();
     let groups = audio::groups(&work);
@@ -256,7 +288,7 @@ pub fn transcribe(
             todo: &todo,
             chunks: work.len(),
             left,
-            resumed: resumed_chunks,
+            resumed: carried,
         };
         choice = run_chunks(job, &plan, &resume, &mut tally, log, &mut reports)?;
     }
@@ -278,6 +310,59 @@ pub fn transcribe(
         log(&format!("could not remove {}: {e}", partial.display()));
     }
     Ok(t)
+}
+
+/// The finished segments `old` a transcription of stretch `[a, b]` keeps: all but those on the chunks
+/// of `work` it hears again. Those are the chunks the stretch touches, and any chunk with no segment
+/// of its own in `old` (the old transcript was planned otherwise, or lost it); every old segment
+/// overlapping one of them goes too, and every chunk that segment overlaps is heard again, until
+/// nothing more moves. So the stretch widens to whole chunks (no word heard cut in half) and the
+/// spliced transcript never holds a stretch's words twice. The caller's run hears the chunks with no
+/// kept segment, which are exactly these.
+pub(crate) fn outside(old: Vec<Segment>, work: &[(usize, Chunk)], a: f64, b: f64) -> Vec<Segment> {
+    let overlaps = |s0: f64, e0: f64, s1: f64, e1: f64| s0 < e1 && s1 < e0;
+    let mut redo: Vec<bool> = work
+        .iter()
+        .map(|&(track, c)| {
+            overlaps(c.start, c.end, a, b)
+                || !old.iter().any(|s| s.track == track && s.start == c.start)
+        })
+        .collect();
+    let mut gone = vec![false; old.len()];
+    loop {
+        let mut moved = false;
+        for (i, s) in old.iter().enumerate() {
+            if gone[i] {
+                continue;
+            }
+            let hit = work.iter().zip(&redo).any(|(&(track, c), &r)| {
+                r && track == s.track && overlaps(c.start, c.end, s.start, s.end)
+            });
+            if hit {
+                gone[i] = true;
+                moved = true;
+                for (k, &(track, c)) in work.iter().enumerate() {
+                    if track == s.track && overlaps(c.start, c.end, s.start, s.end) {
+                        redo[k] = true;
+                    }
+                }
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+    old.into_iter()
+        .zip(gone)
+        .filter(|(_, g)| !g)
+        .map(|(s, _)| s)
+        .collect()
+}
+
+/// `h:mm:ss` of source seconds, for the log.
+fn clock(s: f64) -> String {
+    let t = s.max(0.0) as u64;
+    format!("{}:{:02}:{:02}", t / 3600, t / 60 % 60, t % 60)
 }
 
 /// The chunks of a run with some left to hear.

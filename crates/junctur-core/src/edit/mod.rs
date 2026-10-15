@@ -42,7 +42,7 @@ pub use scores::windows;
 pub use speakers::{
     check_name, default_name, Labeller, Person, SpeakerName, Speakers, Turn, MAX_NAME,
 };
-pub use splice::{cut_span, keep_span};
+pub use splice::{cut_span, keep_span, replace_span};
 pub use spread::{keep_heard, likeness, spread, spread_with, Spread, SpreadIndex, Which};
 pub use times::{set_time, to_ms, Retime, Times};
 

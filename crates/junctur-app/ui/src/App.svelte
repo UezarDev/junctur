@@ -2,7 +2,7 @@
   // The editor: video area, play bar, lanes and side panel, placed from layout.ts, plus what several
   // parts share (the selection, the lanes' window, who is talking). Every menu ends in `onMenu`.
   import { onMount, untrack } from "svelte";
-  import { ask, open } from "@tauri-apps/plugin-dialog";
+  import { ask as ask_, open } from "@tauri-apps/plugin-dialog";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import * as api from "./lib/api";
   import Transport from "./lib/Transport.svelte";
@@ -20,6 +20,7 @@
   import * as steps from "./lib/steps";
   import TitleBar from "./lib/TitleBar.svelte";
   import SettingsDialog from "./lib/SettingsDialog.svelte";
+  import ReanalyseDialog from "./lib/ReanalyseDialog.svelte";
   import { floatAt, layout, REVIEW, TITLE, TOOLS } from "./lib/layout";
   import type { MenuId } from "./lib/menus";
   import { Talk, same } from "./lib/talking";
@@ -389,46 +390,70 @@
   const chip = $derived(steps.label(analysis, steps.paused(lane, analysis?.file)));
   const chipSteps = $derived(steps.current(analysis));
 
-  // Re-analyse in the background: the user's edit list is kept, speakers matched again, nothing to
-  // ask. A fresh cut (`fresh`) replaces their cut and hears the words and speakers again, so when the
-  // list holds their edits, ask first.
-  async function reanalyse(fresh: boolean) {
-    if (!opened) return;
-    const file = opened.file;
-    try {
-      let r = await api.reanalyse(file, fresh, false);
-      // Only a fresh cut is ever held back to ask; a plain Re-analyse never replaces the cut.
-      if (fresh && r.handEdited) {
-        const yes = await ask(
-          "Your cut is replaced by a fresh one from the analysis, and the speakers are heard and the whole recording transcribed again, about as long as its first transcription took. Speaker names and caption settings stay; your fixed words move onto the new words, as Correct does. Your version is kept beside it as edit.junctur.bak (or .bak2, …).",
-          { title: "Start over with a fresh cut?", kind: "warning", okLabel: "Start over", cancelLabel: "Keep my cut" },
-        );
-        if (!yes) return;
-        r = await api.reanalyse(file, true, true);
-      }
-      if (r.progress && opened?.file === file) analysis = r.progress;
-    } catch (e) {
-      failure = String(e);
-    }
+  // The Correct pop-up (ReanalyseDialog): open while `correcting` holds the word bar's waiting
+  // promise, answered with what started (for its note) or null.
+  let correcting = $state<{ done: (r: Corrected | null) => void } | null>(null);
+  // What the word bar's note says a run is doing, with the run's answer.
+  type Corrected = { r: api.Corrected; doing: string };
+  // The selection as the pop-up takes it: one stretch from its first second to its last (several
+  // stretches of words count as the span holding them all).
+  const reanalyseSpan = $derived.by(() => {
+    if (!spans.length) return null;
+    const start = Math.min(...spans.map((s) => s.start));
+    const end = Math.max(...spans.map((s) => s.end));
+    return end > start ? { start, end, what: sel.describe(selection, edit?.fps ?? null) } : null;
+  });
+
+  // The word bar's (and the empty transcript's) Correct: opens the pop-up; resolves once it starts a
+  // run or is closed.
+  function correct(): Promise<Corrected | null> {
+    if (!opened) return Promise.resolve(null);
+    correcting?.done(null);
+    return new Promise((done) => (correcting = { done }));
+  }
+  function closeCorrect(r: Corrected | null = null) {
+    correcting?.done(r);
+    correcting = null;
   }
 
-  // The word bar's Correct: every fix given to the words heard the same way, then the speakers and
-  // words heard again, the edit list kept. As slow as the first transcription, so ask first.
-  async function correct(): Promise<api.Corrected | null> {
-    if (!opened) return null;
+  // What a run asked for does, in a few words for the word bar's note.
+  function doing(ask: api.Ask): string {
+    const parts = [
+      ask.words ? "transcribing the words again" : "",
+      ask.speakers ? (ask.keepNames ? "hearing the speakers again" : "hearing the speakers again and naming them afresh") : "",
+      ask.keepCuts ? "" : "making a fresh cut",
+      ask.keepFixes ? "" : "dropping your fixed words",
+    ].filter((p) => p);
+    const what = parts.length ? parts.join(", ") : "running what the settings changed";
+    return ask.within ? `${what} in the selection` : what;
+  }
+
+  // Runs what the pop-up asks. A fresh cut over the user's edits is asked about first (the cut
+  // is theirs); declined, the pop-up stays for another choice.
+  async function reanalyse(
+    choice: Omit<api.Ask, "within" | "replace">,
+    within: [number, number] | null,
+  ): Promise<{ error: string | null; started: boolean }> {
+    if (!opened) return { error: null, started: false };
     const file = opened.file;
-    const yes = await ask(
-      "Every word heard the same way as one you fixed gets the same fix. Then the speakers are heard again against the remembered voices and the whole recording is transcribed again with your word list, about as long as its first transcription took; the words come back five minutes at a time. Your cuts, names and caption settings stay; your fixes, and the word times you set by moving a cut's edge, move onto the new words, and any whose word is heard otherwise now are listed above the transcript for you to redo.",
-      { title: "Correct this recording?", kind: "info", okLabel: "Correct", cancelLabel: "Not now" },
-    );
-    if (!yes || opened?.file !== file) return null;
+    const ask: api.Ask = { ...choice, within, replace: false };
     try {
-      const r = await api.correct();
-      if (opened?.file === file) analysis = r.progress;
-      return r;
+      let r = await api.reanalyse(file, ask);
+      if (r.handEdited) {
+        const yes = await ask_(
+          within
+            ? "Your cut in the selection is replaced by a fresh one from the analysis; the rest of your cut stays. Your version is kept beside it as edit.junctur.bak (or .bak2, …)."
+            : "Your cut is replaced by a fresh one from the analysis. Your version is kept beside it as edit.junctur.bak (or .bak2, …).",
+          { title: "Make a fresh cut?", kind: "warning", okLabel: "Make a fresh cut", cancelLabel: "Keep my cut" },
+        );
+        if (!yes || opened?.file !== file) return { error: null, started: false };
+        r = await api.reanalyse(file, { ...ask, replace: true });
+      }
+      if (r.progress && opened?.file === file) analysis = r.progress;
+      if (r.progress) closeCorrect({ r, doing: doing(ask) });
+      return { error: null, started: r.progress != null };
     } catch (e) {
-      failure = String(e);
-      return null;
+      return { error: String(e), started: false };
     }
   }
 
@@ -485,8 +510,8 @@
   }
 
   function onKey(e: KeyboardEvent) {
-    // The dialog has the keys while it is open (Escape closes it).
-    if (settingsOpen) return;
+    // A dialog has the keys while it is open (Escape closes it).
+    if (settingsOpen || correcting) return;
     // A field, a textarea or anything editable keeps every key, the title bar's shortcuts too:
     // Ctrl+W from an uncommitted number would close before saving, Backspace would cut the lanes.
     const t = e.target;
@@ -610,7 +635,7 @@
 
 <div class="frame">
 <TitleBar
-  menu={{ loaded, closable: loaded || opening, panel: panelOpen, talking: overlay, locked: settingsOpen }}
+  menu={{ loaded, closable: loaded || opening, panel: panelOpen, talking: overlay, locked: settingsOpen || correcting != null }}
   {onMenu}
 />
 <main class:dragging>
@@ -753,8 +778,6 @@
             {lane}
             outdated={opened.outdated}
             {waves}
-            onReanalyse={() => reanalyse(false)}
-            onFreshCut={() => reanalyse(true)}
             onError={(e) => (failure = e)}
           />
         </div>
@@ -764,6 +787,9 @@
 
   {#if settingsOpen}
     <SettingsDialog onClose={() => (settingsOpen = false)} onSaved={settingsSaved} />
+  {/if}
+  {#if correcting}
+    <ReanalyseDialog selection={reanalyseSpan} onRun={reanalyse} onClose={() => closeCorrect()} />
   {/if}
 </main>
 </div>

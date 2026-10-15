@@ -9,7 +9,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use super::{blocking, notifier, App};
-use crate::analysis::{self, Again, Progress, Reanalysed, Redo, Transcription};
+use crate::analysis::{self, Progress, Transcription};
 use crate::project::{self, ProjectStatus, RecordingInfo};
 use crate::recent::{self, Recent};
 use crate::waves::{self, WavesState};
@@ -191,31 +191,6 @@ pub async fn pause_transcription(
     });
     sent.into_inner()
         .ok_or_else(|| "the transcription lane was not read".to_string())
-}
-
-/// Analyses `path` again with the settings now ([`Analysis::reanalyse`](crate::analysis::Analysis::reanalyse)); `fresh` re-cuts the
-/// list and hears the words and the speakers again ([`Redo::fresh`]), and without `replace` a list
-/// holding the user's edits starts nothing, for the page to ask.
-#[tauri::command]
-pub async fn reanalyse(
-    handle: AppHandle,
-    app: State<'_, App>,
-    path: String,
-    fresh: bool,
-    replace: bool,
-) -> Result<Reanalysed, String> {
-    // Off the async runtime: asking whether the list holds user edits reads the track analysis
-    // and the transcript.
-    let analysis = app.analysis.clone();
-    blocking(move || {
-        analysis.reanalyse(
-            Path::new(&path),
-            Again::from_flags(fresh, replace),
-            Redo::fresh(fresh),
-            notifier(handle),
-        )
-    })
-    .await
 }
 
 /// A recent recording's length and where its analysis stands (the start window). Off the
