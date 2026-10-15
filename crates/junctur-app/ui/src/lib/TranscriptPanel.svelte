@@ -32,6 +32,7 @@
     waiting = false,
     failed = false,
     error = null,
+    file = null,
     through = null,
     player,
     edit,
@@ -54,6 +55,8 @@
     failed?: boolean;
     /** Why it failed, when it did (the run's error, as Properties shows it). */
     error?: string | null;
+    /** The open recording, whose analysis `failed` and `error` are. */
+    file?: string | null;
     /** While it transcribes: the words shown are every one before this many seconds. */
     through?: number | null;
     player: api.PlayerState | null;
@@ -350,18 +353,26 @@
     return [listed, ...notes].filter((t) => t).join(" ");
   });
   async function correctAll() {
+    // The recording the run is for: another opened while the pop-up was up is not its.
+    const asked = file;
     const started = await correct();
-    if (!started || !mounted) return;
+    if (!started || !mounted || !asked || file !== asked) return;
     note = `Correcting: ${started.doing} (Properties shows how far).`;
-    noted = true;
+    noted = asked;
   }
-  // The run the note is about: ended failed, the note says why instead of that it goes on (a
-  // run asked to name the speakers afresh that could not hear them stops, and says so only here
-  // and in Properties).
-  let noted = $state(false);
+  // The recording whose run the note is about: ended failed, the note says why instead of that it
+  // goes on (a run asked to name the speakers afresh that could not hear them stops, and says so
+  // only here and in Properties). Another recording shown, the note and the run are not its.
+  let noted = $state<string | null>(null);
   $effect(() => {
-    if (!noted || analysing) return;
-    noted = false;
+    if (!noted) return;
+    if (file !== noted) {
+      noted = null;
+      note = null;
+      return;
+    }
+    if (analysing) return;
+    noted = null;
     if (failed) note = `Correct stopped: ${error ?? "Properties says why"}.`;
   });
 

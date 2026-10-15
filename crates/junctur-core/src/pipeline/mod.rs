@@ -214,11 +214,12 @@ fn forget_now(p: &Project, opts: &PipelineOptions, found: bool) -> Forget {
     }
 }
 
-/// Why a run asked to name the speakers afresh stopped: `why` is what kept them from being heard
-/// (an offline model download, say), which the stage's own line would only show in passing.
+/// Why a run asked to name the speakers afresh stopped: `why` is the speakers stage's error (their
+/// model not downloaded offline, say, or the new hearing not written), which its own line would
+/// only show in passing.
 fn not_named_afresh(why: &str) -> Error {
     Error::Edit(format!(
-        "the speakers were not named afresh, because they could not be heard ({why}): the run stopped there, with the edit list and the words as they were. Keep the names and voices to redo the rest without hearing them"
+        "the speakers were not named afresh, because they could not be heard or saved ({why}): the run stopped there, with the edit list and the words as they were. Keep the names and voices to redo the rest without hearing them"
     ))
 }
 

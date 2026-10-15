@@ -877,6 +877,7 @@
           waiting={analysis?.phase === "waiting"}
           failed={analysis?.phase === "failed"}
           error={analysis?.phase === "failed" ? analysis.error : null}
+          file={opened?.file ?? null}
           {through}
           {player}
           {edit}
