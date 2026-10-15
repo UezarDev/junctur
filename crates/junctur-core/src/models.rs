@@ -153,6 +153,25 @@ pub const LAYA_TOKENIZER: Model = Model {
     license: "Apache-2.0",
 };
 
+/// Every pin above, for the tests that hold them all to one rule (a test checks none is missing).
+pub const ALL: &[&Model] = &[
+    &SILERO_VAD,
+    &MDX_VOCALS,
+    &SPEAKER_EMBEDDING,
+    &SEGMENTATION,
+    &WHISPER_LARGE_V3,
+    &WHISPER_LARGE_V3_TURBO,
+    &WHISPER_LARGE_V3_Q5,
+    &TRANSLATE_ENCODER,
+    &TRANSLATE_DECODER,
+    &TRANSLATE_TOKENIZER,
+    &SIGLIP_VISION,
+    &SIGLIP_TEXT,
+    &SIGLIP_TOKENIZER,
+    &LAYA_MODEL,
+    &LAYA_TOKENIZER,
+];
+
 pub fn dir(cache_dir: &Path) -> PathBuf {
     cache_dir.join("models")
 }
@@ -327,25 +346,15 @@ mod tests {
     /// move under its checksum, so every Hugging Face file is fetched at a full commit.
     #[test]
     fn every_hugging_face_model_is_pinned_to_a_commit() {
-        let all = [
-            &SILERO_VAD,
-            &MDX_VOCALS,
-            &SPEAKER_EMBEDDING,
-            &SEGMENTATION,
-            &WHISPER_LARGE_V3,
-            &WHISPER_LARGE_V3_TURBO,
-            &WHISPER_LARGE_V3_Q5,
-            &TRANSLATE_ENCODER,
-            &TRANSLATE_DECODER,
-            &TRANSLATE_TOKENIZER,
-            &SIGLIP_VISION,
-            &SIGLIP_TEXT,
-            &SIGLIP_TOKENIZER,
-            &LAYA_MODEL,
-            &LAYA_TOKENIZER,
-        ];
-        for m in all {
+        for m in ALL {
             let Some(rest) = m.url.strip_prefix("https://huggingface.co/") else {
+                // Another spelling of the host (http, hf.co) would slip past the check below.
+                assert!(
+                    !m.url.contains("huggingface.co") && !m.url.contains("hf.co"),
+                    "{} is not fetched from https://huggingface.co/: {}",
+                    m.file,
+                    m.url
+                );
                 continue;
             };
             let rev = rest
@@ -359,6 +368,16 @@ mod tests {
                 m.url
             );
         }
+    }
+
+    /// [`ALL`] is kept by hand: a pin added above and not to it would skip the test before.
+    #[test]
+    fn all_lists_every_model_pin() {
+        let pins = include_str!("models.rs")
+            .lines()
+            .filter(|l| l.starts_with("pub const ") && l.ends_with(": Model = Model {"))
+            .count();
+        assert_eq!(pins, ALL.len());
     }
 
     #[test]
