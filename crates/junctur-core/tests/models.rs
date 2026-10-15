@@ -316,3 +316,56 @@ fn whisper_takes_the_word_list_and_cuts_a_long_one() {
     w.transcribe(&x, "en").unwrap();
     assert_eq!(w.set_prompt(&[]).kept, 0);
 }
+
+/// SigLIP 2 reads a test card as one, the same on every device it opens on (CAM++ on CUDA did not,
+/// phase 5r), and a frame embeds the same alone and in a batch. The text tower runs once: a second
+/// ask reads the kept embeddings.
+#[test]
+#[ignore = "downloads models"]
+fn siglip_reads_a_test_card_alike_on_every_device() {
+    use junctur_core::labels::model::{self, Vision, SIZE};
+    let cache = cache::default_dir();
+    let d = workdir("models", "siglip");
+    let raw = d.join("bars.rgb");
+    let size = format!("smptebars=size={SIZE}x{SIZE}:duration=1");
+    let raw_s = raw.to_string_lossy().into_owned();
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        &size,
+        "-frames:v",
+        "1",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        &raw_s,
+    ]);
+    let px = std::fs::read(&raw).unwrap();
+    let mut cpu = Vision::open(&cache, DevicePref::Cpu).unwrap();
+    let mut any = Vision::open(&cache, DevicePref::Auto).unwrap();
+    let a = cpu.embed(&[&px]).unwrap().remove(0);
+    let b = any.embed(&[&px, &px]).unwrap();
+    let dot = |x: &[f32], y: &[f32]| x.iter().zip(y).map(|(p, q)| p * q).sum::<f32>();
+    eprintln!(
+        "SigLIP on {:?}: {:.5} against the CPU",
+        any.device,
+        dot(&a, &b[0])
+    );
+    assert!(
+        dot(&a, &b[0]) > 0.99,
+        "{:?} differs from the CPU",
+        any.device
+    );
+    assert!(dot(&b[0], &b[1]) > 0.9999);
+    let prompts: Vec<String> = ["colour bars test pattern", "a video game fight", "a cat"]
+        .map(String::from)
+        .to_vec();
+    let t = model::texts(&cache, &prompts).unwrap();
+    let s = model::shares(&a, &t);
+    eprintln!("shares {s:?}");
+    assert!(s[0] > s[1] && s[0] > s[2], "{s:?}");
+    assert_eq!(model::texts(&cache, &prompts).unwrap(), t);
+    let _ = std::fs::remove_dir_all(&d);
+}

@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use junctur_core::ffmpeg;
+use junctur_core::labels;
 use junctur_core::pipeline::{self, Project, StageName, StageState};
 use junctur_core::transcribe;
 use serde::Serialize;
@@ -33,6 +34,9 @@ pub struct Stage {
     pub name: String,
     /// `pending`, `running` (or interrupted), `done` or `failed`, as `jobs.json` spells them.
     pub state: StageState,
+    /// What `jobs.json` notes beside it: `reused`, why it failed, or `off` for labels not asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -57,6 +61,7 @@ fn status_of(p: &Project) -> ProjectStatus {
         .map(|stage| Stage {
             name: stage.name().to_string(),
             state: jobs.get(stage).map_or(StageState::Pending, |r| r.state),
+            note: jobs.get(stage).and_then(|r| r.note.clone()),
         })
         .collect();
     let (edit, edit_error) = if p.edit_path().is_file() {
@@ -118,6 +123,17 @@ fn summary(p: &Project) -> Result<EditSummary, String> {
     }
     m.insert(path, (text, s.clone()));
     s
+}
+
+/// The labels of `file`'s silent parts, for the editor's Labels lane: `None` when it has none, or
+/// its last run had them off (the file is kept for when they are turned on again).
+pub fn labels(file: &Path, cache_dir: Option<PathBuf>) -> Result<Option<labels::Labels>, String> {
+    let p = Project::open(file, cache_dir, None).map_err(|e| e.to_string())?;
+    let off = p
+        .jobs()
+        .get(StageName::Labels)
+        .is_some_and(|r| r.note.as_deref() == Some(pipeline::LABELS_OFF));
+    Ok(if off { None } else { labels::load(&p.dir) })
 }
 
 /// A recent recording's line on the start window: how long it is and where its analysis

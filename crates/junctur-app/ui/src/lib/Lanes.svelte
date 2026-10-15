@@ -22,6 +22,8 @@
     view,
     row,
     speakersRow,
+    labelsRow = 0,
+    labels = null,
     head,
     thin,
     wavesVersion,
@@ -40,6 +42,10 @@
     view: { start: number; len: number };
     row: number;
     speakersRow: number;
+    /** The Labels lane's height; 0 when there is none. */
+    labelsRow?: number;
+    /** The silent parts' labels, drawn on the Labels lane. */
+    labels?: api.Labels | null;
     head: number;
     /** Portrait's thin lanes: no second line in the headers. */
     thin: boolean;
@@ -65,7 +71,36 @@
   const duration = $derived(player?.duration ?? 0);
   const end = $derived(view.start + view.len);
   // What the lanes need: below the height left they scroll (headers and bodies together).
-  const content = $derived(RULER + speakersRow + tracks.length * row);
+  const content = $derived(RULER + speakersRow + labelsRow + tracks.length * row);
+  const pieces = $derived(labelsRow > 0 ? (labels?.pieces ?? []) : []);
+
+  /** What hovering a labelled piece says: its likeliest label and share, and how busy it sounds. */
+  function describe(p: api.LabelledPiece): string {
+    const top = p.top[0];
+    const what = top ? `${top.label} ${Math.round(top.score * 100)}%` : "no frame read";
+    const then = p.top.slice(1).map((s) => `${s.label} ${Math.round(s.score * 100)}%`);
+    const busy = p.busy != null ? ` · busy ${Math.round(p.busy * 100)}%` : "";
+    return `${what}${busy}${then.length ? `\n then ${then.join(", ")}` : ""}\n${clock(p.start)} to ${clock(p.end)}, nobody talks`;
+  }
+  // The labelled piece under the pointer on the Labels lane, for the body's tooltip.
+  let hoverPiece = $state.raw<api.LabelledPiece | null>(null);
+  function pieceAt(clientX: number, clientY: number): api.LabelledPiece | null {
+    if (!pieces.length) return null;
+    const r = body.getBoundingClientRect();
+    const y = clientY - r.top - RULER - speakersRow;
+    if (y < 0 || y >= labelsRow) return null;
+    const t = timeAt(clientX);
+    // Pieces are in time order: the first ending after `t`.
+    let lo = 0;
+    let hi = pieces.length;
+    while (lo < hi) {
+      const m = (lo + hi) >> 1;
+      if (pieces[m].end <= t) lo = m + 1;
+      else hi = m;
+    }
+    const p = pieces[lo];
+    return p && p.start <= t ? p : null;
+  }
 
   const x = (t: number) => ((t - view.start) / view.len) * width;
   const timeAt = (clientX: number) => {
@@ -177,6 +212,35 @@
       ctx.fillRect(0, y - 1, width, 1);
     }
 
+    // Labels lane: each silent piece a block, stronger the busier its game audio, its likeliest
+    // label written in it where it fits.
+    if (labelsRow > 0) {
+      ctx.textAlign = "left";
+      ctx.font = "10px 'Segoe UI', system-ui, sans-serif";
+      for (const p of pieces) {
+        if (p.end <= view.start || p.start >= end) continue;
+        const x0 = Math.max(0, x(p.start));
+        const x1 = Math.min(width, x(p.end));
+        // A tint of --accent written out (the canvas cannot read the token).
+        ctx.fillStyle = `rgba(255, 160, 140, ${0.15 + 0.55 * (p.busy ?? 0.3)})`;
+        ctx.fillRect(x0 + 0.5, y + 2, Math.max(1, x1 - x0 - 1), labelsRow - 5);
+        const top = p.top[0];
+        if (top && x1 - x0 > 40) {
+          ctx.fillStyle = "rgba(255, 255, 255, 0.85)";
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(x0 + 3, y, x1 - x0 - 6, labelsRow);
+          ctx.clip();
+          ctx.fillText(top.label, x0 + 4, y + labelsRow / 2);
+          ctx.restore();
+        }
+      }
+      ctx.textAlign = "center";
+      y += labelsRow;
+      ctx.fillStyle = line;
+      ctx.fillRect(0, y - 1, width, 1);
+    }
+
     // Track lanes: each waveform mirrored about the lane's middle, in the track's colour, dimmer
     // when it is not heard.
     const cols = peaks?.columns ?? 0;
@@ -266,6 +330,8 @@
     void height;
     void row;
     void speakersRow;
+    void labelsRow;
+    void pieces;
     paint();
   });
 
@@ -416,6 +482,8 @@
     }
     if (!down) {
       setHover(edgeAt(e.clientX, e.clientY));
+      const p = pieceAt(e.clientX, e.clientY);
+      if (p !== hoverPiece) hoverPiece = p;
       return;
     }
     if (Math.abs(e.clientX - down.x) > 3) down.moved = true;
@@ -498,6 +566,15 @@
         <Avatars {speakers} {talking} {mixer} size="small" />
       </div>
     {/if}
+    {#if labelsRow > 0}
+      <div
+        class="h labels"
+        style:height="{labelsRow}px"
+        title="What the picture shows where nobody talks, from SigLIP 2, stronger where the game sounds busier. Hover a part for its labels."
+      >
+        <span class="nm">Labels</span>
+      </div>
+    {/if}
     {#each tracks as t (t.index)}
       <div class="h track" style:height="{row}px" title={tr.title(t)}>
         <span class="dot" style:background={tr.colour(t, speakers)}></span>
@@ -525,7 +602,9 @@
     }}
     onpointerleave={() => {
       if (!drag) hover = null;
+      hoverPiece = null;
     }}
+    title={hoverPiece ? describe(hoverPiece) : undefined}
     onwheel={wheel}
     class:grabbing={!!grab}
     role="slider"
@@ -584,6 +663,9 @@
   .h.ruler {
     font-size: 11px;
     color: var(--muted);
+  }
+  .h.labels {
+    font-size: 11px;
   }
   .tag {
     padding: 0 6px;

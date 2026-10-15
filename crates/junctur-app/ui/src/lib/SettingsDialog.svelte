@@ -20,6 +20,9 @@
   // The word list as the text box holds it, one entry per line; the core trims it and drops blank
   // lines and repeats when it saves.
   let wordsText = $state("");
+  // The labels added per kind, as their text boxes hold them, one per line; trimmed when saved.
+  let addedText = $state<Record<api.LabelKindKey, string>>({ generic: "", league: "" });
+  const kind = $derived(view?.labelKinds.find((k) => k.key === draft?.labels.kind));
   // Resolved as the picker resolves it, so the (i) explains the model the picker shows.
   const model = $derived(view ? chosenModel(view.models, draft?.whisperModel ?? "") : undefined);
 
@@ -29,6 +32,10 @@
         view = v;
         draft = structuredClone(v.settings);
         wordsText = v.settings.words.join("\n");
+        addedText = {
+          generic: (v.settings.labels.added?.generic ?? []).join("\n"),
+          league: (v.settings.labels.added?.league ?? []).join("\n"),
+        };
       },
       (e) => (error = String(e)),
     );
@@ -46,7 +53,11 @@
     try {
       // An emptied or fractional number field: whole percent, within 0 to 100.
       const flagBelow = Math.min(100, Math.max(0, Math.round(Number(draft.flagBelow) || 0)));
-      onSaved(await api.saveSettings({ ...$state.snapshot(draft), words: wordsText.split("\n"), flagBelow }));
+      const labels = {
+        ...$state.snapshot(draft).labels,
+        added: { generic: addedText.generic.split("\n"), league: addedText.league.split("\n") },
+      };
+      onSaved(await api.saveSettings({ ...$state.snapshot(draft), words: wordsText.split("\n"), flagBelow, labels }));
       onClose();
     } catch (e) {
       error = String(e);
@@ -111,6 +122,43 @@
             />
           {/snippet}
         </Field>
+      </Section>
+
+      <Section
+        title="Labels"
+        info="Labels the parts where nobody talks from the picture (SigLIP 2), with how busy the game sounds, on a lane of their own. Used by the next analysis; off by default, and the first labelled recording fetches about 1.5 GB of model."
+      >
+        <Field label="Label silent parts">
+          {#snippet children(id)}
+            <input
+              {id}
+              type="checkbox"
+              bind:checked={() => draft?.labels.on ?? false, (v) => draft && (draft.labels.on = v)}
+            />
+          {/snippet}
+        </Field>
+        <Field label="Kind of video" info="Picks the built-in labels. League of Legends has the general ones and its own.">
+          {#snippet children(id)}
+            <select {id} bind:value={() => draft?.labels.kind ?? "generic", (v) => draft && (draft.labels.kind = v)}>
+              {#each view?.labelKinds ?? [] as k (k.key)}
+                <option value={k.key}>{k.name}</option>
+              {/each}
+            </select>
+          {/snippet}
+        </Field>
+        {#if kind}
+          <p class="status builtin">Built in: {kind.builtin.join(", ")}</p>
+          <Field
+            kind="stack"
+            label="Your labels"
+            info="More labels for this kind, one per line, scored by their own words: describe what the picture shows, like a video game boss fight."
+          >
+            {#snippet children(id)}
+              <textarea {id} rows="3" spellcheck="false" bind:value={addedText[kind.key]} placeholder="a video game boss fight"
+              ></textarea>
+            {/snippet}
+          </Field>
+        {/if}
       </Section>
 
       <div class="group">
@@ -182,6 +230,10 @@
   /* The dialog has the room for a wider control column than the panel's. */
   .dialog {
     --control-width: 240px;
+  }
+  .builtin {
+    margin: 4px 0 8px;
+    color: var(--muted);
   }
   .path {
     margin-top: 18px;

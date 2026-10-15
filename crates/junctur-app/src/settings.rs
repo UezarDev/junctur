@@ -4,6 +4,7 @@
 
 use junctur_core::config::{self, Config};
 use junctur_core::edit::{Captions, ExistingClips};
+use junctur_core::labels::{self, Kind};
 use junctur_core::transcribe::ModelPref;
 use junctur_core::wordlist;
 use serde::{Deserialize, Serialize};
@@ -74,6 +75,9 @@ pub struct Settings {
     /// none.
     #[serde(default = "flag_below")]
     pub flag_below: u8,
+    /// Labels for the parts where nobody talks: off by default; the kind and the labels added.
+    #[serde(default)]
+    pub labels: labels::Settings,
 }
 
 fn flag_below() -> u8 {
@@ -89,6 +93,33 @@ pub struct SettingsView {
     pub path: Option<String>,
     /// Why the file could not be read; the dialog shows the defaults then, and saving replaces it.
     pub error: Option<String>,
+    /// Each kind of video the labels offer, with its built-in labels.
+    pub label_kinds: Vec<LabelKind>,
+}
+
+/// A kind of video for the labels, as the dialog lists it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelKind {
+    /// What the config file holds.
+    pub key: Kind,
+    pub name: &'static str,
+    /// Its built-in labels, as shown.
+    pub builtin: Vec<&'static str>,
+}
+
+fn label_kinds() -> Vec<LabelKind> {
+    Kind::ALL
+        .into_iter()
+        .map(|k| LabelKind {
+            key: k,
+            name: match k {
+                Kind::Generic => "Any game",
+                Kind::League => "League of Legends",
+            },
+            builtin: k.builtin().into_iter().map(|(text, _)| text).collect(),
+        })
+        .collect()
 }
 
 fn models() -> Vec<ModelChoice> {
@@ -111,6 +142,7 @@ fn from_config(c: &Config) -> Settings {
         captions: c.captions.clone().unwrap_or_default(),
         words: c.words.clone(),
         flag_below: c.flag_below(),
+        labels: c.labels.clone(),
     }
 }
 
@@ -134,7 +166,25 @@ fn to_config(s: &Settings) -> Result<Config, String> {
         captions: (captions != Captions::default()).then_some(captions),
         words: wordlist::normalize(&s.words),
         flag_below: (s.flag_below != config::FLAG_BELOW).then_some(u64::from(s.flag_below)),
+        labels: labels::Settings {
+            added: labels::Added {
+                generic: added(&s.labels.added.generic),
+                league: added(&s.labels.added.league),
+            },
+            ..s.labels.clone()
+        },
     })
+}
+
+/// Added labels as the box gave them, trimmed, blank lines and repeats dropped.
+fn added(lines: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for l in lines.iter().map(|l| l.trim()).filter(|l| !l.is_empty()) {
+        if !out.iter().any(|o| o.eq_ignore_ascii_case(l)) {
+            out.push(l.to_string());
+        }
+    }
+    out
 }
 
 fn view(c: Result<Config, String>) -> SettingsView {
@@ -147,6 +197,7 @@ fn view(c: Result<Config, String>) -> SettingsView {
         models: models(),
         path: config::path().ok().map(|p| p.display().to_string()),
         error,
+        label_kinds: label_kinds(),
     }
 }
 

@@ -30,9 +30,12 @@ pub use speaker_files::{
 
 use again::{carry_fixes, hear_again, heard_again, not_again};
 use editlist::{draft, keep_or_write};
-use stages::{count_words, speakers_stage, speech_stage, transcribe_stage, Stage};
+use stages::{count_words, labels_stage, speakers_stage, speech_stage, transcribe_stage, Stage};
+
+pub use stages::LABELS_OFF;
 
 use crate::edit::{self, CutSettings, EditList};
+use crate::labels;
 use crate::runtime::DevicePref;
 use crate::tracks::{self, Role, TrackReport};
 use crate::transcribe::{self, Languages, ModelPref, TranscribeOptions, Transcript};
@@ -133,8 +136,8 @@ impl Project {
 
 #[derive(Debug, Clone, Default)]
 pub struct PipelineOptions {
-    /// Where Whisper may run. Only transcription uses it: tracks, speech and speakers always run on
-    /// the CPU (CAM++ on the GPU finds a speaker per sentence).
+    /// Where Whisper and the labels' vision tower may run. Only they use it: tracks, speech and
+    /// speakers always run on the CPU (CAM++ on the GPU finds a speaker per sentence).
     pub device: DevicePref,
     pub model: ModelPref,
     /// The word list Whisper is told (the caller reads the config file). Not part of what makes
@@ -150,6 +153,8 @@ pub struct PipelineOptions {
     pub no_speakers: bool,
     /// Enrolled voices to label speakers by (the caller reads the voices file).
     pub voices: Vec<Voice>,
+    /// Whether the silent parts are labelled, and with which list ([`labels`]).
+    pub labels: labels::Settings,
     /// Whether an edit list holding the user's edits is kept or re-cut ([`KeepList`]).
     pub keep_list: KeepList,
     /// Hear the speakers again from the audio, cut at the user's pins, instead of reusing the
@@ -283,9 +288,9 @@ pub fn prepare(
     })
 }
 
-/// A run's second half: Whisper over the speech, piece by piece (`transcribed` is told where the
-/// transcript is whole, `between` is called between chunks and may block: the app's pause;
-/// [`transcribe::Reports`]), then the words counted into the edit list's score windows in place
+/// A run's second half: the labels of the silent parts when they are on ([`labels`]), then Whisper
+/// over the speech, piece by piece (`transcribed` is told where the transcript is whole, `between`
+/// is called between chunks and may block: the app's pause; [`transcribe::Reports`]), then the words counted into the edit list's score windows in place
 /// ([`count_words`]). Never re-cuts: edits made since [`prepare`] stay.
 pub fn finish(
     p: &Project,
@@ -304,6 +309,17 @@ pub fn finish(
     } = prepared;
     let mut jobs = p.jobs();
     jobs.file = p.file.clone();
+    // Labels are an extra, like the speakers: when they cannot be made (the model cannot be
+    // fetched offline, say), the run goes on to the transcript.
+    let stage = Stage {
+        p,
+        jobs: &mut jobs,
+        report: &report,
+        steps,
+    };
+    if let Err(e) = labels_stage(stage, &speech, opts, log) {
+        log(&format!("labels: {e}; going on without them"));
+    }
     let transcript = if opts.no_transcript {
         None
     } else {
@@ -362,13 +378,43 @@ pub fn speech_tracks(report: &TrackReport) -> Vec<usize> {
 }
 
 /// Why a re-run with `opts` would redo more than the cut, one line each for the user: no
-/// transcript yet, or one made with another model or languages than `opts` asks. Empty when the
-/// analysis answers `opts`; `Auto` takes any model, as [`run`] does, so this never offers a re-run
-/// that would redo nothing.
+/// transcript yet, or one made with another model or languages than `opts` asks; labels asked for
+/// and missing or made with another list ([`labels_outdated`]). Empty when the analysis answers
+/// `opts`; `Auto` takes any model, as [`run`] does, so this never offers a re-run that would redo
+/// nothing.
 pub fn outdated(p: &Project, opts: &PipelineOptions) -> Vec<String> {
     if opts.no_transcript {
         return Vec::new();
     }
+    let mut out = transcript_outdated(p, opts);
+    out.extend(labels_outdated(p, opts));
+    out
+}
+
+/// Why the labels of the silent parts do not answer `opts`, when they are on: none yet (or the last
+/// run had them off), or made with another list or model. `None` when they are off, up to date, or
+/// the speech is not found yet (the run that finds it makes them).
+fn labels_outdated(p: &Project, opts: &PipelineOptions) -> Option<String> {
+    if !opts.labels.on {
+        return None;
+    }
+    let (speech, report) = (p.speech()?, cached_tracks(p)?);
+    let off = p
+        .jobs()
+        .get(StageName::Labels)
+        .is_some_and(|r| r.note.as_deref() == Some(LABELS_OFF));
+    let pieces = labels::pieces::pieces(&speech.all_regions(), report.duration);
+    match labels::load(&p.dir).filter(|_| !off) {
+        None => Some("The parts where nobody talks have no labels yet.".into()),
+        Some(l) if !labels::answers(&l, &opts.labels.labels(), &pieces) => {
+            Some("The labels were made with another list.".into())
+        }
+        Some(_) => None,
+    }
+}
+
+/// [`outdated`]'s lines about the transcript.
+fn transcript_outdated(p: &Project, opts: &PipelineOptions) -> Vec<String> {
     let t = TranscribeOptions {
         model: opts.model,
         device: opts.device,

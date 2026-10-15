@@ -1,5 +1,5 @@
 //! Junctur engine library: [`pipeline`] runs a recording's stages in order (tracks, speech,
-//! speakers, [`transcribe`], [`edit`]), each cached and resumable; [`export`] and [`render`] turn
+//! speakers, [`edit`], [`labels`], [`transcribe`]), each cached and resumable; [`export`] and [`render`] turn
 //! the edit list into an FCPXML timeline or a video.
 
 pub mod cache;
@@ -11,6 +11,7 @@ pub mod export;
 pub mod ffmpeg;
 pub mod hash;
 pub mod hidden;
+pub mod labels;
 pub mod models;
 pub mod output;
 pub mod paths;

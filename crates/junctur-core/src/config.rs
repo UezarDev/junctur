@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::edit::Captions;
+use crate::labels;
 use crate::pipeline::PipelineOptions;
 use crate::transcribe::ModelPref;
 use crate::{hidden, voices, Error, Result};
@@ -29,6 +30,13 @@ pub struct Config {
     /// none. Any whole number reads (300 clamps to 100), so one bad value cannot break the file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flag_below: Option<u64>,
+    /// Labels for the parts where nobody talks ([`labels`]): off, generic, nothing added, unless set.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub labels: labels::Settings,
+}
+
+fn is_default(s: &labels::Settings) -> bool {
+    s == &labels::Settings::default()
 }
 
 /// The default of [`Config::flag_below`], in percent: flags about one word in twenty, nearly all
@@ -146,8 +154,9 @@ fn transcription(flag: Option<&str>, cfg: Result<Config>) -> Result<(ModelPref, 
 }
 
 /// The options `junctur analyze` runs with before its own flags, and the app's analysis with: the
-/// model and word list ([`transcription`]; the config file is not read without a transcript, since no
-/// model is loaded) and the remembered voices (not read without speakers, so a broken voices file cannot
+/// model and word list ([`transcription`]; the config file is not read for them without a transcript,
+/// since no model is loaded), the labels settings (off when the file cannot be read: an extra, never a
+/// reason to stop) and the remembered voices (not read without speakers, so a broken voices file cannot
 /// block the rest). Device, cut settings and `force` stay the defaults for the caller to set.
 pub fn analysis_options(
     model_flag: Option<&str>,
@@ -162,6 +171,7 @@ pub fn analysis_options(
     Ok(PipelineOptions {
         model,
         words,
+        labels: load().map(|c| c.labels).unwrap_or_default(),
         no_transcript,
         no_speakers,
         voices: if no_speakers {

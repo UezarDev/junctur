@@ -42,6 +42,7 @@ pub fn known(command: &str) -> Vec<&'static str> {
                 "--force",
                 "--no-transcript",
                 "--no-speakers",
+                "--labels",
             ],
         ),
         "status" => (true, false, &[]),

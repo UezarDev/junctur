@@ -59,6 +59,11 @@ pub fn analyze(a: Args) -> Result<(), String> {
     }
     opts.cut = cut_settings(&a)?;
     opts.force = a.has("--force");
+    // Labels for the silent parts this run, with the config file's kind and added labels, as when
+    // the file turns them on.
+    if a.has("--labels") {
+        opts.labels.on = true;
+    }
     let out = pipeline::run(&p, &opts, &mut |line| eprintln!("junctur: {line}"))
         .map_err(|e| e.to_string())?;
     if let Some(t) = &out.transcript {

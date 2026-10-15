@@ -47,6 +47,7 @@
     speakers: "Speakers",
     transcribe: "Transcript",
     edit: "Edit list",
+    labels: "Labels",
   };
   // The running stage's tracks, named as their lanes are.
   const steps = $derived(current(analysis));
@@ -70,10 +71,11 @@
 
   // `running` in jobs.json is a stage started and not finished: running now while the app
   // analyses, else a run that was stopped (a closed app or a killed CLI).
-  function state(s: api.StageState): { label: string; cls: string } {
+  function state(s: api.StageState, note?: string): { label: string; cls: string } {
     switch (s) {
       case "done":
-        return { label: "done", cls: "done" };
+        // Labels not asked for (Settings): done, nothing made.
+        return note === "off" ? { label: "off", cls: "pending" } : { label: "done", cls: "done" };
       case "failed":
         return { label: "failed", cls: "failed" };
       case "running":
@@ -130,7 +132,7 @@
     {:else if status}
       <ul class="stages">
         {#each status.stages as s (s.name)}
-          {@const st = state(s.state)}
+          {@const st = state(s.state, s.note)}
           {@const mine = st.cls === "running" && steps.length > 0 && steps[0].stage === s.name}
           <li>
             <span class="icon {st.cls}" aria-hidden="true"></span>

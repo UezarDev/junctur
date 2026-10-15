@@ -102,6 +102,32 @@ pub const TRANSLATE_TOKENIZER: Model = Model {
     license: "MIT",
 };
 
+/// SigLIP 2 base, 224 px (Apache-2.0, Google): labels for the parts where nobody talks
+/// ([`crate::labels`]). onnx-community's export, its towers apart so the text one is opened only
+/// for a label never seen. fp32 both: the int8 text tower picks other labels, the fp16 ones do
+/// not load on the CPU.
+pub const SIGLIP_VISION: Model = Model {
+    file: "siglip2_base_224_vision.onnx",
+    url: "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/ba1f3b0843f24bc5417d38e19c37b287d719b2f4/onnx/vision_model.onnx",
+    sha256: "c0573e3f4140c3a7c4e9cc5912bd6b26a033b46a6a8e8af26cbea262b163bcad",
+    license: "Apache-2.0",
+};
+
+pub const SIGLIP_TEXT: Model = Model {
+    file: "siglip2_base_224_text.onnx",
+    url: "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/ba1f3b0843f24bc5417d38e19c37b287d719b2f4/onnx/text_model.onnx",
+    sha256: "baf12d941beabafafb14f7b4adb38dc15be18681b964a84410ec53d9d65e6293",
+    license: "Apache-2.0",
+};
+
+/// Its Gemma vocabulary, which appends `<eos>` and pads to the 64 tokens the text tower reads.
+pub const SIGLIP_TOKENIZER: Model = Model {
+    file: "siglip2_base_224_tokenizer.json",
+    url: "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/ba1f3b0843f24bc5417d38e19c37b287d719b2f4/tokenizer.json",
+    sha256: "cb9140fae3ac5122c972d37adf83e1248471a38147ad76f8215c8872c6fd8322",
+    license: "Apache-2.0",
+};
+
 pub fn dir(cache_dir: &Path) -> PathBuf {
     cache_dir.join("models")
 }

@@ -244,11 +244,23 @@ pub fn read(
     stop: &AtomicBool,
     more: &mut dyn FnMut(&[u8]),
 ) -> Result<Option<usize>> {
+    let all: Vec<usize> = (0..tracks).collect();
+    read_tracks(file, &all, duration, stop, more)
+}
+
+/// [`read`] for the audio ordinals `which` only, in that order (the labels' busy score reads one).
+pub fn read_tracks(
+    file: &Path,
+    which: &[usize],
+    duration: Option<f64>,
+    stop: &AtomicBool,
+    more: &mut dyn FnMut(&[u8]),
+) -> Result<Option<usize>> {
+    let tracks = which.len();
     if tracks == 0 {
         return Ok(Some(0));
     }
-    let all: Vec<usize> = (0..tracks).collect();
-    let mut r = PcmReader::merged(file, &all, DECODE_RATE, duration)?;
+    let mut r = PcmReader::merged(file, which, DECODE_RATE, duration)?;
     let frame = PER_HOP * tracks;
     let mut buf = Vec::with_capacity(READ_HOPS * frame);
     let mut out = Vec::with_capacity(READ_HOPS * tracks);

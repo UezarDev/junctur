@@ -4,9 +4,10 @@
 use super::speaker_files::{set_aside, write_speakers};
 use super::{
     describe, speakers, speech, speech_tracks, steps, Found, Jobs, PipelineOptions, Project,
-    Speech, StageName, Steps,
+    Speech, StageName, StageState, Steps,
 };
 use crate::edit::{self, EditList};
+use crate::labels::{self, Labels};
 use crate::tracks::{Role, TrackReport};
 use crate::transcribe::{self, Source, TranscribeOptions, Transcript};
 use crate::Result;
@@ -150,6 +151,47 @@ pub(super) fn speakers_stage(
     };
     log(&describe(&found));
     Ok(found)
+}
+
+/// The note a `labels` stage left off carries in `jobs.json`.
+pub const LABELS_OFF: &str = "off";
+
+/// The silent parts labelled ([`labels`]), reused when the list, the speech and the model are what
+/// they were. Off (the default), the stage is recorded done with the note [`LABELS_OFF`] and
+/// nothing is read: a stage of its own state would make an older build drop the whole `jobs.json`.
+pub(super) fn labels_stage(
+    st: Stage,
+    speech: &Speech,
+    opts: &PipelineOptions,
+    log: &mut dyn FnMut(&str),
+) -> Result<Option<Labels>> {
+    let Stage {
+        p, jobs, report, ..
+    } = st;
+    if !opts.labels.on {
+        let off = Some(LABELS_OFF.to_string());
+        jobs.set(&p.dir, StageName::Labels, StageState::Done, None, off)?;
+        return Ok(None);
+    }
+    let regions = speech.all_regions();
+    let job = labels::Job {
+        file: &p.file,
+        dir: &p.dir,
+        cache_dir: &p.cache_dir,
+        report,
+        speech: &regions,
+        settings: &opts.labels,
+        device: opts.device,
+    };
+    let l = match labels::reused(&job) {
+        Some(l) => {
+            jobs.skip(&p.dir, StageName::Labels, log)?;
+            l
+        }
+        None => jobs.stage(&p.dir, StageName::Labels, log, |log| labels::run(&job, log))?,
+    };
+    log(&labels::summary(&l));
+    Ok(Some(l))
 }
 
 /// Whisper over the speech regions, resumed or reused when it can be.

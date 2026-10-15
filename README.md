@@ -52,7 +52,7 @@ junctur tracks <file> [--json <out.json>] [--cache-dir <dir>] [--no-cache] [--no
 junctur separate <file> [--track <n>] [--start <s>] [--duration <s>] [--cpu] [--force]
                         [--no-speakers] [--json <out.json>] [--cache-dir <dir>]
 junctur analyze <file> [--project <dir>] [--cpu] [--force] [--no-transcript] [--no-speakers]
-                       [--model auto|large-v3-turbo|large-v3|large-v3-q5_0] [cut flags]
+                       [--labels] [--model auto|large-v3-turbo|large-v3|large-v3-q5_0] [cut flags]
 junctur status <file> [--project <dir>]
 junctur cut <file> [--project <dir>] [cut flags]
 junctur export <file> [--fcpxml <out.fcpxml>] [--srt <out.srt>] [--project <dir>]
@@ -67,12 +67,23 @@ in the cache unless `--project <dir>` puts it somewhere else, for example a git 
 `analyze` also tells speakers apart (`--no-speakers` skips it): one speaker per speech track when OBS
 recorded the voices on their own tracks, otherwise by voice on the mix (CAM++ embeddings of 1.5 s
 windows, and pyannote's segmentation model for where two people talk at once). Both always run on the
-CPU, as tracks and speech do, also in a CUDA build, where Whisper is the only part of `analyze` on the GPU
-(`junctur separate` still separates on the GPU): on ONNX Runtime's CUDA provider CAM++'s embeddings were
-wrong, and every sentence became its own speaker. They are written into
+CPU, as tracks and speech do, also in a CUDA build, where only Whisper and the labels' picture model run
+on the GPU (`junctur separate` still separates on the GPU): on ONNX Runtime's CUDA provider CAM++'s
+embeddings were wrong, and every sentence became its own speaker. They are written into
 `edit.junctur` as `speaker <id> <name>` lines and `turn <start> <end> <id>` lines; turns of two people
 overlap where both talk. Rename or recolour a speaker by editing its line (or in the app). A re-cut keeps
 the names.
+
+Labels for the parts where nobody talks are off by default (`"labels": {"on": true}` in the config file,
+Settings in the app, or `analyze --labels` for one run). Each silent stretch of 2 s or more (cut into
+pieces of at most 30 s) is looked at every 2 s, at the recording's keyframes, by SigLIP 2 base (zero-shot
+against a list of labels: `"kind": "generic"` or `"league"`, plus your own in `"added"`), and scored for how
+busy it sounds: the share of the recording's seconds quieter on the game/PC track, else the mix. They
+land in `labels.json` in the project folder and on the app's Labels lane, between the edit list and
+Whisper. On the 1h45 sample they take about 75 s on an RTX 3060 (about 45 s per hour of recording), plus a
+1.5 GB download the first time; a changed list is scored again from the kept frames in seconds. Base reads
+menus, the client and the desktop well, and calls most of a League game "teamfight": the busy score is
+what tells a real fight from walking.
 
 Voices can be remembered once and recognised in every recording: in the app, select words only one
 person says and choose "Remember voice…", or `junctur voices <file> --add <name> --at 61-75,300-312`
@@ -217,6 +228,7 @@ Downloaded on first use into `<cache>/models/`, checked against pinned SHA-256 d
 | UVR MDX-Net Kim Vocal 2 | voice isolation | no explicit license on the weights |
 | 3D-Speaker CAM++ (VoxCeleb) | speaker embeddings | Apache-2.0 |
 | pyannote segmentation-3.0 (k2-fsa's ONNX export) | overlapping speech | MIT |
+| SigLIP 2 base 224 px (onnx-community's export) | labels for the silent parts | Apache-2.0 |
 | Whisper large-v3-turbo, large-v3 f16 or 5-bit large-v3, ggml (whisper.cpp) | transcription | MIT |
 
 ## Whisper models

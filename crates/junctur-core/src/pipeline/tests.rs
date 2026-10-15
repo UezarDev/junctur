@@ -82,15 +82,20 @@ fn tracks_speech_and_speakers_open_their_models_on_the_cpu_only() {
     ] {
         assert!(!this.contains(banned), "the run's code has {banned}");
     }
-    // Every `device` field this file writes is transcription's (its own options' declaration
-    // aside), and the run's device is only ever written into one.
+    // Every `device` field this file writes is transcription's or the labels' (its own options'
+    // declaration aside), and the run's device is only ever written into one. The labels' vision
+    // tower is the one ONNX model on the GPU: 400 to 800 ms a frame on the CPU, and its CUDA
+    // embeddings checked against the CPU's (`tests/models.rs`), which CAM++'s were not.
     let mut fields = 0;
     for (k, _) in this.match_indices("device:") {
         let before = &this[..k];
         let opened = &before[..before.rfind(" {").expect("a struct")];
         let owner = opened.rsplit([' ', '(', '=']).next().unwrap();
         if !opened.ends_with("pub struct PipelineOptions") {
-            assert_eq!(owner, "TranscribeOptions", "a device field at byte {k}");
+            assert!(
+                ["TranscribeOptions", "labels::Job"].contains(&owner),
+                "a device field of {owner} at byte {k}"
+            );
             fields += 1;
         }
     }
@@ -1032,5 +1037,94 @@ fn a_retranscription_carries_word_times_and_survives_being_stopped_or_asked_agai
     std::fs::create_dir(&mark).unwrap();
     assert!(hear_again(&p, &asked, &mut log).is_err());
     assert!(!before.exists());
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn outdated_says_when_labels_are_on_and_missing_left_off_or_from_another_list() {
+    let (d, p) = scratch_project("outdated-labels");
+    std::fs::write(
+        transcribe::path(&p.dir),
+        r#"{"choice":{"model":"large-v3-turbo","device":"cuda","note":null},
+            "languages":["es","en"],"segments":[],"audio_s":0,"elapsed_s":0}"#,
+    )
+    .unwrap();
+    let with = |kind| PipelineOptions {
+        labels: labels::Settings {
+            on: true,
+            kind,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let on = with(labels::Kind::Generic);
+    // Before the speech is found: the run that finds it makes them.
+    assert!(outdated(&p, &on).is_empty());
+    let report = TrackReport {
+        file: p.file.clone(),
+        duration: 20.0,
+        windows: vec![],
+        window_seconds: 1.0,
+        tracks: vec![],
+        logical: vec![],
+        speech_error: None,
+        from_cache: false,
+    };
+    let entry = tracks::entry(&p.file, &tracks_options(&p, false)).unwrap();
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::fs::write(&entry, serde_json::to_vec(&report).unwrap()).unwrap();
+    let region = crate::vad::Region {
+        start: 5.0,
+        end: 8.0,
+    };
+    let speech = Speech {
+        tracks: vec![speech::SpeechTrack {
+            track: 0,
+            regions: vec![region],
+            share: 0.15,
+        }],
+        seconds: 3.0,
+    };
+    std::fs::write(p.speech_path(), serde_json::to_vec(&speech).unwrap()).unwrap();
+    assert_eq!(
+        outdated(&p, &on),
+        vec!["The parts where nobody talks have no labels yet."]
+    );
+    // Off, nothing is missing.
+    assert!(outdated(&p, &PipelineOptions::default()).is_empty());
+    let list = on.labels.labels();
+    let made = labels::Labels {
+        model: labels::model::NAME.into(),
+        kind: labels::Kind::Generic,
+        labels: list.iter().map(|l| l.text.clone()).collect(),
+        prompts: list.iter().map(|l| l.prompt.clone()).collect(),
+        busy_track: None,
+        pieces: labels::pieces::pieces(&[region], 20.0)
+            .into_iter()
+            .map(|x| labels::Labelled {
+                start: x.start,
+                end: x.end,
+                frames: 1,
+                top: vec![],
+                busy: None,
+                level_db: None,
+            })
+            .collect(),
+    };
+    labels::save(&p.dir, &made).unwrap();
+    assert!(outdated(&p, &on).is_empty());
+    assert_eq!(
+        outdated(&p, &with(labels::Kind::League)),
+        vec!["The labels were made with another list."]
+    );
+    // The last run had them off: the file there is not this list's labels.
+    let off = Some(LABELS_OFF.to_string());
+    p.jobs()
+        .set(&p.dir, StageName::Labels, StageState::Done, None, off)
+        .unwrap();
+    assert_eq!(
+        outdated(&p, &on),
+        vec!["The parts where nobody talks have no labels yet."]
+    );
     std::fs::remove_dir_all(&d).unwrap();
 }

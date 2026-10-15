@@ -45,6 +45,7 @@ fn defaults_are_not_written_and_the_rest_round_trips() {
         },
         words: vec!["Uezar".into(), "Tsunheto".into()],
         flag_below: 25,
+        labels: Default::default(),
     };
     let c = to_config(&s).unwrap();
     assert_eq!(c.whisper_model, Some(ModelPref::LargeV3));
@@ -63,6 +64,7 @@ fn a_recordings_remembered_choice_for_clips_in_resolve_never_becomes_a_default()
         },
         words: vec![],
         flag_below: config::FLAG_BELOW,
+        labels: Default::default(),
     };
     let saved = to_config(&s).unwrap().captions.unwrap();
     assert!(saved.on);
@@ -85,6 +87,7 @@ fn the_word_list_is_saved_trimmed_without_blanks_or_repeats() {
         captions: Captions::default(),
         words: vec![" Uezar ".into(), "".into(), "Delay".into(), "Uezar".into()],
         flag_below: config::FLAG_BELOW,
+        labels: Default::default(),
     };
     assert_eq!(
         to_config(&s).unwrap().words,
@@ -105,6 +108,7 @@ fn a_bad_model_or_out_of_limits_captions_are_refused() {
         captions: Captions::default(),
         words: vec![],
         flag_below: config::FLAG_BELOW,
+        labels: Default::default(),
     };
     assert!(to_config(&s).is_err());
     let s = Settings {
@@ -115,6 +119,7 @@ fn a_bad_model_or_out_of_limits_captions_are_refused() {
         },
         words: vec![],
         flag_below: config::FLAG_BELOW,
+        labels: Default::default(),
     };
     assert!(to_config(&s).unwrap_err().contains("caption defaults"));
 }
@@ -142,4 +147,36 @@ fn the_flag_threshold_is_saved_off_its_default_only() {
     v.as_object_mut().unwrap().remove("flagBelow").unwrap();
     let old: Settings = serde_json::from_value(v).unwrap();
     assert_eq!(old.flag_below, config::FLAG_BELOW);
+}
+
+/// Labels round-trip, off by default and not written then; added ones are trimmed, once each.
+#[test]
+fn labels_settings_round_trip_and_added_ones_are_cleaned() {
+    let plain = from_config(&Config::default());
+    assert!(!plain.labels.on);
+    assert_eq!(
+        to_config(&plain).unwrap().labels,
+        labels::Settings::default()
+    );
+    let on = Settings {
+        labels: labels::Settings {
+            on: true,
+            kind: Kind::League,
+            added: labels::Added {
+                generic: vec![],
+                league: vec![" baron ".into(), "".into(), "Baron".into(), "drake".into()],
+            },
+        },
+        ..plain
+    };
+    let c = to_config(&on).unwrap();
+    assert!(c.labels.on);
+    assert_eq!(c.labels.added.league, vec!["baron", "drake"]);
+    assert_eq!(from_config(&c).labels, c.labels);
+    // The dialog's kinds are every kind, each with its built-in labels.
+    let kinds = label_kinds();
+    assert_eq!(kinds.len(), Kind::ALL.len());
+    assert!(kinds.iter().all(|k| !k.builtin.is_empty()));
+    let v = serde_json::to_value(&kinds[1]).unwrap();
+    assert_eq!(v["key"], "league");
 }

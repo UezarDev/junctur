@@ -108,6 +108,7 @@ fn main() {
             commands::turns,
             commands::waves_state,
             commands::waves,
+            commands::labels,
             commands::recent_info,
             commands::thumbnail,
             commands::reveal,

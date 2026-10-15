@@ -11,6 +11,7 @@ export const STEP: Record<string, string> = {
   speakers: "Finding speakers",
   transcribe: "Transcribing",
   edit: "Cutting",
+  labels: "Labelling the silent parts",
 };
 
 /** The stage running now, while the run is. */

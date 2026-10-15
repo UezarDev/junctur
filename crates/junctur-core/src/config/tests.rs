@@ -108,6 +108,14 @@ fn saves_what_it_reads_with_canonical_names() {
         }),
         words: vec!["Uezar".into(), "Tsunheto".into()],
         flag_below: Some(0),
+        labels: crate::labels::Settings {
+            on: true,
+            kind: crate::labels::Kind::League,
+            added: crate::labels::Added {
+                league: vec!["baron fight".into()],
+                ..Default::default()
+            },
+        },
     };
     save_to(&path, &c).unwrap();
     assert_eq!(load_from(&path, true).unwrap(), c);
@@ -190,4 +198,17 @@ fn missing_default_is_defaults_but_missing_named_file_and_broken_file_are_errors
     let e = load_from(&d, false).unwrap_err().to_string();
     assert!(e.contains("junctur-config-"), "{e}");
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Labels are off unless the file turns them on, and not written while off and empty.
+#[test]
+fn labels_are_off_unless_set_and_written_only_when_set() {
+    assert!(!parse(b"{}").unwrap().labels.on);
+    let c = parse(br#"{"labels":{"on":true,"kind":"league"}}"#).unwrap();
+    assert!(c.labels.on);
+    assert_eq!(c.labels.kind, crate::labels::Kind::League);
+    assert!(parse(br#"{"labels":{"on":true,"kind":"chess"}}"#).is_err());
+    assert!(!serde_json::to_string(&Config::default())
+        .unwrap()
+        .contains("labels"));
 }

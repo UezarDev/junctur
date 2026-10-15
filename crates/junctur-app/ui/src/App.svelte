@@ -33,6 +33,8 @@
   // Raw: replaced whole, never changed in place, and `attach` compares it with the object it set;
   // a deep `$state` would store a proxy, so that check would never hold.
   let opened = $state.raw<api.Opened | null>(null);
+  // The open recording's labels for its silent parts (the Labels lane); null when it has none.
+  let labels = $state.raw<api.Labels | null>(null);
   let edit = $state.raw<api.EditState | null>(null);
   // Every track's mute, solo and role; the meters go straight to the bars (meters.ts).
   let mixer = $state.raw<api.MixerState | null>(null);
@@ -96,6 +98,7 @@
   const aspect = $derived(player?.aspect ?? null);
   const trackCount = $derived(mixer?.tracks.length ?? 0);
   const speakerCount = $derived(speakers.length);
+  const hasLabels = $derived((labels?.pieces.length ?? 0) > 0);
   const L = $derived(
     layout({
       width: windowWidth,
@@ -104,6 +107,7 @@
       aspect,
       tracks: trackCount,
       speakers: speakerCount,
+      labels: hasLabels,
     }),
   );
   // The layout's shares are of the window below the title bar; mpv's are of the whole window, the
@@ -333,6 +337,7 @@
       analysis = now;
       if (now.phase === "done") opened = { ...o, outdated: [] };
     }
+    void loadLabels();
     const w = await api.wavesState();
     if (stale()) return;
     if (w && w.file === o.file) {
@@ -344,6 +349,30 @@
 
   const busy = steps.busy;
   const rank = steps.rank;
+
+  // The labels of the open recording as its project has them now; only the latest ask's answer for
+  // the recording still open is taken.
+  let labelsAsk = 0;
+  async function loadLabels() {
+    const o = opened;
+    const ask = ++labelsAsk;
+    if (!o) {
+      labels = null;
+      return;
+    }
+    try {
+      const l = await api.labels(o.file);
+      if (ask === labelsAsk && opened?.file === o.file) {
+        labels = l;
+        void api.uiLog(`labels: ${l?.pieces.length ?? 0} pieces`);
+      }
+    } catch (e) {
+      failure = String(e);
+    }
+  }
+  /** Whether `p`'s labels stage is done (made, reused or off). */
+  const labelled = (p: api.Progress | null) =>
+    p?.project?.stages.some((s) => s.name === "labels" && s.state === "done") ?? false;
 
   // The words again while the recording transcribes: a piece more, or the finished transcript. Only
   // words at the end are new (the core's promise), so the selection and the panel stay. Only the
@@ -368,6 +397,8 @@
     if (!opened || p.file !== opened.file) return;
     const was = analysis;
     analysis = p;
+    // The labels stage done during the run (they show while Whisper runs), or the run over.
+    if ((labelled(p) && !labelled(was)) || (busy(was) && !busy(p))) void loadLabels();
     if (busy(was) && !busy(p)) {
       // The run ended: what the panel said was out of date was its business; the transcript may
       // be new (the edit list comes in through the watch). One that grew piece by piece is the
@@ -446,6 +477,7 @@
     }
     opened = null;
     analysis = null;
+    labels = null;
     words = null;
     selection = null;
     waves = null;
@@ -674,6 +706,8 @@
           {view}
           row={L.row}
           speakersRow={L.speakersRow}
+          labelsRow={L.labelsRow}
+          {labels}
           head={L.head}
           thin={L.portrait}
           {wavesVersion}

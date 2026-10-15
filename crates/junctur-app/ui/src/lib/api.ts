@@ -260,6 +260,26 @@ export interface Settings {
   words: string[];
   /** The transcript flags words Whisper was less sure of than this many percent; 0 for none. */
   flagBelow: number;
+  /** Labels for the parts where nobody talks (junctur-core labels::Settings). */
+  labels: LabelSettings;
+}
+
+/** A kind of video the labels know; its built-in list. */
+export type LabelKindKey = "generic" | "league";
+
+export interface LabelSettings {
+  /** Off by default: the first run fetches about 1.5 GB of model. */
+  on: boolean;
+  kind: LabelKindKey;
+  /** Labels the user added, per kind; missing ones are none. */
+  added?: { generic?: string[]; league?: string[] };
+}
+
+export interface LabelKind {
+  key: LabelKindKey;
+  name: string;
+  /** Its built-in labels, as shown. */
+  builtin: string[];
 }
 
 export interface SettingsView {
@@ -269,6 +289,28 @@ export interface SettingsView {
   path: string | null;
   /** Why the file could not be read (saving replaces it). */
   error: string | null;
+  labelKinds: LabelKind[];
+}
+
+/** One silent piece with its likeliest labels (junctur-core labels::Labelled; `labels.json`). */
+export interface LabelledPiece {
+  start: number;
+  end: number;
+  frames: number;
+  /** The likeliest labels, each with its share of the frames' votes (all labels sum to 1). */
+  top: { label: string; score: number }[];
+  /** The share of the recording's seconds quieter on the game (or mix) track, 0 to 1. */
+  busy?: number;
+  level_db?: number;
+}
+
+export interface Labels {
+  model: string;
+  kind: LabelKindKey;
+  labels: string[];
+  prompts: string[];
+  busy_track: { track: number; role: string } | null;
+  pieces: LabelledPiece[];
 }
 
 /** A voice Junctur remembers, used to name speakers in every recording. */
@@ -314,7 +356,8 @@ export type StageState = "pending" | "running" | "done" | "failed";
 
 export interface ProjectStatus {
   dir: string;
-  stages: { name: string; state: StageState }[];
+  /** `note` is jobs.json's: "reused", why it failed, or "off" for labels not asked for. */
+  stages: { name: string; state: StageState; note?: string }[];
   transcript: boolean;
   edit: EditSummary | null;
   editError: string | null;
@@ -621,6 +664,8 @@ export const saveSettings = (settings: Settings) => invoke<SettingsView>("save_s
 /** The Captions panel's "Save as default". */
 export const saveCaptionDefaults = (captions: Captions) =>
   invoke<SettingsView>("save_caption_defaults", { captions });
+/** The silent parts' labels of `path`; null when it has none or its last run had them off. */
+export const labels = (path: string) => invoke<Labels | null>("labels", { path });
 /** Why `path`'s analysis is out of date with the settings now. */
 export const outdated = (path: string) => invoke<string[]>("outdated", { path });
 /** Windows' snap layouts for the window (the pointer resting on the title bar's maximise button). */
