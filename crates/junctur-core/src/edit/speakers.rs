@@ -339,32 +339,11 @@ fn carry<'p>(
         }
         return out;
     }
-    // Overlap seconds between each new and each previous speaker's turns.
-    let spans = |ts: &[Turn], id: u32| -> Vec<(f64, f64)> {
-        ts.iter()
-            .filter(|t| t.speaker == id)
-            .map(|t| (t.start, t.end))
-            .collect()
-    };
-    // Each previous speaker's spans once, not once per new speaker.
-    let before: Vec<Vec<(f64, f64)>> = previous
-        .names
-        .iter()
-        .map(|p| spans(&previous.turns, p.id))
+    let new: Vec<usize> = (0..n)
+        .filter(|&i| out[i].is_none() && !is_person(i))
         .collect();
-    let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
-    for i in (0..n).filter(|&i| out[i].is_none() && !is_person(i)) {
-        let a = spans(turns, i as u32 + 1);
-        for (j, p) in previous.names.iter().enumerate() {
-            if taken[j] || !allowed(p) {
-                continue;
-            }
-            let o = overlap(&a, &before[j]);
-            if o > 0.0 {
-                pairs.push((o, i, j));
-            }
-        }
-    }
+    let open = |j: usize| !taken[j] && allowed(&previous.names[j]);
+    let mut pairs = overlaps(turns, &new, previous, &open);
     // The largest overlaps first; on a tie, the same id (a re-cut of the same labels).
     pairs.sort_by(|a, b| {
         b.0.total_cmp(&a.0).then_with(|| {
@@ -379,6 +358,41 @@ fn carry<'p>(
         }
     }
     out
+}
+
+/// The turns of speaker `id` as spans.
+fn spans(ts: &[Turn], id: u32) -> Vec<(f64, f64)> {
+    ts.iter()
+        .filter(|t| t.speaker == id)
+        .map(|t| (t.start, t.end))
+        .collect()
+}
+
+/// `(seconds shared, new speaker, previous speaker)` for each of the `new` speakers (indices, id
+/// one more) and each previous one `open` allows, where they share any time.
+fn overlaps(
+    turns: &[Turn],
+    new: &[usize],
+    previous: &Speakers,
+    open: &dyn Fn(usize) -> bool,
+) -> Vec<(f64, usize, usize)> {
+    // Each previous speaker's spans built once, when first needed, not once per new speaker.
+    let mut before: Vec<Option<Vec<(f64, f64)>>> = vec![None; previous.names.len()];
+    let mut pairs = Vec::new();
+    for &i in new {
+        let a = spans(turns, i as u32 + 1);
+        for (j, p) in previous.names.iter().enumerate() {
+            if !open(j) {
+                continue;
+            }
+            let b = before[j].get_or_insert_with(|| spans(&previous.turns, p.id));
+            let o = overlap(&a, b);
+            if o > 0.0 {
+                pairs.push((o, i, j));
+            }
+        }
+    }
+    pairs
 }
 
 /// Seconds two sorted lists of spans share (each list's spans may touch or overlap each other).

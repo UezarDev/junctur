@@ -1079,3 +1079,40 @@ fn underline_wraps_inside_bold_and_italic_outside_the_colour() {
     };
     assert!(styled(bold, true).contains("<b><u><font color=\"#F2B33D\">hola</font></u></b>\r\n"));
 }
+
+/// `finished_cues` answers as checking `untranslated` and then cutting `cues` did, refused or not:
+/// nothing translated, part, all, an empty sentence, no words, captions not translated.
+#[test]
+fn finished_cues_answer_as_the_check_then_the_cut_did() {
+    use crate::export::{finished_cues, untranslated};
+    use crate::Error;
+    let w = [
+        word(0.0, 0.4, "Hola."),
+        word(1.0, 1.2, "<b>"),
+        word(10.5, 11.0, "Adiós."),
+        word(12.0, 12.5, "Hola."),
+    ];
+    let all: Vec<(usize, &Word)> = w.iter().map(|w| (0, w)).collect();
+    let translated = Captions {
+        translate: "en".into(),
+        ..Default::default()
+    };
+    let mut some = Translations::default();
+    some.insert("es", "en", "Hola.", "Hello.");
+    let mut every = some.clone();
+    every.insert("es", "en", "Adiós.", "Goodbye.");
+    for c in [translated, Captions::default()] {
+        let e = edit(&[(0.0, 5.0), (10.0, 40.0)], c.clone());
+        for t in [Translations::default(), some.clone(), every.clone()] {
+            for words in [&all[..], &all[1..2], &[]] {
+                let old = untranslated(&e, &c, words, 30, 1, &t)
+                    .map(|()| cues(&e, &c, words.iter().copied(), 30, 1, Some(&t)));
+                match (finished_cues(&e, &c, words, 30, 1, &t), old) {
+                    (Ok(a), Ok(b)) => assert_eq!(a, b),
+                    (Err(Error::Edit(a)), Err(Error::Edit(b))) => assert_eq!(a, b),
+                    (a, b) => panic!("{a:?} against {b:?}"),
+                }
+            }
+        }
+    }
+}

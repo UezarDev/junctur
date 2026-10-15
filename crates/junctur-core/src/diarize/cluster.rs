@@ -92,9 +92,11 @@ fn first_pass<E: AsRef<[f32]>>(
                 labels.push(i);
             }
             _ => {
+                // The scratch becomes the unit; the next window refills an empty one.
+                let unit = std::mem::take(&mut e);
                 groups.push(Group {
-                    sum: e.clone(),
-                    unit: e.clone(),
+                    sum: unit.clone(),
+                    unit,
                     count: 1,
                 });
                 labels.push(groups.len() - 1);

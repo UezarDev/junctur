@@ -215,6 +215,25 @@ pub fn save(dir: &Path, w: &Waves) -> Result<()> {
     Ok(())
 }
 
+/// Each track's level in each hop of interleaved `buf` ([`PER_HOP`] frames a hop, the last maybe
+/// short) into `out` (replacing it), through `peaks` (one per track, reused); returns the hops.
+fn hop_levels(buf: &[f32], tracks: usize, peaks: &mut [f32], out: &mut Vec<u8>) -> usize {
+    out.clear();
+    let mut hops = 0;
+    // A read is whole hops of whole frames, but at the end of the stream.
+    for hop in buf.chunks(PER_HOP * tracks) {
+        peaks.fill(0.0);
+        for s in hop.chunks_exact(tracks) {
+            for (p, x) in peaks.iter_mut().zip(s) {
+                *p = p.max(x.abs());
+            }
+        }
+        out.extend(peaks.iter().copied().map(level));
+        hops += 1;
+    }
+    hops
+}
+
 /// Reads the peaks of tracks `0..tracks` of `file` to `duration` seconds (a short track is padded
 /// with silence; unknown, all stop with the shortest), handing each new stretch of whole hops to
 /// `more`. Returns the hops read, or `Ok(None)` when `stop` was set before the end.
@@ -243,18 +262,7 @@ pub fn read(
         if buf.is_empty() {
             break;
         }
-        out.clear();
-        // A read is whole hops of whole frames, but at the end of the stream.
-        for hop in buf.chunks(frame) {
-            peaks.fill(0.0);
-            for s in hop.chunks_exact(tracks) {
-                for (p, x) in peaks.iter_mut().zip(s) {
-                    *p = p.max(x.abs());
-                }
-            }
-            out.extend(peaks.iter().copied().map(level));
-            hops += 1;
-        }
+        hops += hop_levels(&buf, tracks, &mut peaks, &mut out);
         more(&out);
     }
     r.finish()?;

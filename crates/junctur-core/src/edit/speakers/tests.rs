@@ -143,3 +143,52 @@ fn a_speaker_that_is_a_track_takes_every_word_on_it() {
     assert_eq!(s.labeller().of_word(0, 2.0, 3.0), Some(1));
     assert_eq!(s.labeller().of_word(3, 0.2, 0.6), Some(2));
 }
+
+/// The overlaps with each previous speaker's spans built once are the ones the pair loop got
+/// rebuilding them for every pair, in the same order.
+#[test]
+fn overlaps_match_spans_rebuilt_per_pair() {
+    let name = |id: u32| SpeakerName {
+        id,
+        name: format!("S{id}"),
+        track: None,
+        color: String::new(),
+    };
+    let previous = Speakers {
+        names: (1..=5).map(name).collect(),
+        turns: (0..200)
+            .map(|k| t(k as f64 * 1.5, k as f64 * 1.5 + 2.0, (k * 7 % 5) as u32 + 1))
+            .collect(),
+    };
+    let turns: Vec<Turn> = (0..150)
+        .map(|k| {
+            t(
+                k as f64 * 2.0 + 0.3,
+                k as f64 * 2.0 + 1.9,
+                (k * 3 % 4) as u32 + 1,
+            )
+        })
+        .collect();
+    let new = [0, 1, 3];
+    let open = |j: usize| j != 2;
+    let mut want = Vec::new();
+    for &i in &new {
+        for (j, p) in previous.names.iter().enumerate() {
+            if !open(j) {
+                continue;
+            }
+            let o = overlap(&spans(&turns, i as u32 + 1), &spans(&previous.turns, p.id));
+            if o > 0.0 {
+                want.push((o, i, j));
+            }
+        }
+    }
+    let got = overlaps(&turns, &new, &previous, &open);
+    assert!(!got.is_empty());
+    let bits = |v: &[(f64, usize, usize)]| {
+        v.iter()
+            .map(|&(o, i, j)| (o.to_bits(), i, j))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(bits(&got), bits(&want));
+}

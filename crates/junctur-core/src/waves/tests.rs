@@ -193,3 +193,29 @@ fn one_decode_reads_every_tracks_peaks() {
     assert!(stopped.is_none());
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The levels with one reused peaks buffer are the ones a new buffer per hop gave, a short last
+/// hop included.
+#[test]
+fn hop_levels_match_a_new_buffer_per_hop() {
+    for tracks in [1, 3] {
+        let buf: Vec<f32> = (0..PER_HOP * tracks * 7 + tracks * 5)
+            .map(|i| {
+                (((i * 7919) % 2001) as f32 / 1000.0 - 1.0) * if i % 3 == 0 { 0.01 } else { 1.0 }
+            })
+            .collect();
+        let mut want = Vec::new();
+        for hop in buf.chunks(PER_HOP * tracks) {
+            let mut peaks = vec![0f32; tracks];
+            for s in hop.chunks_exact(tracks) {
+                for (p, x) in peaks.iter_mut().zip(s) {
+                    *p = p.max(x.abs());
+                }
+            }
+            want.extend(peaks.into_iter().map(level));
+        }
+        let (mut peaks, mut out) = (vec![0f32; tracks], vec![9u8; 3]);
+        assert_eq!(hop_levels(&buf, tracks, &mut peaks, &mut out), 8);
+        assert_eq!(out, want);
+    }
+}

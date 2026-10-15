@@ -54,17 +54,24 @@ impl Mdx {
     }
 }
 
-/// The model's input for one stereo chunk: `[4][DIM_F][DIM_T]`, written in that order (reading
-/// the frame-major spectrum across frames) so the writes run straight through memory.
+/// The model's input for one stereo chunk: `[4][DIM_F][DIM_T]`, each plane written in order
+/// (the frame-major spectrum read across frames) so the writes run straight through memory.
 fn model_input(stft: &Stft, left: &[f32], right: &[f32]) -> Vec<f32> {
-    let bins = stft.bins();
-    let mut input = Vec::with_capacity(4 * DIM_F * DIM_T);
-    for x in [left, right] {
+    let (plane, bins) = (DIM_F * DIM_T, stft.bins());
+    let mut input = vec![0.0f32; 4 * plane];
+    for (x, planes) in [left, right]
+        .into_iter()
+        .zip(input.chunks_exact_mut(2 * plane))
+    {
         let spec = stft.forward(x);
-        let parts: [fn(&Complex32) -> f32; 2] = [|v| v.re, |v| v.im];
-        for part in parts {
-            for f in 0..DIM_F {
-                input.extend((0..DIM_T).map(|t| part(&spec[t * bins + f])));
+        assert_eq!(spec.len(), DIM_T * bins, "a chunk is DIM_T frames");
+        // One pass over the spectrum fills both planes, each written straight through.
+        let (re, im) = planes.split_at_mut(plane);
+        for f in 0..DIM_F {
+            for t in 0..DIM_T {
+                let v = spec[t * bins + f];
+                re[f * DIM_T + t] = v.re;
+                im[f * DIM_T + t] = v.im;
             }
         }
     }

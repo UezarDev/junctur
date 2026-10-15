@@ -170,6 +170,56 @@ mod tests {
         assert!((r[0].start - (10.0 + FRAME_SECONDS)).abs() < 1e-9);
     }
 
+    /// The gain from the percentile picked in place is the one sorting every RMS gave, ties and
+    /// silent frames included, so the samples come out bit for bit the same.
+    #[test]
+    fn normalize_matches_the_sorted_percentile() {
+        let sorted = |samples: &[f32]| -> Vec<f32> {
+            let mut rms: Vec<f32> = samples
+                .chunks(FRAME)
+                .map(|c| (c.iter().map(|x| x * x).sum::<f32>() / c.len() as f32).sqrt())
+                .collect();
+            if rms.is_empty() {
+                return Vec::new();
+            }
+            rms.sort_by(f32::total_cmp);
+            let loud = rms[(rms.len() * 95 / 100).min(rms.len() - 1)];
+            if loud <= 0.0 {
+                return samples.to_vec();
+            }
+            let gain = (0.1 / loud).clamp(1.0, 1000.0);
+            samples
+                .iter()
+                .map(|x| (x * gain).clamp(-1.0, 1.0))
+                .collect()
+        };
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        for (len, levels) in [
+            (FRAME * 37 + 5, 3),
+            (FRAME * 100, 1),
+            (FRAME * 20, 7),
+            (7, 2),
+        ] {
+            // Few levels, so many frames share an RMS; every fifth frame silent.
+            let x: Vec<f32> = (0..len)
+                .map(|i| {
+                    let frame = i / FRAME;
+                    if frame.is_multiple_of(5) {
+                        0.0
+                    } else {
+                        let level = ((frame * 7919) % levels + 1) as f32 * 1e-3;
+                        if i.is_multiple_of(2) {
+                            level
+                        } else {
+                            -level
+                        }
+                    }
+                })
+                .collect();
+            assert_eq!(bits(&normalize(&x)), bits(&sorted(&x)), "{len} {levels}");
+        }
+    }
+
     #[test]
     fn share_and_normalize_edges() {
         assert_eq!(share(&[], 0.0), 0.0);

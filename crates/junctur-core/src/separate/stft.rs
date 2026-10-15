@@ -62,6 +62,10 @@ impl Stft {
     /// (overlap-add, divided by the summed squared window, centre padding trimmed).
     pub fn inverse(&self, spec: &[Complex32], len: usize) -> Vec<f32> {
         let (n, half, bins) = (self.n_fft, self.n_fft / 2, self.bins());
+        debug_assert!(
+            !spec.is_empty() && spec.len().is_multiple_of(bins),
+            "whole frames of a half spectrum"
+        );
         let frames = spec.len() / bins;
         let total = (frames - 1) * self.hop + n;
         let mut out = vec![0.0f32; total];

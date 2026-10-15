@@ -192,6 +192,61 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// Every kind of file reads as the stamp-first read made it: the same translations, the same
+    /// fresh start, the same error.
+    #[test]
+    fn one_parse_reads_every_file_as_the_stamp_first_read_did() {
+        let stamp_first = |project: &Path| -> Result<Translations> {
+            let text = std::fs::read_to_string(path(project))?;
+            let unread = |e: serde_json::Error| {
+                Error::Edit(format!("{} does not read: {e}", path(project).display()))
+            };
+            #[derive(Deserialize)]
+            struct Stamp {
+                version: u32,
+                model: String,
+            }
+            let stamp: Stamp = serde_json::from_str(&text).map_err(unread)?;
+            if stamp.version != VERSION || stamp.model != Translations::default().model {
+                return Ok(Translations::default());
+            }
+            serde_json::from_str(&text).map_err(unread)
+        };
+        let d = dir("tr", "one-parse");
+        let mut t = Translations::default();
+        t.insert("es", "fr", "uno", "un");
+        let model = Translations::default().model;
+        let files = [
+            serde_json::to_string(&t).unwrap(),
+            serde_json::to_string(&Translations {
+                version: 1,
+                ..t.clone()
+            })
+            .unwrap(),
+            serde_json::to_string(&Translations {
+                model: "old.onnx".into(),
+                ..t.clone()
+            })
+            .unwrap(),
+            r#"{"version":1,"model":"x","to":[1,2]}"#.to_string(),
+            format!(r#"{{"version":{VERSION},"model":"{model}","to":5}}"#),
+            format!(r#"{{"version":{VERSION},"model":"{model}"}}"#),
+            r#"{"version":"two"}"#.to_string(),
+            "{".to_string(),
+            String::new(),
+        ];
+        for f in files {
+            std::fs::write(path(&d), &f).unwrap();
+            let (new, old) = (Translations::read(&d), stamp_first(&d));
+            match (new, old) {
+                (Ok(a), Ok(b)) => assert_eq!(a, b, "{f}"),
+                (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string(), "{f}"),
+                (a, b) => panic!("{f}: {a:?} against {b:?}"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn a_save_keeps_what_another_saved_meanwhile() {
         let d = dir("tr", "merge");
