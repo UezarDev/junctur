@@ -791,6 +791,8 @@ w.m.handlers.build(build({ captions = false }))
 r = w.m.handlers.open({ name = "rec (Junctur)", template = "" })
 check(r.error ~= nil and r.error:find("did not switch") and r.error:find("now has \"Main\" open")
     and w.current == w.main, "not opened: " .. tostring(r.error))
+-- Refused before the template is looked up, so the bundled bin is not imported either.
+check(w.imports == 0 and #w.root.subs == 1, "not opened, nothing imported: " .. w.imports)
 
 -- 5g's place, on the timeline open.
 w = world()

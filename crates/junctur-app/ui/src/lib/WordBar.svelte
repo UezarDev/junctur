@@ -1,6 +1,8 @@
 <script lang="ts">
   // What a selection of transcript words can do: Cut, Keep, Fix text, one-click speakers (each
   // remembers that voice) and Correct. Apart from TranscriptPanel, which is the virtual word list.
+  // Shown, as a hint, with nothing selected too: its rows stay laid out but hidden, so selecting
+  // never changes the panel's height under a double-click.
   import { onDestroy, untrack } from "svelte";
   import * as api from "./api";
   import * as sel from "./selection";
@@ -12,6 +14,7 @@
     selection,
     onSelect,
     onError,
+    checks = false,
     onLooksRight = null,
     retyping = $bindable(false),
     onFixed,
@@ -19,10 +22,12 @@
   }: {
     edit: api.EditState | null;
     words: Words;
-    /** A selection of words (the panel shows this bar only then). */
-    selection: sel.Selection;
+    /** A selection of words, or null for the hint. */
+    selection: sel.Selection | null;
     onSelect: (s: sel.Selection | null) => void;
     onError: (message: string) => void;
+    /** The transcript has flagged words: Looks right is in the bar, greyed unless it applies. */
+    checks?: boolean;
     /** The selection is one flagged word: confirms it as heard and goes to the next; else null. */
     onLooksRight?: (() => void) | null;
     /** The Fix text field is open (the panel opens it on a double-click). */
@@ -132,10 +137,14 @@
   }
 
   // Another selection: the last answer was about the words before. An open "New name…" field
-  // stays, since Ctrl+clicking more of someone's lines while naming them is the point.
+  // stays, since Ctrl+clicking more of someone's lines while naming them is the point; it goes
+  // when the selection clears.
   $effect(() => {
-    void selection;
     said = null;
+    if (!selection) {
+      naming = false;
+      name = "";
+    }
   });
 
   async function call(f: () => Promise<void>) {
@@ -168,14 +177,18 @@
   }
 </script>
 
-<div class="wordbar">
+<div class="wordbar" class:idle={!selection}>
+  {#if !selection}
+    <div class="hint">Select words to cut, keep or fix them, or to say who says them</div>
+  {/if}
   {#if said}
     <div class="said">{said}</div>
   {/if}
+  <div class="rows" inert={!selection}>
   <div class="row">
     <span class="what mono">{sel.describe(selection, edit?.fps ?? null)}</span>
-    <button onclick={() => call(() => sel.apply(selection, false))} title="Cut every selected stretch (Delete)">Cut</button>
-    <button onclick={() => call(() => sel.apply(selection, true))} title="Keep every selected stretch (K)">Keep</button>
+    <button onclick={() => selection && call(() => sel.apply(selection, false))} title="Cut every selected stretch (Delete)">Cut</button>
+    <button onclick={() => selection && call(() => sel.apply(selection, true))} title="Keep every selected stretch (K)">Keep</button>
     <button
       disabled={!one}
       onclick={() => {
@@ -187,11 +200,14 @@
         ? "Retype these words as one text: shown in the transcript and the captions in their place (F2; double-click a selection does this too)"
         : "Select one stretch of words to fix its text: one text cannot go in several places"}>Fix text</button
     >
-    {#if onLooksRight}
+    {#if checks}
+      <!-- Greyed rather than left out, as the header's ‹ › are, so the row does not reflow. -->
       <button
-        onclick={onLooksRight}
-        title="Whisper was unsure of this word but it is right as heard: stop flagging it and go to the next"
-        >Looks right</button
+        disabled={!onLooksRight}
+        onclick={() => onLooksRight?.()}
+        title={onLooksRight
+          ? "Whisper was unsure of this word but it is right as heard: stop flagging it and go to the next"
+          : "Select one underlined word to keep it as heard"}>Looks right</button
       >
     {/if}
     <span class="grow"></span>
@@ -279,16 +295,35 @@
       >{correcting ? "Correcting…" : "Correct"}</button
     >
   </div>
+  </div>
 </div>
 
 <style>
   .wordbar {
+    position: relative;
     display: flex;
     flex-direction: column;
     gap: 6px;
     padding: 8px 12px 10px;
     border-top: 1px solid var(--line);
     background: var(--panel-solid);
+  }
+  .rows {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .idle .rows {
+    visibility: hidden;
+  }
+  .hint {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+    color: var(--muted);
+    font-size: 12px;
   }
   .row {
     display: flex;

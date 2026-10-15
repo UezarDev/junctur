@@ -63,12 +63,6 @@ export function adding(sel: Selection | null, r: Run): Selection {
   return { kind: "words", runs: [...(sel?.kind === "words" ? sel.runs : []), r] };
 }
 
-/** The latest run replaced by `r` (Shift+click), the others kept. */
-export function extending(sel: Selection | null, r: Run): Selection {
-  const kept = sel?.kind === "words" ? sel.runs.slice(0, -1) : [];
-  return { kind: "words", runs: [...kept, r] };
-}
-
 /** Word `i` taken out of every run it is in (Ctrl+click on a selected word); `null` when nothing is left. */
 export function without(sel: Selection | null, i: number): Selection | null {
   if (sel?.kind !== "words") return sel;

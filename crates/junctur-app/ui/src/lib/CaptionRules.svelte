@@ -250,7 +250,7 @@
 {#if shows("resolve")}
   <Field
     label="Resolve template"
-    info="A Text+ title in the open Resolve project's media pool to copy for every caption, or Junctur's own. Refresh asks Resolve again. The word highlight and the animation need Junctur's own template (or a copy of its animated caption): a plain Text+ of yours is placed without them."
+    info="A Text+ title in the open Resolve project's media pool to copy for every caption, or Junctur's own; yours keeps its shadow and background. Refresh asks Resolve again. The word highlight and the animation need Junctur's own template (or a copy of its animated caption): a plain Text+ of yours is placed without them."
   >
     {#snippet children(id)}
       <span class="pair">
@@ -288,7 +288,7 @@
   <Field
     kind="check"
     label="Keep the template's look"
-    info="Junctur sets only each caption's text, timing and speaker colour; the font, size, position and outline are the template's."
+    info="Junctur sets only each caption's text, timing and speaker colour; the font, size, position and outline are the template's, so people talking at once share its spot and overlap."
   >
     {#snippet children(id)}
       <input

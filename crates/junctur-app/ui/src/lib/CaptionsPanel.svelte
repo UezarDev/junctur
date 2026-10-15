@@ -79,8 +79,9 @@
 
   // Send to Resolve, one at a time. When the timeline exists, nothing changes until the pop-up is
   // answered, and a panel closed under it answers Cancel so the send never waits on a gone dialog.
-  // Clips in the captions' way hold the send (`inTheWay`) until the user picks; the re-send repeats
-  // the pop-up's answer so it updates that timeline rather than making another.
+  // Clips in the captions' way (only on Update captions only: a new timeline puts them on a new
+  // track) hold the send (`inTheWay`) until the user picks; the re-send repeats the pop-up's answer
+  // so it updates that timeline rather than making another.
   let sending = $state(false);
   let sendButton = $state<HTMLButtonElement | undefined>();
   let sentLines = $state<string[] | null>(null);
@@ -173,8 +174,7 @@
         choice = "newTrack";
         remember = false;
         inTheWay = { clips: r.inTheWay, captions: r.blocked, answer: used };
-        // On Replace, the timeline made beside the old one, kept until captions land; on an update,
-        // a cut that no longer matches the edit's.
+        // An update's note: a cut that no longer matches the edit's.
         sentLines = r.note ? [r.note] : null;
         return false;
       }
@@ -414,7 +414,7 @@
 
       <Section
         title="Remembered voices"
-        info="Select words only one person says in the transcript and choose Remember voice…: every recording then names that speaker the same, in the same colour. Half a minute from a few places makes a voice recognisable; remember the same name again to add more."
+        info="Select words only one person says in the transcript and pick their name (or New name…) in the bar below it: they are relabelled at once, the words picked stay theirs, and every recording then names that speaker the same, in the same colour. Half a minute from a few places makes a voice recognisable; remember the same name again to add more."
       >
         {#if voiceList.length === 0}<p class="status">None yet.</p>{/if}
         {#each voiceList as v (v.name)}

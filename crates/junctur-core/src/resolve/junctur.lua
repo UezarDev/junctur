@@ -682,10 +682,9 @@ function handlers.open(req)
             .. "all but one, or choose Create new timeline" }
     end
     local t = found[1]
-    local clip
-    -- The animated caption (5l) when the highlight or an animation is on, as `build` looks it up.
-    clip, err = template(project:GetMediaPool(), req.template or "", req.animated == true)
-    if not clip then return { error = err .. " (nothing was changed on the timelines)" } end
+    -- Switched first and the template looked up after: with none named and no Junctur bin yet
+    -- the bundled bin is imported, and that is not done for a send Resolve then refuses.
+    local was = project:GetCurrentTimeline()
     pcall(function() project:SetCurrentTimeline(t) end)
     local now = project:GetCurrentTimeline()
     -- Asked to switch, Resolve may have switched somewhere else: say what is open now.
@@ -695,6 +694,14 @@ function handlers.open(req)
         return { error = "Resolve did not switch to the timeline \"" .. tostring(t:GetName())
             .. "\": it " .. shown .. ", and no clips were changed. Open \"" .. tostring(t:GetName())
             .. "\" yourself and send again" }
+    end
+    -- The animated caption (5l) when the highlight or an animation is on, as `build` looks it up.
+    -- Not found: the timeline open before is open again, so nothing is changed.
+    local clip
+    clip, err = template(project:GetMediaPool(), req.template or "", req.animated == true)
+    if not clip then
+        if was then pcall(function() project:SetCurrentTimeline(was) end) end
+        return { error = err .. " (nothing was changed on the timelines)" }
     end
     local out = describe(t, clip)
     out.cutEnd = cut_end(t) or ""

@@ -23,7 +23,7 @@ export const CAPTION_SECTIONS: { part: CaptionPart; title: string; info?: string
   {
     part: "text",
     title: "Caption text",
-    info: "What the captions show in the SRT, in Resolve and in the preview; the transcript keeps the words as spoken. A translation comes first, then find and replace, case, punctuation and censoring.",
+    info: "What the captions show in the SRT, in Resolve and in the preview; the transcript keeps the words as spoken, so clearing an option brings them back. A translation comes first, a sentence at a time on this machine, then find and replace, case, punctuation and censoring.",
   },
   { part: "cut", title: "How captions are cut" },
   {

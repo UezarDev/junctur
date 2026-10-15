@@ -3,13 +3,14 @@
 //! deleted, new one named). The old timeline goes last, so a send that fails part way never costs
 //! it. "Update captions only" is `check`, `open` (makes the timeline current) and `place`, which
 //! may ask about the user's clips on Junctur's tracks; the answer is sent again as an update.
+//! A built timeline's `place` never asks: it has none of the user's clips.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 use super::lua::Value;
 use super::{job, reply, timeline, Answer, Outcome};
-use crate::edit::{Captions, EditList};
+use crate::edit::{Captions, EditList, ExistingClips};
 use crate::export::layout;
 use crate::export::srt::Cue;
 
@@ -82,10 +83,16 @@ pub fn run(
     )?;
     let timeline = reply::timeline(&built)?;
     let made = timeline.name.as_str();
+    // A timeline just built holds nothing of the user's, so anything in the way goes on a new track:
+    // an ask here would be answered by sending Create or Replace again, building another timeline.
+    let fresh = Captions {
+        existing_clips: ExistingClips::NewTrack,
+        ..c.clone()
+    };
     let mut sent = if cues.is_empty() {
         reply::sent(&HashMap::new(), made)
     } else {
-        let done = place(link, cues, edit, c, &timeline).map_err(|e| {
+        let done = place(link, cues, edit, &fresh, &timeline).map_err(|e| {
             if replace {
                 format!(
                     "Timeline \"{made}\" was made in Resolve beside \"{name}\", which is untouched, \
@@ -98,15 +105,6 @@ pub fn run(
         reply::sent(&done, made)
     };
     if replace && !cues.is_empty() {
-        // Asking first placed nothing and waits for the user's answer: the old timeline stays
-        // until a send has its captions on the new one.
-        if sent.in_the_way > 0 {
-            sent.note = Some(format!(
-                "Timeline \"{made}\" was made in Resolve beside \"{name}\", which is untouched: \
-                 nothing was replaced"
-            ));
-            return Ok(Outcome::Sent(sent));
-        }
         // Every caption refused (a template with no Text+, every append refused): replacing would
         // swap the old timeline for one with no captions at all.
         if sent.placed + sent.restyled == 0 {

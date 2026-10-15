@@ -221,6 +221,9 @@
     return Number(el.dataset.i);
   }
   function startFix(e: MouseEvent) {
+    // With Ctrl (Cmd on macOS) a double-click is two Ctrl+clicks that pick the word and unpick it,
+    // so it opens no field.
+    if (MAC ? e.metaKey : e.ctrlKey) return;
     const i = keptWordAt(e.clientX, e.clientY);
     if (i >= 0) fixAt(i, beforePress);
   }
@@ -273,18 +276,22 @@
   }
 
   // A fix whose spelling joined the word list says so for a moment in the header; a retyped
-  // sentence names every word it added.
+  // sentence names every word it added. The same place says when Looks right has none left.
   const LEARNED_MS = 4000;
   let learned = $state<string | null>(null);
   let learnedTimer = 0;
   // Cleared when the panel goes: `fixWord` can answer after that, and a timer set then would
   // outlive the panel.
   let mounted = false;
-  function tellLearned(all: string[]) {
-    if (!mounted || !all.length) return;
-    learned = all.map((e) => `"${e}"`).join(", ");
+  // In the header for a moment, in place of the word count (`tell` is the line under it).
+  function flash(text: string) {
+    if (!mounted) return;
+    learned = text;
     clearTimeout(learnedTimer);
     learnedTimer = window.setTimeout(() => (learned = null), LEARNED_MS);
+  }
+  function tellLearned(all: string[]) {
+    if (all.length) flash(`${all.map((e) => `"${e}"`).join(", ")} added to the word list`);
   }
 
   // What a fix also did elsewhere, under the header for a while ("Also fixed 2 other places" with
@@ -408,14 +415,21 @@
       pausedUntil = performance.now() + FOLLOW_PAUSE_MS;
     }
   }
-  // Confirms the selected flagged word (it keeps what Whisper heard) and goes on to the next.
+  // Confirms the selected flagged word (it keeps what Whisper heard) and goes on to the next; with
+  // none after it the header says so and the selection goes, so the end is seen.
   function looksRight() {
     const i = checking;
     if (i < 0) return;
     const next = stepFrom(toCheck, i, false);
+    const left = toCheck.length - 1;
     call(async () => {
       await api.confirmWord(i);
-      goTo(next);
+      if (next >= 0) {
+        goTo(next);
+        return;
+      }
+      onSelect(null);
+      flash(left > 0 ? "No flagged word after this one: ‹ goes back" : "Every flagged word checked");
     });
   }
 
@@ -465,7 +479,7 @@
       e.preventDefault();
       fixAt(i, selection);
     } else if (selection?.kind === "words" && edit?.editable && !reviewing && sel.pairs(selection).length === 1) {
-      // The word bar is shown (its conditions below) with Fix text enabled (one stretch).
+      // The word bar shows its actions with Fix text enabled (one stretch selected).
       e.preventDefault();
       retyping = true;
     }
@@ -613,7 +627,7 @@
       </span>
     {/if}
     {#if learned}
-      <span class="muted learned" role="status">{learned} added to the word list</span>
+      <span class="muted learned" role="status">{learned}</span>
     {:else if words}
       <span class="muted">{words.text.length.toLocaleString()} words</span>
     {/if}
@@ -774,14 +788,17 @@
       {/if}
     {/if}
   </div>
-  {#if selection?.kind === "words" && words && edit?.editable && !reviewing}
+  <!-- Kept while nothing is selected: a bar that came with the selection shrank the scroller
+       between a double-click's two presses. -->
+  {#if words && edit?.editable && !reviewing}
     <WordBar
       {edit}
       {words}
-      {selection}
+      selection={selection?.kind === "words" ? selection : null}
       {onSelect}
       {onError}
       bind:retyping
+      checks={toCheck.length > 0}
       onFixed={tellFixed}
       onCorrect={correctAll}
       onLooksRight={checking >= 0 ? looksRight : null}

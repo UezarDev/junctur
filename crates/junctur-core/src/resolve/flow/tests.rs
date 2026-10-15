@@ -174,6 +174,38 @@ fn create_new_builds_beside_it_and_places_its_captions() {
 }
 
 #[test]
+fn a_built_timeline_never_asks_about_clips_in_the_way() {
+    // Whatever the recording's choice, a timeline `build` just made gets a new track for anything
+    // in the way: an ask there would be answered by a send that builds yet another timeline.
+    for answer in [None, Some(Answer::New), Some(Answer::Replace)] {
+        for existing in [
+            ExistingClips::Ask,
+            ExistingClips::Replace,
+            ExistingClips::Skip,
+        ] {
+            let names: &[&str] = if answer.is_some() {
+                &["rec (Junctur)"]
+            } else {
+                &[]
+            };
+            let mut f = Fake::new(names).built("rec (Junctur) 2");
+            f.answers
+                .insert("finish", Ok(vec![("replaced", "true".into())]));
+            let c = Captions {
+                existing_clips: existing,
+                ..Default::default()
+            };
+            run(&mut f, &cues(), &edit(), &c, answer).unwrap();
+            assert_eq!(
+                f.field("place", "existing"),
+                Some("newTrack"),
+                "{answer:?} {existing:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn replace_deletes_the_old_only_after_the_captions_are_placed() {
     let mut f = Fake::new(&["rec (Junctur)"]).built("rec (Junctur) (new)");
     f.answers.insert(
@@ -301,25 +333,6 @@ fn replace_keeps_the_old_timeline_when_no_caption_landed() {
             && e.contains("no Text+"),
         "{e}"
     );
-    // Asking (clips in the way): nothing placed, the user to answer; no finish either.
-    let mut f = Fake::new(&["rec (Junctur)"]).built("rec (Junctur) (new)");
-    f.answers.insert(
-        "place",
-        Ok(vec![("inTheWay", "2".into()), ("blocked", "3".into())]),
-    );
-    let s = sent(
-        run(
-            &mut f,
-            &cues(),
-            &edit(),
-            &Captions::default(),
-            Some(Answer::Replace),
-        )
-        .unwrap(),
-    );
-    assert_eq!(f.kinds(), ["check", "build", "place"]);
-    assert_eq!((s.in_the_way, s.replaced), (2, false));
-    assert!(s.note.unwrap().contains("which is untouched"));
     // Some captions placed and some failed: Replace finishes.
     let mut f = Fake::new(&["rec (Junctur)"]).built("rec (Junctur) (new)");
     f.answers.insert(
