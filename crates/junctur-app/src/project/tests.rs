@@ -164,32 +164,32 @@ fn missing_file_is_an_error() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// The lane's labels: none before a run made them, the file's after, none again when the last run
-/// had them off (the file stays for when they are turned on).
+/// The lane's labels: none before the analysis found the speech and tracks (whatever file is there;
+/// the file's own checks are core's, `pipeline::tests`), and a run that had them off says so.
 #[test]
-fn labels_are_given_unless_the_last_run_had_them_off() {
+fn labels_are_none_before_the_analysis_and_off_is_noted() {
     use junctur_core::labels::{self, Labels};
     let d = scratch("app", "labels");
     let file = d.join("rec.mp4");
     std::fs::write(&file, b"not a video").unwrap();
     let cache = Some(d.join("cache"));
-    assert_eq!(labels(&file, cache.clone()).unwrap(), None);
+    let settings = labels::Settings::default();
+    assert_eq!(labels_with(&file, cache.clone(), &settings).unwrap(), None);
     let p = Project::open(&file, cache.clone(), None).unwrap();
     let l = Labels {
         model: labels::model::NAME.into(),
         kind: labels::Kind::Generic,
-        labels: vec!["fighting".into()],
-        prompts: vec!["a video game fight".into()],
+        labels: vec![],
+        prompts: vec![],
         busy_track: None,
         pieces: vec![],
     };
     labels::save(&p.dir, &l).unwrap();
-    assert_eq!(labels(&file, cache.clone()).unwrap(), Some(l));
+    assert_eq!(labels_with(&file, cache.clone(), &settings).unwrap(), None);
     let off = Some(pipeline::LABELS_OFF.to_string());
     p.jobs()
         .set(&p.dir, StageName::Labels, StageState::Done, None, off)
         .unwrap();
-    assert_eq!(labels(&file, cache.clone()).unwrap(), None);
     let s = status(&file, cache).unwrap();
     let st = s.stages.iter().find(|s| s.name == "labels").unwrap();
     assert_eq!(st.note.as_deref(), Some("off"));

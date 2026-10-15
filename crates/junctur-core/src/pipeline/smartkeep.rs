@@ -10,12 +10,11 @@ use super::{
 };
 use crate::edit::{self, EditList, Range};
 use crate::keep::{self, Choices, Fit, Item, Judged, Summary};
-use crate::labels;
 use crate::transcribe::{self, Transcript};
 use crate::{tracks, Error, Result};
 
-/// The note a `keep` stage left off carries in `jobs.json` (the labels' word).
-pub const KEEP_OFF: &str = super::LABELS_OFF;
+/// The note a `keep` stage left off carries in `jobs.json`.
+pub const KEEP_OFF: &str = "off";
 
 /// Smart keep for a run: the config file's settings, and a prompt given for this run (`--keep`), which
 /// becomes the recording's.
@@ -35,7 +34,9 @@ pub(super) fn keep_stage(
     opts: &PipelineOptions,
     log: &mut dyn FnMut(&str),
 ) -> Result<Option<Judged>> {
-    let Stage { p, jobs, .. } = st;
+    let Stage {
+        p, jobs, report, ..
+    } = st;
     let mut choices = keep::load_choices(&p.dir)?;
     let given = opts.keep.prompt.as_deref().map(str::trim);
     if let Some(given) = given.filter(|g| !g.is_empty()) {
@@ -50,11 +51,8 @@ pub(super) fn keep_stage(
         return Ok(None);
     };
     let list = p.edit()?;
-    let labels_off = jobs
-        .get(StageName::Labels)
-        .is_some_and(|r| r.note.as_deref() == Some(super::LABELS_OFF));
-    let labels = labels::load(&p.dir).filter(|_| !labels_off);
     let regions = speech.all_regions();
+    let labels = super::labels_now(p, jobs, &opts.labels, &regions, report);
     let job = keep::Job {
         dir: &p.dir,
         cache_dir: &p.cache_dir,

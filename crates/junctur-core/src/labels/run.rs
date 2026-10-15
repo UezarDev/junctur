@@ -7,7 +7,7 @@ use std::path::Path;
 use super::busy::{self, BusyTrack};
 use super::model::{self, Vision, DIM, SIZE};
 use super::pieces::{self, Piece};
-use super::{answers, load, save, Label, Labelled, Labels, Settings, Share, TOP};
+use super::{load, save, Label, Labelled, Labels, Settings, Share, TOP};
 use crate::ffmpeg::frames;
 use crate::runtime::DevicePref;
 use crate::tracks::TrackReport;
@@ -48,9 +48,7 @@ pub fn reused(job: &Job) -> Option<Labels> {
     if job.force {
         return None;
     }
-    let pieces = pieces::pieces(job.speech, job.report.duration);
-    let busy = busy::track(job.report);
-    load(job.dir).filter(|l| answers(l, &job.settings.labels(), &pieces, busy))
+    super::current(job.dir, job.settings, job.speech, job.report)
 }
 
 /// Labels `job`'s recording and writes them. Frames are decoded only when the pieces changed or no

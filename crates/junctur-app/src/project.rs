@@ -125,15 +125,24 @@ fn summary(p: &Project) -> Result<EditSummary, String> {
     s
 }
 
-/// The labels of `file`'s silent parts, for the editor's Labels lane: `None` when it has none, or
-/// its last run had them off (the file is kept for when they are turned on again).
+/// The labels of `file`'s silent parts, for the editor's Labels lane: `None` when it has none, its
+/// last run had them off, or they were made with another list than the config file's now (a labels
+/// run that failed since leaves the older file behind; [`pipeline::current_labels`]).
 pub fn labels(file: &Path, cache_dir: Option<PathBuf>) -> Result<Option<labels::Labels>, String> {
+    let settings = junctur_core::config::load()
+        .map(|c| c.labels)
+        .unwrap_or_default();
+    labels_with(file, cache_dir, &settings)
+}
+
+/// [`labels`] with the labels settings given.
+fn labels_with(
+    file: &Path,
+    cache_dir: Option<PathBuf>,
+    settings: &labels::Settings,
+) -> Result<Option<labels::Labels>, String> {
     let p = Project::open(file, cache_dir, None).map_err(|e| e.to_string())?;
-    let off = p
-        .jobs()
-        .get(StageName::Labels)
-        .is_some_and(|r| r.note.as_deref() == Some(pipeline::LABELS_OFF));
-    Ok(if off { None } else { labels::load(&p.dir) })
+    Ok(pipeline::current_labels(&p, settings))
 }
 
 /// A recent recording's line on the start window: how long it is and where its analysis

@@ -141,7 +141,7 @@ impl Project {
 
 #[derive(Debug, Clone, Default)]
 pub struct PipelineOptions {
-    /// Where Whisper and the labels' vision tower may run. Only they use it: tracks, speech and
+    /// Where Whisper, the labels' vision tower and Laya may run. Only they use it: tracks, speech and
     /// speakers always run on the CPU (CAM++ on the GPU finds a speaker per sentence).
     pub device: DevicePref,
     pub model: ModelPref,
@@ -575,6 +575,28 @@ fn transcript_outdated(p: &Project, opts: &PipelineOptions) -> Vec<String> {
         }
         Some(Ok(_)) => Vec::new(),
     }
+}
+
+/// The labels of `p` Laya and the editor's Labels lane read: none when the last run had them off,
+/// and none when `labels.json` no longer answers `settings`' list over the speech and busy track as
+/// they are now (a labels run that failed since leaves the older file behind).
+fn labels_now(
+    p: &Project,
+    jobs: &Jobs,
+    settings: &labels::Settings,
+    speech: &[crate::vad::Region],
+    report: &TrackReport,
+) -> Option<labels::Labels> {
+    let off = jobs
+        .get(StageName::Labels)
+        .is_some_and(|r| r.note.as_deref() == Some(LABELS_OFF));
+    labels::current(&p.dir, settings, speech, report).filter(|_| !off)
+}
+
+/// [`labels_now`] from what `p`'s analysis left: `None` before its speech and tracks are found.
+pub fn current_labels(p: &Project, settings: &labels::Settings) -> Option<labels::Labels> {
+    let (speech, report) = (p.speech()?, cached_tracks(p)?);
+    labels_now(p, &p.jobs(), settings, &speech.all_regions(), &report)
 }
 
 /// What a step that needs the analysis answers before there is one.

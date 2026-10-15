@@ -27,7 +27,7 @@
   import * as sel from "./lib/selection";
   import { words as toWords, type Words } from "./lib/transcript";
   import { blockReload } from "./lib/noReload";
-  import type { Clip } from "./lib/review";
+  import { clips, holding, type Clip } from "./lib/review";
   import { toFrame } from "./lib/time";
 
   // Raw (not deeply reactive): these are replaced whole on every update, and a 30 h transcript or
@@ -162,14 +162,20 @@
   // Review over Laya's uncertain suggestions only, each a clip as the list has it now.
   function reviewUncertain() {
     const fps = edit?.fps;
-    if (!fps || !keep) return;
+    if (!fps || !keep || !edit) return;
+    // A kept clip carries the number of the kept range it is in, as review and the toolbar name it.
+    const all = clips(edit);
+    const range = (frame: number) => {
+      const c = all[holding(all, frame)];
+      return c?.kept ? c.index : 0;
+    };
     const only = keep.items
       .filter((i) => i.state === "suggested" && i.uncertain)
       .map((i) => ({
         start: toFrame(i.start, fps, Math.floor),
         end: toFrame(i.end, fps, Math.ceil),
         kept: !i.keep,
-        index: 0,
+        index: i.keep ? 0 : range(toFrame(i.start, fps, Math.floor)),
       }))
       .filter((c) => c.end > c.start);
     // Review keeps the list it started with: one already open goes on with its own.

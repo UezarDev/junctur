@@ -1501,3 +1501,62 @@ fn a_selection_transcribed_again_gives_no_fix_to_words_outside_it() {
     assert!(!p.dir.join(AGAIN_FILE).exists());
     std::fs::remove_dir_all(&d).unwrap();
 }
+
+/// Laya and the Labels lane read the labels only while they answer the list, speech and busy track
+/// as they are now: a labels run that failed after the list changed leaves the older file, which is
+/// then not read; nor one the last run left off.
+#[test]
+fn labels_are_read_only_while_they_answer_the_list_now() {
+    let (d, p) = scratch_project("labels-now");
+    let speech = Speech {
+        tracks: vec![],
+        seconds: 0.0,
+    };
+    std::fs::write(p.speech_path(), serde_json::to_vec(&speech).unwrap()).unwrap();
+    let report = TrackReport {
+        file: p.file.clone(),
+        duration: 20.0,
+        windows: vec![],
+        window_seconds: 1.0,
+        tracks: vec![],
+        logical: vec![],
+        speech_error: None,
+        from_cache: false,
+    };
+    let entry = tracks::entry(&p.file, &tracks_options(&p, false)).unwrap();
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::fs::write(&entry, serde_json::to_vec(&report).unwrap()).unwrap();
+    let settings = labels::Settings::default();
+    let list = settings.labels();
+    let made = labels::Labels {
+        model: labels::model::NAME.into(),
+        kind: settings.kind,
+        labels: list.iter().map(|l| l.text.clone()).collect(),
+        prompts: list.iter().map(|l| l.prompt.clone()).collect(),
+        busy_track: None,
+        pieces: labels::pieces::pieces(&[], 20.0)
+            .into_iter()
+            .map(|x| labels::Labelled {
+                start: x.start,
+                end: x.end,
+                frames: 0,
+                top: vec![],
+                busy: None,
+                level_db: None,
+            })
+            .collect(),
+    };
+    labels::save(&p.dir, &made).unwrap();
+    assert_eq!(current_labels(&p, &settings), Some(made));
+    // The list changed and its run failed: the old file is still there, and not read.
+    let mut more = settings.clone();
+    more.added.generic.push("a video game boss fight".into());
+    assert_eq!(current_labels(&p, &more), None);
+    // Off in the last run: not read either.
+    let off = Some(LABELS_OFF.to_string());
+    p.jobs()
+        .set(&p.dir, StageName::Labels, StageState::Done, None, off)
+        .unwrap();
+    assert_eq!(current_labels(&p, &settings), None);
+    std::fs::remove_dir_all(&d).unwrap();
+}

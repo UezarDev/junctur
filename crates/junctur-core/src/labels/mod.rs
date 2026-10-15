@@ -111,6 +111,19 @@ pub fn summary(l: &Labels) -> String {
     )
 }
 
+/// The labels in project folder `dir` while they answer `settings`' list over the silent pieces of
+/// `speech` and the busy track `report` names now ([`answers`]): `None` for a file an earlier list,
+/// speech or track made, which a labels run that failed since leaves behind.
+pub fn current(
+    dir: &Path,
+    settings: &Settings,
+    speech: &[crate::vad::Region],
+    report: &crate::tracks::TrackReport,
+) -> Option<Labels> {
+    let pieces = pieces::pieces(speech, report.duration);
+    load(dir).filter(|l| answers(l, &settings.labels(), &pieces, busy::track(report)))
+}
+
 /// Whether `l` answers `labels` over `pieces` with this model and `busy` as the busy track: the same
 /// prompts in the same order, the same pieces, and the busy scores read from that track (a track
 /// report that moved, or a read that failed and recorded none, makes them again). Then the stage
