@@ -1,5 +1,5 @@
 /**
- * The Suggestions lane: Laya's suggested keeps and cuts drawn as blocks on one thin row, and which
+ * The Suggestions lane: smart keep's suggested keeps (and 3b's cuts, the type allows them) drawn as blocks on one thin row, and which
  * one is under the pointer. Apart from Lanes.svelte, which only places the row and asks these.
  */
 import type { KeepItem } from "./api";
@@ -21,8 +21,8 @@ export function itemAt(items: KeepItem[], t: number): KeepItem | null {
 /** What hovering one says. */
 export function describe(i: KeepItem): string {
   const what = i.keep ? "keep" : "cut";
-  const sure = i.uncertain ? ", uncertain" : "";
-  const took = i.state === "accepted" ? `Accepted: ${what}. Click to undo.` : `Laya would ${what} this. Click to accept or dismiss.`;
+  const sure = i.uncertain ? ", a close call" : "";
+  const took = i.state === "accepted" ? `Accepted: ${what}. Click to undo.` : `Smart keep would ${what} this. Click to accept or dismiss.`;
   const part = i.kind === "talk" ? "talk" : "nobody talks";
   return `${took}\n${Math.round(i.p * 100)}% to keep${sure}\n${clock(i.start)} to ${clock(i.end)}, ${part}`;
 }

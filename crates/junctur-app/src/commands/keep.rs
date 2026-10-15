@@ -1,9 +1,8 @@
-//! Smart keep: Laya's suggestions for the open recording, its prompt, the judging run and the
-//! user's answers ([`crate::smartkeep`]).
+//! Smart keep: its suggestions for the open recording, its prompt, the keep run and the user's
+//! answers ([`crate::smartkeep`]).
 
 use std::path::Path;
 
-use junctur_core::keep;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use super::{blocking, App};
@@ -13,11 +12,7 @@ use crate::smartkeep::{self, Action, KeepView, Run, EVENT};
 #[tauri::command]
 pub async fn keep_view(app: State<'_, App>, path: String) -> Result<KeepView, String> {
     let run = app.judging.of(Path::new(&path));
-    blocking(move || {
-        let pairs = keep::pairs_path();
-        smartkeep::view(Path::new(&path), None, run, pairs.as_deref())
-    })
-    .await
+    blocking(move || smartkeep::view(Path::new(&path), None, run)).await
 }
 
 /// Saves `prompt` as `path`'s own (and as the last one used), without judging.
@@ -26,7 +21,7 @@ pub async fn keep_prompt(path: String, prompt: String) -> Result<(), String> {
     blocking(move || smartkeep::set_prompt(Path::new(&path), None, &prompt)).await
 }
 
-/// Saves `prompt` as `path`'s and has Laya judge it in the background; the run's progress comes as
+/// Saves `prompt` as `path`'s and runs smart keep on it in the background; the run's progress comes as
 /// [`EVENT`]. Refused while the recording is being analysed (the run judges at its end).
 #[tauri::command]
 pub async fn keep_judge(
@@ -39,7 +34,7 @@ pub async fn keep_judge(
     let editing = app
         .analysis
         .edit(&file)
-        .ok_or("analysing this recording: Laya judges at the end of its run")?;
+        .ok_or("analysing this recording: smart keep runs at the end of its run")?;
     let (f, p) = (file.clone(), prompt.clone());
     blocking(move || smartkeep::set_prompt(&f, None, &p)).await?;
     let notify = move |r: &Run| {
@@ -61,8 +56,7 @@ pub async fn keep_answer(
     blocking(move || {
         let app = handle.state::<App>();
         let e = app.editable()?;
-        let pairs = keep::pairs_path();
-        smartkeep::answer(&e, e.file(), None, action, start.zip(end), pairs.as_deref())
+        smartkeep::answer(&e, e.file(), None, action, start.zip(end))
     })
     .await
 }

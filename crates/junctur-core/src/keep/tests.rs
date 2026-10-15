@@ -381,3 +381,21 @@ fn a_talk_cut_stops_at_a_silent_neighbour_the_user_kept_by_hand() {
         [(10.0, 20.4, false)]
     );
 }
+
+#[test]
+fn only_the_rules_keep_json_is_read_and_a_laya_one_is_none() {
+    let dir = crate::test_support::scratch("keep", "load");
+    // 3b's file: Laya's cuts of talk are never shown again.
+    let (laya_judged, _) = sample();
+    save(&dir, &laya_judged).unwrap();
+    assert_eq!(load(&dir), None);
+    // The rules' file, and one of an older rules version.
+    let mut ruled = judged(&[(0.0, 10.0, Kind::Silent, 2.0)]);
+    ruled.model = rules::NAME.into();
+    ruled.version = rules::VERSION;
+    save(&dir, &ruled).unwrap();
+    assert_eq!(load(&dir), Some(ruled.clone()));
+    ruled.version = rules::VERSION + 1;
+    save(&dir, &ruled).unwrap();
+    assert_eq!(load(&dir), None);
+}

@@ -38,7 +38,7 @@
   let opened = $state.raw<api.Opened | null>(null);
   // The open recording's labels for its silent parts (the Labels lane); null when it has none.
   let labels = $state.raw<api.Labels | null>(null);
-  // The open recording's smart keep: its prompt and Laya's suggestions (the Suggestions lane).
+  // The open recording's smart keep: its prompt and suggested keeps (the Suggestions lane).
   let keep = $state.raw<api.KeepView | null>(null);
   // Review over only these clips (the uncertain suggestions), or over every clip when null.
   let reviewOnly = $state.raw<Clip[] | null>(null);
@@ -159,7 +159,7 @@
       reviewing = true;
     }
   }
-  // Review over Laya's uncertain suggestions only, each a clip as the list has it now.
+  // Review over smart keep's uncertain suggestions only, each a clip as the list has it now.
   function reviewUncertain() {
     const fps = edit?.fps;
     if (!fps || !keep || !edit) return;

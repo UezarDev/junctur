@@ -46,11 +46,7 @@ pub fn known(command: &str) -> Vec<&'static str> {
                 "--keep",
             ],
         ),
-        "judge" => (
-            true,
-            false,
-            &["--prompt", "--agreement", "--cpu", "--force"],
-        ),
+        "judge" => (true, false, &["--prompt"]),
         "status" => (true, false, &[]),
         "cut" => (true, true, &[]),
         "export" => (true, false, &["--fcpxml", "--srt"]),

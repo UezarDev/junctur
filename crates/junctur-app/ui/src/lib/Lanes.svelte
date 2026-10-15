@@ -53,7 +53,7 @@
     labels?: api.Labels | null;
     /** The Suggestions lane's height; 0 when there is none. */
     keepRow?: number;
-    /** Laya's suggestions and accepted parts, drawn on the Suggestions lane. */
+    /** Smart keep's suggestions and accepted parts, drawn on the Suggestions lane. */
     keepItems?: api.KeepItem[];
     /** A suggestion accepted, dismissed or undone from the lane. */
     onKeep?: (action: api.KeepAction, item: api.KeepItem) => void;
@@ -275,7 +275,7 @@
       ctx.fillRect(0, y - 1, width, 1);
     }
 
-    // Suggestions lane: where Laya would keep or cut otherwise than the list does.
+    // Suggestions lane: where smart keep would keep what the list cuts.
     if (keepRow > 0) {
       sg.paint(ctx, keepItems, x, y, keepRow, width, { start: view.start, end });
       y += keepRow;
@@ -695,7 +695,7 @@
       <div
         class="h labels"
         style:height="{keepRow}px"
-        title="Laya's suggestions for the video you described (Properties, Smart keep): green to keep what is cut, red to cut what is kept, paler when unsure, outlined once accepted. Click one to accept, dismiss or undo it."
+        title="Smart keep's suggestions for the video you described (Properties, Smart keep): green where a silent part busier than usual is cut, paler when it is a close call, outlined once accepted. Click one to accept, dismiss or undo it."
       >
         <span class="nm">Suggestions</span>
       </div>

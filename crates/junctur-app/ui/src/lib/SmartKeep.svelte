@@ -1,7 +1,7 @@
 <script lang="ts">
-  // Properties' Smart keep: the kind of video the user is making, which Laya judges every part of
-  // the recording against; ready prompts; Judge and how far it is; what Laya suggests (Accept all,
-  // Review the uncertain ones) and what it has learnt from the user's decisions. Nothing is applied
+  // Properties' Smart keep: the kind of video the user is making, whose words say how much of the
+  // busy silence to keep (phase 3d's rules); ready prompts; Judge and how far it is; how the prompt
+  // was read and what smart keep suggests (Accept all, Review the close calls). Nothing is applied
   // until the user accepts it.
   import * as api from "./api";
   import { clock } from "./time";
@@ -65,8 +65,9 @@
 <section class="keep">
   <h3>Smart keep</h3>
   <p class="hint">
-    Say what kind of video you are making; Laya reads every part (who says what, or what the picture and
-    the game sound like where nobody talks) and suggests what to keep. Nothing changes until you accept.
+    Say what kind of video you are making. Talk stays as the cut leaves it; the silent parts busier than
+    this recording usually is (game audio, fight labels) are suggested as keeps, fewer for highlights,
+    more for a whole stream, none for a podcast. Nothing changes until you accept.
   </p>
   <textarea
     rows="3"
@@ -88,7 +89,7 @@
     <button
       class="primary"
       disabled={busy || running || !text.trim() || !view?.transcribed}
-      title={view?.transcribed ? "" : "Laya judges once the transcript is done"}
+      title={view?.transcribed ? "" : "Smart keep runs once the transcript is done"}
       onclick={judge}
     >
       {view?.judgedPrompt ? "Judge again" : "Judge"}
@@ -107,26 +108,19 @@
       <p class="note">Judged with another prompt; Judge again to use this one.</p>
     {/if}
     <p>
+      {#if view.reading}Read as {view.reading}.{/if}
       {#if waiting > 0}
-        Laya suggests cutting <b>{s.cut}</b> parts ({clock(s.cutS)}) and keeping <b>{s.keep}</b>
-        ({clock(s.keepS)}){#if s.uncertain > 0}; {s.uncertain} uncertain{/if}.
+        Smart keep suggests keeping <b>{s.keep}</b> busy silent parts ({clock(s.keepS)}){#if s.cut > 0}
+          and cutting <b>{s.cut}</b> ({clock(s.cutS)}){/if}{#if s.uncertain > 0}; {s.uncertain} close calls{/if}.
       {:else}
-        Laya agrees with the cut as it is ({view.parts} parts).
+        Smart keep agrees with the cut as it is.
       {/if}
       {#if s.accepted > 0}{s.accepted} accepted (undo one from the Suggestions lane).{/if}
     </p>
     <div class="row">
       <button disabled={busy || waiting === 0} onclick={acceptAll}>Accept all</button>
-      <button disabled={busy || s.uncertain === 0} onclick={onReviewUncertain}>Review uncertain</button>
+      <button disabled={busy || s.uncertain === 0} onclick={onReviewUncertain}>Review close calls</button>
     </div>
-    <p class="hint">
-      {#if view.fit.pairs > 0}
-        Fitted to {view.fit.pairs} of your decisions: the decision turns at Laya's own {Math.round(view.fit.cutoff * 100)}%,
-        temperature {view.fit.temperature.toFixed(2)}.
-      {:else}
-        Laya learns from what you accept, dismiss, undo and cut yourself, once there are 20 such decisions.
-      {/if}
-    </p>
   {/if}
   {#if view && !view.on}
     <p class="hint">Off in Settings: a recording is judged only when you give it a prompt here.</p>
