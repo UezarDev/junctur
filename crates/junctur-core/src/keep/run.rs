@@ -6,7 +6,7 @@ use std::path::Path;
 
 use super::fit::Fit;
 use super::laya::{self, Laya, Vocab};
-use super::parts::{self, Part};
+use super::parts;
 use super::state::{self, Context, Spoken};
 use super::{read, save, Judged, Judgement};
 use crate::edit::{Speakers, Window};
@@ -157,18 +157,10 @@ fn hash(q: &laya::Question, state: &str) -> String {
 /// Each window's score, P(keep) of the parts it covers weighted by how much of it each covers; a
 /// window no part covers keeps its score. Windows are `len` seconds from their start.
 pub fn score_windows(windows: &mut [Window], len: f64, j: &Judged, fit: &Fit) {
-    let parts: Vec<(Part, f64)> = j
-        .parts
-        .iter()
-        .map(|p| (p.part(), fit.p(p.margin)))
-        .collect();
     for w in windows {
-        let (a, b) = (w.start, w.start + len);
-        let from = parts.partition_point(|(p, _)| p.end <= a);
         let (mut sum, mut cover) = (0.0, 0.0);
-        for (p, chance) in parts[from..].iter().take_while(|(p, _)| p.start < b) {
-            let over = (p.end.min(b) - p.start.max(a)).max(0.0);
-            sum += over * chance;
+        for (p, over) in super::overlap(&j.parts, w.start, w.start + len) {
+            sum += over * fit.p(p.margin);
             cover += over;
         }
         if cover > 0.0 {

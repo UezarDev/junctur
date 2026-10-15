@@ -1598,3 +1598,39 @@ fn labels_are_read_only_while_they_answer_the_list_now() {
     assert_eq!(current_labels(&p, &settings), None);
     std::fs::remove_dir_all(&d).unwrap();
 }
+
+#[test]
+fn suggestions_stand_only_for_the_prompt_judged_and_a_keep_that_did_not_fail() {
+    // 3e: an old `keep.json` stayed on the lane after the prompt changed or smart keep was off.
+    use crate::keep::{self, rules};
+    let (d, p) = scratch_project("judged-now");
+    let j = keep::Judged {
+        model: rules::NAME.into(),
+        prompt: "highlights".into(),
+        version: rules::VERSION,
+        parts: vec![],
+    };
+    keep::save(&p.dir, &j).unwrap();
+    let off = keep::Settings::default();
+    let mut c = keep::Choices::default();
+    // Smart keep off for it (no prompt): none.
+    assert!(judged_now(&p, &c, &off).is_none());
+    c.prompt = Some("highlights".into());
+    assert_eq!(judged_now(&p, &c, &off), Some(j.clone()));
+    // Another prompt since: none until judged again.
+    c.prompt = Some("podcast".into());
+    assert!(judged_now(&p, &c, &off).is_none());
+    // The last prompt, smart keep on, is the recording's.
+    c.prompt = None;
+    let on = keep::Settings {
+        on: true,
+        last: Some(" highlights ".into()),
+    };
+    assert_eq!(judged_now(&p, &c, &on), Some(j));
+    // A keep stage that failed since: none.
+    let mut jobs = p.jobs();
+    jobs.set(&p.dir, StageName::Keep, StageState::Failed, None, None)
+        .unwrap();
+    assert!(judged_now(&p, &c, &on).is_none());
+    let _ = std::fs::remove_dir_all(&d);
+}

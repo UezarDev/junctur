@@ -119,10 +119,19 @@ pub struct Answer {
     /// about this part, so it is no training pair ([`collect`]).
     #[serde(default, skip_serializing_if = "is_false")]
     pub bulk: bool,
+    /// The kind of span it answers ([`rules::SPANS`]). Laya's answers and those to 3d's first padded
+    /// windows carry none (0) and are not read now: matched by their times alone, one could stand
+    /// for a stretch of the same times it never saw (3e). They stay in the file.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub spans: u32,
 }
 
 fn is_false(b: &bool) -> bool {
     !b
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,8 +144,11 @@ pub enum How {
 }
 
 impl Choices {
+    /// `p`'s answer, given to the rules' spans as they are now ([`Answer::spans`]).
     pub fn answer(&self, p: &Part) -> Option<&Answer> {
-        self.answers.iter().find(|a| same(a.start, a.end, p))
+        self.answers
+            .iter()
+            .find(|a| a.spans == rules::SPANS && same(a.start, a.end, p))
     }
 
     /// `p`'s answer while the list (`now`, sorted) still does what it says. One the list no longer
@@ -154,7 +166,8 @@ impl Choices {
             end: a.end,
             kind: Kind::Talk,
         };
-        self.answers.retain(|x| !same(x.start, x.end, &p));
+        self.answers
+            .retain(|x| x.spans != a.spans || !same(x.start, x.end, &p));
         self.answers.push(a);
         self.answers.sort_by(|x, y| x.start.total_cmp(&y.start));
     }
@@ -213,6 +226,16 @@ pub fn load_choices(dir: &Path) -> Result<Choices> {
 pub fn save_choices(dir: &Path, c: &Choices) -> Result<()> {
     crate::output::write_replacing(&choices_path(dir), serde_json::to_vec_pretty(c)?)?;
     Ok(())
+}
+
+/// The parts of `parts` (in time order, apart) that `a..b` overlaps, each with the seconds it covers:
+/// the walk both window scorings make, the rules' ([`rules::score_windows`]) and Laya's.
+fn overlap(parts: &[Judgement], a: f64, b: f64) -> impl Iterator<Item = (&Judgement, f64)> {
+    let from = parts.partition_point(|p| p.end <= a);
+    parts[from..]
+        .iter()
+        .take_while(move |p| p.start < b)
+        .map(move |p| (p, (p.end.min(b) - p.start.max(a)).max(0.0)))
 }
 
 /// One line for Laya's log (3b).

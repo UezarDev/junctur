@@ -79,6 +79,14 @@ fn the_rules_keeps_are_suggested_and_a_laya_file_shows_nothing() {
             part(20.0, 30.0, Kind::Silent, 0.1),
         ],
     };
+    keep::save_choices(
+        &p.dir,
+        &keep::Choices {
+            prompt: Some("League highlights".into()),
+            answers: vec![],
+        },
+    )
+    .unwrap();
     // 3b's file, with a cut of talk in it: not read, nothing suggested.
     keep::save(&p.dir, &j).unwrap();
     let v = view(&file, Some(d.join("cache")), None).unwrap();
@@ -107,5 +115,17 @@ fn the_rules_keeps_are_suggested_and_a_laya_file_shows_nothing() {
         (v.summary.keep, v.summary.cut, v.summary.uncertain),
         (2, 0, 1)
     );
+    assert!(!v.outdated);
+    // The prompt changed since it ran: its stretches are not shown, and the view says why (3e).
+    keep::save_choices(
+        &p.dir,
+        &keep::Choices {
+            prompt: Some("A podcast".into()),
+            answers: vec![],
+        },
+    )
+    .unwrap();
+    let v = view(&file, Some(d.join("cache")), None).unwrap();
+    assert!(v.outdated && v.items.is_empty() && v.judged_prompt.is_none());
     let _ = std::fs::remove_dir_all(&d);
 }

@@ -52,8 +52,11 @@ pub(super) fn keep_stage(
     let list = p.edit()?;
     let regions = speech.all_regions();
     let labels = super::labels_now(p, jobs, &opts.labels, &regions, report);
+    // Talk only keeps no silence: the game track is not decoded for nothing (3e).
+    let talk_only = rules::Strictness::read(&prompt) == rules::Strictness::TalkOnly;
     let judged = jobs.stage(&p.dir, StageName::Keep, log, |log| {
-        let peaks = match busy::track(report) {
+        let peaks = match busy::track(report).filter(|_| !talk_only) {
+            None if talk_only => None,
             None => {
                 log("keep: no game or mix track, so the labels' busy alone");
                 None
@@ -90,7 +93,9 @@ pub(super) fn keep_stage(
 
 /// The `keep` stage alone, over a recording whose analysis is done (the app's Judge, `junctur
 /// judge`): `None` when it is off for it. It waits for the transcript although the rules do not read
-/// it: the stage is a run's last, and the app offers Judge once the transcript is done.
+/// it: one not done may be a run's still going, whose word counts rewrite the edit list this stage
+/// amends, and the jobs file cannot tell it from a run without one (3e kept the gate; such a run
+/// judges at its end, `analyze --no-transcript --keep`).
 pub fn judge(
     p: &Project,
     opts: &PipelineOptions,
@@ -102,7 +107,9 @@ pub fn judge(
     let done = |s| jobs.get(s).is_some_and(|r| r.state == StageState::Done);
     if !done(StageName::Transcribe) {
         return Err(Error::Edit(
-            "the transcript is not finished yet: smart keep runs once it is".into(),
+            "the transcript is not finished yet: smart keep runs once it is (without a \
+             transcript, it runs at the end of `analyze --no-transcript --keep <prompt>`)"
+                .into(),
         ));
     }
     let report = tracks::analyze(&p.file, &tracks_options(p, false))?;
@@ -113,6 +120,19 @@ pub fn judge(
         steps: steps::none(),
     };
     keep_stage(stage, &speech, opts, log)
+}
+
+/// Smart keep's suggested keeps for `p` as it stands now: `keep.json` only when the recording's
+/// prompt now (`choices`, `settings`) is the one it was judged with and the last keep stage did not
+/// fail. Otherwise the file is an old run's, and its stretches would be suggested for a prompt the
+/// user has since changed or turned off (3e).
+pub fn judged_now(p: &Project, choices: &Choices, settings: &keep::Settings) -> Option<Judged> {
+    let failed = p
+        .jobs()
+        .get(StageName::Keep)
+        .is_some_and(|r| r.state == StageState::Failed);
+    let prompt = keep::prompt_for(choices, settings)?;
+    keep::load(&p.dir).filter(|j| !failed && j.prompt.trim() == prompt)
 }
 
 /// What the automatic reduction keeps of `p` with `list`'s settings: a part the list does otherwise

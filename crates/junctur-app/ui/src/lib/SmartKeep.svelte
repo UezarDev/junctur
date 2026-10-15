@@ -103,6 +103,9 @@
     {/if}
   </div>
 
+  {#if view?.outdated}
+    <p class="note">The last suggestions were for another prompt, or that run did not finish; Judge to see them for this one.</p>
+  {/if}
   {#if view?.judgedPrompt && s}
     {#if stale}
       <p class="note">Judged with another prompt; Judge again to use this one.</p>

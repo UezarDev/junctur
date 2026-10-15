@@ -54,6 +54,9 @@ pub struct KeepView {
     pub parts: usize,
     /// How that prompt was read ([`rules::Strictness::describe`]).
     pub reading: Option<String>,
+    /// Smart keep's file is an old run's (another prompt, smart keep off, or the last run failed):
+    /// none of it is shown ([`pipeline::judged_now`], 3e).
+    pub outdated: bool,
     pub items: Vec<Item>,
     pub summary: Summary,
     /// The keep run, when it is this recording's.
@@ -178,11 +181,16 @@ pub fn view(file: &Path, cache_dir: Option<PathBuf>, run: Option<Run>) -> Result
         judged_prompt: None,
         parts: 0,
         reading: None,
+        outdated: false,
         items: Vec::new(),
         summary: Summary::default(),
         run,
     };
-    let (Some(judged), Ok(list)) = (keep::load(&p.dir), p.edit()) else {
+    let Ok(list) = p.edit() else {
+        return Ok(v);
+    };
+    let Some(judged) = pipeline::judged_now(&p, &choices, &settings) else {
+        v.outdated = keep::load(&p.dir).is_some();
         return Ok(v);
     };
     let s = pipeline::standing(&p, &judged, &list, &choices);
@@ -221,7 +229,9 @@ pub fn answer(
     let path = file.ok_or("no recording is open")?;
     let p = Project::open(Path::new(path), cache_dir, None).map_err(|e| e.to_string())?;
     let mut choices = keep::load_choices(&p.dir).map_err(|e| e.to_string())?;
-    let judged = keep::load(&p.dir).ok_or("smart keep has not run on this recording")?;
+    let settings = config::load().map(|c| c.keep).unwrap_or_default();
+    let judged = pipeline::judged_now(&p, &choices, &settings)
+        .ok_or("smart keep has no suggestions for this recording's prompt: judge it again")?;
     let list = p.edit().map_err(|e| e.to_string())?;
     // As the lane was shown them: Accept all takes exactly these.
     let pipeline::Standing { auto, items, .. } = pipeline::standing(&p, &judged, &list, &choices);

@@ -282,6 +282,7 @@ fn choices_read_back_and_a_broken_file_is_an_error() {
         keep: true,
         how: How::Accepted,
         bulk: true,
+        spans: rules::SPANS,
     });
     c.set(Answer {
         start: 1.0,
@@ -289,8 +290,25 @@ fn choices_read_back_and_a_broken_file_is_an_error() {
         keep: false,
         how: How::Dismissed,
         bulk: false,
+        spans: rules::SPANS,
     });
     assert_eq!(c.answers.len(), 1);
+    // One given to another kind of span (Laya's, 3d's padded windows': none) is kept and not read.
+    c.set(Answer {
+        start: 1.0,
+        end: 2.0,
+        keep: true,
+        how: How::Accepted,
+        bulk: false,
+        spans: 0,
+    });
+    assert_eq!(c.answers.len(), 2);
+    let part = Part {
+        start: 1.0,
+        end: 2.0,
+        kind: Kind::Silent,
+    };
+    assert_eq!(c.answer(&part).map(|a| a.how), Some(How::Dismissed));
     save_choices(&dir, &c).unwrap();
     assert_eq!(load_choices(&dir).unwrap(), c);
     std::fs::write(dir.join(CHOICES), "nope").unwrap();

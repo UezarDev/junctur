@@ -21,10 +21,17 @@ export function itemAt(items: KeepItem[], t: number): KeepItem | null {
 /** What hovering one says. */
 export function describe(i: KeepItem): string {
   const what = i.keep ? "keep" : "cut";
-  const sure = i.uncertain ? ", a close call" : "";
   const took = i.state === "accepted" ? `Accepted: ${what}. Click to undo.` : `Smart keep would ${what} this. Click to accept or dismiss.`;
   const part = i.kind === "talk" ? "talk" : "nobody talks";
-  return `${took}\n${Math.round(i.p * 100)}% to keep${sure}\n${clock(i.start)} to ${clock(i.end)}, ${part}`;
+  return `${took}\n${sureness(i)}\n${clock(i.start)} to ${clock(i.end)}, ${part}`;
+}
+
+/**
+ * How sure smart keep is, in words: its number is no chance (the rules' distance above the line), so
+ * no percentage is shown (3e).
+ */
+export function sureness(i: KeepItem): string {
+  return i.uncertain ? "A close call" : "Clear";
 }
 
 /**

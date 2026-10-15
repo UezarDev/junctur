@@ -36,7 +36,7 @@ use editlist::{draft, rewrite, Rewrite};
 use smartkeep::keep_stage;
 use stages::{count_words, labels_stage, speakers_stage, speech_stage, transcribe_stage, Stage};
 
-pub use smartkeep::{automatic_keep, judge, standing, KeepRun, Standing, KEEP_OFF};
+pub use smartkeep::{automatic_keep, judge, judged_now, standing, KeepRun, Standing, KEEP_OFF};
 pub use stages::LABELS_OFF;
 
 use crate::edit::{self, CutSettings, EditList};
@@ -416,7 +416,7 @@ pub fn prepare(
 /// over the speech, piece by piece (`transcribed` is told where the transcript is whole, `between`
 /// is called between chunks and may block: the app's pause; [`transcribe::Reports`]), then the words
 /// counted into the edit list's score windows in place ([`count_words`]), then smart keep's rules when
-/// the recording has a prompt ([`judge`]). Never re-cuts: edits made since [`prepare`] stay.
+/// the recording has a prompt ([`judge`]), transcript or not. Never re-cuts: edits made since [`prepare`] stay.
 pub fn finish(
     p: &Project,
     opts: &PipelineOptions,
@@ -479,25 +479,25 @@ pub fn finish(
             Ok(None) => {}
             Err(e) => log(&format!("edit list: word counts not written ({e})")),
         }
-        // An extra, like the labels: smart keep that fails (a file of its that cannot be read or
-        // written) leaves the run done.
-        let stage = Stage {
-            p,
-            jobs: &mut jobs,
-            report: &report,
-            steps,
-        };
-        match keep_stage(stage, &speech, opts, log) {
-            Ok(Some(_)) => {
-                if let Ok(e) = p.edit() {
-                    edit = e;
-                }
-            }
-            Ok(None) => {}
-            Err(e) => log(&format!("keep: {e}; going on without it")),
-        }
         Some(t)
     };
+    // An extra, like the labels: smart keep that fails (a file of its that cannot be read or
+    // written) leaves the run done. With or without a transcript: the rules read no words (3e).
+    let stage = Stage {
+        p,
+        jobs: &mut jobs,
+        report: &report,
+        steps,
+    };
+    match keep_stage(stage, &speech, opts, log) {
+        Ok(Some(_)) => {
+            if let Ok(e) = p.edit() {
+                edit = e;
+            }
+        }
+        Ok(None) => {}
+        Err(e) => log(&format!("keep: {e}; going on without it")),
+    }
     Ok(Outcome {
         report,
         speech,

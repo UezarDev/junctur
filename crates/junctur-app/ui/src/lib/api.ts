@@ -320,7 +320,10 @@ export interface KeepItem {
   start: number;
   end: number;
   kind: "talk" | "silent";
-  /** The calibrated chance it stays. */
+  /**
+   * How sure smart keep is, 0.5 to 0.98: from the rules, how far the stretch's best moment stands above
+   * the best one left out, not a chance it stays (3e). Read through `uncertain`.
+   */
   p: number;
   /** Its choice: keep it, or cut it (the rules only ever suggest keeps). */
   keep: boolean;
@@ -353,6 +356,8 @@ export interface KeepView {
   summary: { cut: number; cutS: number; keep: number; keepS: number; uncertain: number; accepted: number };
   /** How that prompt was read: how strict, how much of the silence. */
   reading: string | null;
+  /** Smart keep's last suggestions are an old run's (another prompt, off, or it failed): none shown. */
+  outdated: boolean;
   run: KeepRun | null;
 }
 

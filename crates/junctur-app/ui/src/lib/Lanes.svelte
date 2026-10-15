@@ -758,7 +758,7 @@
         tabindex="-1"
         onpointerdown={(e) => e.stopPropagation()}
       >
-        <span class="what">{picked.item.keep ? "Keep" : "Cut"} · {Math.round(picked.item.p * 100)}%</span>
+        <span class="what">{picked.item.keep ? "Keep" : "Cut"} · {sg.sureness(picked.item)}</span>
         {#if picked.item.state === "accepted"}
           <button role="menuitem" onclick={() => answer("undo")}>Undo</button>
         {:else}

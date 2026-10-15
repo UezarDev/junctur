@@ -42,32 +42,36 @@ impl Piece {
     }
 }
 
-/// The silent pieces of a recording `duration` seconds long whose speech is `regions` (any tracks,
+/// The silent stretches of a recording `duration` seconds long whose speech is `regions` (any tracks,
 /// any order, overlapping): every gap of at least [`SHORTEST`] between them, the start and end of the
-/// recording included, each cut into equal pieces of at most [`LONGEST`].
-pub fn pieces(regions: &[Region], duration: f64) -> Vec<Piece> {
+/// recording included. Whole, as the speech leaves them: smart keep keeps a stretch whole, and joining
+/// its [`pieces`] back together missed where two shared ends were computed an ulp apart (3e).
+pub fn gaps(regions: &[Region], duration: f64) -> Vec<(f64, f64)> {
     let mut spans: Vec<(f64, f64)> = regions.iter().map(|r| (r.start, r.end)).collect();
     spans.sort_by(|a, b| a.0.total_cmp(&b.0));
     let mut out = Vec::new();
     let mut at = 0.0f64;
-    let gap = |a: f64, b: f64, out: &mut Vec<Piece>| {
-        let len = b - a;
-        if len < SHORTEST {
-            return;
-        }
-        let n = (len / LONGEST).ceil().max(1.0) as usize;
-        let step = len / n as f64;
+    for (a, b) in spans {
+        out.push((at, a.min(duration)));
+        at = at.max(b);
+    }
+    out.push((at, duration));
+    out.retain(|(a, b)| b - a >= SHORTEST);
+    out
+}
+
+/// The silent pieces: each of [`gaps`] cut into equal pieces of at most [`LONGEST`].
+pub fn pieces(regions: &[Region], duration: f64) -> Vec<Piece> {
+    let mut out = Vec::new();
+    for (a, b) in gaps(regions, duration) {
+        let n = ((b - a) / LONGEST).ceil().max(1.0) as usize;
+        let step = (b - a) / n as f64;
         for k in 0..n {
             let start = a + k as f64 * step;
             let end = if k + 1 == n { b } else { start + step };
             out.push(Piece { start, end });
         }
-    };
-    for (a, b) in spans {
-        gap(at, a.min(duration), &mut out);
-        at = at.max(b);
     }
-    gap(at, duration, &mut out);
     out
 }
 
