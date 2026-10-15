@@ -1,16 +1,7 @@
-//! The open recording's waveforms, one per audio track, for the track lanes (2g).
-//!
-//! Core's `waves` reads them (one ffmpeg for every track) and keeps them in the project folder; this
-//! is the app's side: read the kept ones when a recording opens, or compute them on a thread of its
-//! own while the recording already plays, telling the page how far it got about once a second, so
-//! the lanes fill in from the left. The page never holds the peaks: it asks for one column per
-//! pixel of the window it draws ([`Store::columns`]).
-//!
-//! A module of its own rather than part of the player or the analysis: it outlives neither the
-//! recording being open (opening another stops it, and the next open starts again; nothing is kept
-//! half-read) nor needs the analysis's gate (an 8 kHz decode is not the GPU work that serialises).
-//! It starts at open and does not wait for the `tracks` stage: the read needs only the file's audio
-//! streams, so the lanes show before the analysis gets anywhere.
+//! The open recording's waveforms, one per audio track, for the track lanes: read from the project
+//! folder, or computed on a thread of its own while the recording plays so the lanes fill in from
+//! the left. Apart from the analysis because it lives only while the recording is open and needs
+//! none of its gate.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -110,7 +101,7 @@ impl Store {
         }
     }
 
-    /// No recording is open any more (2i): a read still going stops, and nothing is served.
+    /// No recording is open any more: a read still going stops, and nothing is served.
     pub fn close(&self) {
         if let Some(old) = lock(&self.current).take() {
             old.stop.store(true, Ordering::Relaxed);
@@ -197,7 +188,7 @@ fn compute(file: &Path, dir: Option<&Path>, shared: &Shared, notify: &Notify) {
     let read = waves::read(file, tracks, duration, &shared.stop, &mut |more| {
         let seconds = {
             let mut w = lock(&shared.waves);
-            w.data.extend_from_slice(more);
+            w.extend(more);
             w.seconds()
         };
         lock(&shared.state).seconds = seconds;

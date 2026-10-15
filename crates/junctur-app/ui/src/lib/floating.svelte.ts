@@ -1,6 +1,5 @@
-// What a popup over the UI needs besides its trigger (2t): one open at a time, a place beside its
-// trigger, and a home outside the boxes that scroll. Apart from `InfoTip` so a second kind of popup
-// shares the same slot and rules rather than growing its own.
+// What a popup over the UI needs besides its trigger: one open at a time, a place beside its
+// trigger, and a home outside the boxes that scroll. Apart from `InfoTip` so other popups share it.
 
 /** Space between the trigger and the popup, and kept between the popup and the window's edge. */
 export const GAP = 8;
@@ -9,9 +8,8 @@ export const MARGIN = 8;
 export const LIST_GAP = 4;
 
 /**
- * The one open popup in the window, by id. A single slot rather than a flag per popup: closes are
- * deferred so the pointer can cross into a popup, and with a flag each a pointer sweeping down a
- * column of (i)s left several up at once. Opening one overwrites the slot, so the other is gone.
+ * The one open popup in the window, by id. One slot, not a flag per popup: closes are deferred, so
+ * a pointer sweeping down a column of (i)s would leave several open.
  */
 export const slot = $state<{ open: string | null }>({ open: null });
 
@@ -22,9 +20,7 @@ export function release(id: string) {
 
 /**
  * Where a popup of `width` x `height` goes for a trigger at `at`, in window coordinates: above by
- * preference (a tip: the trigger is what is being looked at), below when there is no room above,
- * centred on the trigger and kept `MARGIN` inside the window. A list (2v's model picker) prefers
- * `"below"`, flush with the trigger's left edge, as a select's list drops.
+ * preference, below when there is no room, kept `MARGIN` inside the window. `"below"` is for lists.
  */
 export function place(
   at: { top: number; bottom: number; left: number; width: number },

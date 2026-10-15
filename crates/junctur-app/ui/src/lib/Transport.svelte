@@ -1,10 +1,6 @@
 <script lang="ts">
-  // The play bar (2g): its own opaque row under the picture, between the video and the track
-  // lanes. Play, the skip toggle, the clocks, the whole recording as an overview (outlining the
-  // window the lanes show) and, at the right end, the lanes' zoom. The track controls that were
-  // here (2a's track select, 2e's strips) live on the lanes and the portrait strips; editing
-  // sits on the picture (ActionBar, 2r). Review (2o) goes through the clips one at a time; while it
-  // runs, Skip cuts stays off (review plays the cuts it judges).
+  // The play bar under the picture: play, the skip toggle, the clocks, the overview and the lanes'
+  // zoom. While review runs, Skip cuts stays off, since review plays the cuts it judges.
   import * as api from "./api";
   import Timeline from "./Timeline.svelte";
   import Clocks from "./Clocks.svelte";
@@ -29,7 +25,7 @@
     view: { start: number; end: number } | null;
     /** Zoom the lanes: a factor on the window's length, or `whole` for the whole recording. */
     onZoom: (by: number | "whole") => void;
-    /** Review mode is on (2o), and the toggle for it. */
+    /** Review mode is on, and the toggle for it. */
     reviewing: boolean;
     onReview: () => void;
     onSelect: (s: Selection | null) => void;

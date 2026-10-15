@@ -172,13 +172,12 @@ pub struct EditState {
     /// Changes when the list's turns (or speaker tracks) do, so the page asks for the words'
     /// labels again after an outside change; a rename leaves it as it was.
     pub speakers_key: String,
-    /// Changes when the list's fixed words do (5h), or its retimed words (2w: a moved cut edge), so
-    /// the page asks for the words' text and times again, after an edit of its own or an outside
-    /// change.
+    /// Changes when the list's fixed or retimed words do, so the page asks for the words' text and
+    /// times again, after an edit of its own or an outside change.
     pub fixes_key: String,
     /// The caption settings: the list's own, else the user's defaults (also with no list).
     pub captions: edit::Captions,
-    /// The list has caption settings of its own; without, it follows the defaults (2i).
+    /// The list has caption settings of its own; without, it follows the defaults.
     pub captions_own: bool,
 }
 
@@ -188,7 +187,7 @@ pub struct SpeakerView {
     pub name: String,
     pub color: String,
     /// Their audio track (0-based) when speakers were told apart by track: the lanes colour it
-    /// and the avatars take its level (2g).
+    /// and the avatars take its level.
     pub track: Option<usize>,
 }
 
@@ -201,7 +200,7 @@ pub struct EditorStatus {
 }
 
 impl EditState {
-    /// `defaults`: the user's caption defaults (2i), for a list without settings of its own.
+    /// `defaults`: the user's caption defaults, for a list without settings of its own.
     pub fn new(
         edit: &Edit,
         skip: bool,
@@ -254,14 +253,11 @@ impl EditState {
 /// FNV-1a over 64-bit values, as a string, since a 64-bit number does not survive JSON into
 /// JavaScript exactly.
 fn key(values: impl IntoIterator<Item = u64>) -> String {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut h = junctur_core::hash::Fnv::new();
     for x in values {
-        for b in x.to_le_bytes() {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x100_0000_01b3);
-        }
+        h.u64(x);
     }
-    format!("{h:016x}")
+    h.hex()
 }
 
 /// Over the turns and speaker tracks (not the names): what the words' labels depend on.
@@ -277,7 +273,7 @@ fn speakers_key(s: &edit::Speakers) -> String {
     key(names.chain(turns))
 }
 
-/// Over the fixed words (5h), spans (5x) and retimed words (2w): what the words' text and times
+/// Over the fixed words, spans and retimed words: what the words' text and times
 /// depend on beside the transcript.
 fn fixes_key(fixes: &[edit::Fix], times: &[edit::Retime]) -> String {
     let times = times.iter().flat_map(|t| {
@@ -306,143 +302,4 @@ fn fixes_key(fixes: &[edit::Fix], times: &[edit::Retime]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use junctur_core::edit::{CutSettings, EditList, Range};
-
-    const FPS: Fps = Fps { num: 30, den: 1 };
-
-    fn scratch(name: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("junctur-cuts-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
-
-    fn list(keep: Vec<Range>) -> String {
-        EditList {
-            source: "rec.mp4".into(),
-            duration: 10.0,
-            settings: CutSettings::default(),
-            keep,
-            speakers: Default::default(),
-            captions: Default::default(),
-            fixes: Vec::new(),
-            times: Vec::new(),
-            windows: vec![],
-        }
-        .to_text()
-    }
-
-    #[test]
-    fn reads_an_edit_list() {
-        let d = scratch("read");
-        let p = d.join("edit.junctur");
-        assert!(read(&p, FPS).is_none(), "no file yet");
-
-        std::fs::write(
-            &p,
-            list(vec![Range {
-                start: 1.0,
-                end: 2.0,
-            }]),
-        )
-        .unwrap();
-        let e = read(&p, FPS).unwrap();
-        assert_eq!(e.timeline.as_ref().unwrap().ranges, vec![(30, 60)]);
-        let defaults = edit::Captions {
-            on: true,
-            chars: 30,
-            ..Default::default()
-        };
-        let s = EditState::new(&e, true, Some(FPS), &EditorStatus::default(), &defaults);
-        assert_eq!(s.ranges, vec![30, 60]);
-        // No `captions` line: the list follows the defaults (2i).
-        assert_eq!((s.captions, s.captions_own), (defaults.clone(), false));
-        assert_eq!((s.total_frames, s.output_frames), (300, 30));
-        assert_eq!(s.summary.unwrap().ranges, 1);
-
-        // Its own settings, even the built-in ones, win over the defaults.
-        let own = EditList {
-            captions: Some(edit::Captions::default()),
-            ..edit::parse(&list(vec![Range {
-                start: 1.0,
-                end: 2.0,
-            }]))
-            .unwrap()
-        };
-        std::fs::write(&p, own.to_text()).unwrap();
-        let e = read(&p, FPS).unwrap();
-        let s = EditState::new(&e, true, Some(FPS), &EditorStatus::default(), &defaults);
-        assert_eq!(
-            (s.captions, s.captions_own),
-            (edit::Captions::default(), true)
-        );
-
-        std::fs::write(&p, list(vec![])).unwrap();
-        let e = read(&p, FPS).unwrap();
-        assert!(e.timeline.is_none());
-        assert_eq!(e.error.as_deref(), Some("the edit list keeps nothing"));
-        assert_eq!(e.summary.unwrap().ranges, 0);
-
-        std::fs::write(&p, "garbage").unwrap();
-        let e = read(&p, FPS).unwrap();
-        assert!(e.timeline.is_none() && e.error.is_some());
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn ranges_in_play_survive_a_missing_or_broken_file() {
-        let d = scratch("merge");
-        let p = d.join("edit.junctur");
-        std::fs::write(
-            &p,
-            list(vec![Range {
-                start: 1.0,
-                end: 2.0,
-            }]),
-        )
-        .unwrap();
-        let playing = read(&p, FPS).unwrap();
-        let t = playing.timeline.clone().unwrap();
-
-        let gone = merge(&playing, None);
-        assert!(Arc::ptr_eq(gone.timeline.as_ref().unwrap(), &t));
-        assert!(gone.error.is_some());
-
-        std::fs::write(
-            &p,
-            "junctur-edit 1
-keep 1",
-        )
-        .unwrap();
-        let broken = merge(&playing, read(&p, FPS));
-        assert!(Arc::ptr_eq(broken.timeline.as_ref().unwrap(), &t));
-        assert!(broken.error.is_some());
-
-        // Same frames: the same timeline (nothing reloads); new frames replace it.
-        std::fs::write(
-            &p,
-            list(vec![Range {
-                start: 1.001,
-                end: 2.0,
-            }]),
-        )
-        .unwrap();
-        let same = merge(&playing, read(&p, FPS));
-        assert!(Arc::ptr_eq(same.timeline.as_ref().unwrap(), &t));
-        std::fs::write(
-            &p,
-            list(vec![Range {
-                start: 3.0,
-                end: 4.0,
-            }]),
-        )
-        .unwrap();
-        let new = merge(&playing, read(&p, FPS));
-        assert_eq!(new.timeline.unwrap().ranges, vec![(90, 120)]);
-        // With nothing in play, a missing file is just no edit list.
-        assert!(merge(&Edit::default(), None).timeline.is_none());
-        let _ = std::fs::remove_dir_all(&d);
-    }
-}
+mod tests;

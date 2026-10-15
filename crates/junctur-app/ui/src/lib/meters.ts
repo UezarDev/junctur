@@ -1,8 +1,6 @@
 /**
- * Every track's level, for whatever draws one (2g: the lanes' meters, the portrait strips, the
- * avatars). Levels come about 20 times a second while playing (2e); one listener takes them and
- * writes every registered bar's style straight away, outside Svelte's reactivity, so a level never
- * costs a component update. With no level for a moment (paused, no audio) every bar drops.
+ * Every track's level, for whatever draws one. One listener writes every registered bar's style
+ * directly, outside Svelte's reactivity, so a level (20 a second) never costs a component update.
  */
 import * as api from "./api";
 

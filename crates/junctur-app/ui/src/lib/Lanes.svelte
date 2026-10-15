@@ -1,19 +1,6 @@
 <script lang="ts">
-  // The track lanes under the play bar (2g, mock B/LV1): one lane per audio track on one time
-  // axis, with the Speakers lane on top when the edit list names speakers. Each lane's header has
-  // its colour, name, what it is, Mute, Solo and a meter; the body shows a zoomed window of the
-  // recording (`view`) with a ruler: the waveforms, the speakers' turns, the cuts shaded across
-  // every lane, the selection, and one playhead through all of them.
-  //
-  // The bodies are one canvas, painted only when what they show changes (the window, the size, the
-  // waveforms read so far, the edit list, the turns, the mutes), never for a position: the playhead
-  // and the selection are elements moved by CSS. Waveforms are asked of the engine one column per
-  // pixel of the window shown (`api.waves`), so the page never holds a 30 h recording's peaks.
-  //
-  // A click on a lane seeks, a drag selects a stretch to cut or keep (whole frames, as the
-  // timeline's shift-drag does), a drag on the ruler scrubs, the wheel pans and Ctrl+wheel zooms
-  // around the pointer. A drag that starts on a cut's edge moves the edge instead (2s, nudge.ts
-  // `edgeNear`): the edit is made once, on release, and the preview then plays from just before it.
+  // The track lanes under the play bar: one lane per audio track on one time axis, painted on one
+  // canvas only when what they show changes; waveforms are fetched per pixel column of the window.
   import { onMount, untrack } from "svelte";
   import * as api from "./api";
   import Avatars from "./Avatars.svelte";
@@ -58,7 +45,7 @@
     thin: boolean;
     /** Moves when more of the waveforms has been read. */
     wavesVersion: number;
-    /** The selection, a span per stretch (2p). */
+    /** The selection, a span per stretch. */
     spans: { start: number; end: number }[];
     /** Cut edges can be dragged (not while reviewing: review moves its clip's edges itself). */
     edges?: boolean;
@@ -126,7 +113,7 @@
     const c = document.createElement("canvas");
     c.width = c.height = n;
     const g = c.getContext("2d")!;
-    // --bad (#f25f8f) written out: a canvas colour cannot read a CSS token (2x).
+    // --bad (#f25f8f) written out: a canvas colour cannot read a CSS token.
     g.strokeStyle = "rgba(242, 95, 143, 0.22)";
     g.lineWidth = dpr;
     g.beginPath();
@@ -248,10 +235,10 @@
         from = sec(r[2 * i + 1]);
       }
       if (from < end) shade(from, sec(edit.totalFrames));
-      // Every cut's edge in view, drawn at once (2w: Uezar, "it should be higlighted
-      // inmediately"), so an edge is seen before it is hovered; the one in reach lights up above.
+      // Every cut's edge in view, drawn at once, so an edge is seen before it is hovered; the one
+      // in reach lights up above.
       if (edges && edit.editable) {
-        // A light tint of --accent written out (the canvas cannot read the token; 2x, was a pale yellow).
+        // A light tint of --accent written out (the canvas cannot read the token).
         ctx.fillStyle = "rgba(255, 160, 140, 0.5)";
         for (let i = lo; i < n; i++) {
           if (sec(r[2 * i]) > end) break;
@@ -311,21 +298,17 @@
     const [p, q] = [toFrame(clampT(Math.min(a, b)), fps, Math.round), toFrame(clampT(Math.max(a, b)), fps, Math.round)];
     onSelect(q > p ? { kind: "frames", start: p, end: q } : null);
   }
-  // Cut edges (2s): every edge in view is drawn as a thin mark (2w); within GRAB px of one over a
-  // lane (not the ruler) the cursor and a lit handle show it, and a press there drags it, in whole frames, inside its room (nudge.ts `Edge`). The edit
-  // waits for the release, so a drag is one undo step and one reload of the ranges, not one per
-  // frame passed; then the preview plays from PREROLL before where the edge landed, so the fix is
-  // heard (with Skip cuts on, a range's start is reached through the cut and lands on it).
-  // 2w: a little wider than 2s's 5px, so an edge is found without hunting for it.
+  // Cut edges: within GRAB px of one the press drags it. The edit waits for the release, so a drag
+  // is one undo step, then the preview plays from PREROLL before where the edge landed.
   const GRAB = 8;
   const PREROLL = 1.5;
   let hover = $state.raw<Edge | null>(null);
   let drag = $state.raw<{ edge: Edge; to: number } | null>(null);
   // Where the pointer last was during a drag, so a zoom or pan under it moves the edge with it.
   let dragX = 0;
-  // A drag's edit sent and its new list not yet here (2s repair): no edge is offered until it is,
-  // since one grabbed from the old list would be placed by frames that have moved. Cleared by the
-  // next edit list, by a failure, or after WAIT ms if no list comes (the edit changed nothing).
+  // A drag's edit sent and its new list not yet here: no edge is offered until it is, since one
+  // grabbed from the old list would be placed by frames that have moved. Cleared by the next edit
+  // list, by a failure, or after WAIT ms if no list comes (the edit changed nothing).
   let waiting = false;
   let waitTimer = 0;
   const WAIT = 2000;
@@ -401,7 +384,7 @@
       waitTimer = window.setTimeout(stopWaiting, WAIT);
       void (async () => {
         try {
-          // 2w: the words beside the edge move with it.
+          // The words beside the edge move with it.
           await api.moveEdge(step, d.edge.frame);
         } catch (e) {
           stopWaiting();
@@ -671,8 +654,7 @@
   .body.grabbing {
     cursor: ew-resize;
   }
-  /* A cut's edge under the pointer, or being dragged (2s); lit over the thin mark every edge has
-     (2w). */
+  /* A cut's edge under the pointer, or being dragged; lit over the thin mark every edge has. */
   .edge {
     position: absolute;
     bottom: 0;

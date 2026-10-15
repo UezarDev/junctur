@@ -199,10 +199,16 @@ fn on_grid(packets: &[PacketTime], fps_num: u64, fps_den: u64) -> Vec<Packet> {
 /// Frame count, and a problem if the frames are not exactly 0..N on the grid (gaps, duplicates,
 /// off-grid times): the plan's frame arithmetic would then not match the stream.
 fn check_grid(packets: &[Packet]) -> (u64, Option<String>) {
-    let mut frames: Vec<i64> = packets.iter().map(|p| p.frame).collect();
-    frames.sort_unstable();
-    let n = frames.len() as u64;
-    let on_grid = frames.iter().enumerate().all(|(i, &f)| f == i as i64);
+    // Sorted they are 0..N exactly when each of 0..N comes once: marked off, not sorted.
+    let n = packets.len();
+    let mut seen = vec![false; n];
+    let on_grid = packets.iter().all(|p| {
+        usize::try_from(p.frame)
+            .ok()
+            .filter(|&f| f < n)
+            .is_some_and(|f| !std::mem::replace(&mut seen[f], true))
+    });
+    let n = n as u64;
     let problem = (!on_grid).then(|| "frame times are not on a constant frame grid".to_string());
     (n, problem)
 }
@@ -271,6 +277,31 @@ mod tests {
         assert!(check_grid(&pk(&[(0, true), (2, false), (1, false)]))
             .1
             .is_none());
+    }
+
+    /// The marked-off check says what sorting the frames and comparing with 0..N said.
+    #[test]
+    fn grid_check_matches_the_sort() {
+        let sorted = |p: &[Packet]| {
+            let mut f: Vec<i64> = p.iter().map(|p| p.frame).collect();
+            f.sort_unstable();
+            f.iter().enumerate().all(|(i, &f)| f == i as i64)
+        };
+        let cases: [&[i64]; 8] = [
+            &[],
+            &[0],
+            &[1],
+            &[-1, 0],
+            &[0, 0, 1],
+            &[2, 0, 1, 3],
+            &[0, 3, 1, 2, 5],
+            &[0, 1, 1, 3],
+        ];
+        for frames in cases {
+            let p = pk(&frames.iter().map(|&f| (f, false)).collect::<Vec<_>>());
+            assert_eq!(check_grid(&p).1.is_none(), sorted(&p), "{frames:?}");
+            assert_eq!(check_grid(&p).0, frames.len() as u64);
+        }
     }
 
     #[test]

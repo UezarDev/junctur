@@ -1,11 +1,6 @@
 <script lang="ts">
-  // The Properties tab (2g, mock L): what was 2a-2d's project panel floating over the picture, now
-  // beside Transcript and Captions. The recording, the analysis steps in the order they run with
-  // their state and, under the running one, each track's progress (2h), the out-of-date notice and
-  // Re-analyse (5s: keeps the user's edits; a fresh cut is the smaller choice under it), the speakers,
-  // the waveforms' read, and the project folder with a button that opens it.
-  // Above the analysis, the transcription job running in the background, whichever recording it is,
-  // with its pause (2k).
+  // The Properties tab: the recording, the background transcription job, the analysis steps with
+  // their progress, the out-of-date notice and Re-analyse, the speakers and the project folder.
   import * as api from "./api";
   import { clock } from "./time";
   import { busy as running, current, whole } from "./steps";
@@ -34,11 +29,11 @@
     /** The project could not be opened (the file still plays). */
     error: string | null;
     analysis: api.Progress | null;
-    /** The transcription lane (2k), whichever recording is open. */
+    /** The transcription lane, whichever recording is open. */
     lane: api.Transcription | null;
     outdated: string[];
     waves: api.WavesState | null;
-    /** Analyse again keeping the user's edits, speakers matched again (5s). */
+    /** Analyse again keeping the user's edits, speakers matched again. */
     onReanalyse: () => void;
     /** Analyse again and replace the cut with a fresh one (asks first when it is the user's). */
     onFreshCut: () => void;
@@ -53,7 +48,7 @@
     transcribe: "Transcript",
     edit: "Edit list",
   };
-  // The running stage's tracks (2h), named as their lanes are.
+  // The running stage's tracks, named as their lanes are.
   const steps = $derived(current(analysis));
   function trackLabel(track: number): string {
     const t = mixer?.tracks.find((m) => m.index === track);

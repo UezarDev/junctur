@@ -33,8 +33,8 @@ impl Decode for PcmReader {
 }
 
 /// A forward-only reader that keeps a little history, because a crossfade reads a few ms before
-/// the point it last read up to. The history is a ring buffer: forgetting the oldest samples does
-/// not move the rest, as draining the front of a vector did on every read.
+/// the point it last read up to. The history is a ring buffer, so forgetting the oldest samples
+/// does not move the rest.
 struct Cursor<D> {
     reader: D,
     channels: usize,
@@ -78,8 +78,7 @@ impl<D: Decode> Samples for Cursor<D> {
     fn read(&mut self, from: u64, to: u64) -> Result<Vec<f32>> {
         let ch = self.channels;
         // Nothing before `from` is read now, nor before `to - keep` later, so it goes while the
-        // buffer fills: the first read after a cut decodes the whole cut gap (2 h of stereo is
-        // 2.8 GB), and holding it was the 1d memory bug.
+        // buffer fills: the first read after a cut decodes the whole cut gap, gigabytes for hours.
         let dead = from.min(to.saturating_sub(self.keep));
         while !self.eof && self.base + ((self.buf.len() / ch) as u64) < to {
             self.forget(dead);

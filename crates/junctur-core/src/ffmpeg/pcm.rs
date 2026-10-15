@@ -9,7 +9,7 @@ use super::{run, Process};
 use crate::Result;
 
 /// Sample rate the analysis decodes at. 16 kHz mono keeps eight windows of four tracks small while
-/// keeping speech and most game audio energy; it is also what the VAD/Whisper stages will want.
+/// keeping speech and most game audio energy; it is also what VAD and Whisper take.
 pub const ANALYSIS_RATE: u32 = 16_000;
 
 // ffmpeg writes `f32le`; the samples are read and written in place as native f32.
@@ -64,19 +64,20 @@ pub fn decode_windows(
     Ok(out)
 }
 
-/// The output side of an ffmpeg that decodes `tracks` (at least one) as mono f32 at `rate`, laid
-/// side by side as channels in that order: `aformat` per track (the conversion `-ac 1 -ar` makes)
-/// then `amerge`, or a plain map for one track. `amerge` ends with the shortest input, so without
-/// `pad` every track comes out as long as the shortest; with `pad` (seconds), every track is padded
-/// with silence and the output lasts exactly that long, so a track that ends early does not cut the
-/// others short.
+/// The output side of an ffmpeg that decodes `tracks` (at least one) as mono f32 at `rate`, side by
+/// side as channels in that order. `amerge` ends with the shortest input; with `pad` (seconds) every
+/// track is padded with silence to that length, so a track that ends early does not cut the others.
 fn merge_args(tracks: &[usize], rate: u32, pad: Option<f64>) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
-    if let Some(len) = pad {
+    if let ([t], None) = (tracks, pad) {
+        args.extend(["-map".into(), format!("0:a:{t}"), "-ac".into(), "1".into()]);
+        args.extend(["-ar".into(), rate.to_string()]);
+    } else {
+        let apad = if pad.is_some() { ",apad" } else { "" };
         let mut g = String::new();
         for (i, t) in tracks.iter().enumerate() {
             g += &format!(
-                "[0:a:{t}]aformat=sample_fmts=flt:sample_rates={rate}:channel_layouts=mono,apad[a{i}];"
+                "[0:a:{t}]aformat=sample_fmts=flt:sample_rates={rate}:channel_layouts=mono{apad}[a{i}];"
             );
         }
         if tracks.len() == 1 {
@@ -89,22 +90,9 @@ fn merge_args(tracks: &[usize], rate: u32, pad: Option<f64>) -> Vec<String> {
             g += &format!("amerge=inputs={}[out]", tracks.len());
         }
         args.extend(["-filter_complex".into(), g, "-map".into(), "[out]".into()]);
-        args.extend(["-t".into(), format!("{len:.3}")]);
-    } else if let [t] = tracks {
-        args.extend(["-map".into(), format!("0:a:{t}"), "-ac".into(), "1".into()]);
-        args.extend(["-ar".into(), rate.to_string()]);
-    } else {
-        let mut g = String::new();
-        for (i, t) in tracks.iter().enumerate() {
-            g += &format!(
-                "[0:a:{t}]aformat=sample_fmts=flt:sample_rates={rate}:channel_layouts=mono[a{i}];"
-            );
+        if let Some(len) = pad {
+            args.extend(["-t".into(), format!("{len:.3}")]);
         }
-        for i in 0..tracks.len() {
-            g += &format!("[a{i}]");
-        }
-        g += &format!("amerge=inputs={}[out]", tracks.len());
-        args.extend(["-filter_complex".into(), g, "-map".into(), "[out]".into()]);
     }
     args.extend(["-f".into(), "f32le".into(), "-".into()]);
     args
@@ -161,7 +149,7 @@ impl PcmReader {
 
     /// Every one of `tracks` (at least one) from the start, mono at `rate`, interleaved one sample
     /// per track in that order (`channels` is their count): one decode for all, as
-    /// [`decode_windows`] does, streamed for a pass over a whole recording (2g's waveforms). Every
+    /// [`decode_windows`] does, streamed for a pass over a whole recording (the waveforms). Every
     /// track lasts `len` seconds when given (the recording's length), padded with silence where it
     /// ends early; without, all stop with the shortest.
     pub fn merged(file: &Path, tracks: &[usize], rate: u32, len: Option<f64>) -> Result<Self> {
@@ -260,74 +248,4 @@ impl PcmWriter {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn decode_failure_carries_the_ffmpeg_message() {
-        let missing = std::env::temp_dir().join("junctur-no-such-file.mp4");
-        let mut r = PcmReader::open(&missing, 0, 16_000, 1, Span::default()).unwrap();
-        assert!(r.read(1024).unwrap().is_empty());
-        let e = r.finish().unwrap_err().to_string();
-        assert!(e.contains("junctur-no-such-file"), "{e}");
-    }
-
-    #[test]
-    fn pcm_round_trips_through_ffmpeg() {
-        let dir = std::env::temp_dir().join(format!("junctur-pcm-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let wav = dir.join("ramp.wav");
-        let ramp: Vec<f32> = (0..32_000).map(|i| (i as f32 / 32_000.0) - 0.5).collect();
-        let mut w =
-            PcmWriter::create_with(&wav, 16_000, 1, &["-c:a".into(), "pcm_f32le".into()]).unwrap();
-        w.write(&ramp).unwrap();
-        w.finish().unwrap();
-        let mut r = PcmReader::open(&wav, 0, 16_000, 1, Span::default()).unwrap();
-        let mut buf = vec![9.0; 3];
-        r.read_into(&mut buf, 20_000).unwrap();
-        assert_eq!(buf, ramp[..20_000]);
-        r.read_into(&mut buf, 20_000).unwrap();
-        assert_eq!(buf, ramp[20_000..]);
-        r.read_into(&mut buf, 20_000).unwrap();
-        assert!(buf.is_empty());
-        r.finish().unwrap();
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn one_ffmpeg_decodes_every_track_as_separate_ones_did() {
-        let dir = std::env::temp_dir().join(format!("junctur-windows-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let f = dir.join("three.mka");
-        // Stereo with different channels, mono, and stereo at another rate.
-        let ok = std::process::Command::new("ffmpeg")
-            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=300:d=4"])
-            .args(["-f", "lavfi", "-i", "sine=f=500:d=4", "-f", "lavfi", "-i"])
-            .args(["sine=f=700:d=3.5:sample_rate=44100", "-filter_complex"])
-            .args(["[0:a][1:a]join=inputs=2:channel_layout=stereo[s];[2:a]asplit=2[m][x];[x]pan=stereo|c0=c0|c1=0.3*c0[t]"])
-            .args(["-map", "[s]", "-map", "[m]", "-map", "[t]", "-c:a", "flac"])
-            .arg(&f)
-            .status()
-            .unwrap()
-            .success();
-        assert!(ok);
-        let together = decode_windows(&f, &[0, 1, 2], 1.0, 3.0).unwrap();
-        let alone: Vec<Vec<f32>> = (0..3)
-            .map(|i| decode_window(&f, i, 1.0, 3.0).unwrap())
-            .collect();
-        // Every track as long as the shortest (the 3.5 s one), as `window::align` cut them.
-        let shortest = alone.iter().map(Vec::len).min().unwrap();
-        for (i, got) in together.iter().enumerate() {
-            assert_eq!(got.len(), shortest, "track {i}");
-            // The same samples, but for the resampler's first millisecond, which settles from a
-            // different start (measured: 17 samples, at most 0.0024 apart).
-            let (head, rest) = got.split_at(32);
-            assert_eq!(rest, &alone[i][32..shortest], "track {i}");
-            assert!(head
-                .iter()
-                .zip(&alone[i])
-                .all(|(a, b)| (a - b).abs() < 0.01));
-        }
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-}
+mod tests;

@@ -1,8 +1,6 @@
 /**
- * The title bar's menus (2i): File and View, as 2g's native menu had them, plus the way back to the start
- * window (2i's "Close recording", named for where it goes in 2u, which also put it on the bar as an arrow). One
- * list of ids, so the bar, the keyboard and test mode's `menu=<id>` (src/testmode.rs) all end in
- * App.svelte's one `onMenu`. Check marks and what is enabled come from the page's own state.
+ * The title bar's menus. One list of ids, so the bar, the keyboard and test mode's `menu=<id>`
+ * all end in App.svelte's one `onMenu`.
  */
 
 export type MenuId =

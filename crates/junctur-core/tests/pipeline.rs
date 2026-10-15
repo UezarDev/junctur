@@ -5,7 +5,7 @@
 use std::process::Command;
 
 use junctur_core::export;
-use junctur_core::pipeline::{self, PipelineOptions, Project, StageState, STAGES};
+use junctur_core::pipeline::{self, PipelineOptions, Project, StageName, StageState};
 
 #[test]
 #[ignore = "downloads models"]
@@ -36,8 +36,8 @@ fn no_speech_gives_an_empty_edit_and_an_empty_timeline() {
     assert!(out.edit.keep.is_empty());
     assert!(out.transcript.unwrap().segments.is_empty());
     let jobs = p.jobs();
-    for s in STAGES {
-        assert_eq!(jobs.get(s).unwrap().state, StageState::Done, "{s}");
+    for s in StageName::ALL {
+        assert_eq!(jobs.get(s).unwrap().state, StageState::Done, "{s:?}");
     }
 
     // The edit file reads back, and exports.

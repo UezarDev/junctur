@@ -1,12 +1,6 @@
 /**
- * How a caption looks in the editor's preview over the picture (5d) and in the Captions panel's
- * speaker samples: the caption settings as CSS.
- *
- * Since 5g the look is the user's (font, size, position, outline, bold, italic, underline) and is
- * what the Text+ clips sent to DaVinci Resolve get, so the preview shows those. Where each
- * speaker's block sits is not decided here but by the engine (`export/layout.rs`), the same
- * placement Resolve gets. An SRT still carries only colour, bold, italic and underline (5d, 5f);
- * imported that way, Resolve's subtitle Track Style decides the rest.
+ * The caption settings as CSS, for the preview over the picture and the Captions panel's samples.
+ * Where each speaker's block sits is the engine's (`export/layout.rs`), the placement Resolve gets.
  */
 import type { Captions } from "./api";
 
@@ -15,8 +9,7 @@ type Styled = Pick<Captions, "bold" | "italic" | "underline">;
 /** Line height over the font size, as the engine's layout counts it (`layout::LINE`). */
 export const LINE = 1.2;
 
-/** The weight, slant and underline the settings give: Text+ "Regular" or "Bold" (5g; before, 5d
- * imitated Resolve's Semibold subtitle face). */
+/** The weight, slant and underline the settings give: Text+ "Regular" or "Bold". */
 export function captionFace(c: Styled): { weight: number; style: string; decoration: string } {
   return {
     weight: c.bold ? 700 : 400,
@@ -64,10 +57,9 @@ export function captionStyle(c: Captions, pictureHeight: number): string {
   ].join("; ");
 }
 
-/** A speaker's colours under the word highlight (5l), as the engine gives Resolve
- * (`Captions::highlight_colors`): the text's and the lit word's. With no highlight colour chosen
- * the text is white and the word the speaker's; a chosen one lights the word over the speaker's
- * colour; a speaker with no colour (or white) gets a yellow word. */
+/** A speaker's colours under the word highlight, as the engine gives Resolve
+ * (`Captions::highlight_colors`): the text's and the lit word's. A speaker with no colour (or
+ * white) gets a yellow word. */
 export function highlightColors(c: Pick<Captions, "highlightColor">, speaker: string | undefined): [string, string] {
   const valid = (x: string | undefined) => (x && /^#[0-9a-fA-F]{6}$/.test(x) ? x.toUpperCase() : null);
   const own = valid(speaker) ?? "#FFFFFF";
@@ -76,7 +68,7 @@ export function highlightColors(c: Pick<Captions, "highlightColor">, speaker: st
   return own === "#FFFFFF" ? ["#FFFFFF", "#FFD400"] : ["#FFFFFF", own];
 }
 
-/** How far a caption is into its in or out animation at output second `t` (5l), 0 hidden to 1
+/** How far a caption is into its in or out animation at output second `t`, 0 hidden to 1
  * whole, as the animated caption plays it in Resolve: in over `animationLength` after its start, out
  * over the same before its end. */
 export function animationProgress(

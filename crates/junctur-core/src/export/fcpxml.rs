@@ -1,10 +1,7 @@
 //! FCPXML 1.10 timeline for DaVinci Resolve: one asset (the untouched source) and one clip on the
-//! spine per kept range, laid end to end.
-//!
-//! Times are whole frames written as rationals (`3003/30000s`): Resolve rejects or drifts on
-//! times off the frame grid, so each range is widened to whole frames (start down, end up) and
-//! ranges that then touch are merged. Crossfades are not written: Resolve's FCPXML import drops
-//! audio transitions on asset clips, so fades belong to the renderer (smart render), not here.
+//! spine per kept range, laid end to end. Times are whole frames as rationals (`3003/30000s`),
+//! since Resolve rejects or drifts on times off the frame grid. Crossfades are not written:
+//! Resolve's FCPXML import drops audio transitions on asset clips, so fades belong to the renderer.
 
 use std::fmt::Write;
 use std::path::Path;

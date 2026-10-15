@@ -84,9 +84,12 @@ impl Fbank {
         }
         let n = 1 + (x.len() - WIN) / SHIFT;
         let mut buf = vec![Complex32::default(); N_FFT];
+        // One frame and one FFT scratch per call, not per frame: a 30 h track is ~10 M frames.
+        let mut scratch = vec![Complex32::default(); self.fft.get_inplace_scratch_len()];
+        let mut f = [0.0f32; WIN];
         let mut feats: Vec<[f32; BINS]> = (0..n)
             .map(|t| {
-                let mut f: Vec<f32> = x[t * SHIFT..t * SHIFT + WIN].to_vec();
+                f.copy_from_slice(&x[t * SHIFT..t * SHIFT + WIN]);
                 let mean = f.iter().sum::<f32>() / WIN as f32;
                 f.iter_mut().for_each(|v| *v -= mean);
                 for i in (1..WIN).rev() {
@@ -97,7 +100,7 @@ impl Fbank {
                 for i in 0..WIN {
                     buf[i].re = f[i] * self.window[i];
                 }
-                self.fft.process(&mut buf);
+                self.fft.process_with_scratch(&mut buf, &mut scratch);
                 let mut row = [0.0f32; BINS];
                 for (b, (first, w)) in self.banks.iter().enumerate() {
                     let e: f32 = w
@@ -139,6 +142,69 @@ mod tests {
         let m: f32 = f.iter().map(|r| r[10]).sum::<f32>() / f.len() as f32;
         assert!(m.abs() < 1e-3);
         assert!(Fbank::new().compute(&[0.0; 100]).is_empty());
+    }
+
+    /// The features as computed before the reused frame and scratch.
+    fn allocating(fb: &Fbank, x: &[f32]) -> Vec<[f32; BINS]> {
+        let n = 1 + (x.len() - WIN) / SHIFT;
+        let mut buf = vec![Complex32::default(); N_FFT];
+        let mut feats: Vec<[f32; BINS]> = (0..n)
+            .map(|t| {
+                let mut f: Vec<f32> = x[t * SHIFT..t * SHIFT + WIN].to_vec();
+                let mean = f.iter().sum::<f32>() / WIN as f32;
+                f.iter_mut().for_each(|v| *v -= mean);
+                for i in (1..WIN).rev() {
+                    f[i] -= 0.97 * f[i - 1];
+                }
+                f[0] -= 0.97 * f[0];
+                buf.fill(Complex32::default());
+                for i in 0..WIN {
+                    buf[i].re = f[i] * fb.window[i];
+                }
+                fb.fft.process(&mut buf);
+                let mut row = [0.0f32; BINS];
+                for (b, (first, w)) in fb.banks.iter().enumerate() {
+                    let e: f32 = w
+                        .iter()
+                        .enumerate()
+                        .map(|(i, wt)| wt * buf[first + i].norm_sqr())
+                        .sum();
+                    row[b] = e.max(f32::EPSILON).ln();
+                }
+                row
+            })
+            .collect();
+        let mut mean = [0.0f32; BINS];
+        for r in &feats {
+            for (m, v) in mean.iter_mut().zip(r) {
+                *m += v / n as f32;
+            }
+        }
+        for r in &mut feats {
+            for (v, m) in r.iter_mut().zip(&mean) {
+                *v -= m;
+            }
+        }
+        feats
+    }
+
+    /// Bit for bit what [`allocating`] gave.
+    #[test]
+    fn features_match_the_allocating_version_bit_for_bit() {
+        let fb = Fbank::new();
+        let x: Vec<f32> = (0..24_123)
+            .map(|i| {
+                let t = i as f32;
+                0.3 * (t * 0.031).sin() + 0.1 * (t * 0.77).sin() + ((i * 7919) % 97) as f32 * 1e-3
+            })
+            .collect();
+        let bits =
+            |f: &[[f32; BINS]]| -> Vec<u32> { f.iter().flatten().map(|v| v.to_bits()).collect() };
+        assert_eq!(bits(&fb.compute(&x)), bits(&allocating(&fb, &x)));
+        assert_eq!(
+            bits(&fb.compute(&x[..400])),
+            bits(&allocating(&fb, &x[..400]))
+        );
     }
 
     #[test]

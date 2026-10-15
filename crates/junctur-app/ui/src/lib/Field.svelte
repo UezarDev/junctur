@@ -1,13 +1,6 @@
 <script lang="ts">
-  // One setting (2t): its label, its (i) when it needs explaining, and its control, in one of three
-  // shapes: `row` (label left, control right in a fixed column so controls line up down a group),
-  // `check` (a checkbox and its label) and `stack` (label above a full-width box, for the lists).
-  //
-  // The label names the control by id, which the control snippet is handed, rather than wrapping
-  // it: a <label> round a row that holds the (i) button would label the button (the first labelable
-  // element inside it), and a click on the words would press the (i). The control's look is set
-  // here (`:global`, since the snippet is the caller's markup) so every field is styled once.
-  // The text and select column is `--control-width` wide (200px), so a screen with room can widen it.
+  // One setting: label, optional (i) and control, as `row`, `check` or `stack`. The label names the
+  // control by id rather than wrapping it, or a click on the words would press the (i) button.
   import type { Snippet } from "svelte";
   import InfoTip from "./InfoTip.svelte";
 

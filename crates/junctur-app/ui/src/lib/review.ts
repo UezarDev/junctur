@@ -1,10 +1,7 @@
 /**
- * Review mode's clips (2o): every stretch of the edit list in order, the kept ranges and the cuts
- * between them (and at either end), as `nudge.ts` `under` finds them one at a time. A module of its
- * own because the list is frozen when review starts and outlives the edits made from it: removing
- * a kept range merges it with the cuts on both sides into one live stretch, so following the live
- * list would make "the next clip" the merged cut just decided. A clip is the proposal's stretch;
- * what it is now is read from the live list for the readout (`now`).
+ * Review mode's clips: every stretch of the edit list in order. Frozen when review starts, since
+ * removing a kept range merges it with the cuts beside it and "the next clip" would be the cut just
+ * decided; what a clip is now is read from the live list (`now`).
  */
 import type { EditState } from "./api";
 
@@ -64,14 +61,9 @@ export function now(edit: EditState, c: Clip): "kept" | "cut" | "partly" {
 }
 
 /**
- * Moves an edge of clip `i` by `by` frames (2s: review's steppers), with the matching edge of the
- * clip beside it, since the two share it: the new frozen list (the clips moved are new objects,
- * the rest kept) and the frame edit that makes it so in the live list, or null for none. Null
- * altogether when nothing moves: the first clip's start and the last one's end are the file's, and
- * an edge stays one frame inside both clips. The frames passed over take the kind of the clip that
- * grows: what it is now in the live list when it is wholly one (a Removed range grows as a cut),
- * else what review proposed. No edit when those frames already are that kind (both clips were kept,
- * say), so the undo history holds only real changes; the clips still move, which is what plays.
+ * Moves an edge of clip `i` by `by` frames with the matching edge of the clip beside it: the new
+ * frozen list and the frame edit for the live list, or null when nothing moves. No edit when the
+ * frames passed over already are the growing clip's kind, so undo holds only real changes.
  */
 export function moveEdge(
   list: Clip[],

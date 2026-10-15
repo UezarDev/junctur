@@ -1,12 +1,7 @@
 /**
- * Who talks when (2g): the edit list's speaker turns, searched by time. Turns are sorted by start
- * and those of different speakers overlap (two people at once, 5b), so "who talks at t" is not one
- * binary search on the starts. A running "furthest end so far" would find the first turn that may
- * still be going, but one long turn early on (a speaker who talks over a whole stretch) keeps it
- * from moving and turns every search after it into a scan from there. Instead the turns are
- * bucketed by time: `BUCKET` seconds per bucket, each listing the turns that overlap it. A position
- * looks in its one bucket; a window (the lanes) walks the turns from its start's bucket on. Each
- * turn is listed once per bucket it spans, so a turn of an hour costs 360 entries, not a scan.
+ * Who talks when: the edit list's speaker turns, bucketed by time (`BUCKET` seconds each), since
+ * overlapping turns make "who talks at t" more than one binary search, and one long turn would turn
+ * a "furthest end so far" search into a scan.
  */
 const BUCKET = 10;
 import type { Turns } from "./api";

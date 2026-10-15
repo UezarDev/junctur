@@ -1,7 +1,6 @@
 <script lang="ts">
-  // Portrait's mixer strips (2g, P4): beside a picture taller than wide, one strip per track with a
-  // tall meter, Mute and Solo, its colour and name. The same controls as the lanes' headers (the
-  // same features in both orientations); replaces 2e's row of strips over the play bar.
+  // Portrait's mixer strips: beside a picture taller than wide, one strip per track with a tall
+  // meter, Mute and Solo, its colour and name, the same controls as the lanes' headers.
   import type * as api from "./api";
   import { meter } from "./meters";
   import MuteSolo from "./MuteSolo.svelte";

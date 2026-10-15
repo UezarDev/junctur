@@ -1,9 +1,6 @@
 <script lang="ts">
-  // The caption translation of the open recording (5k), under the Captions panel's "Caption text":
-  // how many sentences are translated, a run's progress with Cancel, and Translate for the ones
-  // left (a new cut can leave a few). Picking a language in the panel starts a run at once; the
-  // model works in the background (src/translation.rs), so the editor is never held up, and the
-  // preview shows what is translated so far. An export or a send waits for all of it.
+  // The caption translation of the open recording: progress with Cancel, and Translate for the
+  // sentences left. It runs in the background so the editor is never held up.
   import * as api from "./api";
   import InfoTip from "./InfoTip.svelte";
 
@@ -15,7 +12,7 @@
   }: {
     captions: api.Captions;
     source: string | null;
-    /** What the sentences depend on besides the language: the kept ranges, who says what, and the words fixed (5h). */
+    /** What the sentences depend on besides the language: the kept ranges, who says what, and the words fixed. */
     cuts: string;
     onError: (message: string) => void;
   } = $props();
@@ -57,8 +54,7 @@
   });
 
   // The count follows the language and the cuts, not every caption setting: counting builds every
-  // sentence of the transcript. A language picked here, not the one the recording opened with,
-  // starts translating.
+  // sentence. A language picked here, not the one the recording opened with, starts translating.
   let seen: { source: string | null; lang: string } | null = null;
   $effect(() => {
     const lang = to;

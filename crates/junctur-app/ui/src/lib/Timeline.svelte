@@ -1,10 +1,6 @@
 <script lang="ts">
-  // The whole recording in source time: kept stretches lit, cuts dark, the playhead, click/drag to
-  // seek, shift-drag to select a stretch to cut or keep (drawn over the bar, as is a transcript
-  // selection). The ranges are painted onto a canvas only when the edit list or the size changes (each
-  // pixel column shaded by how much of it is kept, see coverage.ts), and the playhead is a separate
-  // element moved by CSS, so a position update never repaints thousands of ranges. Since 2g it is the
-  // overview: it outlines the window the track lanes show (`view`).
+  // The whole recording in source time, outlining the window the lanes show. Ranges paint onto a
+  // canvas only when the edit list or size changes, so a position update never repaints them.
   import { onMount } from "svelte";
   import * as api from "./api";
   import { coverage } from "./coverage";
@@ -21,7 +17,7 @@
   }: {
     player: api.PlayerState | null;
     edit: api.EditState | null;
-    /** The selection, a span per stretch (2p). */
+    /** The selection, a span per stretch. */
     spans: { start: number; end: number }[];
     /** The stretch the track lanes show, outlined (source seconds). */
     view?: { start: number; end: number } | null;
@@ -246,7 +242,7 @@
     --track: rgba(255, 255, 255, 0.18);
     --cut: rgba(255, 255, 255, 0.1);
     /* Read by the canvas through getPropertyValue, which hands back the text unresolved, so this is
-       --accent (#ff5b3a) written out rather than var() (2x). */
+       --accent (#ff5b3a) written out rather than var(). */
     --kept: rgba(255, 91, 58, 0.75);
     position: absolute;
     left: 0;

@@ -9,9 +9,8 @@ export function clock(seconds: number | null | undefined): string {
 }
 
 /**
- * `h:mm:ss:ff` for a frame number the engine counted: non-drop timecode, `ceil(fps)` frames to a
- * second, as Resolve counts it, so it names the same frame as the render and the FCPXML timeline.
- * No rounding happens here. `--:--:--:--` when unknown.
+ * `h:mm:ss:ff` for an engine frame number: non-drop timecode at `ceil(fps)` frames a second, as
+ * Resolve counts it, so it names the same frame as the render and FCPXML. `--:--:--:--` if unknown.
  */
 export function timecode(frame: number | null | undefined, fps: { num: number; den: number }): string {
   if (frame == null || !Number.isFinite(frame)) return "--:--:--:--";

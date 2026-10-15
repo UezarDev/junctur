@@ -1,44 +1,15 @@
 //! A launch check that disturbs nobody: `JUNCTUR_TEST_OFFSCREEN=<seconds>` opens the window far
-//! off-screen, unfocused and out of the taskbar, plays silently, prints what the player reached
-//! (state, new frames drawn, and a verdict) as one `junctur-app test:` JSON line on stdout, and
-//! exits.
+//! off-screen, unfocused and silent, prints what the player reached as one `junctur-app test:`
+//! JSON line on stdout, and exits. Embedding can only be checked in a real window.
 //!
-//! `JUNCTUR_TEST_STEPS="2:seek=130.5;3:kseek=200;4:skip=off;6:skip=on;7:pause"` also runs player
-//! actions at those seconds (`kseek` is a keyframe seek, as a dragged timeline sends), and the
-//! report gives the state each one led to (sampled just before the next) and the skip trace (see
-//! `trace`): every range boundary crossed with its frames and stall.
-//!
-//! Edit steps (2c) run the editor as the frontend does: `cutw=12-15` / `keepw=12-15` (transcript
-//! words, by index), `cutf=300-450` / `keepf=300-450` (source frames), `undo`, `redo`, and
-//! `rename=<id>:<name>` (5a: a speaker's name; no `;` in it), `color=<id>:#RRGGBB`,
-//! `captions=on|off` and `srt=<path>` (write the captions there), `preview=on|off` (5d: the
-//! captions over the picture; each caption it shows is a `caption preview` line in `ui`),
-//! `enroll=<first>-<last>:<name>` (5b: remember a voice from transcript words) and `forget=<name>`. Set `JUNCTUR_VOICES` to a
-//! scratch file for these, or they change the user's own voices. `reanalyse` (2d) analyses the open
-//! recording again as its Re-analyse button does, keeping user edits (5s; a recording without an
-//! edit list is analysed as it opens), and `reanalyse_fresh` as "Start over with a fresh cut" does
-//! once its question is answered yes (re-cut, user edits kept as `edit.junctur.bak*`); the report's `analysis` is the open recording's analysis progress and `outdated` what
-//! the project panel would offer a re-analysis for. Set `JUNCTUR_RECENT` and `JUNCTUR_CACHE_DIR` to
-//! scratch places too. `mute=<n>` / `unmute=<n>` (2e) mute or unmute audio track n (from 1, as
-//! the play bar numbers them); each step's report and the final one add the mutes (`mixer`) and
-//! the levels read then (`levels`: each track's meter and what is heard, in dBFS); `solo=<n>` /
-//! `unsolo=<n>` (2g) solo or unsolo one, and `menu=<id>` chooses a menu item as a click on it does
-//! (`menu=talking` shows the overlay of who is talking; 2i: the title bar's menus, so also
-//! `menu=close`, back to the start window, and `menu=settings`, the Settings dialog). The final
-//! report adds how far the waveforms are (`waves`) and the settings the dialog shows (`settings`;
-//! set `JUNCTUR_CONFIG` to a scratch file before anything saves them);
-//! `speed=1.5`, `loop=<a>-<b>` (source seconds: into review, the whole file playing) and `unloop`
-//! (out of it, the skip toggle back) drive review's speed and loop of one clip (2o), each step's report adding what mpv has then (`speedLoop`: speed, `ab-loop-a`, `-b`);
-//! `reload` reloads the page as F5 did before 2q made the keys do nothing (the page starts over
-//! while the app goes on, and should come back to the open recording; its `ui` lines say what it
-//! read);
-//! the picture's shape is in the `state` (`width`, `height`, `aspect`). Each step's
-//! report adds the edit state it left, and the final report re-reads `edit.junctur` from disk
-//! (`disk`: does it parse, and is it the list in play), counts the loads asked of mpv (a save must
-//! not come back as a second reload) and lists the frontend's log lines (`ui`).
-//!
-//! Embedding can only be checked in a real window, so this is the way a script (or a later phase)
-//! runs the app without putting a window or a sound in front of the user.
+//! `JUNCTUR_TEST_STEPS="<seconds>:<step>;..."` runs steps at those seconds, each reported with the
+//! state it led to: `seek=<s>`, `kseek=<s>` (keyframe), `skip=on|off`, `pause`,
+//! `cutw|keepw=<a>-<b>` (word indices), `cutf|keepf=<a>-<b>` (frames), `undo`, `redo`,
+//! `rename=<id>:<name>`, `color=<id>:#RRGGBB`, `captions=on|off`, `preview=on|off`, `srt=<path>`,
+//! `enroll=<a>-<b>:<name>`, `forget=<name>`, `reanalyse`, `reanalyse_fresh`, `mute|unmute=<n>`,
+//! `solo|unsolo=<n>` (tracks from 1), `menu=<id>`, `speed=<x>`, `loop=<a>-<b>`, `unloop`, `reload`.
+//! Point `JUNCTUR_VOICES`, `JUNCTUR_RECENT`, `JUNCTUR_CACHE_DIR` and `JUNCTUR_CONFIG` at scratch
+//! places, or the steps change the user's own files.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -56,7 +27,7 @@ use crate::trace::Trace;
 pub const ENV: &str = "JUNCTUR_TEST_OFFSCREEN";
 pub const STEPS_ENV: &str = "JUNCTUR_TEST_STEPS";
 /// The event a `menu=<id>` step is sent to the page as, as the title bar's own items go to
-/// App.svelte's `onMenu` (2i; 2g's native menu sent the same).
+/// App.svelte's `onMenu`.
 const MENU_EVENT: &str = "menu";
 
 /// Where the window goes: well outside any monitor layout.
@@ -96,24 +67,24 @@ enum Action {
     Rename(u32, String),
     Recolor(u32, String),
     Captions(bool),
-    /// 5d: the captions over the picture.
+    /// The captions over the picture.
     Preview(bool),
     Srt(String),
     Enroll(usize, usize, String),
     Forget(String),
-    /// Whether it is a fresh cut (5s).
+    /// Whether it is a fresh cut.
     Reanalyse(bool),
     /// Audio track (0-based) and whether to mute it.
     Mute(usize, bool),
-    /// Audio track (0-based) and whether to solo it (2g).
+    /// Audio track (0-based) and whether to solo it.
     Solo(usize, bool),
-    /// A menu item chosen (2g), by id.
+    /// A menu item chosen, by id.
     Menu(String),
-    /// 2o: playback speed, and review's loop of one clip (source seconds) or review's end.
+    /// Playback speed, and review's loop of one clip (source seconds) or review's end.
     Speed(f64),
     Loop(f64, f64),
     Unloop,
-    /// 2q: the page loads again, the app going on.
+    /// The page loads again, the app going on.
     Reload,
 }
 
@@ -121,7 +92,7 @@ enum Action {
 static UI_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// A line from the frontend: printed and kept for the report, in test mode only. Outside it the
-/// lines are dropped: the caption preview (5d) sends one per caption shown, which an ordinary
+/// lines are dropped: the caption preview sends one per caption shown, which an ordinary
 /// session has no use for on stderr.
 pub fn ui_log(message: String) {
     if seconds().is_some() {
@@ -257,17 +228,19 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
         let file = with_player(app, |p| p.file())?.ok_or("no file is open")?;
         let state = app.try_state::<App>().ok_or("app not set up")?;
         let notify = crate::commands::notifier(app.clone());
-        let r = state
-            .analysis
-            .reanalyse(std::path::Path::new(&file), fresh, fresh, notify)?;
+        let r = state.analysis.reanalyse(
+            std::path::Path::new(&file),
+            crate::analysis::Again::from_flags(fresh, fresh),
+            notify,
+        )?;
         eprintln!(
             "junctur-app test: reanalyse started: {}",
             r.progress.is_some()
         );
         return Ok(());
     }
-    // Edits as the frontend's commands make them, through `App::editable` (2m repair): refused
-    // while the recording's list is to come, and holding a run of it off while they work.
+    // Edits as the frontend's commands make them, through `App::editable`: refused while the
+    // recording's list is to come, and holding a run of it off while they work.
     let edit = |f: &dyn Fn(&crate::commands::Editable) -> Result<(), String>| {
         let state = app.try_state::<App>().ok_or("app not set up")?;
         let e = state.editable()?;
@@ -319,7 +292,7 @@ fn snapshot(app: &AppHandle) -> Result<(PlayerState, u64), String> {
     with_player(app, |p| (p.state(), p.frames()))
 }
 
-/// The mutes and the levels now (2e).
+/// The mutes and the levels now.
 fn mixer(app: &AppHandle) -> Value {
     with_player(app, |p| {
         let (meters, heard) = p.levels();
@@ -475,127 +448,4 @@ pub fn arm(app: AppHandle, seconds: f64, trace: Option<Arc<Trace>>) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn playing_needs_frames_and_a_moving_position() {
-        assert_eq!(verdict(false, 0, None, None), "idle");
-        assert_eq!(verdict(true, 120, Some(1.0), Some(3.0)), "playing");
-        // Redraws of a still frame, or a position that never moved, are not playback.
-        assert_eq!(verdict(true, 0, Some(1.0), Some(3.0)), "stalled");
-        assert_eq!(verdict(true, 120, Some(2.0), Some(2.0)), "stalled");
-        assert_eq!(verdict(true, 120, None, Some(2.0)), "stalled");
-    }
-
-    #[test]
-    fn parses_positive_seconds_only() {
-        assert_eq!(parse(Some("8")), Some(8.0));
-        assert_eq!(parse(Some(" 2.5 ")), Some(2.5));
-        assert_eq!(parse(Some("0")), None);
-        assert_eq!(parse(Some("-1")), None);
-        assert_eq!(parse(Some("yes")), None);
-        assert_eq!(parse(None), None);
-    }
-
-    #[test]
-    fn parses_steps_in_time_order() {
-        let s = parse_steps("4:skip=off; 2:seek=130.5 ;6:skip=on;7:pause;8:kseek=1").unwrap();
-        assert_eq!(
-            s,
-            vec![
-                (2.0, Action::Seek(130.5)),
-                (4.0, Action::Skip(false)),
-                (6.0, Action::Skip(true)),
-                (7.0, Action::Pause),
-                (8.0, Action::KeySeek(1.0)),
-            ]
-        );
-        let s = parse_steps("9:reanalyse;10:reanalyse_fresh").unwrap();
-        assert_eq!(
-            s,
-            vec![
-                (9.0, Action::Reanalyse(false)),
-                (10.0, Action::Reanalyse(true))
-            ]
-        );
-        let s = parse_steps("1:cutw=3-5;2:keepf=30-60;3:undo;4:redo").unwrap();
-        assert_eq!(
-            s.iter().map(|x| x.1.clone()).collect::<Vec<_>>(),
-            vec![
-                Action::Edit(Step::Do(Op::Words {
-                    first: 3,
-                    last: 5,
-                    keep: false
-                })),
-                Action::Edit(Step::Do(Op::Frames {
-                    start: 30,
-                    end: 60,
-                    keep: true
-                })),
-                Action::Edit(Step::Undo),
-                Action::Edit(Step::Redo),
-            ]
-        );
-        assert_eq!(
-            parse_steps("5:rename=2:Ana María").unwrap(),
-            vec![(5.0, Action::Rename(2, "Ana María".into()))]
-        );
-        assert_eq!(
-            parse_steps("1:color=2:#FF0000;2:captions=on;3:srt=C:\\x\\out.srt;4:preview=on")
-                .unwrap(),
-            vec![
-                (1.0, Action::Recolor(2, "#FF0000".into())),
-                (2.0, Action::Captions(true)),
-                (3.0, Action::Srt("C:\\x\\out.srt".into())),
-                (4.0, Action::Preview(true)),
-            ]
-        );
-        assert_eq!(
-            parse_steps("1:enroll=10-40:Ana María;2:forget=Ana María").unwrap(),
-            vec![
-                (1.0, Action::Enroll(10, 40, "Ana María".into())),
-                (2.0, Action::Forget("Ana María".into())),
-            ]
-        );
-        assert_eq!(
-            parse_steps("1:mute=2;2:unmute=1").unwrap(),
-            vec![(1.0, Action::Mute(1, true)), (2.0, Action::Mute(0, false))]
-        );
-        assert!(parse_steps("1:mute=0").is_err(), "tracks count from 1");
-        assert_eq!(
-            parse_steps("1:solo=2;2:unsolo=2").unwrap(),
-            vec![(1.0, Action::Solo(1, true)), (2.0, Action::Solo(1, false))]
-        );
-        assert!(parse_steps("1:solo=0").is_err());
-        assert_eq!(
-            parse_steps("3:menu=talking").unwrap(),
-            vec![(3.0, Action::Menu("talking".into()))]
-        );
-        assert_eq!(
-            parse_steps("1:speed=1.5;2:loop=10.5-12;3:unloop").unwrap(),
-            vec![
-                (1.0, Action::Speed(1.5)),
-                (2.0, Action::Loop(10.5, 12.0)),
-                (3.0, Action::Unloop)
-            ]
-        );
-        assert_eq!(
-            parse_steps("4:reload").unwrap(),
-            vec![(4.0, Action::Reload)]
-        );
-        assert!(parse_steps("4:reload=now").is_err());
-        assert!(parse_steps("1:loop=10").is_err());
-        assert!(parse_steps("1:speed=fast").is_err());
-        assert!(parse_steps("1:mute=x").is_err());
-        assert!(parse_steps("1:enroll=10:Ana").is_err());
-        assert!(parse_steps("1:forget=").is_err());
-        assert!(parse_steps("5:captions=maybe").is_err());
-        assert!(parse_steps("5:rename=x:Ana").is_err());
-        assert!(parse_steps("5:rename=2").is_err());
-        assert!(parse_steps("1:cutw=3").is_err());
-        assert!(parse_steps("2:jump=3").is_err());
-        assert!(parse_steps("x:pause").is_err());
-        assert_eq!(parse_steps("").unwrap(), vec![]);
-    }
-}
+mod tests;

@@ -1,11 +1,7 @@
 //! Which frames get re-encoded and which get copied. Pure, so the cut arithmetic is tested without
-//! a video.
-//!
-//! A kept range `[a, b)` is copied between the first and last usable keyframes inside it; only the
-//! frames from `a` up to the first keyframe and from the last keyframe up to `b` are encoded. Every
-//! piece costs an ffmpeg start (~0.3 s to open a 5-track MP4, plus NVENC's), which is what a render
-//! of many short ranges spends its time on, so a copy shorter than it is worth is encoded instead,
-//! and encode pieces close together in the source share one ffmpeg ([`batches`]).
+//! a video. A kept range is copied between its first and last usable keyframes and encoded at the
+//! ends; each piece costs an ffmpeg start, so a short copy is encoded instead and nearby encode
+//! pieces share one ffmpeg ([`batches`]).
 
 /// A run of source frames `[start, end)`; `at` is its first frame's place in the output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

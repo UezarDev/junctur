@@ -1,64 +1,33 @@
-//! The caption text options (5j): case, punctuation, censored words and find-and-replace pairs.
-//! They change only what captions show (the SRT, Send to Resolve, the preview), never the
-//! transcript, so turning one off brings the spoken words back; `export::caption_text` applies
-//! them. A module of their own because they are the only list-valued caption settings, and their
-//! checks are about characters the `captions` line and an SRT cannot carry.
+//! The caption text options: case, punctuation, censored words and find-and-replace pairs. They
+//! change only what captions show, never the transcript. Their own module because they are the only
+//! list-valued caption settings, checked for characters the `captions` line and an SRT cannot carry.
 
 use serde::{Deserialize, Serialize};
 
-/// How caption letters are cased.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Case {
-    #[default]
-    AsSpoken,
-    Upper,
-    Lower,
-    /// The first letter of each word upper, the rest as spoken.
-    Title,
-}
+use super::worded::worded;
 
-impl Case {
-    /// The word on the edit list's `captions` line, the same as in the config file.
-    pub fn word(self) -> &'static str {
-        match self {
-            Case::AsSpoken => "asSpoken",
-            Case::Upper => "upper",
-            Case::Lower => "lower",
-            Case::Title => "title",
-        }
-    }
-
-    pub fn from_word(w: &str) -> Option<Self> {
-        [Case::AsSpoken, Case::Upper, Case::Lower, Case::Title]
-            .into_iter()
-            .find(|c| c.word() == w)
+worded! {
+    /// How caption letters are cased.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+    pub enum Case {
+        #[default]
+        AsSpoken = "asSpoken",
+        Upper = "upper",
+        Lower = "lower",
+        /// The first letter of each word upper, the rest as spoken.
+        Title = "title",
     }
 }
 
-/// How a censored word is hidden.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum CensorStyle {
-    /// First and last letter kept: `f**k`.
-    #[default]
-    Middle,
-    /// Every letter masked: `****`.
-    Whole,
-}
-
-impl CensorStyle {
-    pub fn word(self) -> &'static str {
-        match self {
-            CensorStyle::Middle => "middle",
-            CensorStyle::Whole => "whole",
-        }
-    }
-
-    pub fn from_word(w: &str) -> Option<Self> {
-        [CensorStyle::Middle, CensorStyle::Whole]
-            .into_iter()
-            .find(|c| c.word() == w)
+worded! {
+    /// How a censored word is hidden.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+    pub enum CensorStyle {
+        /// First and last letter kept: `f**k`.
+        #[default]
+        Middle = "middle",
+        /// Every letter masked: `****`.
+        Whole = "whole",
     }
 }
 

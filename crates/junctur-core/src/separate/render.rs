@@ -1,6 +1,7 @@
 //! The human-readable summary printed by `junctur separate`.
 
 use super::Stems;
+use crate::diarize::SpeakerKind;
 
 impl Stems {
     pub fn render(&self) -> String {
@@ -28,7 +29,7 @@ impl Stems {
             let (main, minor): (Vec<_>, Vec<_>) = d
                 .speakers
                 .iter()
-                .partition(|sp| !sp.label.starts_with("minor"));
+                .partition(|sp| sp.kind() != Some(SpeakerKind::Minor));
             let _ = writeln!(s, "speakers: {}", main.len());
             for sp in main {
                 let _ = writeln!(

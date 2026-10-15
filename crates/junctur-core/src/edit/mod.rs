@@ -1,13 +1,11 @@
-//! The edit list: which ranges of the source to keep, as a readable text file the user can diff,
-//! commit and hand-edit, plus who speaks when (named speakers and their turns) and a score per short
-//! time window for the later Review/Swipe modes.
-//!
-//! It is the one piece of state a project owns; everything else in the project folder is a cache
-//! that can be rebuilt. The source itself is never touched.
+//! The edit list: which ranges of the source to keep, who speaks when, word fixes and scores, as a
+//! readable text file the user can diff and hand-edit. It is the one piece of state a project owns;
+//! everything else in the project folder is a rebuildable cache, and the source is never touched.
 
 mod caption_text;
 mod captions;
 mod captions_line;
+mod carry;
 mod fixes;
 mod format;
 mod frames;
@@ -18,6 +16,7 @@ mod speakers;
 mod splice;
 mod spread;
 mod times;
+mod worded;
 
 use std::path::PathBuf;
 
@@ -25,7 +24,11 @@ use serde::{Deserialize, Serialize};
 
 pub use caption_text::{Case, CensorStyle, Replace};
 pub use captions::{
-    default_color, parse_color, title_name, Animation, Captions, ExistingClips, Layout,
+    default_color, parse_color, title_name, Animation, Captions, ExistingClips, Layout, TextStyle,
+    PALETTE_SIZE,
+};
+pub use carry::{
+    carry, carry_times, snapshot, snapshot_times, Carried, CarriedTime, CarryReport, TimesReport,
 };
 pub use fixes::{
     check_fix, check_span, clash, confirm_fix, same_millisecond, set_fix, set_span, Fix, Fixed,
@@ -33,17 +36,14 @@ pub use fixes::{
 };
 pub use format::{parse, FORMAT_VERSION};
 pub use frames::{frame_ranges, frame_span, frames_ceil, frames_floor};
-pub use reduce::{keep_ranges, snap_boundary, word_span, Envelope, ENVELOPE_HOP};
+pub use reduce::{keep_ranges, snap_boundary, word_span, Envelope, Kept, ENVELOPE_HOP};
 pub use save::{amend, backup_path, hold, save, unstamped, Amended, Held, Saved};
 pub use scores::windows;
 pub use speakers::{
     check_name, default_name, Labeller, Person, SpeakerName, Speakers, Turn, MAX_NAME,
 };
 pub use splice::{cut_span, keep_span};
-pub use spread::{
-    carry, carry_times, keep_heard, likeness, snapshot, snapshot_times, spread, Carried,
-    CarriedTime, CarryReport, Spread, TimesReport, Which,
-};
+pub use spread::{keep_heard, likeness, spread, spread_with, Spread, SpreadIndex, Which};
 pub use times::{set_time, to_ms, Retime, Times};
 
 /// A kept stretch of the source, in seconds.
@@ -107,13 +107,13 @@ pub struct EditList {
     /// Who speaks when; empty when the project has no speakers stage result.
     pub speakers: Speakers,
     /// How the caption file is cut into cues, and whether captions are on; `None` when the list has
-    /// no `captions` line, and then it follows the user's defaults (2i, `config::captions`), which
+    /// no `captions` line, and then it follows the user's defaults (`config::captions`), which
     /// the caller resolves before cutting cues.
     pub captions: Option<Captions>,
-    /// Words the user fixed (5h), and runs of words fixed as one text (5x), in time order: shown in
+    /// Words the user fixed, and runs of words fixed as one text, in time order: shown in
     /// place of what Whisper heard.
     pub fixes: Vec<Fix>,
-    /// Words the user retimed by moving a cut's edge (2w), in heard order: their start and end in
+    /// Words the user retimed by moving a cut's edge, in heard order: their start and end in
     /// place of Whisper's wherever a word's time is read.
     #[serde(default)]
     pub times: Vec<Retime>,
@@ -130,11 +130,8 @@ impl EditList {
         format::write(self)
     }
 
-    /// [`Self::to_text`] when [`parse`] reads it back, else the parser's reason (5ad). What every
-    /// writer of an edit list writes ([`save`], [`amend`], the pipeline's re-cut): a list the parser
-    /// refuses opens as a recording whose edits are gone until it is fixed by hand (5aa's carry once
-    /// wrote a kept-as-heard span longer than [`MAX_SPAN`]), so such a list is never written, whatever
-    /// made it.
+    /// [`Self::to_text`] when [`parse`] reads it back, else the parser's reason. Every writer of an
+    /// edit list uses it: a list the parser refuses opens with its edits gone.
     pub fn checked_text(&self) -> Result<String, String> {
         let text = self.to_text();
         match parse(&text) {

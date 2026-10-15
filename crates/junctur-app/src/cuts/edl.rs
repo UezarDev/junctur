@@ -1,8 +1,6 @@
-//! The kept ranges as an mpv EDL (`edl://`), one segment per range of the same source. mpv plays
-//! it as one gapless timeline: its timeline demuxer decodes the next range's lead-in from the
-//! previous keyframe while the current range still plays, which is why skipping cuts this way does
-//! not stall on long-GOP recordings (phase 2b measured 0 ms vs 100-300 ms for seeking at range
-//! ends). In that timeline mpv's `time-pos` is output time.
+//! The kept ranges as an mpv EDL (`edl://`), one segment per range. mpv plays it gapless, decoding
+//! the next range ahead, so skipping cuts does not stall on long-GOP recordings as seeking would.
+//! In that timeline mpv's `time-pos` is output time.
 
 use super::timeline::{Timeline, EDL_DECIMALS};
 

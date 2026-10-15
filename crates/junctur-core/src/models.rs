@@ -9,13 +9,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use sha2::{Digest, Sha256};
 
+use crate::hash::hex;
 use crate::{Error, Result};
 
 pub struct Model {
     pub file: &'static str,
     pub url: &'static str,
     pub sha256: &'static str,
-    /// Shown in `--help`-style listings and the phase notes.
+    /// Shown in `--help`-style listings.
     pub license: &'static str,
 }
 
@@ -43,9 +44,8 @@ pub const SPEAKER_EMBEDDING: Model = Model {
     license: "Apache-2.0",
 };
 
-/// pyannote segmentation-3.0 (MIT, CNRS), who talks and who talks at once per 17 ms of a 10 s window
-/// (5b). pyannote's own repository is gated behind a Hugging Face account; this is k2-fsa's ONNX
-/// export of the same weights, ungated, with pyannote's MIT license beside it, pinned to a commit.
+/// pyannote segmentation-3.0 (MIT, CNRS): who talks, and who at once, per 17 ms of a 10 s window.
+/// k2-fsa's ungated ONNX export of the same weights, since pyannote's own repository is gated.
 pub const SEGMENTATION: Model = Model {
     file: "pyannote_segmentation_3_0.onnx",
     url: "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/9403a6902bb58e3d5ae8c7e77c3422de279db2e0/model.onnx",
@@ -53,7 +53,7 @@ pub const SEGMENTATION: Model = Model {
     license: "MIT",
 };
 
-/// Whisper large-v3 for whisper.cpp (ggml, MIT), f16. ~3.1 GB; wants ~4.8 GB of free VRAM (measured in 1b).
+/// Whisper large-v3 for whisper.cpp (ggml, MIT), f16. ~3.1 GB; wants ~4.8 GB of free VRAM.
 pub const WHISPER_LARGE_V3: Model = Model {
     file: "ggml-large-v3.bin",
     url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3.bin",
@@ -62,7 +62,7 @@ pub const WHISPER_LARGE_V3: Model = Model {
 };
 
 /// Whisper large-v3-turbo (ggml, MIT), f16, 1.6 GB: large-v3's encoder with 4 decoder layers instead of
-/// 32. The default model: faster and lighter on VRAM than even the 5-bit large-v3 (measured in 1f).
+/// 32. The default model: faster and lighter on VRAM than even the 5-bit large-v3.
 pub const WHISPER_LARGE_V3_TURBO: Model = Model {
     file: "ggml-large-v3-turbo.bin",
     url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo.bin",
@@ -78,10 +78,8 @@ pub const WHISPER_LARGE_V3_Q5: Model = Model {
     license: "MIT",
 };
 
-/// M2M100 418M (MIT, Meta), the caption translation model (5k): one many-to-many model for 100
-/// languages. Xenova's ONNX export with its weights quantised to 8 bits, 288 MB of encoder and
-/// 344 MB of decoder (the decoder with and without its key/value cache merged in one file), pinned
-/// to a commit; the full-precision files are 1.1 and 1.3 GB.
+/// M2M100 418M (MIT, Meta), the caption translation model: one many-to-many model for 100
+/// languages. Xenova's 8-bit ONNX export; the decoder file holds the cached and uncached graph.
 pub const TRANSLATE_ENCODER: Model = Model {
     file: "m2m100_418m_encoder_int8.onnx",
     url: "https://huggingface.co/Xenova/m2m100_418M/resolve/9c374f0b7aca709787cea97b047bfbbd1559d177/onnx/encoder_model_quantized.onnx",
@@ -114,9 +112,8 @@ pub fn ensure(model: &Model, cache_dir: &Path) -> Result<PathBuf> {
     ensure_or_stop(model, cache_dir, &AtomicBool::new(false))
 }
 
-/// [`ensure`], whose download ends with [`Error::Cancelled`] soon after `stop` is set: the
-/// translation model (5k) is fetched by a run the user can cancel, and its 630 MB would otherwise
-/// hold the cancel (and any run waiting on it) for minutes.
+/// [`ensure`], whose download ends with [`Error::Cancelled`] soon after `stop` is set, so a
+/// cancelled run is not held for minutes by a large model download.
 pub fn ensure_or_stop(model: &Model, cache_dir: &Path, stop: &AtomicBool) -> Result<PathBuf> {
     let dir = dir(cache_dir);
     let path = dir.join(model.file);
@@ -184,11 +181,7 @@ fn marker(path: &Path) -> PathBuf {
 /// `size mtime sha256` of `path`, as the marker holds it.
 fn stamp(model: &Model, path: &Path) -> Result<String> {
     let meta = std::fs::metadata(path)?;
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_nanos());
+    let mtime = crate::cache::mtime_nanos(&meta);
     Ok(format!("{} {mtime} {}", meta.len(), model.sha256))
 }
 
@@ -229,10 +222,6 @@ fn sha256_file(path: &Path) -> Result<String> {
 #[cfg(test)]
 fn sha256_hex(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
-}
-
-fn hex(digest: &[u8]) -> String {
-    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]

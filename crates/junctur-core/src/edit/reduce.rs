@@ -1,11 +1,8 @@
-//! The first automatic reduction: keep speech, drop the silences between it.
-//!
-//! "Silence" means nobody talking (from the VAD), not a volume threshold, so the ranges come from
-//! speech regions. Each is padded, short pauses are kept so speech is not chopped, and then each
-//! boundary moves to the quietest instant nearby on the speech tracks' energy, so a cut lands in a
-//! real gap rather than on the tail of a breath or a word the VAD trimmed.
+//! The first automatic reduction: keep speech (from the VAD, not a volume threshold), drop the
+//! silences between it, each boundary moved to the quietest instant nearby to land in a real gap.
 
 use super::{CutSettings, Range};
+use crate::spans::{joined, push_joined, Join};
 use crate::vad::Region;
 
 /// Envelope resolution: 10 ms.
@@ -36,37 +33,35 @@ impl Envelope {
     }
 }
 
+/// Which side of a boundary in a gap is kept speech.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kept {
+    Before,
+    After,
+}
+
 /// Where a hand-made boundary goes in the pause `gap` between speech (where the speech before ends,
 /// where the speech after starts), placed as [`keep_ranges`] places its own: `pad_after` past the
 /// speech when the side before is kept (`kept_before`), else `pad_before` ahead of the speech
 /// after, then the quietest step within `snap`. Never outside the gap, so it clips neither side.
 /// `None` when there is no pause (the two overlap, e.g. on two tracks).
-pub fn snap_boundary(
-    env: &Envelope,
-    gap: (f64, f64),
-    kept_before: bool,
-    s: &CutSettings,
-) -> Option<f64> {
+pub fn snap_boundary(env: &Envelope, gap: (f64, f64), kept: Kept, s: &CutSettings) -> Option<f64> {
     let (a, b) = gap;
     if b <= a {
         return None;
     }
-    let target = if kept_before {
-        a + s.pad_after
-    } else {
-        b - s.pad_before
+    let target = match kept {
+        Kept::Before => a + s.pad_after,
+        Kept::After => b - s.pad_before,
     }
     .clamp(a, b);
     Some(env.quietest((target - s.snap).max(a), (target + s.snap).min(b), target))
 }
 
-/// The span a hand edit of a run of words changes: cut (`keep` false) or keep `run` (the run's
-/// first start, its latest end), from a boundary in the pause before it to one in the pause after,
-/// each placed by [`snap_boundary`]. `before` is where earlier speech ends (the latest end of any
-/// earlier word, on any track) and `after` where later speech starts (the earliest later start);
-/// `None` at either end of the transcript, where the neighbour counts as speech both pads away.
-/// Where no pause exists (speech on another track overlaps the run's edge) the boundary is the
-/// run's own edge: a cut removes every track, so that overlapping word is cut there too.
+/// The span a hand edit of a run of words changes (cut, or kept with `keep`), from a boundary placed
+/// by [`snap_boundary`] in the pause before `run` to one in the pause after. `before`/`after` are
+/// where earlier speech ends and later speech starts on any track, `None` at the transcript's ends.
+/// With no pause there the boundary is the run's own edge, since a cut removes every track.
 pub fn word_span(
     before: Option<f64>,
     run: (f64, f64),
@@ -79,9 +74,14 @@ pub fn word_span(
     let pads = s.pad_before + s.pad_after;
     let before = before.unwrap_or((run.0 - pads).max(0.0));
     let after = after.unwrap_or((run.1 + pads).min(duration));
-    // A cut ends kept speech before the run; a keep starts kept speech at it.
-    let start = snap_boundary(env, (before, run.0), !keep, s).unwrap_or(run.0);
-    let end = snap_boundary(env, (run.1, after), keep, s).unwrap_or(run.1);
+    // A cut ends kept speech before the run and starts it after; a keep the other way round.
+    let (into, out_of) = if keep {
+        (Kept::After, Kept::Before)
+    } else {
+        (Kept::Before, Kept::After)
+    };
+    let start = snap_boundary(env, (before, run.0), into, s).unwrap_or(run.0);
+    let end = snap_boundary(env, (run.1, after), out_of, s).unwrap_or(run.1);
     (start, end.max(start))
 }
 
@@ -90,13 +90,7 @@ pub fn keep_ranges(speech: &[Region], env: &Envelope, total: f64, s: &CutSetting
     let mut regions: Vec<Region> = speech.to_vec();
     regions.sort_by(|a, b| a.start.total_cmp(&b.start));
     // Speech spans: union of all tracks, with pauses under `merge_gap` filled in.
-    let mut spans: Vec<Region> = Vec::new();
-    for r in regions {
-        match spans.last_mut() {
-            Some(last) if r.start - last.end < s.merge_gap => last.end = last.end.max(r.end),
-            _ => spans.push(r),
-        }
-    }
+    let spans = joined(regions, Join::Within(s.merge_gap));
     let mut out: Vec<Range> = Vec::new();
     for sp in spans {
         let start = (sp.start - s.pad_before).max(0.0);
@@ -111,126 +105,10 @@ pub fn keep_ranges(speech: &[Region], env: &Envelope, total: f64, s: &CutSetting
         if end <= start {
             continue;
         }
-        match out.last_mut() {
-            Some(last) if start <= last.end => last.end = last.end.max(end),
-            _ => out.push(Range { start, end }),
-        }
+        push_joined(&mut out, Range { start, end }, Join::Touching);
     }
     out
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn r(start: f64, end: f64) -> Region {
-        Region { start, end }
-    }
-
-    fn flat() -> Envelope {
-        Envelope(vec![1.0; 10_000])
-    }
-
-    #[test]
-    fn no_speech_keeps_nothing() {
-        assert!(keep_ranges(&[], &flat(), 100.0, &CutSettings::default()).is_empty());
-    }
-
-    #[test]
-    fn pads_merges_and_clamps() {
-        let s = CutSettings::default();
-        let k = keep_ranges(
-            &[r(10.0, 12.0), r(0.1, 1.0), r(12.5, 13.0), r(30.0, 40.0)],
-            &flat(),
-            40.1,
-            &s,
-        );
-        assert_eq!(k.len(), 3);
-        assert_eq!(k[0].start, 0.0);
-        assert!((k[1].start - 9.75).abs() < 1e-9 && (k[1].end - 13.35).abs() < 1e-9);
-        assert!((k[2].end - 40.1).abs() < 1e-9);
-    }
-
-    #[test]
-    fn overlapping_tracks_union() {
-        let k = keep_ranges(
-            &[r(5.0, 8.0), r(6.0, 7.0), r(7.5, 9.0)],
-            &flat(),
-            100.0,
-            &CutSettings::default(),
-        );
-        assert_eq!(k.len(), 1);
-        assert!((k[0].end - 9.35).abs() < 1e-9);
-    }
-
-    #[test]
-    fn snaps_to_quiet_but_not_into_speech() {
-        // Loud everywhere except a dip at 9.70 s (before the pad start of 9.75) and one at 10.05 s,
-        // inside the speech: the start must take the first and ignore the second.
-        let mut e = vec![1.0f32; 2000];
-        e[970] = 0.0;
-        e[1005] = 0.0;
-        let k = keep_ranges(
-            &[r(10.0, 11.0)],
-            &Envelope(e),
-            100.0,
-            &CutSettings::default(),
-        );
-        assert!((k[0].start - 9.70).abs() < 1e-6, "{:?}", k[0]);
-    }
-
-    #[test]
-    fn hand_boundaries_pad_snap_and_stay_in_the_gap() {
-        let s = CutSettings::default();
-        // Flat: just the pad. After kept speech ending at 10.0, 0.35 s later; before speech at
-        // 12.0, 0.25 s earlier.
-        let snap =
-            |env: &Envelope, gap, kept_before| snap_boundary(env, gap, kept_before, &s).unwrap();
-        let b = snap(&flat(), (10.0, 12.0), true);
-        assert!((b - 10.35).abs() < 1e-9, "{b}");
-        let b = snap(&flat(), (10.0, 12.0), false);
-        assert!((b - 11.75).abs() < 1e-9, "{b}");
-        // A pause shorter than the pad: the far edge of the gap, never into the next word.
-        let b = snap(&flat(), (10.0, 10.1), true);
-        assert!((b - 10.1).abs() < 1e-9, "{b}");
-        // A quiet step within `snap` wins, but not one past the next word's start.
-        let mut e = vec![1.0f32; 2000];
-        e[1040] = 0.0;
-        e[1060] = 0.0;
-        let b = snap(&Envelope(e.clone()), (10.0, 10.5), true);
-        assert!((b - 10.40).abs() < 1e-6, "{b}");
-        // Before speech at 10.45: the target is 10.20, and 10.40 is beyond `snap` of it.
-        let b = snap(&Envelope(e), (10.0, 10.45), false);
-        assert!((b - 10.20).abs() < 1e-6, "{b}");
-        // Overlapping speech (two tracks): no pause to place it in.
-        assert_eq!(snap_boundary(&flat(), (5.0, 4.0), true, &s), None);
-    }
-
-    #[test]
-    fn word_spans_never_clip_and_say_when_there_is_no_pause() {
-        let s = CutSettings::default();
-        let env = Envelope::default();
-        // Cut a run 12.0-12.5 with speech ending at 11.0 before and starting at 14.0 after.
-        let (a, b) = word_span(Some(11.0), (12.0, 12.5), Some(14.0), false, &env, &s, 60.0);
-        assert!(
-            (a - 11.35).abs() < 1e-9 && (b - 13.75).abs() < 1e-9,
-            "{a} {b}"
-        );
-        // Keep it: pads around the run itself.
-        let (a, b) = word_span(Some(11.0), (12.0, 12.5), Some(14.0), true, &env, &s, 60.0);
-        assert!(
-            (a - 11.75).abs() < 1e-9 && (b - 12.85).abs() < 1e-9,
-            "{a} {b}"
-        );
-        // A word on another track runs 10-15, past the run: no pause either side, so the run's
-        // own edges, not a point inside that word claimed as a clean pause.
-        let (a, b) = word_span(Some(15.0), (12.0, 12.5), Some(12.2), false, &env, &s, 60.0);
-        assert_eq!((a, b), (12.0, 12.5));
-        // Ends of the transcript: neighbours both pads away, within the recording.
-        let (a, b) = word_span(None, (0.2, 1.0), None, false, &env, &s, 1.1);
-        assert!(
-            (0.0..=0.2).contains(&a) && (1.0..=1.1).contains(&b),
-            "{a} {b}"
-        );
-    }
-}
+mod tests;

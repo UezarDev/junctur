@@ -1,10 +1,6 @@
-//! CUDA builds on Windows: delay-load the cuBLAS DLL that whisper.cpp links against (it links the
-//! CUDA runtime statically, so cuBLAS is the only toolkit DLL the binary imports).
-//!
-//! The CUDA 13 installer puts its DLLs in `bin\x64`, which is not on PATH, and a normal import
-//! would stop the program from starting at all. Delay-loaded, they resolve on first use, after
-//! `runtime::prepare_cuda` has put the CUDA folder on PATH. Shared by both crates (the CLI's
-//! `build` points here) because link flags only reach the binaries of the crate that sets them.
+//! CUDA builds on Windows: delay-load cuBLAS, whose folder is not on PATH until
+//! `runtime::prepare_cuda` adds it, so a normal import would stop the program from starting.
+//! Shared by both crates (the CLI's `build` points here): link flags only reach the setting crate.
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");

@@ -11,9 +11,49 @@ use crate::Result;
 /// The file in a project folder.
 pub(crate) const FILE: &str = "jobs.json";
 
-/// Stage names, in run order. The edit list comes before the transcript (2j): it needs none of it
-/// but the word counts, filled in once the transcript is whole.
-pub const STAGES: [&str; 5] = ["tracks", "speech", "speakers", "edit", "transcribe"];
+/// The stages, in run order. The edit list comes before the transcript: it needs none of it but
+/// the word counts, filled in once the transcript is whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StageName {
+    Tracks,
+    Speech,
+    Speakers,
+    Edit,
+    Transcribe,
+}
+
+impl StageName {
+    pub const ALL: [StageName; 5] = [
+        StageName::Tracks,
+        StageName::Speech,
+        StageName::Speakers,
+        StageName::Edit,
+        StageName::Transcribe,
+    ];
+
+    /// Its name in `jobs.json`, the log and the page.
+    pub const fn name(self) -> &'static str {
+        match self {
+            StageName::Tracks => "tracks",
+            StageName::Speech => "speech",
+            StageName::Speakers => "speakers",
+            StageName::Edit => "edit",
+            StageName::Transcribe => "transcribe",
+        }
+    }
+}
+
+/// Stage names, in run order ([`StageName::ALL`]).
+pub const STAGES: [&str; 5] = {
+    let mut names = [""; 5];
+    let mut i = 0;
+    while i < names.len() {
+        names[i] = StageName::ALL[i].name();
+        i += 1;
+    }
+    names
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -27,6 +67,7 @@ pub enum StageState {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StageRecord {
+    /// A [`StageName`]'s name, or one a newer build wrote (kept, last).
     pub name: String,
     pub state: StageState,
     /// Wall time of the last run of this stage.
@@ -40,13 +81,19 @@ pub struct Jobs {
     pub stages: Vec<StageRecord>,
 }
 
+impl StageRecord {
+    pub fn is(&self, stage: StageName) -> bool {
+        self.name == stage.name()
+    }
+}
+
 impl Jobs {
     pub fn load(dir: &Path) -> Self {
         std::fs::read(dir.join(FILE))
             .ok()
             .and_then(|b| serde_json::from_slice::<Jobs>(&b).ok())
             .map(|mut j| {
-                // A file written before 2j lists `transcribe` before `edit`: run order now.
+                // An older file may list `transcribe` before `edit`: put in run order.
                 // Stable, and names this version does not know go last.
                 let order = |n: &str| STAGES.iter().position(|&x| x == n).unwrap_or(usize::MAX);
                 j.stages.sort_by_key(|s| order(&s.name));
@@ -66,33 +113,30 @@ impl Jobs {
             })
     }
 
-    pub fn get(&self, name: &str) -> Option<&StageRecord> {
-        self.stages.iter().find(|s| s.name == name)
+    pub fn get(&self, stage: StageName) -> Option<&StageRecord> {
+        self.stages.iter().find(|s| s.is(stage))
     }
 
-    /// Records stage `name`'s state in `dir`'s `jobs.json`, and takes the file as it now is.
-    ///
-    /// Read, changed and written back under one process-wide lock (2m), never this copy written
-    /// whole: a run's second half and 5c's speakers heard again each hold a copy loaded at their
-    /// start, and the speakers' write would put back `transcribe: running` after the
-    /// transcription had finished (the panel showing it running, a resume on the next open).
+    /// Records `stage`'s state in `dir`'s `jobs.json`, and takes the file as it now is. Read,
+    /// changed and written under one lock, never this copy whole: another holder's stale copy would
+    /// put back a stage's old state over a newer one.
     pub fn set(
         &mut self,
         dir: &Path,
-        name: &str,
+        stage: StageName,
         state: StageState,
         seconds: Option<f64>,
         note: Option<String>,
     ) -> Result<()> {
         let file = (!self.file.as_os_str().is_empty()).then(|| self.file.clone());
-        *self = record(dir, file, name, state, seconds, note)?;
+        *self = record(dir, file, stage.name(), state, seconds, note)?;
         Ok(())
     }
 
     fn put(&mut self, name: &str, state: StageState, seconds: Option<f64>, note: Option<String>) {
         if !self.stages.iter().any(|s| s.name == name) {
-            // A stage added after this project's `jobs.json` was written (5a's `speakers`): put it
-            // in run order, or its state would be dropped on every run.
+            // A stage added after this project's `jobs.json` was written: put it in run order, or
+            // its state would be dropped on every run.
             let order = |n: &str| STAGES.iter().position(|&x| x == n);
             let at = self
                 .stages
@@ -119,18 +163,19 @@ impl Jobs {
     }
 
     /// Run one stage, recording it as running, then done (with its time) or failed. The stage
-    /// logs through the same `log`. A stage that panics is recorded failed on the way out (2m),
+    /// logs through the same `log`. A stage that panics is recorded failed on the way out,
     /// not left `running` as if the run had been killed.
     pub fn stage<T>(
         &mut self,
         dir: &Path,
-        name: &str,
+        stage: StageName,
         log: &mut dyn FnMut(&str),
         f: impl FnOnce(&mut dyn FnMut(&str)) -> Result<T>,
     ) -> Result<T> {
         // Recorded before the line is logged, so a caller reading `jobs.json` on it sees the stage
-        // running (the app's progress, 2d).
-        self.set(dir, name, StageState::Running, None, None)?;
+        // running (the app's progress).
+        let name = stage.name();
+        self.set(dir, stage, StageState::Running, None, None)?;
         log(&format!("stage {name} ..."));
         let t0 = Instant::now();
         let unwinding = Unwinding { dir, name };
@@ -139,26 +184,29 @@ impl Jobs {
         match result {
             Ok(v) => {
                 let secs = t0.elapsed().as_secs_f64();
-                self.set(dir, name, StageState::Done, Some(secs), None)?;
+                self.set(dir, stage, StageState::Done, Some(secs), None)?;
                 log(&format!("stage {name} done in {secs:.1} s"));
                 Ok(v)
             }
             Err(e) => {
-                self.set(dir, name, StageState::Failed, None, Some(e.to_string()))?;
+                self.set(dir, stage, StageState::Failed, None, Some(e.to_string()))?;
                 Err(e)
             }
         }
     }
 
     /// A stage whose result was already there.
-    pub fn skip(&mut self, dir: &Path, name: &str, log: &mut dyn FnMut(&str)) -> Result<()> {
-        log(&format!("stage {name}: reusing the earlier result"));
+    pub fn skip(&mut self, dir: &Path, stage: StageName, log: &mut dyn FnMut(&str)) -> Result<()> {
+        log(&format!(
+            "stage {}: reusing the earlier result",
+            stage.name()
+        ));
         let state = StageState::Done;
-        self.set(dir, name, state, None, Some("reused".into()))
+        self.set(dir, stage, state, None, Some("reused".into()))
     }
 }
 
-/// One change to `jobs.json` at a time in this process (2m: see [`Jobs::set`]).
+/// One change to `jobs.json` at a time in this process (see [`Jobs::set`]).
 static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Loads `dir`'s `jobs.json`, records one stage's state in it and writes it back whole, under
@@ -208,25 +256,28 @@ mod tests {
         assert!(j.stages.iter().all(|s| s.state == StageState::Pending));
         let mut log = |_: &str| {};
         let v = j
-            .stage(&dir, "tracks", &mut log, |_| {
+            .stage(&dir, StageName::Tracks, &mut log, |_| {
                 // Mid-stage, the file on disk says running.
                 assert_eq!(
-                    Jobs::load(&dir).get("tracks").unwrap().state,
+                    Jobs::load(&dir).get(StageName::Tracks).unwrap().state,
                     StageState::Running
                 );
                 Ok(7)
             })
             .unwrap();
         assert_eq!(v, 7);
-        let r: Result<()> = j.stage(&dir, "speech", &mut log, |_| {
+        let r: Result<()> = j.stage(&dir, StageName::Speech, &mut log, |_| {
             Err(crate::Error::Edit("boom".into()))
         });
         assert!(r.is_err());
         let back = Jobs::load(&dir);
-        assert_eq!(back.get("tracks").unwrap().state, StageState::Done);
-        assert_eq!(back.get("speech").unwrap().state, StageState::Failed);
+        assert_eq!(back.get(StageName::Tracks).unwrap().state, StageState::Done);
+        assert_eq!(
+            back.get(StageName::Speech).unwrap().state,
+            StageState::Failed
+        );
         assert!(back
-            .get("speech")
+            .get(StageName::Speech)
             .unwrap()
             .note
             .as_deref()
@@ -242,17 +293,29 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         // A run's second half and the speakers heard again, each loaded while transcribing.
         let mut run = Jobs::load(&dir);
-        run.set(&dir, "transcribe", StageState::Running, None, None)
+        run.set(&dir, StageName::Transcribe, StageState::Running, None, None)
             .unwrap();
         let mut rehear = Jobs::load(&dir);
-        run.set(&dir, "transcribe", StageState::Done, Some(1.0), None)
-            .unwrap();
+        run.set(
+            &dir,
+            StageName::Transcribe,
+            StageState::Done,
+            Some(1.0),
+            None,
+        )
+        .unwrap();
         rehear
-            .set(&dir, "speakers", StageState::Done, Some(2.0), None)
+            .set(&dir, StageName::Speakers, StageState::Done, Some(2.0), None)
             .unwrap();
         let back = Jobs::load(&dir);
-        assert_eq!(back.get("transcribe").unwrap().state, StageState::Done);
-        assert_eq!(back.get("speakers").unwrap().state, StageState::Done);
+        assert_eq!(
+            back.get(StageName::Transcribe).unwrap().state,
+            StageState::Done
+        );
+        assert_eq!(
+            back.get(StageName::Speakers).unwrap().state,
+            StageState::Done
+        );
         assert_eq!(rehear, back, "a copy takes the file as written");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -264,11 +327,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let caught = std::panic::catch_unwind(|| {
             let mut j = Jobs::load(&dir);
-            let _: Result<()> = j.stage(&dir, "speech", &mut |_| {}, |_| panic!("boom"));
+            let _: Result<()> = j.stage(&dir, StageName::Speech, &mut |_| {}, |_| panic!("boom"));
         });
         assert!(caught.is_err());
         assert_eq!(
-            Jobs::load(&dir).get("speech").unwrap().state,
+            Jobs::load(&dir).get(StageName::Speech).unwrap().state,
             StageState::Failed
         );
         std::fs::remove_dir_all(&dir).unwrap();
@@ -285,13 +348,31 @@ mod tests {
             {"name":"edit","state":"done","seconds":1.0,"note":null}]}"#;
         std::fs::write(dir.join(FILE), old).unwrap();
         let mut j = Jobs::load(&dir);
-        j.set(&dir, "speakers", StageState::Done, Some(2.0), None)
+        j.set(&dir, StageName::Speakers, StageState::Done, Some(2.0), None)
             .unwrap();
         let back = Jobs::load(&dir);
-        // Also put in today's order: the file had `transcribe` before `edit` (before 2j).
+        // Also put in run order: the file had `transcribe` before `edit`.
         let names: Vec<&str> = back.stages.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, STAGES);
-        assert_eq!(back.get("speakers").unwrap().state, StageState::Done);
+        assert_eq!(
+            back.get(StageName::Speakers).unwrap().state,
+            StageState::Done
+        );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The names are `jobs.json`'s and, serialised, the page's progress steps'.
+    #[test]
+    fn stage_names_are_the_files_and_the_pages() {
+        assert_eq!(
+            STAGES,
+            ["tracks", "speech", "speakers", "edit", "transcribe"]
+        );
+        for s in StageName::ALL {
+            assert_eq!(
+                serde_json::to_string(&s).unwrap(),
+                format!("\"{}\"", s.name())
+            );
+        }
     }
 }

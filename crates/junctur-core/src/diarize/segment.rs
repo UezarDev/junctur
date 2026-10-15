@@ -1,16 +1,6 @@
-//! Where two people talk at once (5b): pyannote's segmentation-3.0 model over 10 s windows.
-//!
-//! CAM++ windows ([`super::segments`]) give one voiceprint per 1.5 s, so they can say who talks but
-//! never that two people do. The segmentation model says, for each 17 ms frame of a 10 s window, which
-//! of up to three "local" speakers of that window talk, alone or two at once (its seven powerset
-//! classes). Local speakers mean nothing outside their window; who they are comes later, from the
-//! labelled CAM++ turns they coincide with where they talk alone ([`Overlap::a`] / [`Overlap::b`]),
-//! so this module only finds the stretches and keeps the evidence for naming them. That keeps it apart
-//! from labelling: enrolling a voice relabels from cached results without running this model again.
-//!
-//! Rejected: pyannote's whole pipeline (an embedding per local speaker, clustered globally). It would
-//! replace 5a's clustering and the voiceprints with a second speaker model doing the same job; the one
-//! thing CAM++ windows cannot see is the second voice, and that is all this adds.
+//! Where two people talk at once, which CAM++ windows cannot see: pyannote's segmentation-3.0 model
+//! over 10 s windows. Its "local" speakers are named later from the labelled turns they coincide
+//! with, so this only finds the stretches and keeps that evidence, and relabelling never reruns it.
 
 use std::path::Path;
 
@@ -35,12 +25,16 @@ pub const BATCH: usize = 16;
 /// A pair class must hold this long to count: shorter is a crossfade at a turn change.
 const MIN_OVERLAP_S: f64 = 0.2;
 /// A frame is two people at once when the three pair classes together have at least this
-/// probability (the most likely pair is taken). Plain argmax (about 0.5) found 202 s of overlap on
-/// the 4-track sample; 0.2 finds 338 s with the same precision against the avatars (93-94% of it
-/// with two or more lit, against 45% of all labelled time); 0.1 drops to 85%.
+/// probability (the most likely pair is taken). Lower than plain argmax (about 0.5), which misses
+/// much overlap; 0.2 keeps the same precision, 0.1 loses some.
 const PAIR_P: f32 = 0.2;
 /// Gaps shorter than this inside one pair's stretch are bridged (a syllable's dip).
 const BRIDGE_S: f64 = 0.3;
+/// The powerset classes: 0 none, 1-3 one local speaker, then the pairs 1+2, 1+3, 2+3.
+const CLASSES: usize = 7;
+const FIRST_PAIR: u8 = 4;
+/// A speaker's solo runs bridge gaps under this many frames.
+const SOLO_BRIDGE_FRAMES: f64 = 1.5;
 
 /// A stretch where two local speakers of one window talk at once, with where each of them talks
 /// alone in that window (source seconds), the evidence for who they are.
@@ -57,8 +51,8 @@ pub struct Segmenter {
 }
 
 impl Segmenter {
-    /// On the CPU, as everything in the Tracks, Speech and Speakers stages is (5r: Uezar, "GPU
-    /// only for the transcribing part").
+    /// On the CPU, as everything in the Tracks, Speech and Speakers stages is: only transcription
+    /// uses the GPU.
     pub fn open(model: &Path) -> Result<Self> {
         Ok(Self {
             session: runtime::open_on_cpu(model, None)?,
@@ -80,7 +74,7 @@ impl Segmenter {
         let x = Tensor::from_array(([clips.len(), 1, len], flat))?;
         let res = self.session.run(ort::inputs!["x" => x])?;
         let (shape, y) = res["y"].try_extract_tensor::<f32>()?;
-        let classes = *shape.last().unwrap_or(&7) as usize;
+        let classes = *shape.last().unwrap_or(&(CLASSES as i64)) as usize;
         let frames = y.len() / clips.len() / classes.max(1);
         Ok(y.chunks_exact(frames * classes)
             .map(|w| {
@@ -93,12 +87,13 @@ impl Segmenter {
                         };
                         // The output is log-probabilities: a frame is two people at once when
                         // the pairs together are likely enough, even if one single class wins.
-                        let pairs: f32 = f.iter().skip(4).map(|x| x.exp()).sum();
+                        let first_pair = FIRST_PAIR as usize;
+                        let pairs: f32 = f.iter().skip(first_pair).map(|x| x.exp()).sum();
                         // Under it, nobody or one person: never a pair that won narrowly.
-                        if f.len() == 7 && pairs >= PAIR_P {
-                            best(4..7)
+                        if f.len() == CLASSES && pairs >= PAIR_P {
+                            best(first_pair..CLASSES)
                         } else {
-                            best(0..f.len().min(4))
+                            best(0..f.len().min(first_pair))
                         }
                     })
                     .collect()
@@ -184,9 +179,13 @@ pub fn overlaps(k: usize, classes: &[u8]) -> Vec<Overlap> {
     let start = k as f64 * STEP_S;
     let (lo, hi) = decides(k);
     let mut out = Vec::new();
-    for class in 4..=6u8 {
+    for class in FIRST_PAIR..CLASSES as u8 {
         let (a, b) = pair(class).expect("a pair class");
-        let alone = |who: u8| runs(start, classes, frame_len() * 1.5, |c| c == who + 1);
+        let alone = |who: u8| {
+            runs(start, classes, frame_len() * SOLO_BRIDGE_FRAMES, |c| {
+                c == who + 1
+            })
+        };
         let mut solo: Option<(Spans, Spans)> = None;
         for [s, e] in runs(start, classes, BRIDGE_S, |c| c == class) {
             // Only the part this window decides; another window decides the rest.

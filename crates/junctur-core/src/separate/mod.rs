@@ -1,9 +1,6 @@
 //! Voice isolation for mix-only recordings: split a mix track into a vocal stem and the rest, then
-//! find speech and speakers on the vocal stem.
-//!
-//! Everything streams (decode, model, encode), so memory does not grow with the recording. Stems go
-//! to the cache, never beside the input, and a finished run is reused: separating a 30h stream is
-//! the expensive stage and must not be repeated by accident.
+//! find speech and speakers on it. Everything streams, and a finished run in the cache is reused,
+//! since separating a long stream is expensive.
 
 mod mdx;
 mod render;
@@ -69,8 +66,8 @@ pub fn separate(file: &Path, track: usize, opts: &SeparateOptions) -> Result<Ste
         opts.span.start, opts.span.len
     );
     let dir = cache_dir.join("stems").join(cache::key(file, &settings)?);
-    // The speakers' file is named for the embeddings they were found from (5r: `stems.json` holds
-    // ones made on the GPU), so new ones are found while the separated stems are reused.
+    // The speakers' file is named for the embeddings they were found from (an older `stems.json`
+    // holds ones made on the GPU), so new ones are found while the separated stems are reused.
     let done = dir.join(if opts.no_speakers {
         "stems-no-speakers.json".to_string()
     } else {
@@ -235,7 +232,7 @@ pub fn speech_regions(audio: &Path, cache_dir: &Path) -> Result<Vec<Region>> {
     let mut reader = PcmReader::open(audio, 0, vad::RATE, 1, Span::default())?;
     let mut probs = Vec::new();
     loop {
-        let x = reader.read(vad::RATE as usize * 60)?;
+        let x = reader.read(vad::MINUTE)?;
         if x.is_empty() {
             break;
         }

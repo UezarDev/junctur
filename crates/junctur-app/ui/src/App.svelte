@@ -1,10 +1,6 @@
 <script lang="ts">
-  // The editor (2g): the video area, the play bar under it and the track lanes under that, the
-  // side panel on the right (Transcript, Captions, Properties); in portrait, mixer strips and large
-  // avatars beside the picture. Where everything goes comes from layout.ts; this places it, tells
-  // mpv the margins, and holds what several parts share (the selection, the lanes' window, who is
-  // talking). Above it all, the title bar (2i): its menus, the keys and test mode's `menu=<id>` all
-  // come to `onMenu`; Settings opens over the editor or the start window.
+  // The editor: video area, play bar, lanes and side panel, placed from layout.ts, plus what several
+  // parts share (the selection, the lanes' window, who is talking). Every menu ends in `onMenu`.
   import { onMount, untrack } from "svelte";
   import { ask, open } from "@tauri-apps/plugin-dialog";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -34,18 +30,18 @@
   // Raw (not deeply reactive): these are replaced whole on every update, and a 30 h transcript or
   // edit list read through a reactive proxy makes every layout pass several times slower.
   let player = $state.raw<api.PlayerState | null>(null);
-  // Raw (2q repair): replaced whole, never changed in place, and `attach` compares it with the
-  // object it set; a deep `$state` stored a proxy, so that check never held.
+  // Raw: replaced whole, never changed in place, and `attach` compares it with the object it set;
+  // a deep `$state` would store a proxy, so that check would never hold.
   let opened = $state.raw<api.Opened | null>(null);
   let edit = $state.raw<api.EditState | null>(null);
-  // Every track's mute, solo and role (2e, 2g); the meters go straight to the bars (meters.ts).
+  // Every track's mute, solo and role; the meters go straight to the bars (meters.ts).
   let mixer = $state.raw<api.MixerState | null>(null);
-  // The open recording's analysis (2d): its stages' states replace the ones read at opening.
+  // The open recording's analysis: its stages' states replace the ones read at opening.
   let analysis = $state.raw<api.Progress | null>(null);
-  // The transcription lane (2k): who transcribes and who waits, whichever recording is open, for
+  // The transcription lane: who transcribes and who waits, whichever recording is open, for
   // the Properties tab's job panel; each job's progress kept current from the analysis events.
   let lane = $state.raw<api.Transcription | null>(null);
-  // The waveforms' read (2g); `wavesVersion` moves each time more of them is there to draw.
+  // The waveforms' read; `wavesVersion` moves each time more of them is there to draw.
   let waves = $state.raw<api.WavesState | null>(null);
   let wavesVersion = $state(0);
   // Who talks when, and who is talking at the playhead.
@@ -67,23 +63,23 @@
   let words = $state.raw<Words | null>(null);
   let wordsLoading = $state(false);
   let selection = $state<sel.Selection | null>(null);
-  // Review mode (2o): one clip at a time in the range toolbar's corner; it takes the keys first.
+  // Review mode: one clip at a time in the range toolbar's corner; it takes the keys first.
   let reviewing = $state(false);
   let reviewer = $state<Review | null>(null);
   let panelOpen = $state(true);
   // Which side panel shows. The transcript stays mounted while hidden: laying out a 30 h
   // transcript again on every switch would cost a noticeable moment.
   let tab = $state<"transcript" | "captions" | "properties">("transcript");
-  // The LV3 overlay: off by default, a viewer's preference kept in this page's storage.
+  // The talking overlay: off by default, a viewer's preference kept in this page's storage.
   const OVERLAY_KEY = "junctur.talkingOverlay";
   let overlay = $state(readOverlay());
   let windowWidth = $state(window.innerWidth);
   let windowHeight = $state(window.innerHeight);
   let settingsOpen = $state(false);
-  // The transcript flags words Whisper was less sure of than this (5o, Settings); none until read.
-  // The default (25) is the core's `config::FLAG_BELOW`, sent with the settings; not repeated here.
+  // The transcript flags words Whisper was less sure of than this (Settings); none until read.
+  // The default is the core's `config::FLAG_BELOW`, sent with the settings; not repeated here.
   let flagBelow = $state(0);
-  // Each open counts one up, and so does a close (2i): an open's answers that arrive after a close,
+  // Each open counts one up, and so does a close: an open's answers that arrive after a close,
   // or after a newer open, are dropped. `closedAt` is the count a close left, so an open that lost
   // to a close (nothing opened since) closes again what the player opened meanwhile.
   let loadGen = 0;
@@ -92,7 +88,7 @@
   const PANEL = 400;
   const loaded = $derived(!!player?.path);
   const panelWidth = $derived(loaded && panelOpen ? Math.min(PANEL, windowWidth * 0.45) : 0);
-  // A span per selected stretch (2p: words can be several), for the lanes and timeline to draw.
+  // A span per selected stretch (words can be several), for the lanes and timeline to draw.
   const spans = $derived(sel.seconds(selection, words, edit?.fps ?? null));
   const speakers = $derived(edit?.speakers ?? []);
   // The layout from plain numbers: each is a derived value that only moves when it changes, so the
@@ -229,7 +225,7 @@
   });
 
   // The edit state's speakers and fixes keys the words were made with: when one moves (an outside
-  // change to the turns, a word fixed here or by hand, 5h), the labels and text are fetched again.
+  // change to the turns, a word fixed here or by hand), the labels and text are fetched again.
   // A rename does not move them.
   let labelledWith = "";
   const wordsKey = () => `${edit?.speakersKey ?? ""}|${edit?.fixesKey ?? ""}`;
@@ -258,8 +254,8 @@
     }
   }
 
-  // Each refetch's number: the latest one asked for wins (2w repair: two quick edge moves each ask
-  // again, and taking only a reply onto the words the ask started from dropped the later one).
+  // Each refetch's number: the latest one asked for wins, so of two quick edge moves the later one's
+  // words are the ones kept.
   let relabel = 0;
   $effect(() => {
     const key = wordsKey();
@@ -272,7 +268,7 @@
         // Only the latest ask, onto the same recording's transcript (another file may have opened
         // meanwhile) and the same words.
         if (view && ask === relabel && gen === loadGen && words && view.speaker.length === words.text.length) {
-          // Text, speakers and the spans fixed as one text (5x) all come from the view.
+          // Text, speakers and the spans fixed as one text all come from the view.
           words = toWords(view);
         }
       },
@@ -302,10 +298,8 @@
     }
   }
 
-  // A page that started over while the app went on (2q: F5 reloaded it; now the keys do nothing,
-  // noReload.ts, but a dev build's Vite or a crash of the page still can): the player has a
-  // recording open, and the page takes it as it is, from the backend, without opening it again.
-  // Before, the reloaded page showed it playing with "No transcript" and an empty Properties tab.
+  // A page that started over while the app went on (a dev build's Vite, a crash of the page): the
+  // player has a recording open, and the page takes it as it is from the backend, not reopening it.
   async function reattach() {
     const gen = ++loadGen;
     const stale = () => gen !== loadGen;
@@ -351,11 +345,9 @@
   const busy = steps.busy;
   const rank = steps.rank;
 
-  // The words again while the recording transcribes (2j): a piece more of them, or the finished
-  // transcript after the pieces. Only words at the end are new (their indices are the core's
-  // promise), so the selection and what the panel shows stay; nothing is blanked meanwhile.
-  // Asks in flight can answer out of order (a piece lands while the last ask is on its way): only
-  // the latest ask's answer is taken, or a shorter list could replace a longer one.
+  // The words again while the recording transcribes: a piece more, or the finished transcript. Only
+  // words at the end are new (the core's promise), so the selection and the panel stay. Only the
+  // latest ask's answer is taken, or a shorter list could replace a longer one.
   let growing = 0;
   async function growTranscript() {
     const file = opened?.file;
@@ -385,22 +377,20 @@
       else void loadTranscript();
     } else if (p.listed && !was?.listed) {
       // The run's list is written: from here the words are this run's, none until its first
-      // piece, never an older run's transcript under indices the new words would reuse (2j).
+      // piece, never an older run's transcript under indices the new words would reuse.
       void loadTranscript();
     } else if (p.transcribed != null && p.transcribed !== was?.transcribed) {
       void growTranscript();
     }
   }
 
-  // What the chip on the picture says while the open recording is analysed (mock L), with a thin
-  // bar per track under it when there are several (2h).
+  // What the chip on the picture says while the open recording is analysed, with a thin bar per
+  // track under it when there are several.
   const chip = $derived(steps.label(analysis, steps.paused(lane, analysis?.file)));
   const chipSteps = $derived(steps.current(analysis));
 
-  // Re-analyse: the pipeline with the settings now, in the background (5s). The user's edit list is
-  // kept, with the speakers matched again against the remembered voices: nothing to ask. A fresh
-  // cut (`fresh`) replaces their cut, so when the list holds their edits, ask first (it is kept as
-  // a backup).
+  // Re-analyse in the background: the user's edit list is kept, speakers matched again, nothing to
+  // ask. A fresh cut (`fresh`) replaces their cut, so when the list holds their edits, ask first.
   async function reanalyse(fresh: boolean) {
     if (!opened) return;
     const file = opened.file;
@@ -421,9 +411,8 @@
     }
   }
 
-  // The word bar's Correct (5aa): every fix given to the words heard the same way, then a run that
-  // hears the speakers and the words again, the edit list kept. It re-transcribes the recording,
-  // which takes about as long as its first transcription did, so ask first.
+  // The word bar's Correct: every fix given to the words heard the same way, then the speakers and
+  // words heard again, the edit list kept. As slow as the first transcription, so ask first.
   async function correct(): Promise<api.Corrected | null> {
     if (!opened) return null;
     const file = opened.file;
@@ -442,7 +431,7 @@
     }
   }
 
-  // Back to the start window (2i). The player stops and forgets the recording; what the page held
+  // Back to the start window. The player stops and forgets the recording; what the page held
   // for it goes too. Edits were saved as they were made; an analysis of it goes on in the background.
   async function closeRecording() {
     // Also while a recording is still opening: the close wins (see `loadGen`).
@@ -464,7 +453,7 @@
     failure = null;
   }
 
-  // A model change surfaces as 2d's out-of-date notice for the open recording; nothing re-runs.
+  // A model change surfaces as the out-of-date notice for the open recording; nothing re-runs.
   function settingsSaved(v: api.SettingsView) {
     flagBelow = v.settings.flagBelow;
     const o = opened;
@@ -497,10 +486,8 @@
   function onKey(e: KeyboardEvent) {
     // The dialog has the keys while it is open (Escape closes it).
     if (settingsOpen) return;
-    // A field keeps every key, the title bar's shortcuts too (2i): Ctrl+W from a caption number
-    // not yet committed would close the recording before its change is saved.
-    // A textarea or anything editable keeps them too (2r: Backspace in the Captions panel's lists
-    // cut the lanes selection, and in review would have removed the clip).
+    // A field, a textarea or anything editable keeps every key, the title bar's shortcuts too:
+    // Ctrl+W from an uncommitted number would close before saving, Backspace would cut the lanes.
     const t = e.target;
     if (t instanceof HTMLInputElement || t instanceof HTMLSelectElement || t instanceof HTMLTextAreaElement) return;
     if (t instanceof HTMLElement && t.isContentEditable) return;
@@ -560,10 +547,8 @@
     }
   }
 
-  // Where the edit actions go, and review's bar (2o): the picture's bottom-right corner, risen
-  // above the caption block when the captions preview would sit under them (2r, layout.ts
-  // `floatAt`). 2n had them centred over the lanes, where they hid the cuts; 2g at the selection or
-  // the playhead, so they slid along while playing.
+  // Where the edit actions and review's bar go: the picture's bottom-right corner, risen above the
+  // caption block when the captions preview would sit under them (layout.ts `floatAt`).
   const band = $derived(edit?.editable && edit.captions?.preview ? { ...edit.captions, speakers: edit.speakers.length } : null);
   const toolsAt = $derived(floatAt(L.picture, L.video, TOOLS, band));
   const reviewAt = $derived(floatAt(L.picture, L.video, REVIEW, band));

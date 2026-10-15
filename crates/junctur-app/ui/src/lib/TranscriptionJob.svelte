@@ -1,10 +1,6 @@
 <script lang="ts">
-  // The transcription job in the Properties tab (2k): the one shared background job (2j) seen from
-  // whichever recording is open, with Pause / Resume (Uezar: "a panel inside properties to see the
-  // current transcription job if the user changed to another video, and the ability to pause it").
-  // Pause is the lane's: the transcribing recording stops after the chunk it is on and the ones
-  // waiting keep waiting. Its own component because Properties is the open recording's and this is
-  // not.
+  // The one shared transcription job, seen from whichever recording is open, with Pause / Resume.
+  // Its own component because Properties is the open recording's and this is not.
   import * as api from "./api";
   import { clock } from "./time";
   import { current, paused, whole } from "./steps";

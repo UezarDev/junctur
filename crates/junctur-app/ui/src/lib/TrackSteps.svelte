@@ -1,7 +1,6 @@
 <script lang="ts">
-  // One row per track for the running analysis stage (2h): the track, a bar and its percentage.
-  // Full rows in Properties; `compact` (bars only, the percentage in the tooltip) under the chip on
-  // the picture and in a start-window row, where there is no room for names.
+  // One row per track for the running analysis stage. `compact` (bars only, the percentage in the
+  // tooltip) is for the chip on the picture and start-window rows, where names do not fit.
   import type * as api from "./api";
   import { percent } from "./steps";
 

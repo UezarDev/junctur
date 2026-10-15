@@ -2,6 +2,7 @@
 //! output may land on it, under any of its names. And replacing a file whole ([`write_replacing`]),
 //! so a reader, or a close in the middle, never finds it half-written.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -16,8 +17,8 @@ pub fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 /// A rename can meet a reader (an antivirus scan, the edit-list watch) holding the file on
-/// Windows; it is retried this many times, this far apart, before it fails.
-const RENAME_TRIES: u32 = 5;
+/// Windows; it is tried this many times, this far apart, before it fails.
+const RENAME_TRIES: u32 = 6;
 const RENAME_WAIT: Duration = Duration::from_millis(40);
 
 /// Renames `tmp` over `path`, retrying while a reader holds `path` ([`RENAME_TRIES`]).
@@ -51,7 +52,7 @@ pub fn remove_retrying(path: &Path) -> std::io::Result<()> {
 
 /// A temporary name beside `path` no other writer uses: this process and a counter, so two
 /// writers (two threads, or the app and the CLI) never write one temporary file.
-fn temp_beside(path: &Path) -> PathBuf {
+pub fn temp_beside(path: &Path) -> PathBuf {
     static N: AtomicU32 = AtomicU32::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
     let mut name = path.file_name().unwrap_or_default().to_os_string();
@@ -62,12 +63,41 @@ fn temp_beside(path: &Path) -> PathBuf {
 /// Writes `bytes` to `path` through a temporary file renamed over it: `path` holds the old content
 /// or the new, never part of either. The temporary file is removed when anything fails.
 pub fn write_replacing(path: &Path, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
+    write_replacing_with(path, |f| f.write_all(bytes.as_ref()))
+}
+
+/// [`write_replacing`] with the content written by `write` into the temporary file, for a file too
+/// big to gather into one buffer first.
+pub fn write_replacing_with(
+    path: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     let tmp = temp_beside(path);
-    let result = std::fs::write(&tmp, bytes).and_then(|()| rename_over(&tmp, path));
+    let result = std::fs::File::create(&tmp)
+        .and_then(|mut f| write(&mut f))
+        .and_then(|()| rename_over(&tmp, path));
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
     result
+}
+
+/// `<name>.<suffix>` beside `path` for `n` 1, else `<name>.<suffix><n>`: backups and files set
+/// aside, numbered so none is ever overwritten.
+pub fn numbered(path: &Path, suffix: &str, n: u32) -> PathBuf {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    match n {
+        1 => path.with_file_name(format!("{name}.{suffix}")),
+        n => path.with_file_name(format!("{name}.{suffix}{n}")),
+    }
+}
+
+/// The first [`numbered`] name that does not exist.
+pub fn first_free(path: &Path, suffix: &str) -> PathBuf {
+    (1..)
+        .map(|n| numbered(path, suffix, n))
+        .find(|p| !p.exists())
+        .expect("some name is free")
 }
 
 /// Refuse `out` when it is `source`.

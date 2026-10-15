@@ -1,14 +1,18 @@
 //! A recording's Junctur project as the app shows it: the same folder `junctur status` reads
 //! (`pipeline::Project::open` with the default cache), with each stage's state and whether the
-//! transcript and edit list exist. The app runs the stages itself in `analysis` (2d).
+//! transcript and edit list exist. The app runs the stages itself in `analysis`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use junctur_core::ffmpeg;
-use junctur_core::pipeline::{self, Project, StageState, STAGES};
+use junctur_core::pipeline::{self, Project, StageName, StageState};
 use junctur_core::transcribe;
 use serde::Serialize;
+
+use crate::lock::lock;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,40 +47,80 @@ pub struct EditSummary {
 /// `None` is the CLI's default cache.
 pub fn status(file: &Path, cache_dir: Option<PathBuf>) -> Result<ProjectStatus, String> {
     let p = Project::open(file, cache_dir, None).map_err(|e| e.to_string())?;
+    Ok(status_of(&p))
+}
+
+fn status_of(p: &Project) -> ProjectStatus {
     let jobs = p.jobs();
-    let stages = STAGES
-        .iter()
-        .map(|&name| Stage {
-            name: name.to_string(),
-            state: jobs.get(name).map_or(StageState::Pending, |r| r.state),
+    let stages = StageName::ALL
+        .into_iter()
+        .map(|stage| Stage {
+            name: stage.name().to_string(),
+            state: jobs.get(stage).map_or(StageState::Pending, |r| r.state),
         })
         .collect();
     let (edit, edit_error) = if p.edit_path().is_file() {
-        match p.edit() {
-            Ok(e) => (
-                Some(EditSummary {
-                    ranges: e.keep.len(),
-                    kept: e.kept(),
-                    duration: e.duration,
-                }),
-                None,
-            ),
-            Err(e) => (None, Some(e.to_string())),
+        match summary(p) {
+            Ok(e) => (Some(e), None),
+            Err(e) => (None, Some(e)),
         }
     } else {
         (None, None)
     };
-    Ok(ProjectStatus {
+    ProjectStatus {
         dir: p.dir.display().to_string(),
         stages,
         transcript: transcribe::path(&p.dir).is_file(),
         edit,
         edit_error,
         edit_path: p.edit_path(),
-    })
+    }
 }
 
-/// A recent recording's line on the start window (2g's S): how long it is and where its analysis
+/// Each edit list's text as last parsed here and what it said: the status is read on every line a
+/// run logs, and parsing a long recording's list each time is the cost, not reading it.
+type Parsed = HashMap<PathBuf, (String, Result<EditSummary, String>)>;
+static PARSED: Mutex<Option<Parsed>> = Mutex::new(None);
+/// The lists the status is read for at once (the open recording, runs, the start window's rows),
+/// and the text they may hold together: past either the cache starts over, and a list bigger than
+/// that is parsed each time rather than held.
+const PARSED_MAX: usize = 8;
+const PARSED_BYTES: usize = 16 << 20;
+
+/// `p`'s edit list summed up, or why it does not read, as `p.edit()` says it; parsed again only when
+/// its text is not the text parsed last.
+fn summary(p: &Project) -> Result<EditSummary, String> {
+    let path = p.edit_path();
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| junctur_core::Error::from(e).to_string())?;
+    if let Some((t, s)) = lock(&PARSED).as_ref().and_then(|m| m.get(&path)) {
+        if *t == text {
+            return s.clone();
+        }
+    }
+    let s = p
+        .parse_edit(&text)
+        .map(|e| EditSummary {
+            ranges: e.keep.len(),
+            kept: e.kept(),
+            duration: e.duration,
+        })
+        .map_err(|e| e.to_string());
+    if text.len() > PARSED_BYTES {
+        return s;
+    }
+    let mut held = lock(&PARSED);
+    let m = held.get_or_insert_with(HashMap::new);
+    m.remove(&path);
+    let bytes: usize = m.values().map(|(t, _)| t.len()).sum();
+    if m.len() >= PARSED_MAX || bytes + text.len() > PARSED_BYTES {
+        m.clear();
+    }
+    m.insert(path, (text, s.clone()));
+    s
+}
+
+/// A recent recording's line on the start window: how long it is and where its analysis
 /// stands. Asked per row after the list is drawn, so the list never waits on its projects.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,7 +128,7 @@ pub struct RecordingInfo {
     pub duration: Option<f64>,
     /// The edit list's kept ranges, when it has one that parses.
     pub ranges: Option<usize>,
-    /// Stages done, of [`STAGES`].
+    /// Stages done, of [`StageName::ALL`].
     pub stages_done: usize,
     pub stages: usize,
 }
@@ -92,7 +136,8 @@ pub struct RecordingInfo {
 /// [`RecordingInfo`] of `file`: its length from the edit list, else the track analysis's cache,
 /// else ffprobe (only for a recording never analysed this far).
 pub fn info(file: &Path, cache_dir: Option<PathBuf>) -> Result<RecordingInfo, String> {
-    let s = status(file, cache_dir.clone())?;
+    let p = Project::open(file, cache_dir, None).map_err(|e| e.to_string())?;
+    let s = status_of(&p);
     let done = s
         .stages
         .iter()
@@ -100,9 +145,7 @@ pub fn info(file: &Path, cache_dir: Option<PathBuf>) -> Result<RecordingInfo, St
         .count();
     let duration = match &s.edit {
         Some(e) => Some(e.duration),
-        None => Project::open(file, cache_dir, None)
-            .ok()
-            .and_then(|p| pipeline::cached_tracks(&p))
+        None => pipeline::cached_tracks(&p)
             .map(|r| r.duration)
             .or_else(|| ffmpeg::probe(file).ok().map(|p| p.duration)),
     };
@@ -160,115 +203,4 @@ pub fn thumbnail(file: &Path, cache_dir: Option<PathBuf>) -> Result<Vec<u8>, Str
 const THUMBNAIL: &str = "thumb.jpg";
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use junctur_core::edit::{CutSettings, EditList, Range};
-
-    fn scratch(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("junctur-app-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
-
-    #[test]
-    fn new_project_has_nothing_yet() {
-        let d = scratch("new");
-        let file = d.join("rec.mp4");
-        std::fs::write(&file, b"not a video").unwrap();
-        let s = status(&file, Some(d.join("cache"))).unwrap();
-        assert_eq!(s.stages.len(), STAGES.len());
-        assert!(s.stages.iter().all(|st| st.state == StageState::Pending));
-        assert!(!s.transcript);
-        assert_eq!((s.edit, s.edit_error), (None, None));
-        assert!(Path::new(&s.dir).is_dir());
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn reports_edit_list_and_transcript() {
-        let d = scratch("edit");
-        let file = d.join("rec.mp4");
-        std::fs::write(&file, b"not a video").unwrap();
-        let p = Project::open(&file, Some(d.join("cache")), None).unwrap();
-        let e = EditList {
-            source: p.file.clone(),
-            duration: 60.0,
-            settings: CutSettings::default(),
-            keep: vec![
-                Range {
-                    start: 0.0,
-                    end: 10.0,
-                },
-                Range {
-                    start: 20.0,
-                    end: 25.0,
-                },
-            ],
-            speakers: Default::default(),
-            captions: Default::default(),
-            fixes: Vec::new(),
-            times: Vec::new(),
-            windows: vec![],
-        };
-        std::fs::write(p.edit_path(), e.to_text()).unwrap();
-        std::fs::write(transcribe::path(&p.dir), b"{}").unwrap();
-        let s = status(&file, Some(d.join("cache"))).unwrap();
-        assert!(s.transcript);
-        let summary = s.edit.unwrap();
-        assert_eq!(summary.ranges, 2);
-        assert!((summary.kept - 15.0).abs() < 1e-9);
-        assert_eq!(summary.duration, 60.0);
-
-        std::fs::write(p.edit_path(), "garbage").unwrap();
-        let s = status(&file, Some(d.join("cache"))).unwrap();
-        assert_eq!(s.edit, None);
-        assert!(s.edit_error.is_some());
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn a_recordings_info_and_still() {
-        let d = scratch("info");
-        let file = d.join("rec.mkv");
-        let ok = std::process::Command::new("ffmpeg")
-            .args([
-                "-v",
-                "error",
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc=d=3:s=640x360:r=25",
-            ])
-            .args(["-f", "lavfi", "-i", "sine=d=3", "-shortest"])
-            .arg(&file)
-            .status()
-            .unwrap()
-            .success();
-        assert!(ok);
-        let cache = Some(d.join("cache"));
-        let i = info(&file, cache.clone()).unwrap();
-        assert_eq!((i.ranges, i.stages_done, i.stages), (None, 0, STAGES.len()));
-        assert!(
-            (i.duration.unwrap() - 3.0).abs() < 0.1,
-            "from ffprobe: {i:?}"
-        );
-        let jpg = thumbnail(&file, cache.clone()).unwrap();
-        assert_eq!(&jpg[..2], &[0xFF, 0xD8], "a JPEG");
-        let dir = PathBuf::from(status(&file, cache.clone()).unwrap().dir);
-        assert!(dir.join(THUMBNAIL).is_file());
-        // Made once: what is there is what comes back.
-        std::fs::write(dir.join(THUMBNAIL), b"kept").unwrap();
-        assert_eq!(thumbnail(&file, cache.clone()).unwrap(), b"kept");
-        assert!(thumbnail(&d.join("nope.mkv"), cache).is_err());
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn missing_file_is_an_error() {
-        let d = scratch("missing");
-        assert!(status(&d.join("nope.mp4"), Some(d.join("cache"))).is_err());
-        let _ = std::fs::remove_dir_all(&d);
-    }
-}
+mod tests;

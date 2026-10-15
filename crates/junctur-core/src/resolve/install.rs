@@ -1,5 +1,5 @@
 //! Putting the Junctur script into Resolve's Scripts folder, where Workspace > Scripts lists it
-//! (5g), and the caption template bin into the mailbox for the script to import. The script is
+//! and the caption template bin into the mailbox for the script to import. The script is
 //! written with the mailbox paths in it: Resolve's sandboxed script state has no environment of
 //! Junctur's to find them from. Written only when the contents differ, so sending again is cheap.
 

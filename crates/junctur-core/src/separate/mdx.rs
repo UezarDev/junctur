@@ -46,24 +46,105 @@ impl Mdx {
 
     /// Vocals of one stereo chunk (`left`, `right`, each [`CHUNK`] samples).
     pub fn vocals(&mut self, left: &[f32], right: &[f32]) -> Result<[Vec<f32>; 2]> {
-        let plane = DIM_F * DIM_T;
-        let mut input = vec![0.0f32; 4 * plane];
-        for (c, x) in [left, right].into_iter().enumerate() {
-            for (t, frame) in self.stft.forward(x).iter().enumerate() {
-                for (f, v) in frame[..DIM_F].iter().enumerate() {
-                    input[(2 * c) * plane + f * DIM_T + t] = v.re;
-                    input[(2 * c + 1) * plane + f * DIM_T + t] = v.im;
-                }
-            }
-        }
+        let input = model_input(&self.stft, left, right);
         let tensor = Tensor::from_array(([1usize, 4, DIM_F, DIM_T], input))?;
         let res = self.session.run(ort::inputs!["input" => tensor])?;
         let out = res["output"].try_extract_tensor::<f32>()?.1;
-        let bins = N_FFT / 2 + 1;
-        let mut stems = [Vec::new(), Vec::new()];
-        for (c, stem) in stems.iter_mut().enumerate() {
-            let spec: Vec<Vec<Complex32>> = (0..DIM_T)
-                .map(|t| {
+        Ok(stems_from(&self.stft, out))
+    }
+}
+
+/// The model's input for one stereo chunk: `[4][DIM_F][DIM_T]`, each plane written in order
+/// (the frame-major spectrum read across frames) so the writes run straight through memory.
+fn model_input(stft: &Stft, left: &[f32], right: &[f32]) -> Vec<f32> {
+    let (plane, bins) = (DIM_F * DIM_T, stft.bins());
+    let mut input = vec![0.0f32; 4 * plane];
+    for (x, planes) in [left, right]
+        .into_iter()
+        .zip(input.chunks_exact_mut(2 * plane))
+    {
+        let spec = stft.forward(x);
+        assert_eq!(spec.len(), DIM_T * bins, "a chunk is DIM_T frames");
+        // One pass over the spectrum fills both planes, each written straight through.
+        let (re, im) = planes.split_at_mut(plane);
+        for f in 0..DIM_F {
+            for t in 0..DIM_T {
+                let v = spec[t * bins + f];
+                re[f * DIM_T + t] = v.re;
+                im[f * DIM_T + t] = v.im;
+            }
+        }
+    }
+    input
+}
+
+/// Both channels' vocals from the model's output, the bins past `DIM_F` zero.
+fn stems_from(stft: &Stft, out: &[f32]) -> [Vec<f32>; 2] {
+    let (plane, bins) = (DIM_F * DIM_T, stft.bins());
+    [0, 1].map(|c| {
+        let (re, im) = (&out[2 * c * plane..], &out[(2 * c + 1) * plane..]);
+        let mut spec = vec![Complex32::default(); DIM_T * bins];
+        for f in 0..DIM_F {
+            for t in 0..DIM_T {
+                spec[t * bins + f] = Complex32::new(re[f * DIM_T + t], im[f * DIM_T + t]);
+            }
+        }
+        stft.inverse(&spec, CHUNK)
+            .into_iter()
+            .map(|x| x * COMPENSATE)
+            .collect()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Synthetic stereo: two tones and a little hash noise per channel.
+    fn chunk(seed: usize) -> Vec<f32> {
+        (0..CHUNK)
+            .map(|i| {
+                let t = i as f32;
+                0.3 * (t * 0.013 * (seed + 1) as f32).sin()
+                    + 0.1 * (t * 0.41).sin()
+                    + ((i * 7919 + seed) % 89) as f32 * 1e-3
+            })
+            .collect()
+    }
+
+    /// The input and the stems as built before the flat spectrum (a Vec per frame, written
+    /// across the planes), bit for bit.
+    #[test]
+    fn layout_matches_the_per_frame_version_bit_for_bit() {
+        let stft = Stft::new(N_FFT, HOP);
+        let bins = stft.bins();
+        let frames_of = |x: &[f32]| -> Vec<Vec<Complex32>> {
+            stft.forward(x)
+                .chunks_exact(bins)
+                .map(<[_]>::to_vec)
+                .collect()
+        };
+        let (left, right) = (chunk(0), chunk(1));
+        let plane = DIM_F * DIM_T;
+        let mut old = vec![0.0f32; 4 * plane];
+        for (c, x) in [&left, &right].into_iter().enumerate() {
+            for (t, frame) in frames_of(x).iter().enumerate() {
+                for (f, v) in frame[..DIM_F].iter().enumerate() {
+                    old[(2 * c) * plane + f * DIM_T + t] = v.re;
+                    old[(2 * c + 1) * plane + f * DIM_T + t] = v.im;
+                }
+            }
+        }
+        let new = model_input(&stft, &left, &right);
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&new), bits(&old));
+
+        // Any output tensor: the input itself, scaled, stands in for the model's.
+        let out: Vec<f32> = old.iter().map(|v| v * 0.5).collect();
+        let stems = stems_from(&stft, &out);
+        for (c, stem) in stems.iter().enumerate() {
+            let spec: Vec<Complex32> = (0..DIM_T)
+                .flat_map(|t| {
                     let mut frame = vec![Complex32::default(); bins];
                     for (f, v) in frame[..DIM_F].iter_mut().enumerate() {
                         *v = Complex32::new(
@@ -74,13 +155,12 @@ impl Mdx {
                     frame
                 })
                 .collect();
-            *stem = self
-                .stft
+            let want: Vec<f32> = stft
                 .inverse(&spec, CHUNK)
                 .into_iter()
                 .map(|x| x * COMPENSATE)
                 .collect();
+            assert_eq!(bits(stem), bits(&want));
         }
-        Ok(stems)
     }
 }

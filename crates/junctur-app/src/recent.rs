@@ -1,9 +1,6 @@
-//! The recordings opened before, for the start window (2d): `junctur/recent.json` beside the user's
-//! config and voices (`JUNCTUR_RECENT` names another file, as test mode does), newest first.
-//!
-//! Only paths and when each was opened: anything about a recording's analysis would mean opening
-//! every project to draw the list. A recent list that cannot be read is an empty one, and one that
-//! cannot be written is said on stderr: neither is worth stopping a recording from opening.
+//! The recordings opened before, for the start window: `junctur/recent.json` beside the user's
+//! config (`JUNCTUR_RECENT` names another file), newest first. Only paths and times, so drawing the
+//! list opens no project; a list that cannot be read or written never stops a recording opening.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};

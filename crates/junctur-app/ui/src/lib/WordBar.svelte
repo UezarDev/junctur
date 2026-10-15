@@ -1,33 +1,8 @@
 <script lang="ts">
-  // What a selection of transcript words can do, at the bottom of the Transcript tab (2p; before, a
-  // name field in the floating bar over the lanes). What is selected ("12 words in 3 places"), Cut
-  // and Keep (every stretch in one undoable edit), and one button per person who already has a
-  // name: the recording's named speakers and the voices Junctur remembers, in their colours, so
-  // giving the words a speaker is one click. A click remembers that person's voice from every
-  // selected stretch as one enrolment (what 5b's Remember voice… did with a typed name): the
-  // seconds are theirs in this recording (5c pins) and they are recognised in others. "New name…"
-  // is for someone not listed yet. The engine's answer shows on the line above.
-  //
-  // Fix text (5x) opens a field across the bar holding what the selected words show now, to retype
-  // them as one text: saved at once as one fix for all of them (the word fixes inside go), its new
-  // words added to the word list, an empty field or the heard words again taking the fixes away. In
-  // the bar rather than in the transcript row: a sentence needs the room, and a row is one fixed
-  // height in a virtual list. One stretch only: one text typed for several places has nowhere to go.
-  //
-  // Correct (5aa), at the end of the people row as Uezar asked ("next to the speaker selection"),
-  // is for the whole recording, not the selection: every fix given to the words heard the same way,
-  // then the speakers heard again and the recording transcribed again with the word list, the cuts
-  // and edits kept. The panel asks first and says what it started.
-  //
-  // A component of its own rather than more of TranscriptPanel: the panel is the virtual word list
-  // and its pointer handling; this is the actions on what it selected, with its own fetch of the
-  // remembered voices and its own busy state while an enrolment runs.
-  //
-  // Shown whenever the transcript can be edited, a hint in place of the actions while no words are
-  // selected (5v): mounted only with a selection, it took its height from the scroller under a
-  // double-click's first press, so a word in the panel's bottom strip was under the bar by the
-  // second press and the fix field never opened. Its rows stay laid out, hidden and inert, so the
-  // bar is as tall with nothing selected as with words, and selecting moves nothing.
+  // What a selection of transcript words can do: Cut, Keep, Fix text, one-click speakers (each
+  // remembers that voice) and Correct. Apart from TranscriptPanel, which is the virtual word list.
+  // Shown, as a hint, with nothing selected too: its rows stay laid out but hidden, so selecting
+  // never changes the panel's height under a double-click.
   import { onDestroy, untrack } from "svelte";
   import * as api from "./api";
   import * as sel from "./selection";
@@ -47,19 +22,19 @@
   }: {
     edit: api.EditState | null;
     words: Words;
-    /** A selection of words, or null for the hint (5v). */
+    /** A selection of words, or null for the hint. */
     selection: sel.Selection | null;
     onSelect: (s: sel.Selection | null) => void;
     onError: (message: string) => void;
-    /** The transcript has flagged words (5o): Looks right is in the bar, greyed unless it applies. */
+    /** The transcript has flagged words: Looks right is in the bar, greyed unless it applies. */
     checks?: boolean;
-    /** The selection is one flagged word (5o): confirms it as heard and goes to the next; else null. */
+    /** The selection is one flagged word: confirms it as heard and goes to the next; else null. */
     onLooksRight?: (() => void) | null;
-    /** The Fix text field is open (the panel opens it on a double-click, 5x). */
+    /** The Fix text field is open (the panel opens it on a double-click). */
     retyping?: boolean;
-    /** What a fix did besides itself: the word list's new entries, the other places fixed (5aa). */
+    /** What a fix did besides itself: the word list's new entries, the other places fixed. */
     onFixed: (r: api.Fixed) => void;
-    /** The Correct button (5aa). */
+    /** The Correct button. */
     onCorrect: () => Promise<void>;
   } = $props();
 
@@ -101,11 +76,8 @@
 
   const runs = $derived(sel.pairs(selection));
 
-  // Fix text (5x). The field is for the stretch it was opened on. Leaving it saves what was typed,
-  // as 5t's one-word field does on leaving: another selection (a Shift+click extending it), the
-  // selection cleared, the bar gone (5x repair: the draft was dropped), the Fix text button pressed
-  // again to close it. Escape, and the field's own
-  // ×, leave the text as it was, as 5t's Escape does.
+  // Fix text, for the stretch it was opened on. Leaving it any way saves what was typed; Escape and
+  // the field's own × leave the text as it was. In the bar, as a virtual list's row has one height.
   let draft = $state("");
   let shown = "";
   let openFor: string | null = null;
@@ -164,10 +136,9 @@
     requestAnimationFrame(() => el.select());
   }
 
-  // Another selection: the last answer was about the words before (an enrolment already on its
-  // way still ends with its own line). An open "New name…" field and what is typed in it stay
-  // (2p repair): Ctrl+clicking more of someone's lines while naming them is the point. They go
-  // when the selection clears, as they went with the bar when clearing unmounted it (5v).
+  // Another selection: the last answer was about the words before. An open "New name…" field
+  // stays, since Ctrl+clicking more of someone's lines while naming them is the point; it goes
+  // when the selection clears.
   $effect(() => {
     said = null;
     if (!selection) {
@@ -230,7 +201,7 @@
         : "Select one stretch of words to fix its text: one text cannot go in several places"}>Fix text</button
     >
     {#if checks}
-      <!-- Greyed rather than left out (5v), as the header's ‹ › are, so the row does not reflow. -->
+      <!-- Greyed rather than left out, as the header's ‹ › are, so the row does not reflow. -->
       <button
         disabled={!onLooksRight}
         onclick={() => onLooksRight?.()}

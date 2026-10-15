@@ -1,8 +1,6 @@
-//! The only place that runs ffmpeg/ffprobe.
-//!
-//! They are external programs found on PATH (a DECISIONS-level choice for now), so every call goes
-//! through here: one spot to swap for bundled binaries or a native decoder later. [`probe`] asks
-//! what a file holds, [`pcm`] streams audio samples in and out, [`feed`] pipes bytes into a muxer.
+//! The only place that runs ffmpeg/ffprobe, external programs found on PATH: one spot to swap for
+//! bundled binaries or a native decoder later. [`probe`] asks what a file holds, [`pcm`] streams
+//! audio samples in and out, [`feed`] pipes bytes into a muxer.
 
 mod feed;
 mod pcm;
