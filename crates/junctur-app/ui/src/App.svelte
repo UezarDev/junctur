@@ -876,6 +876,7 @@
           listed={analysis?.listed ?? false}
           waiting={analysis?.phase === "waiting"}
           failed={analysis?.phase === "failed"}
+          error={analysis?.phase === "failed" ? analysis.error : null}
           {through}
           {player}
           {edit}

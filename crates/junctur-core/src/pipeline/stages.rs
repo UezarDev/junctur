@@ -125,9 +125,9 @@ pub(super) fn speakers_stage(
         None => jobs.stage(&p.dir, StageName::Speakers, log, |log| {
             // The user's pins cut the windows and outlive the hearing they were made on, unless the
             // speakers are to be named afresh: then they are not used, and kept in a copy of the
-            // file the new hearing replaces.
+            // file the new hearing replaces (made once it is heard, so a hearing that fails
+            // leaves no copy and no line saying they were named afresh).
             let pins = if opts.forget.names {
-                keep_copy(p, log)?;
                 Vec::new()
             } else {
                 previous
@@ -155,6 +155,7 @@ pub(super) fn speakers_stage(
             // Named afresh: said before the hearing lands, so a run stopped before its list names
             // them afresh on its resume instead of carrying the old names onto it.
             if opts.forget.names {
+                keep_copy(p, log)?;
                 crate::output::write_replacing(&p.dir.join(AFRESH_FILE), b"")?;
             }
             write_speakers(p, &f)?;

@@ -221,7 +221,8 @@ empty transcript), analyses the recording again, part by part. Its pop-up has tw
 **Cuts** (unticked, a fresh cut from the analysis; when the list holds your edits it asks first and keeps
 them as `edit.junctur.bak*`, as `junctur analyze` does), **Names and voices** (unticked, the speakers are
 heard again and named afresh, without your names or pins; the list and `speakers.json` are backed up,
-the remembered voices file is never touched) and **Corrected words** (your fixes and the word times set by
+the remembered voices file is never touched; when the speakers cannot be heard, say offline with their
+model not yet fetched, the run stops before the list and the note under the transcript says why) and **Corrected words** (your fixes and the word times set by
 moving a cut's edge or a word's own edge; unticked, they are dropped, the list backed up, so "transcribe
 again ignoring my fixes" is one untick). It opens on everything redone and everything kept, and
 Re-analyse whole timeline does what is ticked: with nothing ticked to redo it reruns only what the

@@ -31,6 +31,7 @@
     listed = false,
     waiting = false,
     failed = false,
+    error = null,
     through = null,
     player,
     edit,
@@ -51,6 +52,8 @@
     waiting?: boolean;
     /** Its analysis failed (a transcription that stopped part way keeps its pieces). */
     failed?: boolean;
+    /** Why it failed, when it did (the run's error, as Properties shows it). */
+    error?: string | null;
     /** While it transcribes: the words shown are every one before this many seconds. */
     through?: number | null;
     player: api.PlayerState | null;
@@ -350,7 +353,17 @@
     const started = await correct();
     if (!started || !mounted) return;
     note = `Correcting: ${started.doing} (Properties shows how far).`;
+    noted = true;
   }
+  // The run the note is about: ended failed, the note says why instead of that it goes on (a
+  // run asked to name the speakers afresh that could not hear them stops, and says so only here
+  // and in Properties).
+  let noted = $state(false);
+  $effect(() => {
+    if (!noted || analysing) return;
+    noted = false;
+    if (failed) note = `Correct stopped: ${error ?? "Properties says why"}.`;
+  });
 
   const first = $derived(Math.max(0, Math.floor(top / ROW) - OVERSCAN));
   const visible = $derived.by(() => {
