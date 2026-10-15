@@ -1,4 +1,4 @@
-use super::again::{AGAIN_FILE, BEFORE_FILE, SET_ASIDE_FILE, WITHIN_FILE};
+use super::again::{AGAIN_FILE, BEFORE_FILE, SET_ASIDE_FILE};
 use super::editlist::{back_up, is_generated, rewrite, Draft, Rewrite};
 use super::speaker_files::{set_aside, write_speakers};
 use super::*;
@@ -740,10 +740,10 @@ fn transcript_of(words: &[(f64, &str)]) -> Transcript {
 }
 
 #[test]
-fn a_retranscription_carries_the_fixes_onto_the_new_words_and_spreads_them() {
+fn a_retranscription_carries_the_fixes_onto_the_new_words_and_gives_them_to_no_other() {
     // The Correct button's re-transcription. At its end the fixes, read against the
-    // transcript it replaces, are moved onto the new words and spread to the words heard
-    // alike, and the mark that asked for it goes.
+    // transcript it replaces, are moved onto the new words, and the mark that asked for it
+    // goes. A word heard like a fixed one is left as heard (5ah: no spread).
     let (d, p) = scratch_project("carry");
     let fix = |start: f64, text: &str| edit::Fix {
         track: 0,
@@ -786,8 +786,8 @@ fn a_retranscription_carries_the_fixes_onto_the_new_words_and_spreads_them() {
     std::fs::write(&partial, "{}").unwrap();
     assert!(!hear_again(&p, &plain, &mut log).unwrap());
     std::fs::remove_file(&partial).unwrap();
-    // While it ran, the user kept the "Bane." at 3 as heard ("Undo those" on a spread): it
-    // stays so, carried like any fix, and no spread reaches it.
+    // While it ran, the user kept the "Bane." at 3 as heard (Looks right): it stays so, carried
+    // like any fix.
     e.fixes.push(fix(3.0, "Bane."));
     std::fs::write(p.edit_path(), e.to_text()).unwrap();
     // The new transcript: "Bane," a little later, "Mel" now "and", a third "Bane" at 7. It is
@@ -821,11 +821,12 @@ fn a_retranscription_carries_the_fixes_onto_the_new_words_and_spreads_them() {
     forget_fixes_set_aside(&p, &[]).unwrap();
     e = p.edit().unwrap();
     let shown: Vec<(f64, &str)> = e.fixes.iter().map(|f| (f.start, f.text.as_str())).collect();
-    assert_eq!(shown, [(1.1, "Vayne,"), (3.0, "Bane."), (7.0, "Vayne")]);
+    // The "bane" at 7, new, heard like the fixed "Bane,": not fixed.
+    assert_eq!(shown, [(1.1, "Vayne,"), (3.0, "Bane.")]);
     let said = lines.borrow().clone();
     assert!(
-        said.iter().any(|l| l
-            == "fixed words: 2 kept on their words, 0 no longer needed, 1 set aside; 1 more place(s) fixed"),
+        said.iter()
+            .any(|l| l == "fixed words: 2 kept on their words, 0 no longer needed, 1 set aside"),
         "{said:?}"
     );
     assert!(said
@@ -976,7 +977,7 @@ fn a_retranscription_carries_word_times_and_survives_being_stopped_or_asked_agai
     assert!(lines.borrow().iter().any(|l| l
         == "fixed word set aside: \"Hola,\" (heard \"hola\") at 0:00:06 is on a track with no words this time"));
     assert!(lines.borrow().iter().any(|l| l
-        == "fixed words: 1 kept on their words, 0 no longer needed, 1 set aside; 0 more place(s) fixed; word times: 1 kept on their words, 0 no longer needed, 1 set aside"),
+        == "fixed words: 1 kept on their words, 0 no longer needed, 1 set aside; word times: 1 kept on their words, 0 no longer needed, 1 set aside"),
         "{:?}", lines.borrow());
     // A run adds one more after the panel listed the first: "seen" forgets only that first.
     let more = SetAside {
@@ -1245,10 +1246,9 @@ fn a_stretch_is_refused_with_the_speakers_or_nothing_to_splice_into() {
 }
 
 #[test]
-fn a_selection_transcribed_again_spreads_fixes_only_inside_it() {
-    // Re-analyse selection: the carry's spread gives a fix to the new words heard alike inside
-    // the stretch, never to words outside it, which stay as they were; the stretch is kept beside
-    // the mark for a resumed run and goes with it.
+fn a_selection_transcribed_again_gives_no_fix_to_words_outside_it() {
+    // Re-analyse selection: the fix is carried onto its own word and given to no other (5ah: no
+    // spread), neither the "Bane" outside the stretch nor the new one heard alike inside it.
     let (d, p) = scratch_project("carry-within");
     let fix = |start: f64, text: &str| edit::Fix {
         track: 0,
@@ -1275,23 +1275,11 @@ fn a_selection_transcribed_again_spreads_fixes_only_inside_it() {
     let old = transcript_of(&[(1.0, " Bane"), (3.0, " Bane"), (7.0, " Ben")]);
     std::fs::write(transcribe::path(&p.dir), serde_json::to_vec(&old).unwrap()).unwrap();
     let mut log = |_: &str| {};
-    let whole = PipelineOptions {
+    let stretch = PipelineOptions {
         retranscribe: true,
+        within: Some((6.0, 9.0)),
         ..Default::default()
     };
-    let stretch = PipelineOptions {
-        within: Some((6.0, 9.0)),
-        ..whole.clone()
-    };
-    let within = p.dir.join(WITHIN_FILE);
-    // Asked for the whole recording after a stretch: the carry covers everything.
-    assert!(hear_again(&p, &stretch, &mut log).unwrap());
-    assert!(within.is_file());
-    assert!(hear_again(&p, &whole, &mut log).unwrap());
-    assert!(!within.exists());
-    not_again(&p, &mut log);
-    // A stretch alone: the new words at 7 are heard "Bane" now and take the fix; the "Bane" at
-    // 3, outside the stretch, stays as heard.
     assert!(hear_again(&p, &stretch, &mut log).unwrap());
     let new = transcript_of(&[(1.0, " Bane"), (3.0, " Bane"), (7.0, " Bane")]);
     std::fs::write(transcribe::path(&p.dir), serde_json::to_vec(&new).unwrap()).unwrap();
@@ -1303,7 +1291,7 @@ fn a_selection_transcribed_again_spreads_fixes_only_inside_it() {
         .iter()
         .map(|f| (f.start, f.text.clone()))
         .collect();
-    assert_eq!(shown, [(1.0, "Vayne".into()), (7.0, "Vayne".into())]);
-    assert!(!within.exists() && !p.dir.join(AGAIN_FILE).exists());
+    assert_eq!(shown, [(1.0, "Vayne".into())]);
+    assert!(!p.dir.join(AGAIN_FILE).exists());
     std::fs::remove_dir_all(&d).unwrap();
 }

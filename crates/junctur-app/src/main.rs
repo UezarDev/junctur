@@ -86,7 +86,6 @@ fn main() {
             commands::fix_words,
             commands::fixes_list,
             commands::remove_fixes,
-            commands::keep_heard,
             commands::fixes_set_aside,
             commands::forget_fixes_set_aside,
             commands::recolor_speaker,

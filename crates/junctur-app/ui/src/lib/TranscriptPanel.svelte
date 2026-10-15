@@ -201,9 +201,8 @@
   let fixDraft = $state("");
   // What the open field showed when it opened, and its word as the engine names it (5ae). Leaving
   // saves only what was typed, never measured against the word as it is by then: a field left
-  // alone while its word changed under it (a fix spreading onto it, a re-transcription's words)
-  // wrote its old text back onto that index on a click away, and the spread then gave it to every
-  // word heard alike. The engine refuses the save when the index names another word now.
+  // alone while its word changed under it (a re-transcription's words) wrote its old text back onto
+  // that index on a click away. The engine refuses the save when the index names another word now.
   let fixFrom = "";
   let fixRef: api.WordRef = { at: 0, track: 0, nth: 0 };
   // `fixing` as a plain variable, for the field's own teardown and blur: Svelte gives an effect's
@@ -306,35 +305,10 @@
     if (all.length) flash(`${all.map((e) => `"${e}"`).join(", ")} added to the word list`);
   }
 
-  // What a fix also did elsewhere, under the header for a while ("Also fixed 2 other places" with
-  // Undo those), or what Correct started, which stays until dismissed as its run goes on.
-  const NOTE_MS = 20000;
-  let note = $state<{ text: string; others: api.Fix[]; heard: string[] } | null>(null);
-  let noteTimer = 0;
-  function tell(text: string, others: api.Fix[] = [], heard: string[] = [], stay = false) {
-    if (!mounted) return;
-    note = { text, others, heard };
-    clearTimeout(noteTimer);
-    if (!stay) noteTimer = window.setTimeout(() => (note = null), NOTE_MS);
-  }
-  function places(n: number): string {
-    return `${n.toLocaleString()} other place${n === 1 ? "" : "s"}`;
-  }
+  // What Correct started, under the header until dismissed as its run goes on.
+  let note = $state<string | null>(null);
   function tellFixed(r: api.Fixed) {
     tellLearned(r.learned);
-    if (r.others.length) tell(`Also fixed ${places(r.others.length)} heard the same way.`, r.others, r.heard);
-  }
-  // Kept as heard rather than taken away: a later Correct, or the spread after its transcription,
-  // would otherwise give those words the fix again.
-  async function undoOthers() {
-    const n = note;
-    note = null;
-    if (!n?.others.length) return;
-    await call(async () => {
-      if ((await api.keepHeard(n.others, n.heard)) === 0) {
-        tell("Nothing to undo: those fixes have moved onto the new transcript, or were changed since.");
-      }
-    });
   }
 
   // Fixes a re-transcription could not put on any word: listed once it ends, and on opening, until
@@ -374,18 +348,8 @@
   });
   async function correctAll() {
     const started = await correct();
-    if (!started) return;
-    const { r, doing } = started;
-    const unclear = r.unclear.length
-      ? ` Fixed two ways, left as heard: ${r.unclear.map((u) => `"${u}"`).join(", ")}.`
-      : "";
-    const n = r.others.length;
-    tell(
-      `Correcting: ${n ? `fixed ${places(n)} heard the same way; ` : ""}${doing} (Properties shows how far).${unclear}`,
-      r.others,
-      r.heard,
-      true,
-    );
+    if (!started || !mounted) return;
+    note = `Correcting: ${started.doing} (Properties shows how far).`;
   }
 
   const first = $derived(Math.max(0, Math.floor(top / ROW) - OVERSCAN));
@@ -431,6 +395,22 @@
   // The list of the recording's fixes (5ae), shown in place of the words while open; its jump
   // closes it and goes to the place as the flagged words' steps do.
   let listing = $state(false);
+  // Closed whenever it cannot show (review, no words, a list not editable), or it came back in
+  // place of the words, the word bar hidden, once review ended.
+  $effect(() => {
+    if (reviewing || !words || !edit?.editable) listing = false;
+  });
+  // The words hidden under the list lose their scroll position (a hidden element has none) while
+  // `top` keeps it: put back when the list closes, or the rows drawn for `top` sit out of view.
+  const away = $derived(listing && !!words && !!edit?.editable && !reviewing);
+  let wasAway = false;
+  $effect(() => {
+    if (wasAway && !away && scroller) {
+      ours = Math.round(top);
+      scroller.scrollTop = top;
+    }
+    wasAway = away;
+  });
   async function jumpTo(first: number, last: number) {
     if (!words) return;
     listing = false;
@@ -635,6 +615,8 @@
     mounted = true;
     let timer = 0;
     const ro = new ResizeObserver(() => {
+      // Hidden (the list of fixes in its place, the tab away): no size to lay the words out for.
+      if (scroller.clientWidth === 0 && scroller.clientHeight === 0) return;
       height = scroller.clientHeight;
       clearTimeout(timer);
       // The first size at once, later ones once the resize settles.
@@ -654,7 +636,6 @@
       clearTimeout(timer);
       mounted = false;
       clearTimeout(learnedTimer);
-      clearTimeout(noteTimer);
       ro.disconnect();
     };
   });
@@ -693,10 +674,10 @@
     {/if}
   </header>
   {#if listing && words && edit?.editable && !reviewing}
-    <FixesList {edit} onJump={(a, b) => void jumpTo(a, b)} onClose={() => (listing = false)} {onError} />
+    <FixesList {edit} {words} onJump={(a, b) => void jumpTo(a, b)} onClose={() => (listing = false)} {onError} />
   {/if}
   {#if setAside.length}
-    <div class="spread" role="status">
+    <div class="notice" role="status">
       <span class="grow"
         >{asideLine}</span
       >
@@ -704,24 +685,15 @@
     </div>
   {/if}
   {#if note}
-    <div class="spread" role="status">
-      <span class="grow">{note.text}</span>
-      {#if note.others.length}
-        <button
-          disabled={analysing && !listed}
-          onclick={() => void undoOthers()}
-          title={analysing && !listed
-            ? "Once the speakers are heard again (the edit list is busy until then)"
-            : "Leave the other places as they were heard; the one you typed stays fixed"}>Undo those</button
-        >
-      {/if}
+    <div class="notice" role="status">
+      <span class="grow">{note}</span>
       <button class="x" onclick={() => (note = null)} aria-label="Dismiss">×</button>
     </div>
   {/if}
   <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
   <div
     class="scroll"
-    class:away={listing && words && edit?.editable && !reviewing}
+    class:away={away}
     bind:this={scroller}
     onscroll={onScroll}
     onwheel={() => (pausedUntil = performance.now() + FOLLOW_PAUSE_MS)}
@@ -900,7 +872,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .spread {
+  .notice {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -909,11 +881,11 @@
     color: var(--muted);
     border-bottom: 1px solid var(--line);
   }
-  .spread .grow {
+  .notice .grow {
     flex: 1;
     min-width: 0;
   }
-  .spread button {
+  .notice button {
     padding: 2px 8px;
     font-size: 12px;
   }

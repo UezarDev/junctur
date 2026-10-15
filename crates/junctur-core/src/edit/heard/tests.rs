@@ -50,209 +50,6 @@ fn refs(ws: &[(usize, Word)]) -> Vec<(usize, &Word)> {
     ws.iter().map(|(t, w)| (*t, w)).collect()
 }
 
-/// "Bane" heard twice (once with a comma), and once on the other track.
-fn banes() -> Vec<(usize, Word)> {
-    vec![
-        (0, word(1.0, " Bane,")),
-        (0, word(1.5, " is")),
-        (1, word(2.0, " bane")),
-        (0, word(3.0, " Bane.")),
-        (0, word(4.0, " Baneful")),
-    ]
-}
-
-#[test]
-fn a_fix_spreads_to_every_word_heard_alike_in_its_own_punctuation() {
-    let ws = banes();
-    let mut f = vec![fix(0, 1.0, "Vayne,")];
-    let s = spread(
-        &mut f,
-        &refs(&ws),
-        Which::Words {
-            track: 0,
-            first: at(1.0, 0),
-            last: at(1.0, 0),
-        },
-    );
-    assert_eq!(
-        shown(&f, &ws),
-        ["Vayne,", "is", "Vayne", "Vayne.", "Baneful"]
-    );
-    assert_eq!(s.added.len(), 2, "{s:?}");
-    assert_eq!((s.added[0].track, s.added[1].track), (1, 0));
-    assert!(s.unclear.is_empty());
-    // Spread again: nothing more, every "Bane" is fixed.
-    assert_eq!(spread(&mut f, &refs(&ws), Which::All), Spread::default());
-    assert_eq!(s.heard, ["bane", "Bane."]);
-    // "Undo those": the others say what was heard again, the fix made by hand stays, and one
-    // changed since stays as changed.
-    f[1].text = "Vain".into();
-    assert_eq!(keep_heard(&mut f, &s.added, &s.heard), 1);
-    assert_eq!(shown(&f, &ws), ["Vayne,", "is", "Vain", "Bane.", "Baneful"]);
-    // Kept as heard is kept: spreading every fix again does not reach it.
-    f[1].text = "bane".into();
-    assert_eq!(spread(&mut f, &refs(&ws), Which::All), Spread::default());
-    assert_eq!(shown(&f, &ws), ["Vayne,", "is", "bane", "Bane.", "Baneful"]);
-}
-
-#[test]
-fn one_index_kept_for_fix_after_fix_spreads_as_a_fresh_one_does() {
-    let mut ws = banes();
-    ws.extend([
-        (1, word(6.0, " so")),
-        (1, word(6.0, " Bane")),
-        (0, word(7.0, " big")),
-        (0, word(7.5, " bane")),
-        (1, word(8.0, " big")),
-        (1, word(8.5, " Bane!")),
-        (0, word(9.0, "")),
-    ]);
-    let words = refs(&ws);
-    let index = SpreadIndex::new(&words);
-    assert_eq!(index, SpreadIndex::new(&words), "built the same each time");
-    let one = |track, start, nth| Which::Words {
-        track,
-        first: at(start, nth),
-        last: at(start, nth),
-    };
-    let steps = [
-        (fix(0, 1.0, "Vayne,"), one(0, 1.0, 0)),
-        (fix(0, 7.0, "pig"), one(0, 7.0, 0)),
-        (fix(0, 4.0, "Painful"), one(0, 4.0, 0)),
-        (fix(0, 1.5, "is"), Which::All),
-    ];
-    let (mut fresh, mut kept) = (Vec::new(), Vec::new());
-    for (f, which) in steps {
-        fresh.push(f.clone());
-        kept.push(f);
-        fixes::sort(&mut fresh);
-        fixes::sort(&mut kept);
-        let a = spread(&mut fresh, &words, which);
-        let b = spread_with(&mut kept, &words, &index, which);
-        assert_eq!(a, b);
-        assert_eq!(fresh, kept);
-    }
-    assert!(fresh.len() > 4, "the fixes spread: {fresh:?}");
-    // An index of other words (fewer of them) is not used.
-    let fewer = refs(&ws[..3]);
-    let mut f = vec![fix(0, 1.0, "Vayne,")];
-    let mut g = f.clone();
-    assert_eq!(
-        spread_with(&mut f, &fewer, &index, Which::All),
-        spread(&mut g, &fewer, Which::All)
-    );
-    assert_eq!(f, g);
-}
-
-#[test]
-fn a_word_already_fixed_keeps_its_own_fix_and_a_typed_text_goes_as_typed() {
-    let ws = banes();
-    // The second "Bane" was fixed by hand to something else: it stays.
-    let mut f = vec![fix(0, 1.0, "Vayne!"), fix(0, 3.0, "Bain.")];
-    let s = spread(
-        &mut f,
-        &refs(&ws),
-        Which::Words {
-            track: 0,
-            first: at(1.0, 0),
-            last: at(1.0, 0),
-        },
-    );
-    // "Vayne!" changed the punctuation it was heard with: written as typed.
-    assert_eq!(
-        shown(&f, &ws),
-        ["Vayne!", "is", "Vayne!", "Bain.", "Baneful"]
-    );
-    assert_eq!(s.added.len(), 1);
-    // From every fix, the two disagree: no more spreading, and the heard word is unclear.
-    let mut more = ws.clone();
-    more.push((0, word(5.0, " BANE")));
-    let mut g = vec![fix(0, 1.0, "Vayne,"), fix(0, 3.0, "Bain.")];
-    let s = spread(&mut g, &refs(&more), Which::All);
-    assert!(s.added.is_empty(), "{s:?}");
-    assert_eq!(s.unclear, ["bane"]);
-}
-
-#[test]
-fn a_punctuation_only_fix_or_a_case_fix_spreads_as_it_should() {
-    let ws = vec![
-        (0, word(1.0, " so")),
-        (0, word(2.0, " so")),
-        (0, word(3.0, " tsunheto")),
-        (0, word(4.0, " Tsunheto?")),
-        (0, word(5.0, " tsunheto")),
-    ];
-    // "so" made "so," is not a mishearing: not spread.
-    let mut f = vec![fix(0, 1.0, "so,")];
-    assert!(spread(&mut f, &refs(&ws), Which::All).added.is_empty());
-    // A name heard in lower case: its case spreads, the other word's punctuation kept.
-    let mut f = vec![fix(0, 3.0, "Tsunheto")];
-    let s = spread(&mut f, &refs(&ws), Which::All);
-    assert_eq!(
-        shown(&f, &ws),
-        ["so", "so", "Tsunheto", "Tsunheto?", "Tsunheto"]
-    );
-    // "Tsunheto?" already reads as the fix: no fix needed there.
-    assert_eq!(s.added.len(), 1, "{s:?}");
-}
-
-#[test]
-fn a_span_spreads_over_the_same_words_on_any_track_never_over_a_fixed_one() {
-    let ws = vec![
-        (0, word(1.0, " the")),
-        (0, word(1.3, " wezar")),
-        (0, word(1.6, " went")),
-        (0, word(2.0, " The")),
-        (0, word(2.3, " Wezar")),
-        (0, word(2.6, " went.")),
-        (1, word(3.0, " the")),
-        (1, word(3.3, " wezar")),
-        (1, word(3.6, " went")),
-        (0, word(4.0, " the")),
-        (0, word(4.3, " wezar")),
-        (0, word(4.6, " sat")),
-        (0, word(5.0, " the")),
-        (0, word(5.3, " wezar")),
-        (0, word(5.6, " went")),
-    ];
-    let mut f = vec![
-        Fix {
-            track: 0,
-            start: 1.0,
-            nth: 0,
-            through: Some(at(1.6, 0)),
-            text: "Uezar went".into(),
-        },
-        fix(0, 5.6, "left"),
-    ];
-    let s = spread(&mut f, &refs(&ws), Which::All);
-    assert_eq!(
-        shown(&f, &ws),
-        [
-            "Uezar went",
-            "Uezar went",
-            "Uezar went",
-            "the",
-            "wezar",
-            "sat",
-            "the",
-            "wezar",
-            "left"
-        ]
-    );
-    assert_eq!(s.added.len(), 2, "{s:?}");
-    assert!(s.added.iter().all(Fix::is_span));
-    // A retyped sentence that only moved punctuation is not spread.
-    let mut g = vec![Fix {
-        track: 0,
-        start: 1.0,
-        nth: 0,
-        through: Some(at(1.6, 0)),
-        text: "the wezar, went.".into(),
-    }];
-    assert!(spread(&mut g, &refs(&ws), Which::All).added.is_empty());
-}
-
 #[test]
 fn a_fix_follows_its_word_into_a_new_transcription() {
     let old = vec![
@@ -316,37 +113,8 @@ fn a_fix_follows_its_word_into_a_new_transcription() {
 }
 
 #[test]
-fn a_spread_never_lays_a_fix_over_one_whose_word_is_gone() {
-    // A fix left on no word (a word re-transcribed away) inside the keys a
-    // spread span would cover; with both the list would not read back.
-    let ws = vec![
-        (0, word(1.0, " the")),
-        (0, word(1.3, " wezar")),
-        (0, word(2.0, " the")),
-        (0, word(2.3, " wezar")),
-    ];
-    let mut f = vec![
-        Fix {
-            track: 0,
-            start: 1.0,
-            nth: 0,
-            through: Some(at(1.3, 0)),
-            text: "Uezar".into(),
-        },
-        fix(0, 2.15, "stale"),
-    ];
-    let s = spread(&mut f, &refs(&ws), Which::All);
-    assert!(s.added.is_empty(), "{s:?}");
-    assert!(!super::super::fixes::clash(&f));
-    // A word fix next to it still spreads.
-    let mut g = vec![fix(0, 1.3, "Uezar"), fix(0, 2.15, "stale")];
-    assert_eq!(spread(&mut g, &refs(&ws), Which::All).added.len(), 1);
-    assert!(!super::super::fixes::clash(&g));
-}
-
-#[test]
 fn a_carried_fix_takes_its_new_words_punctuation_and_keeps_its_shape() {
-    // "Vayne," onto a "Bane." heard now is "Vayne.", as a spread would write it.
+    // "Vayne," onto a "Bane." heard now is "Vayne.".
     let old = vec![
         (0, word(1.0, " Bane,")),
         (0, word(3.0, " the")),
@@ -369,8 +137,7 @@ fn a_carried_fix_takes_its_new_words_punctuation_and_keeps_its_shape() {
     let new = vec![(0, word(1.0, " Bane.")), (0, word(3.1, " thewezar"))];
     let r = carry(&mut f, &carried, &refs(&new));
     assert_eq!(f[0].text, "Vayne.");
-    // A sentence is not made a one-word fix (a spread would copy it onto every such word):
-    // set aside. And the track with no words sets its fix aside too.
+    // A sentence is not made a one-word fix: set aside. And the track with no words sets its fix aside too.
     let gone: Vec<&str> = r.gone.iter().map(|g| g.fix.text.as_str()).collect();
     assert_eq!(gone, ["Uezar went", "Hola,"]);
     assert_eq!(f.len(), 1);
@@ -484,8 +251,8 @@ fn a_retimed_word_follows_its_word_into_a_new_transcription() {
 
 #[test]
 fn a_word_kept_as_heard_stays_so_after_a_new_transcription() {
-    // "Undo those" left the second "nuevo" as heard. A new transcription keeps that on its
-    // word, as it now reads, so the spread after it does not reach it.
+    // The second "nuevo" kept as heard (Looks right, or an older Junctur's Undo those): a new
+    // transcription keeps that on its word, as it now reads, and the other fix stays its own.
     let old = vec![(0, word(1.0, " nuevo")), (0, word(4.0, " nuevo"))];
     let mut f = vec![fix(0, 1.0, "gordo"), fix(0, 4.0, "nuevo")];
     let carried = snapshot(&f, &refs(&old));
@@ -493,7 +260,6 @@ fn a_word_kept_as_heard_stays_so_after_a_new_transcription() {
     let r = carry(&mut f, &carried, &refs(&new));
     assert_eq!((r.kept, r.right), (2, 0));
     assert_eq!(f[1].text, "nuevo,");
-    assert!(spread(&mut f, &refs(&new), Which::All).added.is_empty());
     assert_eq!(shown(&f, &new), ["gordo", "nuevo,"]);
 }
 
@@ -553,33 +319,28 @@ fn a_span_is_laid_over_the_new_words_said_in_its_time() {
 }
 
 #[test]
-fn the_fixes_are_listed_on_their_words_and_a_removed_one_reads_as_heard_for_good() {
-    // 5ae: a sentence typed over one "no" spread to every "no"; the list names each place with
-    // its words, and taking them away keeps them as heard so no spread brings the text back.
+fn the_fixes_are_listed_on_their_words_and_a_removed_one_goes_from_the_list() {
+    // 5ae: a sentence an older Junctur gave every "no"; the list names each place with its words,
+    // and Remove takes the fixes out, so the words read as heard (5ah: no line of the heard text
+    // is left behind, nothing would bring the sentence back).
     let ws = vec![
         (0, word(1.0, " no")),
         (0, word(2.0, " lo")),
         (0, word(3.0, " sé")),
         (0, word(4.0, " no,")),
+        (0, word(5.0, " bien")),
     ];
     let sentence = "que tiene de bueno la energia nuclear.";
-    let mut f = vec![fix(0, 1.0, sentence)];
-    let s = spread(
-        &mut f,
-        &refs(&ws),
-        Which::Words {
-            track: 0,
-            first: at(1.0, 0),
-            last: at(1.0, 0),
+    let mut f = vec![
+        fix(0, 1.0, sentence),
+        Fix {
+            through: Some(at(3.0, 0)),
+            ..fix(0, 2.0, "lo se")
         },
-    );
-    assert_eq!(s.added.len(), 1);
-    f.push(Fix {
-        through: Some(at(3.0, 0)),
-        ..fix(0, 2.0, "lo se")
-    });
-    f.push(fix(0, 9.0, "gone"));
-    crate::edit::fixes::sort(&mut f);
+        fix(0, 4.0, sentence),
+        fix(0, 5.0, "bien"),
+        fix(0, 9.0, "gone"),
+    ];
     let p = placed(&f, &refs(&ws));
     let got: Vec<_> = p
         .iter()
@@ -591,29 +352,21 @@ fn the_fixes_are_listed_on_their_words_and_a_removed_one_reads_as_heard_for_good
             (sentence, Some((0, 0)), "no"),
             ("lo se", Some((1, 2)), "lo sé"),
             (sentence, Some((3, 3)), "no,"),
+            ("bien", Some((4, 4)), "bien"),
             ("gone", None, ""),
         ]
     );
     assert!(!p[0].as_heard());
-    // Both sentence copies and the fix on no word go; the span stays. One listed but changed
-    // since is not touched.
-    let mut listed = vec![p[0].fix.clone(), p[2].fix.clone(), p[3].fix.clone()];
+    assert!(p[3].as_heard(), "Looks right's line");
+    // Both sentence copies and the fix on no word go; the span and the confirmation stay. One
+    // listed but changed since is not touched.
+    let mut listed = vec![p[0].fix.clone(), p[2].fix.clone(), p[4].fix.clone()];
     listed.push(Fix {
         text: "changed since".into(),
         ..p[1].fix.clone()
     });
-    assert_eq!(remove(&mut f, &listed, &refs(&ws)), 3);
-    assert_eq!(shown(&f, &ws), ["no", "lo se", "no,"]);
-    assert_eq!(f.len(), 3, "{f:?}");
-    assert!(placed(&f, &refs(&ws))
-        .iter()
-        .filter(|p| p.fix.text != "lo se")
-        .all(Placed::as_heard));
-    // A later spread of every fix (Correct's) does not give them the sentence again.
-    f.push(fix(0, 1.0, sentence));
-    f.remove(0);
-    crate::edit::fixes::sort(&mut f);
-    let again = spread(&mut f, &refs(&ws), Which::All);
-    assert!(again.added.is_empty(), "{again:?}");
-    assert_eq!(remove(&mut f, &listed[1..], &refs(&ws)), 0, "already gone");
+    assert_eq!(remove(&mut f, &listed), 3);
+    assert_eq!(shown(&f, &ws), ["no", "lo se", "no,", "bien"]);
+    assert_eq!(f.len(), 2, "{f:?}");
+    assert_eq!(remove(&mut f, &listed), 0, "already gone");
 }

@@ -461,7 +461,7 @@ export const retimeWord = (word: number, side: "start" | "end", to: number) =>
 /** Renames speaker `id` in the edit list (saved at once, not an undo step). */
 export const renameSpeaker = (id: number, name: string) =>
   invoke<void>("rename_speaker", { id, name });
-/** A word fix as the edit list holds it: handed back to `keepHeard` as it came. */
+/** A word fix as the edit list holds it: handed back to `removeFixes` as it came. */
 export interface Fix {
   track: number;
   start: number;
@@ -469,13 +469,9 @@ export interface Fix {
   through?: { start: number; nth: number };
   text: string;
 }
-/** What a fix did besides itself: the entries the word list gained, and the fixes also made on
- * the words heard like it with what each was heard as ("Also fixed N other places", whose Undo is
- * `keepHeard(others, heard)`). */
+/** What a fix did besides itself: the entries the word list gained. */
 export interface Fixed {
   learned: string[];
-  others: Fix[];
-  heard: string[];
 }
 /** A word as the page named it when its fix field opened (5ae): heard start (whole ms), track and
  * place among that track's words starting in that millisecond (`transcript.wordRef`). */
@@ -484,8 +480,8 @@ export interface WordRef {
   track: number;
   nth: number;
 }
-/** Fixes the spelling of word `index` (empty or the heard text again removes the fix), and every
- * other word heard like it. Saved at once, not an undo step. Refused when `index` is no longer the
+/** Fixes the spelling of word `index` (empty or the heard text again removes the fix), and only
+ * that word. Saved at once, not an undo step. Refused when `index` is no longer the
  * word `word` names (5ae). */
 export const fixWord = (index: number, word: WordRef, text: string) =>
   invoke<Fixed>("fix_word", { index, word, text });
@@ -493,7 +489,7 @@ export const fixWord = (index: number, word: WordRef, text: string) =>
  * once, not an undo step. */
 export const confirmWord = (index: number) => invoke<void>("confirm_word", { index });
 /** Fixes words `first..=last` as one text (empty or the heard words again clears their fixes),
- * and the same words heard elsewhere. Refused, saying why, across two voice tracks or two
+ * and only those words. Refused, saying why, across two voice tracks or two
  * people. Saved at once, not an undo step. */
 export const fixWords = (first: number, last: number, ends: [WordRef, WordRef], text: string) =>
   invoke<Fixed>("fix_words", { first, last, ends, text });
@@ -505,17 +501,14 @@ export interface ListedFix {
   last: number | null;
   /** Its words as heard. */
   heard: string;
-  /** A fix of the heard text (Undo those, a removal, Looks right): the words read as heard. */
+  /** A fix of the heard text (Looks right): the words read as heard. */
   asHeard: boolean;
 }
 /** Every fix of the open recording's list with its words (5ae). */
 export const fixesList = () => invoke<ListedFix[]>("fixes_list");
-/** Takes `fixes` (as `fixesList` gave them) back to what their words were heard as, those still as
- * listed; how many (5ae). Saved at once, not an undo step. */
+/** Takes `fixes` (as `fixesList` gave them) out of the list, those still as listed, so their words
+ * read as heard; how many (5ae). Saved at once, not an undo step. */
 export const removeFixes = (fixes: Fix[]) => invoke<number>("remove_fixes", { fixes });
-/** Takes back fixes a fix made on other words, those still as made: the words keep what they
- * were heard as, and no later spread or Correct gives them the fix again. */
-export const keepHeard = (others: Fix[], heard: string[]) => invoke<number>("keep_heard", { others, heard });
 /** A fix a re-transcription could not put on any word: Whisper hears something else there now. */
 export interface SetAside {
   track: number;
@@ -557,15 +550,10 @@ export interface Corrected {
   progress: Progress | null;
   /** The cut was to be made afresh and nothing started: the edit list holds the user's edits, so ask first. */
   handEdited: boolean;
-  /** The fixes made on words heard like a fixed one, and what each was heard as. */
-  others: Fix[];
-  heard: string[];
-  /** Heard texts fixed two ways, left as heard. */
-  unclear: string[];
 }
-/** The Correct pop-up: analyses `path` again as `ask` says. Transcribing the whole timeline again
- * with the fixes kept first gives every fix to the words heard like it. Refused while analysed, and
- * for a selection with the speakers asked for (they are heard over the whole recording only). */
+/** The Correct pop-up: analyses `path` again as `ask` says; the fixes and word times kept move onto
+ * the new words, and no other word is given a fix. Refused while analysed, and for a selection with
+ * the speakers asked for (they are heard over the whole recording only). */
 export const reanalyse = (path: string, ask: Ask) => invoke<Corrected>("reanalyse", { path, ask });
 /** Sets speaker `id`'s caption colour (`#RRGGBB`). */
 export const recolorSpeaker = (id: number, color: string) =>

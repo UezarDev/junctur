@@ -179,7 +179,7 @@ pub struct Forget {
     /// voices still naming who they recognise. Implies `rehear`.
     pub names: bool,
     /// The fixed words and the word times set by moving a cut's edge, in `within` or everywhere:
-    /// dropped at the list's write, so a re-transcription after has nothing to carry or spread.
+    /// dropped at the list's write, so a re-transcription after has nothing to carry.
     pub fixes: bool,
 }
 

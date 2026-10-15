@@ -124,7 +124,7 @@
       <Field
         kind="check"
         label="Corrected words"
-        info="Your fixed words, and the word times you set by moving a cut's edge or a word's own edge. Kept, they move onto the new words (and for the whole timeline every word heard the same way as one you fixed gets the fix first); any whose word is heard otherwise now is listed above the transcript. Unticked, they are dropped (only inside the selection, for Re-analyse selection), your list kept as a backup."
+        info="Your fixed words, and the word times you set by moving a cut's edge or a word's own edge. Kept, they move onto the new words, and no other word is given a fix; any whose word is heard otherwise now is listed above the transcript. Unticked, they are dropped (only inside the selection, for Re-analyse selection), your list kept as a backup."
       >
         {#snippet children(id)}<input {id} type="checkbox" bind:checked={keepFixes} />{/snippet}
       </Field>
