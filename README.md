@@ -220,23 +220,24 @@ empty transcript), analyses the recording again, part by part. Its pop-up has tw
 (against the remembered voices, your pinned seconds still deciding theirs), and three of yours to keep:
 **Cuts** (unticked, a fresh cut from the analysis; when the list holds your edits it asks first and keeps
 them as `edit.junctur.bak*`, as `junctur analyze` does), **Names and voices** (unticked, the speakers are
-heard again and named afresh, without your names or pins; the list and `speakers.json` are backed up,
-the remembered voices file is never touched) and **Corrected words** (your fixes and the word times set by
-moving a cut's edge or a word's own edge; unticked, they are dropped, the list backed up, so "transcribe
-again ignoring my fixes" is one untick). It opens on everything redone and everything kept, and
-Re-analyse whole timeline does what is ticked: with nothing ticked to redo it reruns only what the
-settings changed, as after a model change. Re-analyse selection works on the stretch selected on the
-timeline, or the words selected in the transcript (several stretches count as the span holding them):
-the words are transcribed again on the Whisper chunks it touches (whole chunks, so no word is cut in
-half), the cut made again only inside it, the fixes dropped only inside it, the rest of the transcript
-and the cut as they were. The speakers are heard over the whole recording only, so with either speakers
-box asking for them the selection button is greyed and says why; a selection also needs a transcript
-made with the settings' model and languages. A run is an analysis like any other (on the transcription
-lane, pausable, the words coming back five minutes at a time). Kept fixes and word times move onto the
-new words, and nothing is fixed beyond what you fixed yourself; one whose word Whisper now spells your
-way is no longer needed, and one whose word is heard otherwise now is set aside and listed above the
-transcript until you dismiss it. An edit list that no longer reads is left as it is, and the analysis
-says so.
+heard again and named afresh, without your names or pins; the list and `speakers.json` are backed up, the
+remembered voices file is never touched; if they cannot be heard, for instance offline before their model
+is downloaded, the run stops before the list and the note under the transcript says why) and **Corrected
+words** (your fixes and the word times set by moving a cut's edge or a word's own edge; unticked, they
+are dropped, the list backed up, so "transcribe again ignoring my fixes" is one untick). It opens on
+everything redone and everything kept, and Re-analyse whole timeline does what is ticked: with nothing
+ticked to redo it reruns only what the settings changed, as after a model change. Re-analyse selection
+works on the stretch selected on the timeline, or the words selected in the transcript (several stretches
+count as the span holding them): the words are transcribed again on the Whisper chunks it touches (whole
+chunks, so no word is cut in half), the cut made again only inside it, the fixes dropped only inside it,
+the rest of the transcript and the cut as they were. The speakers are heard over the whole recording
+only, so with either speakers box asking for them the selection button is greyed and says why; a
+selection also needs a transcript made with the settings' model and languages. A run is an analysis like
+any other (on the transcription lane, pausable, the words coming back five minutes at a time). Kept fixes
+and word times move onto the new words, and nothing is fixed beyond what you fixed yourself; one whose
+word Whisper now spells your way is no longer needed, and one whose word is heard otherwise now is set
+aside and listed above the transcript until you dismiss it. An edit list that no longer reads is left as
+it is, and the analysis says so.
 Words Whisper was unsure of (the lowest probability of their letters' tokens under 25 %, `flag_below`
 below) are underlined; the panel's header steps through them, and "Looks right" keeps one as heard and
 stops flagging it (a `fix` line with the heard text). Transcripts made before this have no flags.

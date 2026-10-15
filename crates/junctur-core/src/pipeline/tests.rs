@@ -579,52 +579,7 @@ fn a_reanalysis_run_keeps_the_users_cut_and_names_and_takes_the_speakers_found()
     // every stage's result in the cache as an earlier analysis left it, so no media or model
     // is needed: tracks and speech reused, the speakers found again from the cache (two voice
     // tracks, one speaker each), the edit list kept.
-    let (d, p) = scratch_project("prepare-keeps");
-    let voice = |track: usize| tracks::LogicalTrack {
-        members: vec![track],
-        sameness: tracks::Sameness::Single,
-        activity: crate::signal::Activity {
-            mean_db: -30.0,
-            peak_db: -10.0,
-            near_silent_share: 0.0,
-            silent: false,
-        },
-        speech: None,
-        role: Role::Voice,
-        confidence: 1.0,
-        reasons: vec![],
-    };
-    let report = TrackReport {
-        file: p.file.clone(),
-        duration: 10.0,
-        windows: vec![],
-        window_seconds: 1.0,
-        tracks: vec![],
-        logical: vec![voice(0), voice(1)],
-        speech_error: None,
-        from_cache: false,
-    };
-    let entry = tracks::entry(&p.file, &tracks_options(&p, false)).unwrap();
-    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
-    std::fs::write(&entry, serde_json::to_vec(&report).unwrap()).unwrap();
-    let region = |start: f64, end: f64| crate::vad::Region { start, end };
-    let speech = Speech {
-        tracks: vec![
-            speech::SpeechTrack {
-                track: 0,
-                regions: vec![region(1.0, 3.0)],
-                share: 0.2,
-            },
-            speech::SpeechTrack {
-                track: 1,
-                regions: vec![region(5.0, 8.0)],
-                share: 0.3,
-            },
-        ],
-        seconds: 5.0,
-    };
-    std::fs::write(p.speech_path(), serde_json::to_vec(&speech).unwrap()).unwrap();
-    std::fs::write(p.envelope_path(), b"").unwrap();
+    let (d, p, speech) = analysed_two_voices("prepare-keeps");
     let turn = |start: f64, end: f64, speaker| edit::Turn {
         start,
         end,
@@ -689,6 +644,89 @@ fn a_reanalysis_run_keeps_the_users_cut_and_names_and_takes_the_speakers_found()
     assert_eq!(recut.speakers.name(1), Some("Ana"));
     assert!(p.dir.join("edit.junctur.bak").exists());
     std::fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn names_asked_afresh_without_speakers_stop_the_run_saying_why() {
+    // The speakers cannot be heard (here: turned off; in the app, their model not fetched
+    // offline): the run asked to name them afresh stops before the list, saying why, and leaves
+    // the list and `speakers.json` as they were, with no copy of it made.
+    let (d, p, _) = analysed_two_voices("afresh-unheard");
+    let text = list(CutSettings::default(), 10.0);
+    std::fs::write(p.edit_path(), &text).unwrap();
+    std::fs::write(p.speakers_path(), b"{}").unwrap();
+    let opts = PipelineOptions {
+        no_speakers: true,
+        forget: Forget {
+            names: true,
+            fixes: false,
+        },
+        ..Default::default()
+    };
+    let mut lines = Vec::new();
+    let err = prepare(&p, &opts, &mut |l| lines.push(l.to_string()), steps::none())
+        .err()
+        .expect("refused")
+        .to_string();
+    assert!(err.contains("not named afresh"), "{err}");
+    assert!(err.contains("telling the speakers apart is off"), "{err}");
+    assert_eq!(std::fs::read_to_string(p.edit_path()).unwrap(), text);
+    assert!(!p.dir.join("speakers.json.bak").exists());
+    assert!(!lines.iter().any(|l| l.contains("going on without them")));
+    assert!(!p.dir.join(AFRESH_FILE).exists());
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
+/// A scratch project analysed as far as its speakers, every result in the cache: two voice tracks
+/// with one stretch of speech each (track 0 at 1-3 s, track 1 at 5-8 s), in a 10 s recording.
+fn analysed_two_voices(name: &str) -> (std::path::PathBuf, Project, Speech) {
+    let (d, p) = scratch_project(name);
+    let voice = |track: usize| tracks::LogicalTrack {
+        members: vec![track],
+        sameness: tracks::Sameness::Single,
+        activity: crate::signal::Activity {
+            mean_db: -30.0,
+            peak_db: -10.0,
+            near_silent_share: 0.0,
+            silent: false,
+        },
+        speech: None,
+        role: Role::Voice,
+        confidence: 1.0,
+        reasons: vec![],
+    };
+    let report = TrackReport {
+        file: p.file.clone(),
+        duration: 10.0,
+        windows: vec![],
+        window_seconds: 1.0,
+        tracks: vec![],
+        logical: vec![voice(0), voice(1)],
+        speech_error: None,
+        from_cache: false,
+    };
+    let entry = tracks::entry(&p.file, &tracks_options(&p, false)).unwrap();
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::fs::write(&entry, serde_json::to_vec(&report).unwrap()).unwrap();
+    let region = |start: f64, end: f64| crate::vad::Region { start, end };
+    let speech = Speech {
+        tracks: vec![
+            speech::SpeechTrack {
+                track: 0,
+                regions: vec![region(1.0, 3.0)],
+                share: 0.2,
+            },
+            speech::SpeechTrack {
+                track: 1,
+                regions: vec![region(5.0, 8.0)],
+                share: 0.3,
+            },
+        ],
+        seconds: 5.0,
+    };
+    std::fs::write(p.speech_path(), serde_json::to_vec(&speech).unwrap()).unwrap();
+    std::fs::write(p.envelope_path(), b"").unwrap();
+    (d, p, speech)
 }
 
 #[test]

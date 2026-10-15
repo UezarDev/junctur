@@ -214,6 +214,15 @@ fn forget_now(p: &Project, opts: &PipelineOptions, found: bool) -> Forget {
     }
 }
 
+/// Why a run asked to name the speakers afresh stopped: `why` is the speakers stage's error (their
+/// model not downloaded offline, say, or the new hearing not written), which its own line would
+/// only show in passing.
+fn not_named_afresh(why: &str) -> Error {
+    Error::Edit(format!(
+        "the speakers were not named afresh, because they could not be heard or saved ({why}): the run stopped there, with the edit list and the words as they were. Keep the names and voices to redo the rest without hearing them"
+    ))
+}
+
 /// The edit list has the speakers as heard last: an [`AFRESH_FILE`] is done with.
 fn afresh_done(p: &Project, log: &mut dyn FnMut(&str)) {
     let path = p.dir.join(AFRESH_FILE);
@@ -365,8 +374,8 @@ pub fn prepare(
     )?;
     // Speakers are an extra, not core: when they cannot be found (the model cannot be fetched
     // offline, say), the run goes on without them and the edit list keeps the names it had.
-    let speakers = if opts.no_speakers {
-        None
+    let heard = if opts.no_speakers {
+        Err("telling the speakers apart is off for this run".to_string())
     } else {
         let stage = Stage {
             p,
@@ -374,12 +383,15 @@ pub fn prepare(
             report: &report,
             steps,
         };
-        match speakers_stage(stage, &speech, opts, log) {
-            Ok(f) => Some(f),
-            Err(e) => {
-                log(&format!("speakers: {e}; going on without them"));
-                None
-            }
+        speakers_stage(stage, &speech, opts, log).map_err(|e| e.to_string())
+    };
+    let speakers = match heard {
+        Ok(f) => Some(f),
+        // Asked for by the user, so not gone on without: stopped saying why, before the list.
+        Err(why) if opts.forget.names => return Err(not_named_afresh(&why)),
+        Err(why) => {
+            log(&format!("speakers: {why}; going on without them"));
+            None
         }
     };
     let edit = jobs.stage(&p.dir, StageName::Edit, log, |log| {
