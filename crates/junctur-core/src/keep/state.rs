@@ -7,10 +7,11 @@ use super::parts::{Kind, Part};
 use crate::labels::{Labelled, Labels};
 
 /// Bumped when the question's wording or the state's shape changes, so every part is judged again.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
-/// Characters of the part itself, and of the talk before and after it: with the question this keeps
-/// the whole inside Laya's 1024 tokens (Spanish runs about 3.5 characters a token).
+/// Characters of the part itself, and of the talk before and after it, to start from: with the question
+/// this keeps the whole inside Laya's 1024 tokens for Spanish (about 3.5 characters a token); a state
+/// that still does not fit is shortened in tokens ([`fitted`]).
 const THIS_MAX: usize = 2400;
 const AROUND_MAX: usize = 160;
 /// Talk further than this from the part is not its context.
@@ -47,6 +48,28 @@ pub struct Context<'a> {
 
 /// `part`'s state.
 pub fn state(c: &Context, part: &Part) -> String {
+    build(c, part, THIS_MAX, AROUND_MAX)
+}
+
+/// `part`'s state shortened until `fits` says it fits whole (Laya cuts what does not at its end,
+/// mid-string): the part itself first, down to a twentieth, then the talk around it. Characters are
+/// not tokens: a script with fewer characters a token passes the character budget and not Laya's.
+pub fn fitted(c: &Context, part: &Part, fits: &dyn Fn(&str) -> bool) -> String {
+    let (mut this, mut around) = (THIS_MAX, AROUND_MAX);
+    loop {
+        let s = build(c, part, this, around);
+        if fits(&s) || around <= AROUND_MAX / 8 {
+            return s;
+        }
+        if this > THIS_MAX / 20 {
+            this = this * 2 / 3;
+        } else {
+            around /= 2;
+        }
+    }
+}
+
+fn build(c: &Context, part: &Part, this_max: usize, around_max: usize) -> String {
     let w = c.words;
     let first = w.partition_point(|x| x.start < part.start);
     let past = w.partition_point(|x| x.start < part.end);
@@ -55,7 +78,7 @@ pub fn state(c: &Context, part: &Part) -> String {
         Kind::Talk => format!(
             "{:.0} s of talk. {}",
             part.len(),
-            said(&w[first..past], THIS_MAX)
+            said(&w[first..past], this_max)
         ),
         Kind::Silent => silent(part, c.labels),
     };
@@ -63,9 +86,9 @@ pub fn state(c: &Context, part: &Part) -> String {
     let near_after = past + w[past..].partition_point(|x| x.start < part.end + AROUND_S);
     dumps(&[
         ("video", &shorten(c.prompt.trim(), PROMPT_MAX)),
-        ("before", &said_ending(&w[near_before..first], AROUND_MAX)),
+        ("before", &said_ending(&w[near_before..first], around_max)),
         ("this part", &this),
-        ("after", &said(&w[past..near_after], AROUND_MAX)),
+        ("after", &said(&w[past..near_after], around_max)),
     ])
 }
 
@@ -253,6 +276,31 @@ mod tests {
             bare.contains(r#""this part": "3 s, nobody talks.""#),
             "{bare}"
         );
+    }
+
+    #[test]
+    fn a_state_too_long_in_tokens_is_shortened_part_first_and_stays_whole() {
+        // Two characters a token: the character budget alone would pass it.
+        let words: Vec<Spoken> = (0..4000)
+            .map(|i| word(i as f64 * 0.05, "Uezar", "日本語"))
+            .collect();
+        let c = Context {
+            prompt: "p",
+            words: &words,
+            labels: None,
+        };
+        let p = part(50.0, 80.0, Kind::Talk);
+        let fits = |s: &str| s.chars().count() / 2 < 900;
+        let full = state(&c, &p);
+        assert!(!fits(&full));
+        let s = fitted(&c, &p, &fits);
+        assert!(fits(&s), "{}", s.chars().count());
+        // Still the whole object, its context kept as long as it was.
+        assert!(s.ends_with("\"}") && s.contains(r#""after": "Uezar:"#));
+        let after = |x: &str| x[x.find(r#""after""#).unwrap()..].chars().count();
+        assert_eq!(after(&s), after(&full));
+        // One that fits is as it was.
+        assert_eq!(fitted(&c, &p, &|_| true), full);
     }
 
     #[test]

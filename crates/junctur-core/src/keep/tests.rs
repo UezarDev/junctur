@@ -73,7 +73,7 @@ fn accepting_dismissing_and_undoing_record_answers() {
     let fit = Fit::default();
     let mut c = Choices::default();
     let (items, _) = suggestions(&j, &fit, &auto, &auto, &c);
-    let edits = accept(&items, &j, &auto, &mut c, false);
+    let edits = accept(&items, &j, (&auto, &auto), &mut c, false);
     // The talk's cut takes its pads too (no sliver of silence left kept), and comes first so the
     // kept silence beside it stays whole.
     assert_eq!(edits, [(9.7, 20.4, false), (0.0, 10.0, true)]);
@@ -83,19 +83,19 @@ fn accepting_dismissing_and_undoing_record_answers() {
     assert_eq!(sum.accepted, 2);
     assert!(items.iter().all(|i| i.state == ItemState::Accepted));
     // Accepted twice is no edit.
-    assert!(accept(&items, &j, &auto, &mut c, false).is_empty());
-    // Undo the cut alone: its span cut, then what the automatic cut kept of it kept again; the
-    // answer is now "keep, dismissed".
+    assert!(accept(&items, &j, (&auto, &now), &mut c, false).is_empty());
+    // Undo the cut alone: its span cut, then what the automatic cut kept of it kept again, stopping
+    // at the accepted silence beside it (the user's now); the answer is now "keep, dismissed".
     assert_eq!(
-        undo(&items[1], &j, &auto, &mut c),
-        [(9.7, 20.4, false), (9.7, 20.4, true)]
+        undo(&items[1], &j, (&auto, &now), &mut c),
+        [(10.0, 20.4, false), (10.0, 20.4, true)]
     );
     let a = c.answer(&items[1].part_of()).unwrap();
     assert_eq!((a.keep, a.how), (true, How::Dismissed));
     // Undo of the kept silence: the part cut, and the talk's pad that reached into it kept again.
     let mut again = c.clone();
     assert_eq!(
-        undo(&items[0], &j, &auto, &mut again),
+        undo(&items[0], &j, (&auto, &now), &mut again),
         [(0.0, 10.0, false), (9.7, 10.0, true)]
     );
     // A dismissed part is no longer listed, and undo of a waiting one is nothing.
@@ -105,7 +105,7 @@ fn accepting_dismissing_and_undoing_record_answers() {
         state: ItemState::Suggested,
         ..items[0]
     };
-    assert!(undo(&waiting, &j, &auto, &mut c).is_empty());
+    assert!(undo(&waiting, &j, (&auto, &now), &mut c).is_empty());
     // Every answer is a pair.
     let pairs = collect(Path::new("r.mp4"), &j, &now, &auto, &c);
     assert_eq!(pairs.len(), 2);
@@ -123,7 +123,7 @@ fn a_cut_of_talk_never_reaches_into_the_talk_beside_it() {
     let mut c = Choices::default();
     let (items, _) = suggestions(&j, &Fit::default(), &auto, &auto, &c);
     assert_eq!(
-        accept(&items, &j, &auto, &mut c, false),
+        accept(&items, &j, (&auto, &auto), &mut c, false),
         [(9.7, 30.0, false)]
     );
 }
@@ -143,11 +143,12 @@ fn an_accepted_part_keeps_what_was_taken_after_a_refit() {
     let (j, auto) = sample();
     let mut c = Choices::default();
     let (items, _) = suggestions(&j, &Fit::default(), &auto, &auto, &c);
-    accept(&items[..1], &j, &auto, &mut c, false);
+    accept(&items[..1], &j, (&auto, &auto), &mut c, false);
     // A fit that would now cut the first silence.
     let strict = Fit {
         temperature: 1.0,
         cutoff: 0.95,
+        turn: 2.944,
         pairs: 30,
     };
     let (items, _) = suggestions(
@@ -179,7 +180,12 @@ fn pairs_are_replaced_per_recording_and_fit_across_them() {
     store_pairs(&path, Path::new("b"), vec![pair("b", -1.0, false)]).unwrap();
     let all = store_pairs(&path, Path::new("a"), vec![pair("a", 2.0, true)]).unwrap();
     assert_eq!(all.len(), 2);
-    assert_eq!(load_pairs(&path), all);
+    assert_eq!(load_pairs(&path).unwrap(), all);
+    // The same pairs again: nothing written.
+    let stamp = std::fs::metadata(&path).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    store_pairs(&path, Path::new("b"), vec![pair("b", -1.0, false)]).unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), stamp);
     assert_eq!(fitted(Some(&path)), Fit::default(), "two pairs fit nothing");
     let many: Vec<Pair> = (0..40)
         .map(|i| {
@@ -194,9 +200,24 @@ fn pairs_are_replaced_per_recording_and_fit_across_them() {
     let f = fitted(Some(&path));
     assert_eq!(f.pairs, 42);
     assert!(f.cutoff > 0.5, "Laya keeps too much here: {f:?}");
-    // A broken file reads as no pairs.
+    // A file that does not parse is set aside whole and the next store starts afresh beside it.
     std::fs::write(&path, "{").unwrap();
-    assert!(load_pairs(&path).is_empty());
+    assert!(load_pairs(&path).unwrap().is_empty());
+    assert_eq!(
+        std::fs::read_to_string(dir.join("keep_pairs.json.broken")).unwrap(),
+        "{"
+    );
+    assert!(!path.exists());
+    std::fs::write(&path, "{\"pairs\": 7}").unwrap();
+    store_pairs(&path, Path::new("a"), vec![pair("a", 1.0, true)]).unwrap();
+    assert!(dir.join("keep_pairs.json.broken2").exists());
+    assert_eq!(load_pairs(&path).unwrap().len(), 1);
+    // One that cannot be read at all (here a folder) is an error, and nothing is written over it.
+    let folder = dir.join("folder.json");
+    std::fs::create_dir_all(&folder).unwrap();
+    assert!(store_pairs(&folder, Path::new("a"), vec![]).is_err());
+    assert!(folder.is_dir());
+    assert_eq!(fitted(Some(&folder)), Fit::default());
 }
 
 #[test]
@@ -296,7 +317,7 @@ fn an_accept_taken_back_by_the_editors_undo_no_longer_stands() {
     let fit = Fit::default();
     let mut c = Choices::default();
     let (items, _) = suggestions(&j, &fit, &auto, &auto, &c);
-    accept(&items, &j, &auto, &mut c, false);
+    accept(&items, &j, (&auto, &auto), &mut c, false);
     // Ctrl+Z put the list back as it was: both are suggestions again, and no pair is counted.
     let (items, sum) = suggestions(&j, &fit, &auto, &auto, &c);
     assert_eq!((sum.accepted, sum.keep, sum.cut), (0, 1, 1));
@@ -320,14 +341,14 @@ fn accept_all_is_no_training_pair_but_one_part_accepted_or_undone_is() {
     let fit = Fit::default();
     let mut c = Choices::default();
     let (items, _) = suggestions(&j, &fit, &auto, &auto, &c);
-    accept(&items, &j, &auto, &mut c, true);
+    accept(&items, &j, (&auto, &auto), &mut c, true);
     let now = ranges(&[(0.0, 10.0), (30.0, 40.0)]);
     // Taken, shown as accepted, but not a pair: Laya's choice is not the user's decision.
     let (items, sum) = suggestions(&j, &fit, &now, &auto, &c);
     assert_eq!(sum.accepted, 2);
     assert!(collect(Path::new("r.mp4"), &j, &now, &auto, &c).is_empty());
     // Undoing one of them is a decision about that part: a pair.
-    undo(&items[1], &j, &auto, &mut c);
+    undo(&items[1], &j, (&auto, &now), &mut c);
     let now = ranges(&[(0.0, 10.0), (10.0, 20.0), (30.0, 40.0)]);
     let pairs = collect(Path::new("r.mp4"), &j, &now, &auto, &c);
     let got: Vec<(f64, bool, &str)> = pairs
@@ -338,9 +359,25 @@ fn accept_all_is_no_training_pair_but_one_part_accepted_or_undone_is() {
     // One part accepted on its own is a pair.
     let mut one = Choices::default();
     let (items, _) = suggestions(&j, &fit, &auto, &auto, &one);
-    accept(&items[..1], &j, &auto, &mut one, false);
+    accept(&items[..1], &j, (&auto, &auto), &mut one, false);
     let now = ranges(&[(0.0, 20.0), (30.0, 40.0)]);
     let pairs = collect(Path::new("r.mp4"), &j, &now, &auto, &one);
     assert_eq!(pairs.len(), 1);
     assert_eq!((pairs[0].start, pairs[0].how.as_str()), (0.0, "accepted"));
+}
+
+#[test]
+fn a_talk_cut_stops_at_a_silent_neighbour_the_user_kept_by_hand() {
+    let (j, _) = sample();
+    let auto = ranges(&[(9.7, 20.4), (29.6, 40.0)]);
+    // The user kept the first silence themselves; Laya would cut the talk after it.
+    let now = ranges(&[(0.0, 20.4), (29.6, 40.0)]);
+    let mut c = Choices::default();
+    let (items, _) = suggestions(&j, &Fit::default(), &now, &auto, &c);
+    let talk: Vec<Item> = items.iter().filter(|i| i.start == 10.0).copied().collect();
+    // The pad reaches into the kept silence no more: only the talk and its pad after are cut.
+    assert_eq!(
+        accept(&talk, &j, (&auto, &now), &mut c, false),
+        [(10.0, 20.4, false)]
+    );
 }

@@ -87,6 +87,6 @@ fn a_judged_recording_shows_its_suggestions_and_its_hand_edits_become_pairs() {
     let at: Vec<(f64, bool)> = v.items.iter().map(|i| (i.start, i.keep)).collect();
     assert_eq!(at, [(0.0, true), (30.0, false)]);
     assert_eq!((v.summary.keep, v.summary.cut), (1, 1));
-    assert!(keep::load_pairs(&pairs).is_empty());
+    assert!(keep::load_pairs(&pairs).unwrap().is_empty());
     let _ = std::fs::remove_dir_all(&d);
 }

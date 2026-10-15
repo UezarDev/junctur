@@ -143,8 +143,13 @@ impl Choices {
 
     /// Records `a`, replacing any answer for the same part.
     pub fn set(&mut self, a: Answer) {
-        self.answers
-            .retain(|x| !(x.start == a.start && x.end == a.end));
+        // Matched as `answer` matches, so a part read back a hair off is replaced, not doubled.
+        let p = Part {
+            start: a.start,
+            end: a.end,
+            kind: Kind::Talk,
+        };
+        self.answers.retain(|x| !same(x.start, x.end, &p));
         self.answers.push(a);
         self.answers.sort_by(|x, y| x.start.total_cmp(&y.start));
     }

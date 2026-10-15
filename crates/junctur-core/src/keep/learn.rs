@@ -4,6 +4,7 @@
 //! recording each time they are collected, so an answer changed is not counted twice.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
@@ -89,19 +90,43 @@ pub fn collect(
     out
 }
 
-/// Every pair in `path`; none when there is no file or it does not read (a broken file is logged by
-/// the writer, which then starts it again rather than failing every edit).
-pub fn load_pairs(path: &Path) -> Vec<Pair> {
-    std::fs::read(path)
-        .ok()
-        .and_then(|b| serde_json::from_slice::<Pairs>(&b).ok())
-        .map(|p| p.pairs)
-        .unwrap_or_default()
+/// Every pair in `path`: none when there is no file, an error when it cannot be read. One that does
+/// not parse is set aside beside it (`keep_pairs.json.broken`, `…broken2`) and said, then none: every
+/// recording's pairs are in it, so it is never written over.
+pub fn load_pairs(path: &Path) -> Result<Vec<Pair>> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    match serde_json::from_slice::<Pairs>(&bytes) {
+        Ok(p) => Ok(p.pairs),
+        Err(e) => {
+            let aside = crate::output::first_free(path, "broken");
+            std::fs::rename(path, &aside)?;
+            eprintln!(
+                "junctur: {} did not read ({e}); kept as {}",
+                path.display(),
+                aside.display()
+            );
+            Ok(Vec::new())
+        }
+    }
 }
 
-/// Replaces `recording`'s pairs in `path` with `pairs`; returns every pair now in it.
+/// One read-change-write of a pairs file at a time in this process: the app collects pairs on every
+/// read of a recording's suggestions, and a judging run may at the same moment.
+static STORING: Mutex<()> = Mutex::new(());
+
+/// Replaces `recording`'s pairs in `path` with `pairs`; returns every pair now in it. Nothing is
+/// written when they are the ones it has, nor when the file could not be read.
 pub fn store_pairs(path: &Path, recording: &Path, pairs: Vec<Pair>) -> Result<Vec<Pair>> {
-    let mut all = load_pairs(path);
+    let _one = STORING.lock().unwrap_or_else(|e| e.into_inner());
+    let mut all = load_pairs(path)?;
+    let had: Vec<&Pair> = all.iter().filter(|p| p.recording == recording).collect();
+    if had.len() == pairs.len() && had.iter().zip(&pairs).all(|(a, b)| *a == b) {
+        return Ok(all);
+    }
     all.retain(|p| p.recording != recording);
     all.extend(pairs);
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -112,9 +137,10 @@ pub fn store_pairs(path: &Path, recording: &Path, pairs: Vec<Pair>) -> Result<Ve
     Ok(file.pairs)
 }
 
-/// The fit of every pair in `path` (the defaults when there are too few).
+/// The fit of every pair in `path` (the defaults when there are too few, or it cannot be read).
 pub fn fitted(path: Option<&Path>) -> Fit {
-    path.map_or_else(Fit::default, |p| fit_of(&load_pairs(p)))
+    path.and_then(|p| load_pairs(p).ok())
+        .map_or_else(Fit::default, |v| fit_of(&v))
 }
 
 pub(super) fn fit_of(pairs: &[Pair]) -> Fit {

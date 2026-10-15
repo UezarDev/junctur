@@ -22,8 +22,11 @@ pub const UNCERTAIN: f64 = 0.1;
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Fit {
     pub temperature: f64,
-    /// Laya's own P(keep) (temperature 1) at which the decision turns.
+    /// Laya's own P(keep) (temperature 1) at which the decision turns, as shown.
     pub cutoff: f64,
+    /// The margin at which it turns, as fitted: what decides, kept rather than read back from the
+    /// cutoff, which saturates past a margin of about 14.
+    pub turn: f64,
     /// Pairs it was fitted on; 0 for the defaults.
     pub pairs: usize,
 }
@@ -33,25 +36,20 @@ impl Default for Fit {
         Self {
             temperature: 1.0,
             cutoff: 0.5,
+            turn: 0.0,
             pairs: 0,
         }
     }
 }
 
 impl Fit {
-    /// The margin at the cutoff.
-    fn turn(&self) -> f64 {
-        let c = self.cutoff.clamp(1e-6, 1.0 - 1e-6);
-        (c / (1.0 - c)).ln()
-    }
-
     /// The calibrated chance a part with `margin` stays.
     pub fn p(&self, margin: f64) -> f64 {
-        p_keep(margin - self.turn(), self.temperature)
+        p_keep(margin - self.turn, self.temperature)
     }
 
     pub fn keeps(&self, margin: f64) -> bool {
-        margin >= self.turn()
+        margin >= self.turn
     }
 
     pub fn uncertain(&self, margin: f64) -> bool {
@@ -60,7 +58,8 @@ impl Fit {
 }
 
 /// The fit of `pairs` (margin, kept): a logistic regression `a·m + b` of the answer on the margin,
-/// read as T = 1/a and the turning margin -b/a. The defaults when there are too few pairs, or when
+/// read as T = 1/a (held to 0.05..20) and the turning margin -b/a, the decision's, whatever T was
+/// held to. The defaults when there are too few pairs, or when
 /// the slope comes out negative or flat (Laya reads this user backwards: no temperature makes that
 /// right).
 pub fn fit(pairs: &[(f64, bool)]) -> Fit {
@@ -72,16 +71,34 @@ pub fn fit(pairs: &[(f64, bool)]) -> Fit {
     if a.is_nan() || a <= 1e-3 || !b.is_finite() {
         return Fit::default();
     }
+    let turn = -b / a;
     Fit {
         temperature: (1.0 / a).clamp(0.05, 20.0),
-        cutoff: p_keep(-b / a, 1.0),
+        cutoff: p_keep(turn, 1.0),
+        turn,
         pairs: pairs.len(),
     }
 }
 
+/// `a·m + b` fitted on the margins standardised (mean 0, spread 1), then mapped back: Newton from
+/// a = 1, b = 0 on margins far from 0 starts saturated and runs off.
+fn logistic(pairs: &[(f64, bool)]) -> (f64, f64) {
+    let n = pairs.len() as f64;
+    let mean = pairs.iter().map(|p| p.0).sum::<f64>() / n;
+    let spread = (pairs.iter().map(|p| (p.0 - mean).powi(2)).sum::<f64>() / n)
+        .sqrt()
+        .max(1e-6);
+    let z: Vec<(f64, bool)> = pairs
+        .iter()
+        .map(|&(m, y)| ((m - mean) / spread, y))
+        .collect();
+    let (a, b) = newton(&z);
+    (a / spread, b - a * mean / spread)
+}
+
 /// Newton's method on the log loss of sigmoid(a·m + b), with a small ridge on `a` so a set the margin
 /// splits perfectly still has an answer.
-fn logistic(pairs: &[(f64, bool)]) -> (f64, f64) {
+fn newton(pairs: &[(f64, bool)]) -> (f64, f64) {
     const RIDGE: f64 = 1e-3;
     let (mut a, mut b) = (1.0f64, 0.0f64);
     for _ in 0..50 {
@@ -141,6 +158,23 @@ mod tests {
         assert!((f.cutoff - p_keep(-2.0, 1.0)).abs() < 0.05, "{f:?}");
         assert!(f.keeps(0.0) && !f.keeps(-4.0), "{f:?}");
         assert!(f.uncertain(-2.0) && !f.uncertain(-8.0), "{f:?}");
+    }
+
+    #[test]
+    fn a_turn_far_out_still_decides_where_it_was_fitted() {
+        // The user keeps only parts Laya is all but sure of: the turn is past a margin of 14, where
+        // a cutoff read back as a chance would have saturated.
+        let pairs: Vec<(f64, bool)> = (0..100)
+            .map(|i| {
+                let m = i as f64 * 0.4;
+                (m, m + ((i * 37) % 11) as f64 * 0.3 - 1.5 > 20.0)
+            })
+            .collect();
+        let f = fit(&pairs);
+        assert!(f.turn > 15.0 && f.turn < 25.0, "{f:?}");
+        assert!(!f.keeps(16.0) || f.turn <= 16.0);
+        assert!(f.keeps(30.0) && !f.keeps(10.0), "{f:?}");
+        assert!((f.p(f.turn) - 0.5).abs() < 1e-9);
     }
 
     #[test]

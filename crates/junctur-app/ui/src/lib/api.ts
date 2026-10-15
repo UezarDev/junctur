@@ -352,7 +352,7 @@ export interface KeepView {
   items: KeepItem[];
   summary: { cut: number; cutS: number; keep: number; keepS: number; uncertain: number; accepted: number };
   /** Laya's own chance where the decision turns, its temperature, and the decisions they come from. */
-  fit: { temperature: number; cutoff: number; pairs: number };
+  fit: { temperature: number; cutoff: number; turn: number; pairs: number };
   run: KeepRun | null;
 }
 

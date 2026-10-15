@@ -6,7 +6,7 @@
 use serde::Serialize;
 
 use super::fit::Fit;
-use super::parts::Kind;
+use super::parts::{Kind, Part};
 use super::{Answer, Choices, How, Judged};
 use crate::edit::Range;
 
@@ -103,14 +103,20 @@ pub fn suggestions(
 
 /// The span an edit of `item` covers. A cut of talk covers the automatic cut's kept ranges (`auto`,
 /// sorted) that reach into it, held out of other talk: those are its speech with the pads kept
-/// around it, and a cut of the part alone would leave slivers of silence kept either side. Anything
-/// else is the part itself.
-fn span(item: &Item, j: &Judged, auto: &[Range]) -> (f64, f64) {
+/// around it, and a cut of the part alone would leave slivers of silence kept either side. It stops at
+/// a silent neighbour that is the user's (the list does otherwise than the automatic cut with it, or
+/// an answer of theirs stands for it): their edit wins. Anything else is the part itself.
+fn span(item: &Item, j: &Judged, auto: &[Range], now: &[Range], choices: &Choices) -> (f64, f64) {
     if item.keep || item.kind != Kind::Talk {
         return (item.start, item.end);
     }
     let at = j.parts.partition_point(|p| p.start < item.start - 1e-6);
-    let near = |k: Option<usize>| k.and_then(|k| j.parts.get(k));
+    let theirs = |p: &Part| p.kept_by(now) != p.kept_by(auto) || choices.standing(p, now).is_some();
+    let near = |k: Option<usize>| {
+        k.and_then(|k| j.parts.get(k))
+            .map(|x| x.part())
+            .filter(|p| !theirs(p))
+    };
     let lo = near(at.checked_sub(1))
         .filter(|p| p.kind == Kind::Silent)
         .map_or(item.start, |p| p.start);
@@ -131,13 +137,13 @@ fn span(item: &Item, j: &Judged, auto: &[Range]) -> (f64, f64) {
 pub fn accept(
     items: &[Item],
     j: &Judged,
-    auto: &[Range],
+    (auto, now): (&[Range], &[Range]),
     choices: &mut Choices,
     bulk: bool,
 ) -> Vec<(f64, f64, bool)> {
     let mut edits = Vec::new();
     for i in items.iter().filter(|i| i.state == ItemState::Suggested) {
-        let (a, b) = span(i, j, auto);
+        let (a, b) = span(i, j, auto, now, choices);
         edits.push((a, b, i.keep));
         choices.set(Answer {
             start: i.start,
@@ -168,14 +174,14 @@ pub fn dismiss(item: &Item, choices: &mut Choices) {
 pub fn undo(
     item: &Item,
     j: &Judged,
-    auto: &[Range],
+    (auto, now): (&[Range], &[Range]),
     choices: &mut Choices,
 ) -> Vec<(f64, f64, bool)> {
     if item.state != ItemState::Accepted {
         return Vec::new();
     }
+    let (a, b) = span(item, j, auto, now, choices);
     dismiss(item, choices);
-    let (a, b) = span(item, j, auto);
     let mut edits = vec![(a, b, false)];
     let from = auto.partition_point(|r| r.end <= a);
     edits.extend(

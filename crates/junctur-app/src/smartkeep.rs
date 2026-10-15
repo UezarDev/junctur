@@ -188,18 +188,18 @@ pub fn view(
     let (Some(judged), Ok(list)) = (keep::load(&p.dir), p.edit()) else {
         return Ok(v);
     };
-    let fit = pipeline::learn(&p, &judged, &list, &choices, pairs).unwrap_or_else(|e| {
-        eprintln!("junctur-app keep: the pairs were not collected ({e})");
-        keep::fitted(pairs)
-    });
-    let auto = pipeline::automatic_keep(&p, &list).unwrap_or_else(|| list.keep.clone());
-    let (items, summary) = keep::suggestions(&judged, &fit, &list.keep, &auto, &choices);
+    let s = pipeline::standing(&p, &judged, &list, &choices, pairs, &mut |l: &str| say(l));
     v.judged_prompt = Some(judged.prompt.clone());
     v.parts = judged.parts.len();
-    v.items = items;
-    v.summary = summary;
-    v.fit = fit;
+    v.items = s.items;
+    v.summary = s.summary;
+    v.fit = s.fit;
     Ok(v)
+}
+
+/// A log line of [`pipeline::standing`]'s, on the app's stderr.
+fn say(line: &str) {
+    eprintln!("junctur-app {line}");
 }
 
 /// What the user does with Laya's suggestions.
@@ -232,16 +232,17 @@ pub fn answer(
     let mut choices = keep::load_choices(&p.dir).map_err(|e| e.to_string())?;
     let judged = keep::load(&p.dir).ok_or("Laya has not judged this recording")?;
     let list = p.edit().map_err(|e| e.to_string())?;
-    let fit = keep::fitted(pairs);
-    let auto = pipeline::automatic_keep(&p, &list).unwrap_or_else(|| list.keep.clone());
-    let (items, _) = keep::suggestions(&judged, &fit, &list.keep, &auto, &choices);
+    // As the lane was shown them: Accept all takes exactly these.
+    let pipeline::Standing { auto, items, .. } =
+        pipeline::standing(&p, &judged, &list, &choices, pairs, &mut |l: &str| say(l));
+    let now = list.keep.as_slice();
     let near =
         |i: &&Item| at.is_some_and(|(a, b)| (i.start - a).abs() < 1e-3 && (i.end - b).abs() < 1e-3);
     let edits: Vec<(f64, f64, bool)> = match action {
-        Action::AcceptAll => keep::accept(&items, &judged, &auto, &mut choices, true),
+        Action::AcceptAll => keep::accept(&items, &judged, (&auto, now), &mut choices, true),
         Action::Accept => {
             let picked: Vec<Item> = items.iter().filter(near).copied().collect();
-            keep::accept(&picked, &judged, &auto, &mut choices, false)
+            keep::accept(&picked, &judged, (&auto, now), &mut choices, false)
         }
         Action::Dismiss => {
             let item = items
@@ -254,9 +255,9 @@ pub fn answer(
         Action::Undo => {
             let item = items
                 .iter()
-                .find(near)
+                .find(|i| near(i) && i.state == ItemState::Accepted)
                 .ok_or("that part is no longer an accepted suggestion")?;
-            keep::undo(item, &judged, &auto, &mut choices)
+            keep::undo(item, &judged, (&auto, now), &mut choices)
         }
     };
     if !edits.is_empty() {

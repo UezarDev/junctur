@@ -15,7 +15,7 @@ use crate::labels::Labels;
 use crate::runtime::DevicePref;
 use crate::transcribe::Transcript;
 use crate::vad::Region;
-use crate::Result;
+use crate::{models, Result};
 
 /// What a run judges.
 pub struct Job<'a> {
@@ -46,10 +46,15 @@ pub fn run(job: &Job, log: &mut dyn FnMut(&str)) -> Result<Judged> {
         labels: job.labels,
     };
     let q = state::question();
-    let states: Vec<String> = parts.iter().map(|p| state::state(&c, p)).collect();
+    // Read even when every part is reused: a state is fitted to Laya's budget in tokens.
+    let vocab = Vocab::shared(job.cache_dir)?;
+    let head = vocab.head(&q)?;
+    let fits = |s: &str| vocab.fits(&head, s).unwrap_or(true);
+    let states: Vec<String> = parts.iter().map(|p| state::fitted(&c, p, &fits)).collect();
     let hashes: Vec<String> = states.iter().map(|s| hash(&q, s)).collect();
     let before: HashMap<String, f64> = load(job.dir)
         .filter(|_| !job.force)
+        .filter(|j| j.model == laya::NAME && j.version == state::VERSION)
         .map(|j| j.parts.into_iter().map(|p| (p.hash, p.margin)).collect())
         .unwrap_or_default();
     let todo: Vec<usize> = (0..parts.len())
@@ -68,7 +73,6 @@ pub fn run(job: &Job, log: &mut dyn FnMut(&str)) -> Result<Judged> {
             parts.len()
         ));
         let opened = std::time::Instant::now();
-        let vocab = Vocab::open(job.cache_dir)?;
         let mut model = Laya::open(job.cache_dir, &vocab, job.device)?;
         log(&format!(
             "keep: Laya on {:?}, opened in {:.1} s",
@@ -76,7 +80,6 @@ pub fn run(job: &Job, log: &mut dyn FnMut(&str)) -> Result<Judged> {
             opened.elapsed().as_secs_f64()
         ));
         let judging = std::time::Instant::now();
-        let head = vocab.head(&q)?;
         let rows = todo
             .iter()
             .map(|&i| vocab.sequence(&head, &states[i]))
@@ -133,10 +136,19 @@ fn spoken(t: &Transcript, s: &Speakers) -> Vec<Spoken> {
         .collect()
 }
 
+/// What a margin depends on: the model and tokenizer files (by their pins), the layout's limits, the
+/// question and state's version and text.
 fn hash(q: &laya::Question, state: &str) -> String {
     let mut h = Fnv::new();
-    h.u64(state::VERSION as u64);
-    for s in [laya::NAME, &q.instructions, &q.keep, &q.cut, state] {
+    h.u64(state::VERSION as u64)
+        .u64(laya::MAX_LEN as u64)
+        .u64(laya::HEAD_MAX_LEN as u64)
+        .u64(laya::OPTION_MAX as u64);
+    let pins = [models::LAYA_MODEL.sha256, models::LAYA_TOKENIZER.sha256];
+    for s in pins
+        .into_iter()
+        .chain([laya::NAME, &q.instructions, &q.keep, &q.cut, state])
+    {
         h.bytes(s.as_bytes()).u64(s.len() as u64);
     }
     h.hex()

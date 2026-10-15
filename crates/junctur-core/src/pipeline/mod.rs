@@ -34,7 +34,7 @@ use editlist::{draft, keep_or_write};
 use smartkeep::keep_stage;
 use stages::{count_words, labels_stage, speakers_stage, speech_stage, transcribe_stage, Stage};
 
-pub use smartkeep::{automatic_keep, judge, learn, KeepRun, KEEP_OFF};
+pub use smartkeep::{automatic_keep, judge, learn, standing, KeepRun, Standing, KEEP_OFF};
 pub use stages::LABELS_OFF;
 
 use crate::edit::{self, CutSettings, EditList};

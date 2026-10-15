@@ -3,7 +3,8 @@
 //! it (`laya/common.py`, `build_head` and `build_sequence`), since the weights were trained on that
 //! layout and nothing else; the ignored test against the SDK's own output pins it.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use ort::session::Session;
 use ort::value::Tensor;
@@ -19,7 +20,7 @@ pub const MAX_LEN: usize = 1024;
 /// The question and its options, in tokens (its `head_max_len`).
 pub const HEAD_MAX_LEN: usize = 256;
 /// Tokens kept of each option.
-const OPTION_MAX: usize = 48;
+pub const OPTION_MAX: usize = 48;
 /// `choice` in Laya's question types.
 const CHOICE: i64 = 0;
 /// Rows in one run, and tokens (rows times the longest): a full card would fall back to the CPU.
@@ -47,7 +48,22 @@ pub struct Vocab {
 /// an option marker of its own.
 const MASK: &str = "<mask>";
 
+/// The tokenizer read last, kept for the process: a 34 MB JSON is a second's parse, and every judging
+/// run needs it (states are fitted to Laya's budget in tokens).
+static SHARED: Mutex<Option<(PathBuf, Arc<Vocab>)>> = Mutex::new(None);
+
 impl Vocab {
+    /// [`Self::open`], read once per process and cache folder.
+    pub fn shared(cache_dir: &Path) -> Result<Arc<Self>> {
+        let mut kept = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, v)) = kept.as_ref().filter(|(d, _)| d == cache_dir) {
+            return Ok(v.clone());
+        }
+        let v = Arc::new(Self::open(cache_dir)?);
+        *kept = Some((cache_dir.to_path_buf(), v.clone()));
+        Ok(v)
+    }
+
     /// Fetches the tokenizer on first use (34 MB) and reads it.
     pub fn open(cache_dir: &Path) -> Result<Self> {
         let path = models::ensure(&models::LAYA_TOKENIZER, cache_dir)?;
@@ -83,28 +99,25 @@ impl Vocab {
 
     /// The question's half of every input: `<bos> "choice question: " instructions <eos>`, then
     /// `<mask> " keep: " description <mask> " cut: " description <eos>`, with the markers' places.
-    /// Options are held to [`OPTION_MAX`] tokens and the whole to about [`HEAD_MAX_LEN`] as
-    /// `build_head` holds them (its budget leaves out the three separators, and so does this).
+    /// Options are held to [`OPTION_MAX`] tokens and the instructions to what [`HEAD_MAX_LEN`] leaves
+    /// after them, as `build_head` holds them (its budget leaves out the three separators, and so does
+    /// this). Its other branch, options cut when they leave under 16 tokens, cannot happen with two
+    /// options of at most 49 tokens each, and is left out.
     pub fn head(&self, q: &Question) -> Result<(Vec<u32>, Vec<usize>)> {
         let head = self.ids(&format!(
             "choice question: {}",
             q.instructions.replace(MASK, " ")
         ))?;
         let mut options: Vec<Vec<u32>> = Vec::with_capacity(2);
+        const { assert!(2 * (OPTION_MAX + 1) + 16 <= HEAD_MAX_LEN) };
         for (label, text) in [("keep", &q.keep), ("cut", &q.cut)] {
             let mut ids = self.ids(&format!(" {label}: {text}"))?;
             ids.truncate(OPTION_MAX);
             ids.insert(0, self.mask);
             options.push(ids);
         }
-        let used = |o: &[Vec<u32>]| o.iter().map(Vec::len).sum::<usize>();
-        let mut budget = HEAD_MAX_LEN as isize - used(&options) as isize;
-        if budget < 16 {
-            let per = ((HEAD_MAX_LEN - 16) / options.len()).max(4);
-            options.iter_mut().for_each(|o| o.truncate(per));
-            budget = HEAD_MAX_LEN as isize - used(&options) as isize;
-        }
-        let keep_head = (budget.max(8) as usize).min(head.len());
+        let used: usize = options.iter().map(Vec::len).sum();
+        let keep_head = HEAD_MAX_LEN.saturating_sub(used).max(8).min(head.len());
         let mut ids = Vec::with_capacity(HEAD_MAX_LEN + 3);
         ids.push(self.cls);
         ids.extend_from_slice(&head[..keep_head]);
@@ -116,6 +129,12 @@ impl Vocab {
         }
         ids.push(self.sep);
         Ok((ids, markers))
+    }
+
+    /// Whether `state` fits whole after `head`, its closing `<eos>` included: one that does not is cut
+    /// at its end, the rest of the JSON with it.
+    pub fn fits(&self, head: &(Vec<u32>, Vec<usize>), state: &str) -> Result<bool> {
+        Ok(head.0.len() + self.ids(state)?.len() < MAX_LEN)
     }
 
     /// The whole input for `state` after `head` (from [`Self::head`]): the state cut at its end to the
@@ -163,27 +182,7 @@ impl Laya {
     /// Each row's keep logit minus its cut logit, in the rows' order. Run shortest first in batches,
     /// each padded to its longest, so a few long parts do not pad every short one to 1024.
     pub fn margins(&mut self, rows: &[Row], done: &mut dyn FnMut(usize)) -> Result<Vec<f32>> {
-        let mut order: Vec<usize> = (0..rows.len()).collect();
-        order.sort_by_key(|&i| rows[i].ids.len());
-        let mut out = vec![0f32; rows.len()];
-        let mut at = 0;
-        while at < order.len() {
-            let mut end = at;
-            while end < order.len()
-                && end - at < BATCH_ROWS
-                && rows[order[end]].ids.len() * (end - at + 1) <= BATCH_TOKENS
-            {
-                end += 1;
-            }
-            let end = end.max(at + 1);
-            let batch: Vec<&Row> = order[at..end].iter().map(|&i| &rows[i]).collect();
-            for (k, m) in self.run(&batch)?.into_iter().enumerate() {
-                out[order[at + k]] = m;
-            }
-            at = end;
-            done(at);
-        }
-        Ok(out)
+        in_batches(rows, &mut |b| self.run(b), done)
     }
 
     fn run(&mut self, batch: &[&Row]) -> Result<Vec<f32>> {
@@ -234,7 +233,49 @@ impl Laya {
     }
 }
 
+/// `run` over `rows` shortest first, in batches of at most [`BATCH_ROWS`] rows and [`BATCH_TOKENS`]
+/// tokens (rows times the longest), its answers put back in the rows' order; `done` told how many are
+/// done after each batch. Apart from the model so the order is tested without one.
+fn in_batches(
+    rows: &[Row],
+    run: &mut dyn FnMut(&[&Row]) -> Result<Vec<f32>>,
+    done: &mut dyn FnMut(usize),
+) -> Result<Vec<f32>> {
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by_key(|&i| rows[i].ids.len());
+    let mut out = vec![0f32; rows.len()];
+    let mut at = 0;
+    while at < order.len() {
+        let mut end = at;
+        while end < order.len()
+            && end - at < BATCH_ROWS
+            && rows[order[end]].ids.len() * (end - at + 1) <= BATCH_TOKENS
+        {
+            end += 1;
+        }
+        let end = end.max(at + 1);
+        let batch: Vec<&Row> = order[at..end].iter().map(|&i| &rows[i]).collect();
+        let got = run(&batch)?;
+        if got.len() != batch.len() {
+            return Err(Error::Model(format!(
+                "{} answers for {} inputs",
+                got.len(),
+                batch.len()
+            )));
+        }
+        for (k, m) in got.into_iter().enumerate() {
+            out[order[at + k]] = m;
+        }
+        at = end;
+        done(at);
+    }
+    Ok(out)
+}
+
 /// The chance a part with `margin` stays, at temperature `t`.
 pub fn p_keep(margin: f64, t: f64) -> f64 {
     1.0 / (1.0 + (-margin / t).exp())
 }
+
+#[cfg(test)]
+mod tests;

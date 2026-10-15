@@ -9,7 +9,7 @@ use super::{
     StageName, StageState,
 };
 use crate::edit::{self, EditList, Range};
-use crate::keep::{self, Choices, Fit, Judged};
+use crate::keep::{self, Choices, Fit, Item, Judged, Summary};
 use crate::labels;
 use crate::transcribe::{self, Transcript};
 use crate::{tracks, Error, Result};
@@ -68,11 +68,15 @@ pub(super) fn keep_stage(
         force: opts.force,
     };
     let judged = jobs.stage(&p.dir, StageName::Keep, log, |log| keep::run(&job, log))?;
-    let pairs = keep::pairs_path();
-    let fit = learn(p, &judged, &list, &choices, pairs.as_deref()).unwrap_or_else(|e| {
-        log(&format!("keep: your decisions were not read ({e})"));
-        keep::fitted(pairs.as_deref())
-    });
+    let fit = standing(
+        p,
+        &judged,
+        &list,
+        &choices,
+        keep::pairs_path().as_deref(),
+        log,
+    )
+    .fit;
     let amended = edit::amend(&p.edit_path(), |e| {
         keep::score_windows(&mut e.windows, e.settings.window, &judged, &fit);
     });
@@ -121,6 +125,39 @@ pub fn automatic_keep(p: &Project, list: &EditList) -> Option<Vec<Range>> {
         list.duration,
         &list.settings,
     ))
+}
+
+/// What `p`'s suggestions are now, the one reading of them the stage, the app's lane and its answers
+/// share, so Accept all applies the parts the lane showed: the pairs collected and the fit of every
+/// pair ([`learn`]; a failure said and the pairs file's fit used), the automatic cut (the list itself
+/// before the speech is found), and the suggestions against them.
+pub struct Standing {
+    pub fit: Fit,
+    pub auto: Vec<Range>,
+    pub items: Vec<Item>,
+    pub summary: Summary,
+}
+
+pub fn standing(
+    p: &Project,
+    judged: &Judged,
+    list: &EditList,
+    choices: &Choices,
+    pairs: Option<&Path>,
+    log: &mut dyn FnMut(&str),
+) -> Standing {
+    let fit = learn(p, judged, list, choices, pairs).unwrap_or_else(|e| {
+        log(&format!("keep: your decisions were not read ({e})"));
+        keep::fitted(pairs)
+    });
+    let auto = automatic_keep(p, list).unwrap_or_else(|| list.keep.clone());
+    let (items, summary) = keep::suggestions(judged, &fit, &list.keep, &auto, choices);
+    Standing {
+        fit,
+        auto,
+        items,
+        summary,
+    }
 }
 
 /// Collects `p`'s pairs as `list` and `choices` stand ([`keep::collect`]) into the pairs file at
