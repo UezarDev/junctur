@@ -16,6 +16,7 @@ mod player;
 mod project;
 mod recent;
 mod settings;
+mod smartkeep;
 mod state;
 #[cfg(test)]
 mod test_support;
@@ -109,6 +110,11 @@ fn main() {
             commands::turns,
             commands::waves_state,
             commands::waves,
+            commands::labels,
+            commands::keep_view,
+            commands::keep_judge,
+            commands::keep_prompt,
+            commands::keep_answer,
             commands::recent_info,
             commands::thumbnail,
             commands::reveal,
@@ -146,6 +152,7 @@ fn setup(app: &mut tauri::App) -> tauri::Result<()> {
         analysis: Default::default(),
         waves: Default::default(),
         translation: Default::default(),
+        judging: Default::default(),
     });
     if let Some(secs) = test {
         testmode::arm(app.handle().clone(), secs, trace);

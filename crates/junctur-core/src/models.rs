@@ -102,6 +102,51 @@ pub const TRANSLATE_TOKENIZER: Model = Model {
     license: "MIT",
 };
 
+/// SigLIP 2 base, 224 px (Apache-2.0, Google): labels for the parts where nobody talks
+/// ([`crate::labels`]). onnx-community's export, its towers apart so the text one is opened only
+/// for a label never seen. fp32 both: the int8 text tower picks other labels, the fp16 ones do
+/// not load on the CPU.
+pub const SIGLIP_VISION: Model = Model {
+    file: "siglip2_base_224_vision.onnx",
+    url: "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/ba1f3b0843f24bc5417d38e19c37b287d719b2f4/onnx/vision_model.onnx",
+    sha256: "c0573e3f4140c3a7c4e9cc5912bd6b26a033b46a6a8e8af26cbea262b163bcad",
+    license: "Apache-2.0",
+};
+
+pub const SIGLIP_TEXT: Model = Model {
+    file: "siglip2_base_224_text.onnx",
+    url: "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/ba1f3b0843f24bc5417d38e19c37b287d719b2f4/onnx/text_model.onnx",
+    sha256: "baf12d941beabafafb14f7b4adb38dc15be18681b964a84410ec53d9d65e6293",
+    license: "Apache-2.0",
+};
+
+/// Its Gemma vocabulary, which appends `<eos>` and pads to the 64 tokens the text tower reads.
+pub const SIGLIP_TOKENIZER: Model = Model {
+    file: "siglip2_base_224_tokenizer.json",
+    url: "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/ba1f3b0843f24bc5417d38e19c37b287d719b2f4/tokenizer.json",
+    sha256: "cb9140fae3ac5122c972d37adf83e1248471a38147ad76f8215c8872c6fd8322",
+    license: "Apache-2.0",
+};
+
+/// Laya multilingual (Apache-2.0, Convai Innovations, mmBERT-base): smart keep's keep-or-cut
+/// decisions ([`crate::keep`]). Convai publishes safetensors only, so this is our fp16 export of
+/// `convaiinnovations/laya` commit 7b928d82 (`multilingual/`), made with laya 0.4.7's own exporter and
+/// converted with the rotary angles left fp32 (fp16 ones are off near the end of a long input).
+pub const LAYA_MODEL: Model = Model {
+    file: "laya_multilingual_fp16.onnx",
+    url: "https://huggingface.co/UezarDev/laya-multilingual-onnx/resolve/main/laya_multilingual_fp16.onnx",
+    sha256: "eeef5471a9be22daa8af9a94902dcc4906dbd5200780c9c3f3b8e72696023dc0",
+    license: "Apache-2.0",
+};
+
+/// Its Gemma vocabulary, from Convai's own commit (no truncation or padding set in it).
+pub const LAYA_TOKENIZER: Model = Model {
+    file: "laya_multilingual_tokenizer.json",
+    url: "https://huggingface.co/convaiinnovations/laya/resolve/7b928d828b7b0e022f929d9bd2e44165aa270148/multilingual/tokenizer/tokenizer.json",
+    sha256: "609d8f4c067cd3950f88594c5a802616cea245823836ef5848ee4fc40aab5b6f",
+    license: "Apache-2.0",
+};
+
 pub fn dir(cache_dir: &Path) -> PathBuf {
     cache_dir.join("models")
 }

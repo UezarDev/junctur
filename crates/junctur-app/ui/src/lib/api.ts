@@ -260,6 +260,28 @@ export interface Settings {
   words: string[];
   /** The transcript flags words Whisper was less sure of than this many percent; 0 for none. */
   flagBelow: number;
+  /** Labels for the parts where nobody talks (junctur-core labels::Settings). */
+  labels: LabelSettings;
+  /** Smart keep (junctur-core keep::Settings): off by default; the prompt last set on a recording. */
+  keep: { on: boolean; last?: string | null };
+}
+
+/** A kind of video the labels know; its built-in list. */
+export type LabelKindKey = "generic" | "league";
+
+export interface LabelSettings {
+  /** Off by default: the first run fetches about 1.5 GB of model. */
+  on: boolean;
+  kind: LabelKindKey;
+  /** Labels the user added, per kind; missing ones are none. */
+  added?: { generic?: string[]; league?: string[] };
+}
+
+export interface LabelKind {
+  key: LabelKindKey;
+  name: string;
+  /** Its built-in labels, as shown. */
+  builtin: string[];
 }
 
 export interface SettingsView {
@@ -269,7 +291,72 @@ export interface SettingsView {
   path: string | null;
   /** Why the file could not be read (saving replaces it). */
   error: string | null;
+  labelKinds: LabelKind[];
 }
+
+/** One silent piece with its likeliest labels (junctur-core labels::Labelled; `labels.json`). */
+export interface LabelledPiece {
+  start: number;
+  end: number;
+  frames: number;
+  /** The likeliest labels, each with its share of the frames' votes (all labels sum to 1). */
+  top: { label: string; score: number }[];
+  /** The share of the recording's seconds quieter on the game (or mix) track, 0 to 1. */
+  busy?: number;
+  level_db?: number;
+}
+
+export interface Labels {
+  model: string;
+  kind: LabelKindKey;
+  labels: string[];
+  prompts: string[];
+  busy_track: { track: number; role: string } | null;
+  pieces: LabelledPiece[];
+}
+
+/** A part Laya would do otherwise than the edit list (junctur-core keep::Item). */
+export interface KeepItem {
+  start: number;
+  end: number;
+  kind: "talk" | "silent";
+  /** The calibrated chance it stays. */
+  p: number;
+  /** Laya's choice: keep it, or cut it. */
+  keep: boolean;
+  /** Near one half: Review's "Uncertain" goes through these. */
+  uncertain: boolean;
+  /** Waiting for the user, or taken (and undoable). */
+  state: "suggested" | "accepted";
+}
+
+/** Laya's judging run (src/smartkeep.rs). */
+export interface KeepRun {
+  file: string;
+  running: boolean;
+  line: string | null;
+  error: string | null;
+}
+
+/** Smart keep for a recording: its prompt, Laya's suggestions and what it has learnt. */
+export interface KeepView {
+  /** The recording's own prompt, and the last one set on any (offered when it has none). */
+  prompt: string | null;
+  last: string | null;
+  on: boolean;
+  presets: { name: string; prompt: string }[];
+  transcribed: boolean;
+  /** The prompt Laya judged with; null before it judged. */
+  judgedPrompt: string | null;
+  parts: number;
+  items: KeepItem[];
+  summary: { cut: number; cutS: number; keep: number; keepS: number; uncertain: number; accepted: number };
+  /** Laya's own chance where the decision turns, its temperature, and the decisions they come from. */
+  fit: { temperature: number; cutoff: number; turn: number; pairs: number };
+  run: KeepRun | null;
+}
+
+export type KeepAction = "acceptAll" | "accept" | "dismiss" | "undo";
 
 /** A voice Junctur remembers, used to name speakers in every recording. */
 export interface Voice {
@@ -314,7 +401,8 @@ export type StageState = "pending" | "running" | "done" | "failed";
 
 export interface ProjectStatus {
   dir: string;
-  stages: { name: string; state: StageState }[];
+  /** `note` is jobs.json's: "reused", why it failed, or "off" for labels not asked for. */
+  stages: { name: string; state: StageState; note?: string }[];
   transcript: boolean;
   edit: EditSummary | null;
   editError: string | null;
@@ -647,6 +735,18 @@ export const saveSettings = (settings: Settings) => invoke<SettingsView>("save_s
 /** The Captions panel's "Save as default". */
 export const saveCaptionDefaults = (captions: Captions) =>
   invoke<SettingsView>("save_caption_defaults", { captions });
+/** Smart keep for `path`: its prompt, Laya's suggestions, the fit and the judging run. */
+export const keepView = (path: string) => invoke<KeepView>("keep_view", { path });
+/** Keeps `prompt` as `path`'s own (and as the last one), without judging. */
+export const keepPrompt = (path: string, prompt: string) => invoke<void>("keep_prompt", { path, prompt });
+/** Keeps `prompt` as `path`'s and has Laya judge it in the background (`onKeep` tells how far). */
+export const keepJudge = (path: string, prompt: string) => invoke<KeepRun>("keep_judge", { path, prompt });
+/** Accepts every suggestion, or accepts, dismisses or undoes the part `start` to `end`. */
+export const keepAnswer = (action: KeepAction, start?: number, end?: number) =>
+  invoke<void>("keep_answer", { action, start: start ?? null, end: end ?? null });
+
+/** The silent parts' labels of `path`; null when it has none or its last run had them off. */
+export const labels = (path: string) => invoke<Labels | null>("labels", { path });
 /** Why `path`'s analysis is out of date with the settings now. */
 export const outdated = (path: string) => invoke<string[]>("outdated", { path });
 /** Windows' snap layouts for the window (the pointer resting on the title bar's maximise button). */
@@ -664,6 +764,9 @@ export const onAnalysis = (f: (p: Progress) => void): Promise<UnlistenFn> =>
 
 export const onTranscription = (f: (t: Transcription) => void): Promise<UnlistenFn> =>
   listen<Transcription>("transcription", (e) => f(e.payload));
+
+export const onKeep = (f: (r: KeepRun) => void): Promise<UnlistenFn> =>
+  listen<KeepRun>("keep", (e) => f(e.payload));
 
 export const onTranslation = (f: (r: TranslationRun) => void): Promise<UnlistenFn> =>
   listen<TranslationRun>("translation", (e) => f(e.payload));

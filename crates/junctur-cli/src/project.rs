@@ -59,6 +59,16 @@ pub fn analyze(a: Args) -> Result<(), String> {
     }
     opts.cut = cut_settings(&a)?;
     opts.force = a.has("--force");
+    // Labels for the silent parts this run, with the config file's kind and added labels, as when
+    // the file turns them on.
+    if a.has("--labels") {
+        opts.labels.on = true;
+    }
+    // Laya judges this run with this prompt, kept as the recording's and as the last one.
+    opts.keep.prompt = a.value("--keep").map(str::to_string);
+    if let Some(prompt) = &opts.keep.prompt {
+        crate::judge::remember(prompt);
+    }
     let out = pipeline::run(&p, &opts, &mut |line| eprintln!("junctur: {line}"))
         .map_err(|e| e.to_string())?;
     if let Some(t) = &out.transcript {

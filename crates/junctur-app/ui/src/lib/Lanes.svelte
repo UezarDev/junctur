@@ -10,6 +10,7 @@
   import type { Selection, WordEdge } from "./selection";
   import type { Talk } from "./talking";
   import { clampEdge, dragged, edgeNear, type Edge } from "./nudge";
+  import * as sg from "./suggestions";
   import { clock, timecode, toFrame, toSeconds } from "./time";
   import * as tr from "./tracks";
 
@@ -22,6 +23,11 @@
     view,
     row,
     speakersRow,
+    labelsRow = 0,
+    labels = null,
+    keepRow = 0,
+    keepItems = [],
+    onKeep,
     head,
     thin,
     wavesVersion,
@@ -41,6 +47,16 @@
     view: { start: number; len: number };
     row: number;
     speakersRow: number;
+    /** The Labels lane's height; 0 when there is none. */
+    labelsRow?: number;
+    /** The silent parts' labels, drawn on the Labels lane. */
+    labels?: api.Labels | null;
+    /** The Suggestions lane's height; 0 when there is none. */
+    keepRow?: number;
+    /** Laya's suggestions and accepted parts, drawn on the Suggestions lane. */
+    keepItems?: api.KeepItem[];
+    /** A suggestion accepted, dismissed or undone from the lane. */
+    onKeep?: (action: api.KeepAction, item: api.KeepItem) => void;
     head: number;
     /** Portrait's thin lanes: no second line in the headers. */
     thin: boolean;
@@ -68,7 +84,57 @@
   const duration = $derived(player?.duration ?? 0);
   const end = $derived(view.start + view.len);
   // What the lanes need: below the height left they scroll (headers and bodies together).
-  const content = $derived(RULER + speakersRow + tracks.length * row);
+  const content = $derived(RULER + speakersRow + labelsRow + keepRow + tracks.length * row);
+  const pieces = $derived(labelsRow > 0 ? (labels?.pieces ?? []) : []);
+
+  /** What hovering a labelled piece says: its likeliest label and share, and how busy it sounds. */
+  function describe(p: api.LabelledPiece): string {
+    const top = p.top[0];
+    const what = top ? `${top.label} ${Math.round(top.score * 100)}%` : "no frame read";
+    const then = p.top.slice(1).map((s) => `${s.label} ${Math.round(s.score * 100)}%`);
+    const busy = p.busy != null ? ` · busy ${Math.round(p.busy * 100)}%` : "";
+    return `${what}${busy}${then.length ? `\n then ${then.join(", ")}` : ""}\n${clock(p.start)} to ${clock(p.end)}, nobody talks`;
+  }
+  // The labelled piece under the pointer on the Labels lane, for the body's tooltip.
+  let hoverPiece = $state.raw<api.LabelledPiece | null>(null);
+  function pieceAt(clientX: number, clientY: number): api.LabelledPiece | null {
+    if (!pieces.length) return null;
+    const r = body.getBoundingClientRect();
+    const y = clientY - r.top - RULER - speakersRow;
+    if (y < 0 || y >= labelsRow) return null;
+    const t = timeAt(clientX);
+    // Pieces are in time order: the first ending after `t`.
+    let lo = 0;
+    let hi = pieces.length;
+    while (lo < hi) {
+      const m = (lo + hi) >> 1;
+      if (pieces[m].end <= t) lo = m + 1;
+      else hi = m;
+    }
+    const p = pieces[lo];
+    return p && p.start <= t ? p : null;
+  }
+
+  // The suggestion under the pointer on the Suggestions lane, and the one clicked (its menu open).
+  let hoverItem = $state.raw<api.KeepItem | null>(null);
+  let picked = $state.raw<{ item: api.KeepItem; px: number } | null>(null);
+  function itemAt(clientX: number, clientY: number): api.KeepItem | null {
+    if (keepRow <= 0 || !keepItems.length) return null;
+    const r = body.getBoundingClientRect();
+    const y = clientY - r.top - RULER - speakersRow - labelsRow;
+    if (y < 0 || y >= keepRow) return null;
+    return sg.itemAt(keepItems, timeAt(clientX));
+  }
+  // A menu for an item that has since gone (answered, judged again) would act on nothing.
+  $effect(() => {
+    void keepItems;
+    picked = null;
+  });
+  function answer(action: api.KeepAction) {
+    const p = picked;
+    picked = null;
+    if (p) onKeep?.(action, p.item);
+  }
 
   const x = (t: number) => ((t - view.start) / view.len) * width;
   const timeAt = (clientX: number) => {
@@ -180,6 +246,43 @@
       ctx.fillRect(0, y - 1, width, 1);
     }
 
+    // Labels lane: each silent piece a block, stronger the busier its game audio, its likeliest
+    // label written in it where it fits.
+    if (labelsRow > 0) {
+      ctx.textAlign = "left";
+      ctx.font = "10px 'Segoe UI', system-ui, sans-serif";
+      for (const p of pieces) {
+        if (p.end <= view.start || p.start >= end) continue;
+        const x0 = Math.max(0, x(p.start));
+        const x1 = Math.min(width, x(p.end));
+        // A tint of --accent written out (the canvas cannot read the token).
+        ctx.fillStyle = `rgba(255, 160, 140, ${0.15 + 0.55 * (p.busy ?? 0.3)})`;
+        ctx.fillRect(x0 + 0.5, y + 2, Math.max(1, x1 - x0 - 1), labelsRow - 5);
+        const top = p.top[0];
+        if (top && x1 - x0 > 40) {
+          ctx.fillStyle = "rgba(255, 255, 255, 0.85)";
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(x0 + 3, y, x1 - x0 - 6, labelsRow);
+          ctx.clip();
+          ctx.fillText(top.label, x0 + 4, y + labelsRow / 2);
+          ctx.restore();
+        }
+      }
+      ctx.textAlign = "center";
+      y += labelsRow;
+      ctx.fillStyle = line;
+      ctx.fillRect(0, y - 1, width, 1);
+    }
+
+    // Suggestions lane: where Laya would keep or cut otherwise than the list does.
+    if (keepRow > 0) {
+      sg.paint(ctx, keepItems, x, y, keepRow, width, { start: view.start, end });
+      y += keepRow;
+      ctx.fillStyle = line;
+      ctx.fillRect(0, y - 1, width, 1);
+    }
+
     // Track lanes: each waveform mirrored about the lane's middle, in the track's colour, dimmer
     // when it is not heard.
     const cols = peaks?.columns ?? 0;
@@ -269,6 +372,10 @@
     void height;
     void row;
     void speakersRow;
+    void labelsRow;
+    void pieces;
+    void keepRow;
+    void keepItems;
     paint();
   });
 
@@ -461,6 +568,14 @@
 
   function pointerDown(e: PointerEvent) {
     if (e.button !== 0 || !player?.path) return;
+    // A suggestion clicked opens its menu; a click anywhere else closes one.
+    const it = itemAt(e.clientX, e.clientY);
+    if (it && onKeep) {
+      const r = body.getBoundingClientRect();
+      picked = { item: it, px: Math.min(Math.max(0, e.clientX - r.left), Math.max(0, width - 170)) };
+      return;
+    }
+    picked = null;
     body.setPointerCapture(e.pointerId);
     const g = edgeAt(e.clientX, e.clientY, e.altKey);
     if (g) {
@@ -480,6 +595,10 @@
     }
     if (!down) {
       setHover(edgeAt(e.clientX, e.clientY, e.altKey));
+      const p = pieceAt(e.clientX, e.clientY);
+      if (p !== hoverPiece) hoverPiece = p;
+      const it = itemAt(e.clientX, e.clientY);
+      if (it !== hoverItem) hoverItem = it;
       return;
     }
     if (Math.abs(e.clientX - down.x) > CLICK) down.moved = true;
@@ -563,6 +682,24 @@
         <Avatars {speakers} {talking} {mixer} size="small" />
       </div>
     {/if}
+    {#if labelsRow > 0}
+      <div
+        class="h labels"
+        style:height="{labelsRow}px"
+        title="What the picture shows where nobody talks, from SigLIP 2, stronger where the game sounds busier. Hover a part for its labels."
+      >
+        <span class="nm">Labels</span>
+      </div>
+    {/if}
+    {#if keepRow > 0}
+      <div
+        class="h labels"
+        style:height="{keepRow}px"
+        title="Laya's suggestions for the video you described (Properties, Smart keep): green to keep what is cut, red to cut what is kept, paler when unsure, outlined once accepted. Click one to accept, dismiss or undo it."
+      >
+        <span class="nm">Suggestions</span>
+      </div>
+    {/if}
     {#each tracks as t (t.index)}
       <div class="h track" style:height="{row}px" title={tr.title(t)}>
         <span class="dot" style:background={tr.colour(t, speakers)}></span>
@@ -590,7 +727,10 @@
     }}
     onpointerleave={() => {
       if (!drag) hover = null;
+      hoverPiece = null;
+      hoverItem = null;
     }}
+    title={hoverPiece ? describe(hoverPiece) : hoverItem ? sg.describe(hoverItem) : undefined}
     onwheel={wheel}
     class:grabbing={!!grab}
     role="slider"
@@ -607,6 +747,24 @@
     {#if grab}
       <div class="edge" class:on={!!drag} class:word={grab.word} style:top="{RULER}px" style:transform="translateX({grab.px}px)">
         {#if grab.label}<span class="when mono" class:flip={grab.px > width - 96}>{grab.label}</span>{/if}
+      </div>
+    {/if}
+    {#if picked}
+      <div
+        class="pick"
+        style:left="{picked.px}px"
+        style:top="{RULER + speakersRow + labelsRow + keepRow}px"
+        role="menu"
+        tabindex="-1"
+        onpointerdown={(e) => e.stopPropagation()}
+      >
+        <span class="what">{picked.item.keep ? "Keep" : "Cut"} · {Math.round(picked.item.p * 100)}%</span>
+        {#if picked.item.state === "accepted"}
+          <button role="menuitem" onclick={() => answer("undo")}>Undo</button>
+        {:else}
+          <button role="menuitem" onclick={() => answer("accept")}>Accept</button>
+          <button role="menuitem" onclick={() => answer("dismiss")}>Dismiss</button>
+        {/if}
       </div>
     {/if}
     {#if headX != null && headX >= 0 && headX <= width}
@@ -649,6 +807,9 @@
   .h.ruler {
     font-size: 11px;
     color: var(--muted);
+  }
+  .h.labels {
+    font-size: 11px;
   }
   .tag {
     padding: 0 6px;
@@ -764,6 +925,28 @@
     border-left: 1px solid rgba(120, 170, 255, 0.85);
     border-right: 1px solid rgba(120, 170, 255, 0.85);
     pointer-events: none;
+  }
+  /* A suggestion's menu, under the Suggestions lane where it was clicked. */
+  .pick {
+    position: absolute;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 4px 3px 8px;
+    border-radius: 6px;
+    background: rgba(16, 17, 20, 0.95);
+    border: 1px solid var(--line);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .pick .what {
+    color: var(--muted);
+    margin-right: 4px;
+  }
+  .pick button {
+    padding: 2px 8px;
+    font-size: 12px;
   }
   .head {
     position: absolute;

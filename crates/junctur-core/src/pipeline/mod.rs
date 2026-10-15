@@ -8,6 +8,7 @@ mod adopt;
 mod again;
 mod editlist;
 mod jobs;
+mod smartkeep;
 mod speaker_files;
 mod speakers;
 mod speech;
@@ -32,9 +33,14 @@ use again::{carry_fixes, hear_again, heard_again, not_again};
 #[cfg(test)]
 use editlist::keep_or_write;
 use editlist::{draft, rewrite, Rewrite};
-use stages::{count_words, speakers_stage, speech_stage, transcribe_stage, Stage};
+use smartkeep::keep_stage;
+use stages::{count_words, labels_stage, speakers_stage, speech_stage, transcribe_stage, Stage};
+
+pub use smartkeep::{automatic_keep, judge, learn, standing, KeepRun, Standing, KEEP_OFF};
+pub use stages::LABELS_OFF;
 
 use crate::edit::{self, CutSettings, EditList};
+use crate::labels;
 use crate::runtime::DevicePref;
 use crate::tracks::{self, Role, TrackReport};
 use crate::transcribe::{self, Languages, ModelPref, TranscribeOptions, Transcript};
@@ -135,8 +141,8 @@ impl Project {
 
 #[derive(Debug, Clone, Default)]
 pub struct PipelineOptions {
-    /// Where Whisper may run. Only transcription uses it: tracks, speech and speakers always run on
-    /// the CPU (CAM++ on the GPU finds a speaker per sentence).
+    /// Where Whisper, the labels' vision tower and Laya may run. Only they use it: tracks, speech and
+    /// speakers always run on the CPU (CAM++ on the GPU finds a speaker per sentence).
     pub device: DevicePref,
     pub model: ModelPref,
     /// The word list Whisper is told (the caller reads the config file). Not part of what makes
@@ -152,6 +158,10 @@ pub struct PipelineOptions {
     pub no_speakers: bool,
     /// Enrolled voices to label speakers by (the caller reads the voices file).
     pub voices: Vec<Voice>,
+    /// Whether the silent parts are labelled, and with which list ([`labels`]).
+    pub labels: labels::Settings,
+    /// Smart keep's settings and this run's prompt ([`crate::keep`]).
+    pub keep: KeepRun,
     /// Whether an edit list holding the user's edits is kept or re-cut ([`KeepList`]).
     pub keep_list: KeepList,
     /// Hear the speakers again from the audio, cut at the user's pins, instead of reusing the
@@ -390,10 +400,11 @@ pub fn prepare(
     })
 }
 
-/// A run's second half: Whisper over the speech, piece by piece (`transcribed` is told where the
-/// transcript is whole, `between` is called between chunks and may block: the app's pause;
-/// [`transcribe::Reports`]), then the words counted into the edit list's score windows in place
-/// ([`count_words`]). Never re-cuts: edits made since [`prepare`] stay.
+/// A run's second half: the labels of the silent parts when they are on ([`labels`]), then Whisper
+/// over the speech, piece by piece (`transcribed` is told where the transcript is whole, `between`
+/// is called between chunks and may block: the app's pause; [`transcribe::Reports`]), then the words
+/// counted into the edit list's score windows in place ([`count_words`]), then Laya's keep when the
+/// recording has a prompt ([`judge`]). Never re-cuts: edits made since [`prepare`] stay.
 pub fn finish(
     p: &Project,
     opts: &PipelineOptions,
@@ -411,6 +422,17 @@ pub fn finish(
     } = prepared;
     let mut jobs = p.jobs();
     jobs.file = p.file.clone();
+    // Labels are an extra, like the speakers: when they cannot be made (the model cannot be
+    // fetched offline, say), the run goes on to the transcript.
+    let stage = Stage {
+        p,
+        jobs: &mut jobs,
+        report: &report,
+        steps,
+    };
+    if let Err(e) = labels_stage(stage, &speech, opts, log) {
+        log(&format!("labels: {e}; going on without them"));
+    }
     let transcript = if opts.no_transcript {
         None
     } else {
@@ -445,6 +467,23 @@ pub fn finish(
             Ok(None) => {}
             Err(e) => log(&format!("edit list: word counts not written ({e})")),
         }
+        // An extra, like the labels: Laya that cannot run (the model cannot be fetched) leaves the
+        // run done.
+        let stage = Stage {
+            p,
+            jobs: &mut jobs,
+            report: &report,
+            steps,
+        };
+        match keep_stage(stage, &speech, &t, opts, log) {
+            Ok(Some(_)) => {
+                if let Ok(e) = p.edit() {
+                    edit = e;
+                }
+            }
+            Ok(None) => {}
+            Err(e) => log(&format!("keep: {e}; going on without it")),
+        }
         Some(t)
     };
     Ok(Outcome {
@@ -469,13 +508,48 @@ pub fn speech_tracks(report: &TrackReport) -> Vec<usize> {
 }
 
 /// Why a re-run with `opts` would redo more than the cut, one line each for the user: no
-/// transcript yet, or one made with another model or languages than `opts` asks. Empty when the
-/// analysis answers `opts`; `Auto` takes any model, as [`run`] does, so this never offers a re-run
-/// that would redo nothing.
+/// transcript yet, or one made with another model or languages than `opts` asks; labels asked for
+/// and missing or made with another list ([`labels_outdated`]). Empty when the analysis answers
+/// `opts`; `Auto` takes any model, as [`run`] does, so this never offers a re-run that would redo
+/// nothing.
 pub fn outdated(p: &Project, opts: &PipelineOptions) -> Vec<String> {
     if opts.no_transcript {
         return Vec::new();
     }
+    let mut out = transcript_outdated(p, opts);
+    out.extend(labels_outdated(p, opts));
+    out
+}
+
+/// Why the labels of the silent parts do not answer `opts`, when they are on: none yet (or the last
+/// run had them off), busy read from another track than the track report names now (or the read
+/// failed), or made with another list or model. `None` when they are off, up to date, or
+/// the speech is not found yet (the run that finds it makes them).
+fn labels_outdated(p: &Project, opts: &PipelineOptions) -> Option<String> {
+    if !opts.labels.on {
+        return None;
+    }
+    let (speech, report) = (p.speech()?, cached_tracks(p)?);
+    let off = p
+        .jobs()
+        .get(StageName::Labels)
+        .is_some_and(|r| r.note.as_deref() == Some(LABELS_OFF));
+    let pieces = labels::pieces::pieces(&speech.all_regions(), report.duration);
+    let busy = labels::busy::track(&report);
+    match labels::load(&p.dir).filter(|_| !off) {
+        None => Some("The parts where nobody talks have no labels yet.".into()),
+        Some(l) if l.busy_track != busy => {
+            Some("The labels' busy scores are not from the game track found now.".into())
+        }
+        Some(l) if !labels::answers(&l, &opts.labels.labels(), &pieces, busy) => {
+            Some("The labels were made with another list.".into())
+        }
+        Some(_) => None,
+    }
+}
+
+/// [`outdated`]'s lines about the transcript.
+fn transcript_outdated(p: &Project, opts: &PipelineOptions) -> Vec<String> {
     let t = TranscribeOptions {
         model: opts.model,
         device: opts.device,
@@ -501,6 +575,28 @@ pub fn outdated(p: &Project, opts: &PipelineOptions) -> Vec<String> {
         }
         Some(Ok(_)) => Vec::new(),
     }
+}
+
+/// The labels of `p` Laya and the editor's Labels lane read: none when the last run had them off,
+/// and none when `labels.json` no longer answers `settings`' list over the speech and busy track as
+/// they are now (a labels run that failed since leaves the older file behind).
+fn labels_now(
+    p: &Project,
+    jobs: &Jobs,
+    settings: &labels::Settings,
+    speech: &[crate::vad::Region],
+    report: &TrackReport,
+) -> Option<labels::Labels> {
+    let off = jobs
+        .get(StageName::Labels)
+        .is_some_and(|r| r.note.as_deref() == Some(LABELS_OFF));
+    labels::current(&p.dir, settings, speech, report).filter(|_| !off)
+}
+
+/// [`labels_now`] from what `p`'s analysis left: `None` before its speech and tracks are found.
+pub fn current_labels(p: &Project, settings: &labels::Settings) -> Option<labels::Labels> {
+    let (speech, report) = (p.speech()?, cached_tracks(p)?);
+    labels_now(p, &p.jobs(), settings, &speech.all_regions(), &report)
 }
 
 /// What a step that needs the analysis answers before there is one.

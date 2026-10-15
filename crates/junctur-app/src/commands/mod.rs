@@ -4,6 +4,7 @@
 
 mod captions;
 mod edit;
+mod keep;
 mod playback;
 mod prefs;
 mod recording;
@@ -13,6 +14,7 @@ mod words;
 // One module per part of the page; every command is still `commands::<name>` for the handler list.
 pub use captions::*;
 pub use edit::*;
+pub use keep::*;
 pub use playback::*;
 pub use prefs::*;
 pub use recording::*;
@@ -41,6 +43,8 @@ pub struct App {
     pub waves: waves::Store,
     /// The caption translation running in the background.
     pub translation: Translation,
+    /// Laya judging a recording in the background (smart keep).
+    pub judging: crate::smartkeep::Judging,
 }
 
 impl App {

@@ -7,9 +7,10 @@
 //! `cutw|keepw=<a>-<b>` (word indices), `cutf|keepf=<a>-<b>` (frames), `undo`, `redo`,
 //! `rename=<id>:<name>`, `color=<id>:#RRGGBB`, `captions=on|off`, `preview=on|off`, `srt=<path>`,
 //! `enroll=<a>-<b>:<name>`, `forget=<name>`, `reanalyse`, `reanalyse_fresh`, `mute|unmute=<n>`,
-//! `solo|unsolo=<n>` (tracks from 1), `menu=<id>`, `speed=<x>`, `loop=<a>-<b>`, `unloop`, `reload`.
-//! Point `JUNCTUR_VOICES`, `JUNCTUR_RECENT`, `JUNCTUR_CACHE_DIR` and `JUNCTUR_CONFIG` at scratch
-//! places, or the steps change the user's own files.
+//! `solo|unsolo=<n>` (tracks from 1), `menu=<id>`, `speed=<x>`, `loop=<a>-<b>`, `unloop`, `reload`,
+//! `keepall` (smart keep's Accept all).
+//! Point `JUNCTUR_VOICES`, `JUNCTUR_RECENT`, `JUNCTUR_CACHE_DIR`, `JUNCTUR_CONFIG` and
+//! `JUNCTUR_KEEP_PAIRS` at scratch places, or the steps change the user's own files.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -86,6 +87,8 @@ enum Action {
     Unloop,
     /// The page loads again, the app going on.
     Reload,
+    /// Every waiting smart-keep suggestion accepted.
+    KeepAll,
 }
 
 /// The frontend's log lines (`ui_log`), kept for the report.
@@ -181,6 +184,7 @@ fn parse_steps(s: &str) -> Result<Vec<(f64, Action)>, String> {
             None if action == "reanalyse_fresh" => Action::Reanalyse(true),
             None if action == "unloop" => Action::Unloop,
             None if action == "reload" => Action::Reload,
+            None if action == "keepall" => Action::KeepAll,
             _ => return Err(bad()),
         };
         steps.push((at, action));
@@ -254,6 +258,13 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
     };
     match a {
         Action::Edit(step) => return edit(&|e| e.edit(e.file(), *step)),
+        Action::KeepAll => {
+            return edit(&|e| {
+                let pairs = junctur_core::keep::pairs_path();
+                let all = crate::smartkeep::Action::AcceptAll;
+                crate::smartkeep::answer(e, e.file(), None, all, None, pairs.as_deref())
+            })
+        }
         Action::Rename(id, name) => return edit(&|e| e.rename_speaker(e.file(), *id, name)),
         Action::Recolor(id, color) => return edit(&|e| e.recolor_speaker(e.file(), *id, color)),
         Action::Captions(on) => {

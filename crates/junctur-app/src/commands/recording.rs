@@ -14,6 +14,13 @@ use crate::project::{self, ProjectStatus, RecordingInfo};
 use crate::recent::{self, Recent};
 use crate::waves::{self, WavesState};
 
+/// The silent parts' labels of the recording at `path` (`labels.json`), for the Labels lane; `None`
+/// when it has none or its last run had them off.
+#[tauri::command]
+pub async fn labels(path: String) -> Result<Option<junctur_core::labels::Labels>, String> {
+    blocking(move || project::labels(Path::new(&path), None)).await
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Opened {

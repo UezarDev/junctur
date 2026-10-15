@@ -12,7 +12,9 @@ use crate::Result;
 pub(crate) const FILE: &str = "jobs.json";
 
 /// The stages, in run order. The edit list comes before the transcript: it needs none of it but
-/// the word counts, filled in once the transcript is whole.
+/// the word counts, filled in once the transcript is whole. The labels come between: they need the
+/// speech and the video only, and so show in the editor while Whisper runs. Laya's keep comes last:
+/// it reads the transcript and the labels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StageName {
@@ -20,16 +22,20 @@ pub enum StageName {
     Speech,
     Speakers,
     Edit,
+    Labels,
     Transcribe,
+    Keep,
 }
 
 impl StageName {
-    pub const ALL: [StageName; 5] = [
+    pub const ALL: [StageName; 7] = [
         StageName::Tracks,
         StageName::Speech,
         StageName::Speakers,
         StageName::Edit,
+        StageName::Labels,
         StageName::Transcribe,
+        StageName::Keep,
     ];
 
     /// Its name in `jobs.json`, the log and the page.
@@ -39,14 +45,16 @@ impl StageName {
             StageName::Speech => "speech",
             StageName::Speakers => "speakers",
             StageName::Edit => "edit",
+            StageName::Labels => "labels",
             StageName::Transcribe => "transcribe",
+            StageName::Keep => "keep",
         }
     }
 }
 
 /// Stage names, in run order ([`StageName::ALL`]).
-pub const STAGES: [&str; 5] = {
-    let mut names = [""; 5];
+pub const STAGES: [&str; 7] = {
+    let mut names = [""; 7];
     let mut i = 0;
     while i < names.len() {
         names[i] = StageName::ALL[i].name();
@@ -353,7 +361,12 @@ mod tests {
         let back = Jobs::load(&dir);
         // Also put in run order: the file had `transcribe` before `edit`.
         let names: Vec<&str> = back.stages.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, STAGES);
+        // Every stage it holds, in run order; the labels and keep were never recorded in it.
+        let held: Vec<&str> = STAGES
+            .into_iter()
+            .filter(|&n| n != "labels" && n != "keep")
+            .collect();
+        assert_eq!(names, held);
         assert_eq!(
             back.get(StageName::Speakers).unwrap().state,
             StageState::Done
@@ -366,7 +379,15 @@ mod tests {
     fn stage_names_are_the_files_and_the_pages() {
         assert_eq!(
             STAGES,
-            ["tracks", "speech", "speakers", "edit", "transcribe"]
+            [
+                "tracks",
+                "speech",
+                "speakers",
+                "edit",
+                "labels",
+                "transcribe",
+                "keep"
+            ]
         );
         for s in StageName::ALL {
             assert_eq!(

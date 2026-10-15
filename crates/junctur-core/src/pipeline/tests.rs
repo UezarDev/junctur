@@ -82,15 +82,21 @@ fn tracks_speech_and_speakers_open_their_models_on_the_cpu_only() {
     ] {
         assert!(!this.contains(banned), "the run's code has {banned}");
     }
-    // Every `device` field this file writes is transcription's (its own options' declaration
-    // aside), and the run's device is only ever written into one.
+    // Every `device` field this file writes is transcription's, the labels' or Laya's (its own
+    // options' declaration aside), and the run's device is only ever written into one. The labels'
+    // vision tower and Laya are the ONNX models on the GPU: 400 to 800 ms a frame on the CPU for the
+    // one, seconds a part in fp16 for the other, and both checked against a reference
+    // (`tests/models.rs`), which CAM++ was not.
     let mut fields = 0;
     for (k, _) in this.match_indices("device:") {
         let before = &this[..k];
         let opened = &before[..before.rfind(" {").expect("a struct")];
         let owner = opened.rsplit([' ', '(', '=']).next().unwrap();
         if !opened.ends_with("pub struct PipelineOptions") {
-            assert_eq!(owner, "TranscribeOptions", "a device field at byte {k}");
+            assert!(
+                ["TranscribeOptions", "labels::Job", "keep::Job"].contains(&owner),
+                "a device field of {owner} at byte {k}"
+            );
             fields += 1;
         }
     }
@@ -1037,6 +1043,143 @@ fn a_retranscription_carries_word_times_and_survives_being_stopped_or_asked_agai
 }
 
 #[test]
+fn outdated_says_when_labels_are_on_and_missing_left_off_or_from_another_list() {
+    let (d, p) = scratch_project("outdated-labels");
+    std::fs::write(
+        transcribe::path(&p.dir),
+        r#"{"choice":{"model":"large-v3-turbo","device":"cuda","note":null},
+            "languages":["es","en"],"segments":[],"audio_s":0,"elapsed_s":0}"#,
+    )
+    .unwrap();
+    let with = |kind| PipelineOptions {
+        labels: labels::Settings {
+            on: true,
+            kind,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let on = with(labels::Kind::Generic);
+    // Before the speech is found: the run that finds it makes them.
+    assert!(outdated(&p, &on).is_empty());
+    let report = TrackReport {
+        file: p.file.clone(),
+        duration: 20.0,
+        windows: vec![],
+        window_seconds: 1.0,
+        tracks: vec![],
+        logical: vec![],
+        speech_error: None,
+        from_cache: false,
+    };
+    let entry = tracks::entry(&p.file, &tracks_options(&p, false)).unwrap();
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::fs::write(&entry, serde_json::to_vec(&report).unwrap()).unwrap();
+    let region = crate::vad::Region {
+        start: 5.0,
+        end: 8.0,
+    };
+    let speech = Speech {
+        tracks: vec![speech::SpeechTrack {
+            track: 0,
+            regions: vec![region],
+            share: 0.15,
+        }],
+        seconds: 3.0,
+    };
+    std::fs::write(p.speech_path(), serde_json::to_vec(&speech).unwrap()).unwrap();
+    assert_eq!(
+        outdated(&p, &on),
+        vec!["The parts where nobody talks have no labels yet."]
+    );
+    // Off, nothing is missing.
+    assert!(outdated(&p, &PipelineOptions::default()).is_empty());
+    let list = on.labels.labels();
+    let made = labels::Labels {
+        model: labels::model::NAME.into(),
+        kind: labels::Kind::Generic,
+        labels: list.iter().map(|l| l.text.clone()).collect(),
+        prompts: list.iter().map(|l| l.prompt.clone()).collect(),
+        busy_track: None,
+        pieces: labels::pieces::pieces(&[region], 20.0)
+            .into_iter()
+            .map(|x| labels::Labelled {
+                start: x.start,
+                end: x.end,
+                frames: 1,
+                top: vec![],
+                busy: None,
+                level_db: None,
+            })
+            .collect(),
+    };
+    labels::save(&p.dir, &made).unwrap();
+    assert!(outdated(&p, &on).is_empty());
+    assert_eq!(
+        outdated(&p, &with(labels::Kind::League)),
+        vec!["The labels were made with another list."]
+    );
+    // A busy track the report did not have when they were made (its roles found again).
+    let mut moved = report.clone();
+    moved.logical = vec![tracks::LogicalTrack {
+        members: vec![0],
+        sameness: tracks::Sameness::Single,
+        activity: crate::signal::Activity {
+            mean_db: -30.0,
+            peak_db: -10.0,
+            near_silent_share: 0.0,
+            silent: false,
+        },
+        speech: None,
+        role: tracks::Role::GamePc,
+        confidence: 1.0,
+        reasons: vec![],
+    }];
+    std::fs::write(&entry, serde_json::to_vec(&moved).unwrap()).unwrap();
+    assert_eq!(
+        outdated(&p, &on),
+        vec!["The labels' busy scores are not from the game track found now."]
+    );
+    std::fs::write(&entry, serde_json::to_vec(&report).unwrap()).unwrap();
+    // The last run had them off: the file there is not this list's labels.
+    let off = Some(LABELS_OFF.to_string());
+    p.jobs()
+        .set(&p.dir, StageName::Labels, StageState::Done, None, off)
+        .unwrap();
+    assert_eq!(
+        outdated(&p, &on),
+        vec!["The parts where nobody talks have no labels yet."]
+    );
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
+/// Laya judges an analysed recording only: before the speech is found, and while the transcript is
+/// not done, `judge` says so and writes nothing.
+#[test]
+fn judge_waits_for_the_analysis_and_the_transcript() {
+    let (d, p) = scratch_project("judge-early");
+    let opts = PipelineOptions {
+        keep: KeepRun {
+            prompt: Some("League highlights".into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let e = judge(&p, &opts, &mut |_| {}).unwrap_err().to_string();
+    assert!(e.contains("analyze"), "{e}");
+    let speech = Speech {
+        tracks: vec![],
+        seconds: 0.0,
+    };
+    std::fs::write(p.speech_path(), serde_json::to_vec(&speech).unwrap()).unwrap();
+    let e = judge(&p, &opts, &mut |_| {}).unwrap_err().to_string();
+    assert!(e.contains("not finished"), "{e}");
+    assert!(!p.dir.join(crate::keep::FILE).exists());
+    assert!(!p.dir.join(crate::keep::CHOICES).exists());
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
 fn a_stretch_is_cut_again_and_fixes_and_names_forgotten_only_as_asked() {
     // The Correct pop-up's write: a selection re-cut leaves the cut outside it, fixes dropped in
     // the stretch only, and names forgotten afresh; a list of the user's that loses anything is
@@ -1356,5 +1499,64 @@ fn a_selection_transcribed_again_gives_no_fix_to_words_outside_it() {
         .collect();
     assert_eq!(shown, [(1.0, "Vayne".into())]);
     assert!(!p.dir.join(AGAIN_FILE).exists());
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
+/// Laya and the Labels lane read the labels only while they answer the list, speech and busy track
+/// as they are now: a labels run that failed after the list changed leaves the older file, which is
+/// then not read; nor one the last run left off.
+#[test]
+fn labels_are_read_only_while_they_answer_the_list_now() {
+    let (d, p) = scratch_project("labels-now");
+    let speech = Speech {
+        tracks: vec![],
+        seconds: 0.0,
+    };
+    std::fs::write(p.speech_path(), serde_json::to_vec(&speech).unwrap()).unwrap();
+    let report = TrackReport {
+        file: p.file.clone(),
+        duration: 20.0,
+        windows: vec![],
+        window_seconds: 1.0,
+        tracks: vec![],
+        logical: vec![],
+        speech_error: None,
+        from_cache: false,
+    };
+    let entry = tracks::entry(&p.file, &tracks_options(&p, false)).unwrap();
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::fs::write(&entry, serde_json::to_vec(&report).unwrap()).unwrap();
+    let settings = labels::Settings::default();
+    let list = settings.labels();
+    let made = labels::Labels {
+        model: labels::model::NAME.into(),
+        kind: settings.kind,
+        labels: list.iter().map(|l| l.text.clone()).collect(),
+        prompts: list.iter().map(|l| l.prompt.clone()).collect(),
+        busy_track: None,
+        pieces: labels::pieces::pieces(&[], 20.0)
+            .into_iter()
+            .map(|x| labels::Labelled {
+                start: x.start,
+                end: x.end,
+                frames: 0,
+                top: vec![],
+                busy: None,
+                level_db: None,
+            })
+            .collect(),
+    };
+    labels::save(&p.dir, &made).unwrap();
+    assert_eq!(current_labels(&p, &settings), Some(made));
+    // The list changed and its run failed: the old file is still there, and not read.
+    let mut more = settings.clone();
+    more.added.generic.push("a video game boss fight".into());
+    assert_eq!(current_labels(&p, &more), None);
+    // Off in the last run: not read either.
+    let off = Some(LABELS_OFF.to_string());
+    p.jobs()
+        .set(&p.dir, StageName::Labels, StageState::Done, None, off)
+        .unwrap();
+    assert_eq!(current_labels(&p, &settings), None);
     std::fs::remove_dir_all(&d).unwrap();
 }

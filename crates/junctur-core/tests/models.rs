@@ -316,3 +316,113 @@ fn whisper_takes_the_word_list_and_cuts_a_long_one() {
     w.transcribe(&x, "en").unwrap();
     assert_eq!(w.set_prompt(&[]).kept, 0);
 }
+
+/// SigLIP 2 reads a test card as one, the same on every device it opens on (CAM++ on CUDA did not,
+/// phase 5r), and a frame embeds the same alone and in a batch. The text tower runs once: a second
+/// ask reads the kept embeddings.
+#[test]
+#[ignore = "downloads models"]
+fn siglip_reads_a_test_card_alike_on_every_device() {
+    use junctur_core::labels::model::{self, Vision, SIZE};
+    let cache = cache::default_dir();
+    let d = workdir("models", "siglip");
+    let raw = d.join("bars.rgb");
+    let size = format!("smptebars=size={SIZE}x{SIZE}:duration=1");
+    let raw_s = raw.to_string_lossy().into_owned();
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        &size,
+        "-frames:v",
+        "1",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        &raw_s,
+    ]);
+    let px = std::fs::read(&raw).unwrap();
+    let mut cpu = Vision::open(&cache, DevicePref::Cpu).unwrap();
+    let mut any = Vision::open(&cache, DevicePref::Auto).unwrap();
+    let a = cpu.embed(&[&px]).unwrap().remove(0);
+    let b = any.embed(&[&px, &px]).unwrap();
+    let dot = |x: &[f32], y: &[f32]| x.iter().zip(y).map(|(p, q)| p * q).sum::<f32>();
+    eprintln!(
+        "SigLIP on {:?}: {:.5} against the CPU",
+        any.device,
+        dot(&a, &b[0])
+    );
+    assert!(
+        dot(&a, &b[0]) > 0.99,
+        "{:?} differs from the CPU",
+        any.device
+    );
+    assert!(dot(&b[0], &b[1]) > 0.9999);
+    let prompts: Vec<String> = ["colour bars test pattern", "a video game fight", "a cat"]
+        .map(String::from)
+        .to_vec();
+    let t = model::texts(&cache, &prompts).unwrap();
+    let s = model::shares(&a, &t);
+    eprintln!("shares {s:?}");
+    assert!(s[0] > s[1] && s[0] > s[2], "{s:?}");
+    assert_eq!(model::texts(&cache, &prompts).unwrap(), t);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Laya reads a state as its Python SDK does: the same token ids and option markers for the six
+/// states of `data/laya_golden.json` (a dict state spelled as `json.dumps` spells it, a `<mask>` in
+/// the text, a state past 1024 tokens), and P(keep) within 0.01 of the SDK's PyTorch model, on the
+/// CPU and on the best device this build has (the fp16 export was within 0.0045 in Python).
+#[test]
+#[ignore = "downloads models"]
+fn laya_reads_states_as_the_python_sdk_does() {
+    use junctur_core::keep::laya::{self, Laya, Question, Vocab};
+    use junctur_core::keep::state::dumps;
+    let golden: serde_json::Value =
+        serde_json::from_str(include_str!("data/laya_golden.json")).unwrap();
+    let cache = cache::default_dir();
+    let q = &golden["question"];
+    let q = Question {
+        instructions: q["instructions"].as_str().unwrap().into(),
+        keep: q["keep"].as_str().unwrap().into(),
+        cut: q["cut"].as_str().unwrap().into(),
+    };
+    assert_eq!(golden["max_len"], laya::MAX_LEN);
+    assert_eq!(golden["head_max_len"], laya::HEAD_MAX_LEN);
+    let vocab = Vocab::open(&cache).unwrap();
+    let head = vocab.head(&q).unwrap();
+    let mut rows = Vec::new();
+    let mut want = Vec::new();
+    for (i, c) in golden["cases"].as_array().unwrap().iter().enumerate() {
+        let text = c["text"].as_str().unwrap();
+        if let Some(o) = c["state"].as_object() {
+            // In the state's own order (serde_json's map is sorted).
+            let members: Vec<(&str, &str)> = ["video", "before", "this part", "after"]
+                .into_iter()
+                .map(|k| (k, o[k].as_str().unwrap()))
+                .collect();
+            assert_eq!(dumps(&members), text, "case {i} spelled otherwise");
+        }
+        let row = vocab.sequence(&head, text).unwrap();
+        let ids: Vec<u32> = serde_json::from_value(c["ids"].clone()).unwrap();
+        let markers: Vec<usize> = serde_json::from_value(c["markers"].clone()).unwrap();
+        assert_eq!(row.ids, ids, "case {i}: other ids");
+        assert_eq!(row.markers, markers, "case {i}: other markers");
+        rows.push(row);
+        want.push(c["p_keep"].as_f64().unwrap());
+    }
+    for pref in [DevicePref::Cpu, DevicePref::Auto] {
+        let mut model = Laya::open(&cache, &vocab, pref).unwrap();
+        let margins = model.margins(&rows, &mut |_| {}).unwrap();
+        for (i, (m, w)) in margins.iter().zip(&want).enumerate() {
+            let p = laya::p_keep(*m as f64, 1.0);
+            eprintln!("Laya on {:?}, case {i}: {p:.4} (SDK {w:.4})", model.device);
+            assert!(
+                (p - w).abs() < 0.01,
+                "case {i} on {:?}: {p} against {w}",
+                model.device
+            );
+        }
+    }
+}

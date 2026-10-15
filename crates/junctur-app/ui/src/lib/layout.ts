@@ -15,6 +15,10 @@ export const ROW_MIN = 22;
 export const ROW_MAX = 52;
 /** Portrait's thin track lanes. */
 export const ROW_THIN = 26;
+/** The Labels lane: one thin row of the silent parts' labels, when the recording has them. */
+export const LABELS_ROW = 18;
+/** The Suggestions lane: Laya's suggested keeps and cuts, when it has judged the recording. */
+export const KEEP_ROW = 18;
 const VIDEO_MIN = 120;
 /** What a portrait side area needs to be worth drawing. */
 const STRIP = 58;
@@ -35,9 +39,12 @@ export interface Layout {
   picture: Rect;
   bar: Rect;
   lanes: Rect;
-  /** A track lane's height, the Speakers lane's (0: none) and the lanes' name column's width. */
+  /** A track lane's height, the Speakers, Labels and Suggestions lanes' (0: none) and the lanes'
+   * name column's width. */
   row: number;
   speakersRow: number;
+  labelsRow: number;
+  keepRow: number;
   head: number;
   /** Portrait's side areas beside the picture: mixer strips, large avatars; null when too narrow. */
   strips: Rect | null;
@@ -55,6 +62,10 @@ export interface Input {
   aspect: number | null;
   tracks: number;
   speakers: number;
+  /** The recording has labels for its silent parts (a Labels lane). */
+  labels?: boolean;
+  /** Laya has judged the recording (a Suggestions lane). */
+  keep?: boolean;
 }
 
 const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x));
@@ -70,8 +81,10 @@ export function layout(i: Input): Layout {
   const column = Math.max(0, i.width - i.panel);
   const tracks = Math.max(0, i.tracks);
   const speakersRow = speakersHeight(i.speakers);
-  const anyLanes = tracks > 0 || speakersRow > 0;
-  const fixed = anyLanes ? RULER + speakersRow : 0;
+  const labelsRow = i.labels ? LABELS_ROW : 0;
+  const keepRow = i.keep ? KEEP_ROW : 0;
+  const anyLanes = tracks > 0 || speakersRow > 0 || labelsRow > 0 || keepRow > 0;
+  const fixed = anyLanes ? RULER + speakersRow + labelsRow + keepRow : 0;
   const avail = Math.max(0, i.height - BAR);
   let videoH: number;
   let row: number;
@@ -113,6 +126,8 @@ export function layout(i: Input): Layout {
     lanes,
     row,
     speakersRow,
+    labelsRow,
+    keepRow,
     head: clamp(column * 0.24, 130, portrait ? 180 : 200),
     strips,
     avatars,

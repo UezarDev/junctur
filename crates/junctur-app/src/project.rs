@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use junctur_core::ffmpeg;
+use junctur_core::labels;
 use junctur_core::pipeline::{self, Project, StageName, StageState};
 use junctur_core::transcribe;
 use serde::Serialize;
@@ -33,6 +34,9 @@ pub struct Stage {
     pub name: String,
     /// `pending`, `running` (or interrupted), `done` or `failed`, as `jobs.json` spells them.
     pub state: StageState,
+    /// What `jobs.json` notes beside it: `reused`, why it failed, or `off` for labels not asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -57,6 +61,7 @@ fn status_of(p: &Project) -> ProjectStatus {
         .map(|stage| Stage {
             name: stage.name().to_string(),
             state: jobs.get(stage).map_or(StageState::Pending, |r| r.state),
+            note: jobs.get(stage).and_then(|r| r.note.clone()),
         })
         .collect();
     let (edit, edit_error) = if p.edit_path().is_file() {
@@ -118,6 +123,26 @@ fn summary(p: &Project) -> Result<EditSummary, String> {
     }
     m.insert(path, (text, s.clone()));
     s
+}
+
+/// The labels of `file`'s silent parts, for the editor's Labels lane: `None` when it has none, its
+/// last run had them off, or they were made with another list than the config file's now (a labels
+/// run that failed since leaves the older file behind; [`pipeline::current_labels`]).
+pub fn labels(file: &Path, cache_dir: Option<PathBuf>) -> Result<Option<labels::Labels>, String> {
+    let settings = junctur_core::config::load()
+        .map(|c| c.labels)
+        .unwrap_or_default();
+    labels_with(file, cache_dir, &settings)
+}
+
+/// [`labels`] with the labels settings given.
+fn labels_with(
+    file: &Path,
+    cache_dir: Option<PathBuf>,
+    settings: &labels::Settings,
+) -> Result<Option<labels::Labels>, String> {
+    let p = Project::open(file, cache_dir, None).map_err(|e| e.to_string())?;
+    Ok(pipeline::current_labels(&p, settings))
 }
 
 /// A recent recording's line on the start window: how long it is and where its analysis
