@@ -390,7 +390,8 @@
   const chipSteps = $derived(steps.current(analysis));
 
   // Re-analyse in the background: the user's edit list is kept, speakers matched again, nothing to
-  // ask. A fresh cut (`fresh`) replaces their cut, so when the list holds their edits, ask first.
+  // ask. A fresh cut (`fresh`) replaces their cut and hears the words and speakers again, so when the
+  // list holds their edits, ask first.
   async function reanalyse(fresh: boolean) {
     if (!opened) return;
     const file = opened.file;
@@ -399,7 +400,7 @@
       // Only a fresh cut is ever held back to ask; a plain Re-analyse never replaces the cut.
       if (fresh && r.handEdited) {
         const yes = await ask(
-          "Your cut is replaced by a fresh one from the analysis; speaker names, fixed words and caption settings stay. Your version is kept beside it as edit.junctur.bak (or .bak2, …).",
+          "Your cut is replaced by a fresh one from the analysis, and the speakers are heard and the whole recording transcribed again, about as long as its first transcription took. Speaker names and caption settings stay; your fixed words move onto the new words, as Correct does. Your version is kept beside it as edit.junctur.bak (or .bak2, …).",
           { title: "Start over with a fresh cut?", kind: "warning", okLabel: "Start over", cancelLabel: "Keep my cut" },
         );
         if (!yes) return;

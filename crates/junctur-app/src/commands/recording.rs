@@ -9,7 +9,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use super::{blocking, notifier, App};
-use crate::analysis::{self, Again, Progress, Reanalysed, Transcription};
+use crate::analysis::{self, Again, Progress, Reanalysed, Redo, Transcription};
 use crate::project::{self, ProjectStatus, RecordingInfo};
 use crate::recent::{self, Recent};
 use crate::waves::{self, WavesState};
@@ -194,7 +194,8 @@ pub async fn pause_transcription(
 }
 
 /// Analyses `path` again with the settings now ([`Analysis::reanalyse`](crate::analysis::Analysis::reanalyse)); `fresh` re-cuts the
-/// list, and without `replace` a list holding the user's edits starts nothing, for the page to ask.
+/// list and hears the words and the speakers again ([`Redo::fresh`]), and without `replace` a list
+/// holding the user's edits starts nothing, for the page to ask.
 #[tauri::command]
 pub async fn reanalyse(
     handle: AppHandle,
@@ -210,6 +211,7 @@ pub async fn reanalyse(
         analysis.reanalyse(
             Path::new(&path),
             Again::from_flags(fresh, replace),
+            Redo::fresh(fresh),
             notifier(handle),
         )
     })

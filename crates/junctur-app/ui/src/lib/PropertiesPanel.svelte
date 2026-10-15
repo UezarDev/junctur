@@ -164,7 +164,7 @@
       <button
         class="fresh"
         disabled={busy}
-        title="Re-analyses and replaces your cut with a fresh one; your version is kept as a backup"
+        title="Replaces your cut with a fresh one and hears the speakers and transcribes the recording again; your version is kept as a backup"
         onclick={onFreshCut}>Start over with a fresh cut</button
       >
     {/if}

@@ -69,8 +69,8 @@ impl Analysis {
             o.cut = e.settings;
         }
         o.keep_list = how.keep_list;
-        o.rehear = how.correct;
-        o.retranscribe = how.correct;
+        o.rehear = how.redo.speakers;
+        o.retranscribe = how.redo.words;
         Ok(o)
     }
 

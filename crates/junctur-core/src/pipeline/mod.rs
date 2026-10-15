@@ -153,10 +153,11 @@ pub struct PipelineOptions {
     /// Whether an edit list holding the user's edits is kept or re-cut ([`KeepList`]).
     pub keep_list: KeepList,
     /// Hear the speakers again from the audio, cut at the user's pins, instead of reusing the
-    /// hearing (the Correct button; what [`rehear`] does outside a run).
+    /// hearing (the Correct button and the app's fresh cut; what [`rehear`] does outside a run).
     pub rehear: bool,
     /// Transcribe the recording again, the word list as it is now, and carry the edit list's fixes
-    /// onto the new words ([`finish`]; the Correct button).
+    /// onto the new words ([`finish`]; the Correct button and the app's fresh cut). Apart from
+    /// `rehear` and `keep_list`, so either hearing can be asked for alone.
     pub retranscribe: bool,
 }
 

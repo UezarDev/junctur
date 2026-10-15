@@ -231,6 +231,7 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
         let r = state.analysis.reanalyse(
             std::path::Path::new(&file),
             crate::analysis::Again::from_flags(fresh, fresh),
+            crate::analysis::Redo::fresh(fresh),
             notify,
         )?;
         eprintln!(

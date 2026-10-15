@@ -422,8 +422,8 @@ export const forgetRecent = (path: string) => invoke<void>("forget_recent", { pa
 export const analysis = (path: string) => invoke<Progress | null>("analysis", { path });
 /**
  * Analyses `path` again: the user's edit list is kept, with the speakers matched again against
- * the remembered voices. With `fresh` the list is re-cut instead; then, without `replace`, a list with
- * the user's edits starts nothing.
+ * the remembered voices. With `fresh` the list is re-cut instead and the words and the speakers are
+ * heard again; then, without `replace`, a list with the user's edits starts nothing.
  */
 export const reanalyse = (path: string, fresh: boolean, replace: boolean) =>
   invoke<Reanalysed>("reanalyse", { path, fresh, replace });

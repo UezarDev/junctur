@@ -35,8 +35,42 @@ pub const LANE_EVENT: &str = "transcription";
 struct How {
     /// What becomes of an edit list holding the user's edits.
     keep_list: KeepList,
-    /// Hear the speakers and the words again (the Correct button).
-    correct: bool,
+    /// What is heard again rather than reused.
+    redo: Redo,
+}
+
+/// What a run hears again from the audio instead of reusing, each apart from the other and from
+/// what becomes of the list ([`Again`]): one flag for both left a fresh cut unable to ask for either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Redo {
+    /// Transcribe the recording again, the fixes carried onto the new words
+    /// (`PipelineOptions::retranscribe`).
+    pub words: bool,
+    /// Hear the speakers again, cut at the user's pins (`PipelineOptions::rehear`).
+    pub speakers: bool,
+}
+
+impl Redo {
+    /// Reuse whatever still answers the settings (Re-analyse).
+    pub const NOTHING: Redo = Redo {
+        words: false,
+        speakers: false,
+    };
+    /// Hear both again (Correct, and a fresh cut).
+    pub const ALL: Redo = Redo {
+        words: true,
+        speakers: true,
+    };
+
+    /// The page's `fresh` flag: a fresh cut starts over from nothing, so it hears both again; a
+    /// re-cut that kept the old words came back with the old transcript.
+    pub fn fresh(fresh: bool) -> Self {
+        if fresh {
+            Redo::ALL
+        } else {
+            Redo::NOTHING
+        }
+    }
 }
 
 /// What a re-analysis does with the user's edit list.
@@ -200,7 +234,7 @@ impl Analysis {
             notify,
             How {
                 keep_list: KeepList::Edits,
-                correct: false,
+                redo: Redo::NOTHING,
             },
         )
     }
@@ -247,11 +281,13 @@ impl Analysis {
         Ok(first)
     }
 
-    /// Analyses `file` again with the settings now ([`Again`]).
+    /// Analyses `file` again with the settings now: `again` says what becomes of the user's list,
+    /// `redo` what is heard again. Refused while being analysed.
     pub fn reanalyse(
         &self,
         file: &Path,
         again: Again,
+        redo: Redo,
         notify: Notify,
     ) -> Result<Reanalysed, String> {
         if self.busy(file) {
@@ -275,7 +311,7 @@ impl Analysis {
                         Again::KeepList => KeepList::Whole,
                         Again::Recut | Again::RecutOverEdits => KeepList::No,
                     },
-                    correct: false,
+                    redo,
                 },
             )?),
             hand_edited: false,
@@ -285,17 +321,9 @@ impl Analysis {
     /// The Correct button's run: Re-analyse keeping the user's list, with the speakers heard and
     /// the words transcribed again, fixes carried onto the new words. Refused while being analysed.
     pub fn correct(&self, file: &Path, notify: Notify) -> Result<Progress, String> {
-        if self.busy(file) {
-            return Err("this recording is already being analysed".into());
-        }
-        self.start_with(
-            file,
-            notify,
-            How {
-                keep_list: KeepList::Whole,
-                correct: true,
-            },
-        )
+        self.reanalyse(file, Again::KeepList, Redo::ALL, notify)?
+            .progress
+            .ok_or_else(|| "the analysis did not start".into())
     }
 
     /// Pauses or resumes the transcription lane after the current chunk; whether anything changed.
