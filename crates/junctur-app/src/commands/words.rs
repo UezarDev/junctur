@@ -202,11 +202,26 @@ pub async fn reanalyse(
     ask: Ask,
 ) -> Result<Corrected, String> {
     let r = ask.reanalysis();
-    // Only while the list can be edited, as the fixes are.
-    app.editable()?;
+    // Only while the list can be edited, as the fixes are, and only the open recording's: the page
+    // asks for the one it shows. The mark is held until the run has started, so an edit begun
+    // meanwhile ends before the run reads anything.
+    let e = app.editable()?;
+    let open = e
+        .file()
+        .map(|f| std::path::absolute(f).unwrap_or_else(|_| f.into()));
+    if open.as_deref()
+        != Some(
+            std::path::absolute(&path)
+                .as_deref()
+                .unwrap_or(Path::new(&path)),
+        )
+    {
+        return Err("this recording is no longer the open one".into());
+    }
     let analysis = app.analysis.clone();
     blocking(move || {
         let started = analysis.reanalyse(Path::new(&path), r, notifier(handle))?;
+        drop(e);
         Ok(Corrected {
             progress: started.progress,
             hand_edited: started.hand_edited,

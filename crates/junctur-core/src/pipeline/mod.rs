@@ -189,11 +189,37 @@ impl Forget {
     }
 }
 
+/// There from the moment a hearing that names the speakers afresh is in `speakers.json` (its pins
+/// left out, [`speakers_stage`]) until the edit list has its speakers named afresh too: a run stopped
+/// in between would otherwise carry the old names onto the new hearing on its resume. Empty.
+const AFRESH_FILE: &str = "speakers-afresh";
+
+/// What the edit stage of this run forgets: what it was asked, and the names when an earlier run that
+/// was asked to name the speakers afresh stopped before its list ([`AFRESH_FILE`]) and speakers were
+/// found this time (with none, the list keeps what it has, as any run without speakers).
+fn forget_now(p: &Project, opts: &PipelineOptions, found: bool) -> Forget {
+    Forget {
+        names: opts.forget.names || (found && p.dir.join(AFRESH_FILE).is_file()),
+        ..opts.forget
+    }
+}
+
+/// The edit list has the speakers as heard last: an [`AFRESH_FILE`] is done with.
+fn afresh_done(p: &Project, log: &mut dyn FnMut(&str)) {
+    let path = p.dir.join(AFRESH_FILE);
+    if let Err(e) = crate::output::remove_retrying(&path) {
+        if path.exists() {
+            log(&format!("could not remove {}: {e}", path.display()));
+        }
+    }
+}
+
 /// Refuses options a run cannot do soundly, before anything is written: a stretch with the speakers
 /// heard again (they are clustered over the whole recording, and a stretch's clusters match no one
 /// outside it), and a stretch's words transcribed again with nothing to splice them into or a
-/// transcript that does not answer the settings (it would mix two models or languages), or while an
-/// earlier transcription is unfinished (its resume would not know the stretch).
+/// transcript that does not answer the settings (it would mix two models or languages; under `Auto`
+/// the stretch is heard by the transcript's own model, which must be one this version loads), or
+/// while an earlier transcription is unfinished (a run that redoes nothing resumes it first).
 fn check(p: &Project, opts: &PipelineOptions) -> Result<()> {
     let Some((a, b)) = opts.within else {
         return Ok(());
@@ -209,7 +235,7 @@ fn check(p: &Project, opts: &PipelineOptions) -> Result<()> {
     }
     if opts.retranscribe && !opts.no_transcript {
         if transcribe::interrupted(&p.dir) {
-            return refuse("an earlier transcription of this recording is unfinished: analyse the whole timeline to finish it");
+            return refuse(transcribe::UNFINISHED);
         }
         let t = TranscribeOptions {
             model: opts.model,
@@ -221,6 +247,11 @@ fn check(p: &Project, opts: &PipelineOptions) -> Result<()> {
             Some(Err(e)) => return refuse(&format!("the transcript could not be read ({e}): analyse the whole timeline")),
             Some(Ok((model, languages))) if !transcribe::answers(&model, &languages, &t) => {
                 return refuse("the transcript was made with another model or languages than the settings ask: analyse the whole timeline, or one transcript would mix both")
+            }
+            // Heard with the model that made it ([`transcribe::stretch_model`]), so it must be
+            // one this version loads.
+            Some(Ok((model, _))) if model.parse::<ModelPref>().is_err() => {
+                return refuse(&format!("the transcript was made with {model}, which this version cannot run: analyse the whole timeline"))
             }
             Some(Ok(_)) => {}
         }
@@ -346,10 +377,11 @@ pub fn prepare(
         let how = Rewrite {
             keep: opts.keep_list,
             within: opts.within,
-            forget: opts.forget,
+            forget: forget_now(p, opts, speakers.is_some()),
         };
         rewrite(p, d, speakers.as_ref(), &how, log)
     })?;
+    afresh_done(p, log);
     Ok(Prepared {
         report,
         speech,

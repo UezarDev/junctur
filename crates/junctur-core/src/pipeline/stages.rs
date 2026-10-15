@@ -4,7 +4,7 @@
 use super::speaker_files::{set_aside, write_speakers};
 use super::{
     describe, speakers, speech, speech_tracks, steps, Found, Jobs, PipelineOptions, Project,
-    Speech, StageName, Steps,
+    Speech, StageName, Steps, AFRESH_FILE,
 };
 use crate::edit::{self, EditList};
 use crate::tracks::{Role, TrackReport};
@@ -150,6 +150,11 @@ pub(super) fn speakers_stage(
             // names for whatever cluster now sits there.
             if let Some(old) = &previous {
                 speakers::remember_known(&mut f, old);
+            }
+            // Named afresh: said before the hearing lands, so a run stopped before its list names
+            // them afresh on its resume instead of carrying the old names onto it.
+            if opts.forget.names {
+                crate::output::write_replacing(&p.dir.join(AFRESH_FILE), b"")?;
             }
             write_speakers(p, &f)?;
             Ok(f)

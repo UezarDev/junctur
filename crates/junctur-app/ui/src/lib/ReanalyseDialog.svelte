@@ -66,10 +66,13 @@
   }
 </script>
 
+<!-- In the capture phase, so Escape is the dialog's before any window listener of the app's
+     (App.svelte's keys, which also stand down while it is open) or a field's sees it. -->
 <svelte:window
-  onkeydown={(e) => {
+  onkeydowncapture={(e) => {
     if (e.code !== "Escape") return;
     e.stopPropagation();
+    e.preventDefault();
     // An open (i) takes Escape first.
     if (slot.open) slot.open = null;
     else if (!running) onClose();

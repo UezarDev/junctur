@@ -75,6 +75,12 @@ pub(super) fn rewrite(
     how: &Rewrite,
     log: &mut dyn FnMut(&str),
 ) -> Result<EditList> {
+    if how.forget.names && found.is_none() {
+        // Asked for, not silently skipped: the names stay only when the user can see why.
+        return Err(Error::Edit(
+            "the speakers could not be heard, so they cannot be named afresh: the edit list is left as it was".into(),
+        ));
+    }
     let _writing = edit::hold();
     let mut d = d.recheck(p);
     let partial = how.within.is_some();

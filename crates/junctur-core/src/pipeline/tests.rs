@@ -1242,6 +1242,69 @@ fn a_stretch_is_refused_with_the_speakers_or_nothing_to_splice_into() {
         ..Default::default()
     })
     .contains("empty"));
+    let words = within(PipelineOptions {
+        retranscribe: true,
+        ..Default::default()
+    });
+    // Made by a model this version cannot load: a stretch would have to be heard by another.
+    t.languages = Languages::default().allowed;
+    t.choice.model = "medium".into();
+    std::fs::write(transcribe::path(&p.dir), serde_json::to_vec(&t).unwrap()).unwrap();
+    assert!(err(&words).contains("cannot run"));
+    t.choice.model = "large-v3".into();
+    std::fs::write(transcribe::path(&p.dir), serde_json::to_vec(&t).unwrap()).unwrap();
+    assert!(
+        check(&p, &words).is_ok(),
+        "Auto takes large-v3's, heard by large-v3"
+    );
+    // An unfinished transcription: the refusal says how to finish it (a run redoing nothing
+    // resumes it; a whole re-transcription would hear it all again instead).
+    std::fs::write(p.dir.join("transcript.partial.jsonl"), "torn").unwrap();
+    assert!(err(&words).contains("nothing ticked to redo resumes it"));
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn names_asked_afresh_are_named_afresh_on_a_resume_and_never_skipped_silently() {
+    let (d, p) = scratch_project("afresh");
+    let plain = PipelineOptions::default();
+    let mut log = |_: &str| {};
+    // A run asked to name the speakers afresh stopped after their hearing, before its list: the
+    // resumed run names them afresh, once speakers are found; then the mark is done with.
+    std::fs::write(p.dir.join(AFRESH_FILE), b"").unwrap();
+    assert!(forget_now(&p, &plain, true).names);
+    assert!(
+        !forget_now(&p, &plain, false).names,
+        "no speakers: the list keeps what it has"
+    );
+    afresh_done(&p, &mut log);
+    assert!(!forget_now(&p, &plain, true).names);
+    // Asked now with no speakers heard: refused, the list left as it was.
+    let text = list(CutSettings::default(), 2.0);
+    std::fs::write(p.edit_path(), &text).unwrap();
+    let d0 = Draft {
+        list: edit::parse(&text).unwrap(),
+        old: Some(text.clone()),
+        users: false,
+    };
+    let err = rewrite(
+        &p,
+        d0,
+        None,
+        &Rewrite {
+            keep: KeepList::Whole,
+            within: None,
+            forget: Forget {
+                names: true,
+                fixes: false,
+            },
+        },
+        &mut log,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("cannot be named afresh"), "{err}");
+    assert_eq!(std::fs::read_to_string(p.edit_path()).unwrap(), text);
     std::fs::remove_dir_all(&d).unwrap();
 }
 
