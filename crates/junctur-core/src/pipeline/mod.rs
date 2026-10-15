@@ -392,7 +392,8 @@ pub fn outdated(p: &Project, opts: &PipelineOptions) -> Vec<String> {
 }
 
 /// Why the labels of the silent parts do not answer `opts`, when they are on: none yet (or the last
-/// run had them off), or made with another list or model. `None` when they are off, up to date, or
+/// run had them off), busy read from another track than the track report names now (or the read
+/// failed), or made with another list or model. `None` when they are off, up to date, or
 /// the speech is not found yet (the run that finds it makes them).
 fn labels_outdated(p: &Project, opts: &PipelineOptions) -> Option<String> {
     if !opts.labels.on {
@@ -404,9 +405,13 @@ fn labels_outdated(p: &Project, opts: &PipelineOptions) -> Option<String> {
         .get(StageName::Labels)
         .is_some_and(|r| r.note.as_deref() == Some(LABELS_OFF));
     let pieces = labels::pieces::pieces(&speech.all_regions(), report.duration);
+    let busy = labels::busy::track(&report);
     match labels::load(&p.dir).filter(|_| !off) {
         None => Some("The parts where nobody talks have no labels yet.".into()),
-        Some(l) if !labels::answers(&l, &opts.labels.labels(), &pieces) => {
+        Some(l) if l.busy_track != busy => {
+            Some("The labels' busy scores are not from the game track found now.".into())
+        }
+        Some(l) if !labels::answers(&l, &opts.labels.labels(), &pieces, busy) => {
             Some("The labels were made with another list.".into())
         }
         Some(_) => None,

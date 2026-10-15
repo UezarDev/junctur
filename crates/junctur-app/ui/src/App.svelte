@@ -367,7 +367,8 @@
         void api.uiLog(`labels: ${l?.pieces.length ?? 0} pieces`);
       }
     } catch (e) {
-      failure = String(e);
+      // The lane is an extra: a labels file that will not read is logged, not a banner over the editor.
+      void api.uiLog(`labels could not be read: ${e}`);
     }
   }
   /** Whether `p`'s labels stage is done (made, reused or off). */

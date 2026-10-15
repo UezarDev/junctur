@@ -88,13 +88,19 @@ fn labels_are_reused_only_for_the_same_list_pieces_and_model() {
         ..Default::default()
     };
     let l = file(&s, &pieces);
-    assert!(answers(&l, &s.labels(), &pieces));
+    assert!(answers(&l, &s.labels(), &pieces, None));
     // A label added.
     let mut more = s.clone();
     more.added.league.push("baron".into());
-    assert!(!answers(&l, &more.labels(), &pieces));
+    assert!(!answers(&l, &more.labels(), &pieces, None));
     // Another kind.
-    assert!(!answers(&l, &Settings::default().labels(), &pieces));
+    assert!(!answers(&l, &Settings::default().labels(), &pieces, None));
+    // A busy track now, where they were made without one (or its read failed).
+    let game = Some(BusyTrack {
+        track: 1,
+        role: crate::tracks::Role::GamePc,
+    });
+    assert!(!answers(&l, &s.labels(), &pieces, game));
     // The speech moved a piece.
     let moved = [
         pieces[0],
@@ -103,9 +109,48 @@ fn labels_are_reused_only_for_the_same_list_pieces_and_model() {
             end: 15.0,
         },
     ];
-    assert!(!answers(&l, &s.labels(), &moved));
+    assert!(!answers(&l, &s.labels(), &moved, None));
     // Another model.
     let mut other = l.clone();
     other.model = "siglip2-so400m".into();
-    assert!(!answers(&other, &s.labels(), &pieces));
+    assert!(!answers(&other, &s.labels(), &pieces, None));
+}
+
+/// `--force` makes them again: labels that answer the settings are not reused.
+#[test]
+fn forced_labels_are_never_reused() {
+    let d = crate::test_support::scratch("labels", "force");
+    let report = crate::tracks::TrackReport {
+        file: d.join("rec.mp4"),
+        duration: 20.0,
+        windows: vec![],
+        window_seconds: 1.0,
+        tracks: vec![],
+        logical: vec![],
+        speech_error: None,
+        from_cache: false,
+    };
+    let speech = [crate::vad::Region {
+        start: 5.0,
+        end: 8.0,
+    }];
+    let s = Settings {
+        on: true,
+        ..Default::default()
+    };
+    let l = file(&s, &pieces::pieces(&speech, 20.0));
+    save(&d, &l).unwrap();
+    let job = |force| Job {
+        file: &report.file,
+        dir: &d,
+        cache_dir: &d,
+        report: &report,
+        speech: &speech,
+        settings: &s,
+        device: crate::runtime::DevicePref::Cpu,
+        force,
+    };
+    assert_eq!(reused(&job(false)), Some(l));
+    assert_eq!(reused(&job(true)), None);
+    let _ = std::fs::remove_dir_all(&d);
 }

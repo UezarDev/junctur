@@ -19,13 +19,14 @@ pub struct BusyTrack {
     pub role: Role,
 }
 
-/// The first game/PC track, else the first mix; `None` when there is neither (voices only).
+/// The first game/PC track that is not silent, else the first such mix; `None` when there is neither
+/// (voices only).
 pub fn track(report: &TrackReport) -> Option<BusyTrack> {
     [Role::GamePc, Role::Mix].into_iter().find_map(|role| {
         report
             .logical
             .iter()
-            .find(|l| l.role == role)
+            .find(|l| l.role == role && !l.activity.silent)
             .map(|l| BusyTrack {
                 track: l.members[0],
                 role,
@@ -120,6 +121,11 @@ mod tests {
     }
 
     fn report(roles: &[Role]) -> TrackReport {
+        quiet(roles, &[])
+    }
+
+    /// `roles`, the tracks in `silent` silent.
+    fn quiet(roles: &[Role], silent: &[usize]) -> TrackReport {
         let logical = roles
             .iter()
             .enumerate()
@@ -130,7 +136,7 @@ mod tests {
                     mean_db: -30.0,
                     peak_db: -10.0,
                     near_silent_share: 0.0,
-                    silent: false,
+                    silent: silent.contains(&i),
                 },
                 speech: None,
                 role,
@@ -157,5 +163,8 @@ mod tests {
         let t = track(&report(&[Role::Voice, Role::Mix])).unwrap();
         assert_eq!((t.track, t.role), (1, Role::Mix));
         assert_eq!(track(&report(&[Role::Voice, Role::Voice])), None);
+        // A game track with nothing on it: the mix.
+        let t = track(&quiet(&[Role::GamePc, Role::Mix], &[0])).unwrap();
+        assert_eq!((t.track, t.role), (1, Role::Mix));
     }
 }

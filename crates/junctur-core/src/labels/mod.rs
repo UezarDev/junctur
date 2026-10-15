@@ -111,10 +111,13 @@ pub fn summary(l: &Labels) -> String {
     )
 }
 
-/// Whether `l` answers `labels` over `pieces` with this model: the same prompts in the same order
-/// and the same pieces. Then the stage reuses it.
-pub fn answers(l: &Labels, labels: &[Label], pieces: &[Piece]) -> bool {
+/// Whether `l` answers `labels` over `pieces` with this model and `busy` as the busy track: the same
+/// prompts in the same order, the same pieces, and the busy scores read from that track (a track
+/// report that moved, or a read that failed and recorded none, makes them again). Then the stage
+/// reuses it.
+pub fn answers(l: &Labels, labels: &[Label], pieces: &[Piece], busy: Option<BusyTrack>) -> bool {
     l.model == model::NAME
+        && l.busy_track == busy
         && l.prompts.len() == labels.len()
         && l.prompts.iter().zip(labels).all(|(p, x)| *p == x.prompt)
         && l.labels.iter().zip(labels).all(|(t, x)| *t == x.text)

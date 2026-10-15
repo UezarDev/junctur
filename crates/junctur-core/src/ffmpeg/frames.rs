@@ -6,6 +6,7 @@
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
 use crate::{Error, Result};
@@ -16,6 +17,10 @@ pub const CHANNELS: usize = 3;
 /// The hardware decoder asked for first. When ffmpeg cannot start it, the pass is made again on the
 /// CPU ([`keyframes`]); an ffmpeg that can start it but not for this stream decodes in software.
 const HWACCEL: [&str; 2] = ["-hwaccel", "cuda"];
+
+/// Set once the hardware decoder failed in this process: no later frame asks for it again (each
+/// seek of [`frame_at`] would otherwise start a failing ffmpeg first).
+static NO_HWACCEL: AtomicBool = AtomicBool::new(false);
 
 /// Lines of ffmpeg's stderr kept for an error.
 const KEEP_LINES: usize = 20;
@@ -50,17 +55,21 @@ fn scaled(size: u32, info: bool) -> Vec<String> {
 
 /// Every keyframe of `file`'s first video stream, in order, as `size` by `size` RGB with its time
 /// in seconds from the start: `more(t, pixels)`, which returns false to stop early. The hardware
-/// decoder is tried first; a pass that fails before its first frame is made again on the CPU.
+/// decoder is tried first; a pass it fails is made again on the CPU, giving only the frames after
+/// the last one given, so a decoder that gives up an hour in loses nothing.
 pub fn keyframes(file: &Path, size: u32, more: &mut dyn FnMut(f64, &[u8]) -> bool) -> Result<()> {
-    let mut any = false;
-    let hw = pass(file, size, true, &mut |t, px| {
-        any = true;
-        more(t, px)
-    });
-    match hw {
-        Err(_) if !any => pass(file, size, false, more),
-        r => r,
+    let mut last = f64::NEG_INFINITY;
+    if !NO_HWACCEL.load(Ordering::Relaxed) {
+        let hw = pass(file, size, true, &mut |t, px| {
+            last = t;
+            more(t, px)
+        });
+        if hw.is_ok() {
+            return hw;
+        }
+        NO_HWACCEL.store(true, Ordering::Relaxed);
     }
+    pass(file, size, false, &mut |t, px| t <= last || more(t, px))
 }
 
 /// One keyframe pass; `hw` asks for the hardware decoder.
@@ -180,7 +189,10 @@ fn pts_time(line: &str) -> Option<f64> {
 /// keyframe before `t`, so this costs up to a keyframe interval of decoding.
 pub fn frame_at(file: &Path, t: f64, size: u32) -> Result<Option<Vec<u8>>> {
     let mut args: Vec<String> = ["-v", "error", "-nostdin"].map(String::from).to_vec();
-    args.extend(HWACCEL.map(String::from));
+    let hw = !NO_HWACCEL.load(Ordering::Relaxed);
+    if hw {
+        args.extend(HWACCEL.map(String::from));
+    }
     args.extend(["-ss".to_string(), format!("{t:.3}"), "-i".to_string()]);
     args.push(file.to_string_lossy().into_owned());
     args.extend(["-frames:v", "1"].map(String::from));
@@ -205,8 +217,9 @@ pub fn frame_at(file: &Path, t: f64, size: u32) -> Result<Option<Vec<u8>>> {
     };
     let bytes = match one(&args) {
         Ok(b) => b,
-        // Without the hardware decoder, as the keyframe pass falls back.
-        Err(_) => {
+        // Without the hardware decoder, as the keyframe pass falls back; remembered.
+        Err(_) if hw => {
+            NO_HWACCEL.store(true, Ordering::Relaxed);
             let soft: Vec<String> = args
                 .iter()
                 .filter(|a| !HWACCEL.contains(&a.as_str()))
@@ -214,6 +227,7 @@ pub fn frame_at(file: &Path, t: f64, size: u32) -> Result<Option<Vec<u8>>> {
                 .collect();
             one(&soft)?
         }
+        Err(e) => return Err(e),
     };
     Ok((bytes.len() >= want).then(|| bytes[..want].to_vec()))
 }

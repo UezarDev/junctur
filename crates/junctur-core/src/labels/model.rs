@@ -83,6 +83,12 @@ fn pooled(v: &ort::value::DynValue, n: usize) -> Result<Vec<Vec<f32>>> {
             data.len()
         )));
     }
+    // A NaN would score every label NaN, written as null, and `labels.json` would no longer read.
+    if data.iter().any(|x| !x.is_finite()) {
+        return Err(Error::Model(
+            "SigLIP gave an embedding that is not a number".into(),
+        ));
+    }
     Ok(data.chunks_exact(DIM).map(normalised).collect())
 }
 

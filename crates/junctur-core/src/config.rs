@@ -153,25 +153,28 @@ fn transcription(flag: Option<&str>, cfg: Result<Config>) -> Result<(ModelPref, 
     }
 }
 
-/// The options `junctur analyze` runs with before its own flags, and the app's analysis with: the
-/// model and word list ([`transcription`]; the config file is not read for them without a transcript,
-/// since no model is loaded), the labels settings (off when the file cannot be read: an extra, never a
-/// reason to stop) and the remembered voices (not read without speakers, so a broken voices file cannot
-/// block the rest). Device, cut settings and `force` stay the defaults for the caller to set.
+/// The options `junctur analyze` runs with before its own flags, and the app's analysis with, from
+/// one read of the config file: the model and word list ([`transcription`]; not taken without a
+/// transcript, since no model is loaded, so a broken file then stops nothing), the labels settings
+/// (off when the file cannot be read: an extra, never a reason to stop) and the remembered voices (not
+/// read without speakers, so a broken voices file cannot block the rest). Device, cut settings and
+/// `force` stay the defaults for the caller to set.
 pub fn analysis_options(
     model_flag: Option<&str>,
     no_transcript: bool,
     no_speakers: bool,
 ) -> Result<PipelineOptions> {
+    let cfg = load();
+    let labels = cfg.as_ref().map(|c| c.labels.clone()).unwrap_or_default();
     let (model, words) = if no_transcript {
         (ModelPref::Auto, Vec::new())
     } else {
-        transcription(model_flag, load())?
+        transcription(model_flag, cfg)?
     };
     Ok(PipelineOptions {
         model,
         words,
-        labels: load().map(|c| c.labels).unwrap_or_default(),
+        labels,
         no_transcript,
         no_speakers,
         voices: if no_speakers {

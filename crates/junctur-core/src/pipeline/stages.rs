@@ -156,9 +156,11 @@ pub(super) fn speakers_stage(
 /// The note a `labels` stage left off carries in `jobs.json`.
 pub const LABELS_OFF: &str = "off";
 
-/// The silent parts labelled ([`labels`]), reused when the list, the speech and the model are what
-/// they were. Off (the default), the stage is recorded done with the note [`LABELS_OFF`] and
-/// nothing is read: a stage of its own state would make an older build drop the whole `jobs.json`.
+/// The silent parts labelled ([`labels`]), reused when the list, the speech, the busy track and the
+/// model are what they were, unless forced. Off (the default), the stage is recorded done with the
+/// note [`LABELS_OFF`] and nothing is read. Not a `StageState` of its own: an older build keeps a
+/// stage name it does not know, but cannot parse a state it does not know, and would then read the
+/// whole `jobs.json` as every stage pending.
 pub(super) fn labels_stage(
     st: Stage,
     speech: &Speech,
@@ -182,6 +184,7 @@ pub(super) fn labels_stage(
         speech: &regions,
         settings: &opts.labels,
         device: opts.device,
+        force: opts.force,
     };
     let l = match labels::reused(&job) {
         Some(l) => {

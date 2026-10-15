@@ -1117,6 +1117,28 @@ fn outdated_says_when_labels_are_on_and_missing_left_off_or_from_another_list() 
         outdated(&p, &with(labels::Kind::League)),
         vec!["The labels were made with another list."]
     );
+    // A busy track the report did not have when they were made (its roles found again).
+    let mut moved = report.clone();
+    moved.logical = vec![tracks::LogicalTrack {
+        members: vec![0],
+        sameness: tracks::Sameness::Single,
+        activity: crate::signal::Activity {
+            mean_db: -30.0,
+            peak_db: -10.0,
+            near_silent_share: 0.0,
+            silent: false,
+        },
+        speech: None,
+        role: tracks::Role::GamePc,
+        confidence: 1.0,
+        reasons: vec![],
+    }];
+    std::fs::write(&entry, serde_json::to_vec(&moved).unwrap()).unwrap();
+    assert_eq!(
+        outdated(&p, &on),
+        vec!["The labels' busy scores are not from the game track found now."]
+    );
+    std::fs::write(&entry, serde_json::to_vec(&report).unwrap()).unwrap();
     // The last run had them off: the file there is not this list's labels.
     let off = Some(LABELS_OFF.to_string());
     p.jobs()

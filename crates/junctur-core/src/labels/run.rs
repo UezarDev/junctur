@@ -30,6 +30,8 @@ pub struct Job<'a> {
     pub settings: &'a Settings,
     /// Where the vision tower may run.
     pub device: DevicePref,
+    /// Make them again: nothing earlier is reused, frames and busy scores included (`--force`).
+    pub force: bool,
 }
 
 /// One frame looked at: its piece, its time and its embedding.
@@ -40,10 +42,15 @@ struct Look {
     embedding: Vec<f32>,
 }
 
-/// The labels in `job`'s project folder, when they answer its settings and speech as they are now.
+/// The labels in `job`'s project folder, when they answer its settings, speech and busy track as they
+/// are now; never when it is forced.
 pub fn reused(job: &Job) -> Option<Labels> {
+    if job.force {
+        return None;
+    }
     let pieces = pieces::pieces(job.speech, job.report.duration);
-    load(job.dir).filter(|l| answers(l, &job.settings.labels(), &pieces))
+    let busy = busy::track(job.report);
+    load(job.dir).filter(|l| answers(l, &job.settings.labels(), &pieces, busy))
 }
 
 /// Labels `job`'s recording and writes them. Frames are decoded only when the pieces changed or no
@@ -52,7 +59,9 @@ pub fn reused(job: &Job) -> Option<Labels> {
 pub fn run(job: &Job, log: &mut dyn FnMut(&str)) -> Result<Labels> {
     let list = job.settings.labels();
     let pieces = pieces::pieces(job.speech, job.report.duration);
-    let before = load(job.dir).filter(|l| same_pieces(l, &pieces));
+    let before = load(job.dir)
+        .filter(|_| !job.force)
+        .filter(|l| same_pieces(l, &pieces));
     let kept = before
         .as_ref()
         .filter(|l| l.model == model::NAME)
@@ -85,15 +94,7 @@ pub fn run(job: &Job, log: &mut dyn FnMut(&str)) -> Result<Labels> {
     if fresh {
         write_looks(&job.dir.join(FRAMES_FILE), &looks)?;
     }
-    let busy = match (busy_kept, peaks) {
-        (Some(b), _) => b,
-        (None, Some(Ok(p))) => busy::scores(&p, &pieces),
-        (None, Some(Err(e))) => {
-            log(&format!("labels: the busy score could not be read ({e})"));
-            vec![None; pieces.len()]
-        }
-        (None, None) => vec![None; pieces.len()],
-    };
+    let (busy, busy_track) = busy_of(busy_kept, peaks, busy_track, &pieces, log);
     // No frame to score (no silent piece): the text tower is not fetched for nothing.
     let texts = if looks.is_empty() {
         Vec::new()
@@ -112,6 +113,27 @@ pub fn run(job: &Job, log: &mut dyn FnMut(&str)) -> Result<Labels> {
     );
     save(job.dir, &labels)?;
     Ok(labels)
+}
+
+/// Each piece's busy score and the track it was read from: kept, or from the peaks read. A read that
+/// failed leaves every piece without one and records no track, so the next run reads it again
+/// ([`super::answers`]).
+fn busy_of(
+    kept: Option<Vec<Option<(f64, f64)>>>,
+    peaks: Option<Result<Vec<u8>>>,
+    track: Option<BusyTrack>,
+    pieces: &[Piece],
+    log: &mut dyn FnMut(&str),
+) -> (Vec<Option<(f64, f64)>>, Option<BusyTrack>) {
+    match (kept, peaks) {
+        (Some(b), _) => (b, track),
+        (None, Some(Ok(p))) => (busy::scores(&p, pieces), track),
+        (None, Some(Err(e))) => {
+            log(&format!("labels: the busy score could not be read ({e})"));
+            (vec![None; pieces.len()], None)
+        }
+        (None, None) => (vec![None; pieces.len()], None),
+    }
 }
 
 fn panicked() -> Error {
@@ -147,7 +169,12 @@ fn look(job: &Job, pieces: &[Piece], log: &mut dyn FnMut(&str)) -> Result<Vec<Lo
         found.extend(batch.drain(..).zip(e).map(|((p, t, _), e)| (p, t, e)));
         Ok(())
     };
+    let past = pieces.last().map_or(0.0, |p| p.end);
     frames::keyframes(job.file, SIZE, &mut |t, px| {
+        // Nothing past the last silent piece is looked at.
+        if t >= past {
+            return false;
+        }
         let tenth = (t / total * 10.0) as usize;
         if tenth > told {
             told = tenth;
@@ -194,11 +221,15 @@ fn look(job: &Job, pieces: &[Piece], log: &mut dyn FnMut(&str)) -> Result<Vec<Lo
             seeks.len()
         ));
     }
+    let mut unread = 0;
     for chunk in seeks.chunks(model::BATCH) {
         let mut got: Vec<(usize, f64, Vec<u8>)> = Vec::new();
         for &(p, t) in chunk {
-            if let Some(px) = frames::frame_at(job.file, t, SIZE)? {
-                got.push((p, t, px));
+            // One frame that will not decode is one look fewer, not the run's frames lost.
+            match frames::frame_at(job.file, t, SIZE) {
+                Ok(Some(px)) => got.push((p, t, px)),
+                Ok(None) => {}
+                Err(_) => unread += 1,
             }
         }
         let px: Vec<&[u8]> = got.iter().map(|(_, _, f)| f.as_slice()).collect();
@@ -209,6 +240,11 @@ fn look(job: &Job, pieces: &[Piece], log: &mut dyn FnMut(&str)) -> Result<Vec<Lo
                 embedding: e,
             });
         }
+    }
+    if unread > 0 {
+        log(&format!(
+            "labels: {unread} looks could not be decoded, left out"
+        ));
     }
     looks.sort_by(|a, b| a.t.total_cmp(&b.t));
     log(&format!(
@@ -339,6 +375,29 @@ fn read_looks(path: &Path, pieces: usize) -> Option<Vec<Look>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_busy_read_records_no_track_so_the_next_run_reads_it_again() {
+        let t = Some(BusyTrack {
+            track: 1,
+            role: crate::tracks::Role::GamePc,
+        });
+        let p = [Piece {
+            start: 0.0,
+            end: 2.0,
+        }];
+        let mut log = |_: &str| {};
+        let (b, track) = busy_of(None, Some(Err(panicked())), t, &p, &mut log);
+        assert_eq!((b, track), (vec![None], None));
+        let (b, track) = busy_of(None, Some(Ok(vec![100; 200])), t, &p, &mut log);
+        assert!(b[0].is_some());
+        assert_eq!(track, t);
+        let kept = vec![Some((0.5, -20.0))];
+        assert_eq!(
+            busy_of(Some(kept.clone()), None, t, &p, &mut log),
+            (kept, t)
+        );
+    }
 
     #[test]
     fn looks_read_back_as_written_and_a_bad_file_is_none() {
