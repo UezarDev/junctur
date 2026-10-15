@@ -132,9 +132,15 @@ pub const SIGLIP_TOKENIZER: Model = Model {
 /// decisions ([`crate::keep`]). Convai publishes safetensors only, so this is our fp16 export of
 /// `convaiinnovations/laya` commit 7b928d82 (`multilingual/`), made with laya 0.4.7's own exporter and
 /// converted with the rotary angles left fp32 (fp16 ones are off near the end of a long input).
+/// Hosted at `Perfica-Dev/laya-multilingual-base-onnx`, which Uezar already kept for another
+/// project, pinned to its commit 128871e7: the `UezarDev/laya-multilingual-onnx` repo 3b pointed
+/// at was never made, so a fresh install had nowhere to fetch it from (phase 3c). The same bytes
+/// as 3b's, so a cache that already holds them keeps them; that repo's int8 file is not used (on
+/// CUDA its ops fall back to the CPU, about 20 times slower, and nearly a fifth of its answers
+/// differ from these).
 pub const LAYA_MODEL: Model = Model {
     file: "laya_multilingual_fp16.onnx",
-    url: "https://huggingface.co/UezarDev/laya-multilingual-onnx/resolve/main/laya_multilingual_fp16.onnx",
+    url: "https://huggingface.co/Perfica-Dev/laya-multilingual-base-onnx/resolve/128871e7d3167d4d091af0cbfa7ed62e17433d0a/laya_multilingual_fp16.onnx",
     sha256: "eeef5471a9be22daa8af9a94902dcc4906dbd5200780c9c3f3b8e72696023dc0",
     license: "Apache-2.0",
 };
@@ -146,6 +152,25 @@ pub const LAYA_TOKENIZER: Model = Model {
     sha256: "609d8f4c067cd3950f88594c5a802616cea245823836ef5848ee4fc40aab5b6f",
     license: "Apache-2.0",
 };
+
+/// Every pin above, for the tests that hold them all to one rule (a test checks none is missing).
+pub const ALL: &[&Model] = &[
+    &SILERO_VAD,
+    &MDX_VOCALS,
+    &SPEAKER_EMBEDDING,
+    &SEGMENTATION,
+    &WHISPER_LARGE_V3,
+    &WHISPER_LARGE_V3_TURBO,
+    &WHISPER_LARGE_V3_Q5,
+    &TRANSLATE_ENCODER,
+    &TRANSLATE_DECODER,
+    &TRANSLATE_TOKENIZER,
+    &SIGLIP_VISION,
+    &SIGLIP_TEXT,
+    &SIGLIP_TOKENIZER,
+    &LAYA_MODEL,
+    &LAYA_TOKENIZER,
+];
 
 pub fn dir(cache_dir: &Path) -> PathBuf {
     cache_dir.join("models")
@@ -315,6 +340,44 @@ mod tests {
         std::fs::write(dir(&d).join("m.onnx"), b"abc").unwrap();
         assert!(ensure_or_stop(&m, &d, &stop).is_ok());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Phase 3c: Laya's pin pointed at `resolve/main` of a repo that was never made. A branch can
+    /// move under its checksum, so every Hugging Face file is fetched at a full commit.
+    #[test]
+    fn every_hugging_face_model_is_pinned_to_a_commit() {
+        for m in ALL {
+            let Some(rest) = m.url.strip_prefix("https://huggingface.co/") else {
+                // Another spelling of the host (http, hf.co) would slip past the check below.
+                assert!(
+                    !m.url.contains("huggingface.co") && !m.url.contains("hf.co"),
+                    "{} is not fetched from https://huggingface.co/: {}",
+                    m.file,
+                    m.url
+                );
+                continue;
+            };
+            let rev = rest
+                .split("/resolve/")
+                .nth(1)
+                .and_then(|r| r.split('/').next());
+            assert!(
+                rev.is_some_and(|r| r.len() == 40 && r.bytes().all(|b| b.is_ascii_hexdigit())),
+                "{} is not fetched at a commit: {}",
+                m.file,
+                m.url
+            );
+        }
+    }
+
+    /// [`ALL`] is kept by hand: a pin added above and not to it would skip the test before.
+    #[test]
+    fn all_lists_every_model_pin() {
+        let pins = include_str!("models.rs")
+            .lines()
+            .filter(|l| l.starts_with("pub const ") && l.ends_with(": Model = Model {"))
+            .count();
+        assert_eq!(pins, ALL.len());
     }
 
     #[test]
