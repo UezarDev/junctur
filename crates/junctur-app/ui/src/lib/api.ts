@@ -489,17 +489,42 @@ export interface Fixed {
   others: Fix[];
   heard: string[];
 }
+/** A word as the page named it when its fix field opened (5ae): heard start (whole ms), track and
+ * place among that track's words starting in that millisecond (`transcript.wordRef`). */
+export interface WordRef {
+  at: number;
+  track: number;
+  nth: number;
+}
 /** Fixes the spelling of word `index` (empty or the heard text again removes the fix), and every
- * other word heard like it. Saved at once, not an undo step. */
-export const fixWord = (index: number, text: string) => invoke<Fixed>("fix_word", { index, text });
+ * other word heard like it. Saved at once, not an undo step. Refused when `index` is no longer the
+ * word `word` names (5ae). */
+export const fixWord = (index: number, word: WordRef, text: string) =>
+  invoke<Fixed>("fix_word", { index, word, text });
 /** Marks word `index` as checked: it keeps what Whisper heard and is no longer flagged. Saved at
  * once, not an undo step. */
 export const confirmWord = (index: number) => invoke<void>("confirm_word", { index });
 /** Fixes words `first..=last` as one text (empty or the heard words again clears their fixes),
  * and the same words heard elsewhere. Refused, saying why, across two voice tracks or two
  * people. Saved at once, not an undo step. */
-export const fixWords = (first: number, last: number, text: string) =>
-  invoke<Fixed>("fix_words", { first, last, text });
+export const fixWords = (first: number, last: number, ends: [WordRef, WordRef], text: string) =>
+  invoke<Fixed>("fix_words", { first, last, ends, text });
+/** A fix of the recording's list where the transcript has it (5ae: the list of fixes). */
+export interface ListedFix {
+  fix: Fix;
+  /** Its first and last words' indices; null when it is on no word now. */
+  first: number | null;
+  last: number | null;
+  /** Its words as heard. */
+  heard: string;
+  /** A fix of the heard text (Undo those, a removal, Looks right): the words read as heard. */
+  asHeard: boolean;
+}
+/** Every fix of the open recording's list with its words (5ae). */
+export const fixesList = () => invoke<ListedFix[]>("fixes_list");
+/** Takes `fixes` (as `fixesList` gave them) back to what their words were heard as, those still as
+ * listed; how many (5ae). Saved at once, not an undo step. */
+export const removeFixes = (fixes: Fix[]) => invoke<number>("remove_fixes", { fixes });
 /** Takes back fixes a fix made on other words, those still as made: the words keep what they
  * were heard as, and no later spread or Correct gives them the fix again. */
 export const keepHeard = (others: Fix[], heard: string[]) => invoke<number>("keep_heard", { others, heard });

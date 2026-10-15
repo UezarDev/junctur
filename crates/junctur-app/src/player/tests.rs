@@ -1,4 +1,35 @@
 #[test]
+fn a_fix_field_saves_only_onto_the_words_it_was_opened_on() {
+    // 5ae: a field left open while its words' indices went to other words (a reload, a
+    // re-transcription) wrote its text onto those, out of sight. The save names its words by heard
+    // start, track and place in the millisecond, and is refused when the index holds another.
+    use super::words::{named, WordRef, FIELD_MOVED};
+    use super::Words;
+    use junctur_core::transcribe::Word;
+    let w = |start: f64, text: &str| Word {
+        start,
+        end: start + 0.3,
+        text: text.into(),
+        p: 1.0,
+        p_min: None,
+    };
+    let r = |at: u64, track: usize, nth: usize| WordRef { at, track, nth };
+    let then = Words::from_words(vec![w(1.0, " no"), w(2.0, " lo"), w(3.0, " se")]);
+    assert_eq!(named(&then, 0, r(1000, 0, 0)), Ok(()));
+    assert_eq!(named(&then, 2, r(3000, 0, 0)), Ok(()));
+    // Heard again: index 0 is another word now, index 3 none.
+    let now = Words::from_words(vec![w(0.5, " y"), w(1.0, " no"), w(2.0, " lo")]);
+    assert_eq!(named(&now, 0, r(1000, 0, 0)), Err(FIELD_MOVED.into()));
+    assert_eq!(named(&now, 3, r(3000, 0, 0)), Err(FIELD_MOVED.into()));
+    // Two words in one millisecond: the start alone does not tell them apart, the place does.
+    let two = Words::from_words(vec![w(1.0, " uh"), w(1.0, " no")]);
+    assert_eq!(named(&two, 1, r(1000, 0, 1)), Ok(()));
+    assert_eq!(named(&two, 1, r(1000, 0, 0)), Err(FIELD_MOVED.into()));
+    // Another track.
+    assert_eq!(named(&then, 0, r(1000, 1, 0)), Err(FIELD_MOVED.into()));
+}
+
+#[test]
 fn a_word_edit_is_refused_only_when_its_own_words_changed() {
     // A piece of a running transcription landing while a word is fixed adds words
     // after it and must not refuse the fix; a re-transcription that moved the word must.

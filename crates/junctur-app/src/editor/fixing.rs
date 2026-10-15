@@ -6,7 +6,7 @@ use std::sync::{Arc, Weak};
 use junctur_core::edit::{self, EditList, Fix, Spread, SpreadIndex, Which, WordAt};
 use junctur_core::transcribe::Word;
 
-use super::{Edited, Editor, Retyped};
+use super::{Edited, Editor, Retyped, Words};
 
 impl Editor {
     /// Fixes the spelling of `word`, heard on `track`, the `nth` of that track's words starting in
@@ -95,6 +95,19 @@ impl Editor {
     ) -> Result<(Option<Edited>, usize), String> {
         let mut fixes = list.fixes.clone();
         let n = edit::keep_heard(&mut fixes, others, heard);
+        Ok((self.set_fixes(list, fixes, Spread::default())?, n))
+    }
+
+    /// Takes the fixes of `gone` back to what their words of `words` were heard as (5ae: the list of
+    /// fixes' Remove), those still as listed ([`edit::remove`]). Saved; not an undo step. How many.
+    pub fn remove_fixes(
+        &mut self,
+        list: &EditList,
+        gone: &[Fix],
+        words: &Words,
+    ) -> Result<(Option<Edited>, usize), String> {
+        let mut fixes = list.fixes.clone();
+        let n = edit::remove(&mut fixes, gone, &words.in_order());
         Ok((self.set_fixes(list, fixes, Spread::default())?, n))
     }
 

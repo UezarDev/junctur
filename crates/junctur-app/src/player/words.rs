@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use junctur_core::edit::{Fix, Spread};
 use junctur_core::wordlist;
+use serde::Deserialize;
 
 use super::Core;
 use crate::editor::{Editor, Words};
@@ -30,6 +31,37 @@ fn heard(words: &Words) -> wordlist::Heard {
 /// finished re-transcription would get the fix on the old word's place).
 pub const WORDS_CHANGED: &str =
     "the transcript changed meanwhile: nothing was changed, try again on the words shown now";
+
+/// A word as the page named it when it opened a fix field (5ae): its heard start in whole
+/// milliseconds (`words.heard`), its track and its place among that track's words starting in that
+/// millisecond. A save by bare index wrote onto whatever word had the index by then: a field left
+/// open while its words changed put its text on other words, out of sight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct WordRef {
+    pub at: u64,
+    pub track: usize,
+    pub nth: usize,
+}
+
+/// A fix field's words are not where the page had them when it opened (5ae).
+pub const FIELD_MOVED: &str = "these words are no longer where the fix field was opened (the transcript changed meanwhile): nothing was saved, open the field again on the words shown now";
+
+/// Whether word `i` of the editor's `words` is the one `r` names. A run is checked by its two ends:
+/// a word put in or taken out between them moves the last one's index onto another word.
+pub(super) fn named(words: &Words, i: usize, r: WordRef) -> Result<(), String> {
+    let here = words.list.get(i).map(|w| {
+        (
+            (w.start.max(0.0) * 1000.0).round() as u64,
+            words.tracks.get(i).copied(),
+            words.nth(i),
+        )
+    });
+    if here == Some((r.at, Some(r.track), r.nth)) {
+        Ok(())
+    } else {
+        Err(FIELD_MOVED.into())
+    }
+}
 
 /// The editor's words were let go while a word edit was asked for (a piece of a running
 /// transcription landed): the edit reads them again and retries ([`Core::retrying`]).
@@ -70,9 +102,10 @@ impl Core {
         &self,
         file: Option<&str>,
         index: usize,
+        word: WordRef,
         text: &str,
     ) -> Result<FixDone, String> {
-        self.retrying(|| self.fix_word_once(file, index, text))
+        self.retrying(|| self.fix_word_once(file, index, word, text))
     }
 
     /// A word edit, read again when the editor let its words go meanwhile ([`WORDS_LET_GO`]):
@@ -97,6 +130,7 @@ impl Core {
         &self,
         file: Option<&str>,
         index: usize,
+        named_as: WordRef,
         text: &str,
     ) -> Result<FixDone, String> {
         self.prepare();
@@ -104,6 +138,7 @@ impl Core {
             .words
             .clone()
             .ok_or("this recording has no transcript")?;
+        named(&words, index, named_as)?;
         let (Some(word), Some(&track)) = (words.list.get(index), words.tracks.get(index)) else {
             return Err("no such word in the transcript".into());
         };
@@ -154,9 +189,10 @@ impl Core {
         file: Option<&str>,
         first: usize,
         last: usize,
+        ends: [WordRef; 2],
         text: &str,
     ) -> Result<FixDone, String> {
-        self.retrying(|| self.fix_words_once(file, first, last, text))
+        self.retrying(|| self.fix_words_once(file, first, last, ends, text))
     }
 
     fn fix_words_once(
@@ -164,6 +200,7 @@ impl Core {
         file: Option<&str>,
         first: usize,
         last: usize,
+        ends: [WordRef; 2],
         text: &str,
     ) -> Result<FixDone, String> {
         self.prepare();
@@ -171,6 +208,8 @@ impl Core {
             .words
             .clone()
             .ok_or("this recording has no transcript")?;
+        named(&words, first, ends[0])?;
+        named(&words, last, ends[1])?;
         let speakers = lock(&self.ctl)
             .edit
             .list
@@ -215,6 +254,38 @@ impl Core {
             Ok(r)
         })?;
         Ok(out)
+    }
+
+    /// The list's fixes on the words of the transcript in the editor (5ae: the list of fixes the
+    /// user takes wrong ones out of), in the list's order.
+    pub fn fixes_list(&self) -> Result<Vec<junctur_core::edit::Placed>, String> {
+        self.prepare();
+        let words = lock(&self.editor)
+            .words
+            .clone()
+            .ok_or("this recording has no transcript")?;
+        let fixes = lock(&self.ctl)
+            .edit
+            .list
+            .as_deref()
+            .map(|l| l.fixes.clone())
+            .ok_or("this recording has no edit list")?;
+        Ok(junctur_core::edit::placed(&fixes, &words.in_order()))
+    }
+
+    /// Takes the fixes of `gone`, as [`Self::fixes_list`] gave them, back to what their words were
+    /// heard as (5ae), those still as listed. Saved, not an undo step. How many.
+    pub fn remove_fixes(&self, file: Option<&str>, gone: &[Fix]) -> Result<usize, String> {
+        self.prepare();
+        let mut n = 0;
+        self.change(file, |ed, list, _| {
+            // The words as they are under the writer lock: what the removed fixes' words read as.
+            let words = ed.words.clone().ok_or("this recording has no transcript")?;
+            let (r, k) = ed.remove_fixes(list, gone, &words)?;
+            n = k;
+            Ok(r)
+        })?;
+        Ok(n)
     }
 
     /// Takes back the fixes a fix also made elsewhere, those still as they were (the note's

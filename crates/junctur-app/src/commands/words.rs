@@ -9,7 +9,7 @@ use tauri::{AppHandle, State};
 
 use super::{notifier, App};
 use crate::analysis::Progress;
-use crate::player::FixDone;
+use crate::player::{FixDone, WordRef};
 use crate::settings;
 
 /// What a fix did besides itself, for the page: the entries the word list gained, and the fixes
@@ -38,11 +38,17 @@ fn learned(done: FixDone, fixed: &str) -> Fixed {
 
 /// Fixes the spelling of transcript word `index` (empty, or the heard text again, removes the fix),
 /// and every other word heard like it; its spelling joins the word list when the recording never
-/// heard it (or only changed its case).
+/// heard it (or only changed its case). `word` names the word as the page had it when its field
+/// opened: refused when `index` holds another word now (5ae).
 #[tauri::command]
-pub async fn fix_word(app: State<'_, App>, index: usize, text: String) -> Result<Fixed, String> {
+pub async fn fix_word(
+    app: State<'_, App>,
+    index: usize,
+    word: WordRef,
+    text: String,
+) -> Result<Fixed, String> {
     let e = app.editable()?;
-    let done = e.fix_word(e.file(), index, &text)?;
+    let done = e.fix_word(e.file(), index, word, &text)?;
     Ok(learned(done, &text))
 }
 
@@ -56,16 +62,18 @@ pub async fn confirm_word(app: State<'_, App>, index: usize) -> Result<(), Strin
 
 /// Fixes transcript words `first..=last` as one text (empty or the heard words again clears their
 /// fixes), and the same words heard elsewhere; its words the recording never heard join the word
-/// list. One word is learned as [`fix_word`] learns it.
+/// list. One word is learned as [`fix_word`] learns it. `ends`: the first and last words as the
+/// page had them when the field opened, as for [`fix_word`] (5ae).
 #[tauri::command]
 pub async fn fix_words(
     app: State<'_, App>,
     first: usize,
     last: usize,
+    ends: [WordRef; 2],
     text: String,
 ) -> Result<Fixed, String> {
     let e = app.editable()?;
-    let done = e.fix_words(e.file(), first, last, &text)?;
+    let done = e.fix_words(e.file(), first, last, ends, &text)?;
     Ok(learned(done, &text))
 }
 
@@ -80,6 +88,45 @@ pub async fn keep_heard(
 ) -> Result<usize, String> {
     let e = app.editable()?;
     e.keep_heard(e.file(), &others, &heard)
+}
+
+/// A fix of the open recording's list where its transcript has it (5ae: the list of fixes).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListedFix {
+    pub fix: Fix,
+    /// Its first and last words' indices in the transcript; none when it is on no word now.
+    pub first: Option<usize>,
+    pub last: Option<usize>,
+    /// Its words as heard.
+    pub heard: String,
+    /// A fix of the heard text (Undo those, a removal, Looks right): the words read as heard.
+    pub as_heard: bool,
+}
+
+/// Every fix of the open recording's edit list with its words (5ae), in the list's order.
+#[tauri::command]
+pub async fn fixes_list(app: State<'_, App>) -> Result<Vec<ListedFix>, String> {
+    Ok(app
+        .core()?
+        .fixes_list()?
+        .into_iter()
+        .map(|p| ListedFix {
+            as_heard: p.as_heard(),
+            first: p.words.map(|w| w.0),
+            last: p.words.map(|w| w.1),
+            heard: p.heard,
+            fix: p.fix,
+        })
+        .collect())
+}
+
+/// Takes the fixes of `fixes` (as [`fixes_list`] gave them) back to what their words were heard
+/// as, those still as listed (5ae: the list's Remove); how many.
+#[tauri::command]
+pub async fn remove_fixes(app: State<'_, App>, fixes: Vec<Fix>) -> Result<usize, String> {
+    let e = app.editable()?;
+    e.remove_fixes(e.file(), &fixes)
 }
 
 /// The fixes a re-transcription of the open recording could not put on any word, until

@@ -417,6 +417,77 @@ pub fn keep_heard(fixes: &mut [Fix], added: &[Fix], heard: &[String]) -> usize {
     n
 }
 
+/// A fix of the list where the transcript has it (5ae: the list the user takes wrong fixes out of).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Placed {
+    pub fix: Fix,
+    /// Its first and last words' places in the transcript; `None` when it is on no word of it now.
+    pub words: Option<(usize, usize)>,
+    /// Its words as heard, joined by spaces; empty when it is on no word.
+    pub heard: String,
+}
+
+impl Placed {
+    /// A fix of the heard text itself (Undo those, a removal, Looks right): the words read as heard.
+    pub fn as_heard(&self) -> bool {
+        !self.heard.is_empty() && check_span(&self.heard).ok() == check_span(&self.fix.text).ok()
+    }
+}
+
+/// Every fix of `fixes` with the words of `words` (the transcript, in [`Fixes`]' order) it is on, in
+/// the list's order.
+pub fn placed(fixes: &[Fix], words: &[(usize, &Word)]) -> Vec<Placed> {
+    let likes = likes(words);
+    let heard = read(words, &likes);
+    let tracks = by_track(&heard);
+    fixes
+        .iter()
+        .map(|f| {
+            let at = words_of(f, &heard, &tracks);
+            Placed {
+                fix: f.clone(),
+                words: at.first().zip(at.last()).map(|(&a, &b)| (a, b)),
+                heard: at
+                    .iter()
+                    .map(|&i| heard[i].text)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            }
+        })
+        .collect()
+}
+
+/// Takes the fixes of `gone` still in `fixes` as listed back to what their words of `words` were
+/// heard as (5ae), as [`keep_heard`] does, so a later spread does not give them the wrong text again.
+/// One on no word now, or whose heard text a fix may not hold (the parser would refuse the list), is
+/// dropped: the words read as heard all the same. One changed since stays. How many went back.
+pub fn remove(fixes: &mut Vec<Fix>, gone: &[Fix], words: &[(usize, &Word)]) -> usize {
+    let ours: Vec<Fix> = fixes
+        .iter()
+        .filter(|f| gone.iter().any(|g| same(f, g)))
+        .cloned()
+        .collect();
+    let mut n = 0;
+    for p in placed(&ours, words) {
+        let Some(i) = fixes.iter().position(|f| same(f, &p.fix)) else {
+            continue;
+        };
+        let text = if p.fix.is_span() {
+            check_span(&p.heard)
+        } else {
+            check_fix(&p.heard)
+        };
+        match text {
+            Ok(t) if !t.is_empty() => fixes[i].text = t,
+            _ => {
+                fixes.remove(i);
+            }
+        }
+        n += 1;
+    }
+    n
+}
+
 /// Both name the same words with the same text (a fix read back from the list may differ from the one
 /// it was written from in the last bits of its start).
 pub(super) fn same(a: &Fix, b: &Fix) -> bool {
