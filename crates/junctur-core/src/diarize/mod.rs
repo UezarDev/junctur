@@ -48,13 +48,22 @@ pub struct Speaker {
 }
 
 impl Speaker {
-    /// `None` for a label no kind writes (a hand-edited cache).
+    /// `None` for a label no kind writes (a hand-edited cache), except that any label starting
+    /// with "minor" is a minor one, as an older wording of it would be.
     pub fn kind(&self) -> Option<SpeakerKind> {
         SpeakerKind::ALL
             .into_iter()
             .find(|k| k.label() == self.label)
+            .or_else(|| {
+                self.label
+                    .starts_with(MINOR_PREFIX)
+                    .then_some(SpeakerKind::Minor)
+            })
     }
 }
+
+/// What every minor speaker's label starts with.
+const MINOR_PREFIX: &str = "minor";
 
 /// What a speaker is taken to be from its share of the talk time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -608,5 +617,13 @@ mod tests {
                 Some(SpeakerKind::Minor)
             ]
         );
+        assert!(SpeakerKind::Minor.label().starts_with(MINOR_PREFIX));
+        // Any label starting "minor" is minor, as the summary always read it; others need the text.
+        let with = |label: &str| Speaker {
+            label: label.into(),
+            ..d.speakers[0].clone()
+        };
+        assert_eq!(with("minor: laughs").kind(), Some(SpeakerKind::Minor));
+        assert_eq!(with("main voice").kind(), None);
     }
 }
