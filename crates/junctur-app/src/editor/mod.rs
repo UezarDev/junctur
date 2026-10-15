@@ -80,6 +80,15 @@ pub fn join_runs(runs: &[(usize, usize)]) -> Result<Vec<(usize, usize)>, String>
     Ok(out)
 }
 
+/// Which way a committed step moves the history: a new step, or one taken from the undo or redo
+/// stack (a word's own retime is a new step with no [`Op`], so this is not a [`Step`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Move {
+    Do,
+    Undo,
+    Redo,
+}
+
 /// What an undo step puts back: the kept ranges and, since a moved cut edge moves words with it,
 /// the retimed words. Everything else in the list (names, fixes, captions) is not undone.
 #[derive(Debug, Clone, PartialEq)]
@@ -175,7 +184,12 @@ impl Editor {
             Step::Undo => (self.undo.last().cloned().ok_or("nothing to undo")?, false),
             Step::Redo => (self.redo.last().cloned().ok_or("nothing to redo")?, false),
         };
-        self.commit(list, step, to, unsnapped, fps)
+        let way = match step {
+            Step::Do(_) => Move::Do,
+            Step::Undo => Move::Undo,
+            Step::Redo => Move::Redo,
+        };
+        self.commit(list, way, to, unsnapped, fps)
     }
 
     /// Makes frame edit `start..end` (`keep`) and, when it moves edge `from` of a kept range to
@@ -220,7 +234,30 @@ impl Editor {
             _ => list.times.clone(),
         };
         let to = Snapshot { keep: kept, times };
-        self.commit(list, Step::Do(op), to, false, fps)
+        self.commit(list, Move::Do, to, false, fps)
+    }
+
+    /// Moves `side` of word `word` itself to frame `to`, its neighbour on its track trimmed if run
+    /// into ([`Words::retimed`]), as one undo step that changes no kept range: a word reaching into a
+    /// cut is kept or cut by its middle, as every word is. Needs the transcript read before.
+    pub fn retime_word(
+        &mut self,
+        list: &EditList,
+        word: usize,
+        side: Side,
+        to: u64,
+        fps: Fps,
+    ) -> Result<Option<Edited>, String> {
+        let words = self
+            .words
+            .as_deref()
+            .ok_or("this recording has no transcript")?;
+        let times = words.retimed(&list.times, word, side, to, list.duration, fps)?;
+        let to = Snapshot {
+            keep: list.keep.clone(),
+            times,
+        };
+        self.commit(list, Move::Do, to, false, fps)
     }
 
     /// Applies `ops` in order to `list` and saves the result as **one** undo step; each op sees the
@@ -233,9 +270,9 @@ impl Editor {
         ops: &[Op],
         fps: Fps,
     ) -> Result<Option<Edited>, String> {
-        let Some(&first) = ops.first() else {
+        if ops.is_empty() {
             return Ok(None);
-        };
+        }
         let mut now = list.clone();
         let mut unsnapped = false;
         let mut skipped = 0;
@@ -265,7 +302,7 @@ impl Editor {
             keep: now.keep,
             times: list.times.clone(),
         };
-        let edited = self.commit(list, Step::Do(first), to, unsnapped, fps)?;
+        let edited = self.commit(list, Move::Do, to, unsnapped, fps)?;
         Ok(edited.map(|e| Edited { skipped, ..e }))
     }
 
@@ -274,7 +311,7 @@ impl Editor {
     fn commit(
         &mut self,
         list: &EditList,
-        step: Step,
+        way: Move,
         to: Snapshot,
         unsnapped: bool,
         fps: Fps,
@@ -283,11 +320,12 @@ impl Editor {
         if to == before {
             // Nothing to write; an undo or redo step that is already in play is still used up,
             // so the next one moves on.
-            self.shift(step, before);
+            self.shift(way, before);
             return Ok(None);
         }
         let Snapshot { keep, times } = to;
-        if let Step::Do(_) = step {
+        // A step that changes only the retimed words is still a change.
+        if way == Move::Do && keep != list.keep {
             // Spans under half a frame are joined back on the frame grid: say so rather than
             // write a change nobody can see or hear.
             let total = frames_ceil(list.duration, fps.num, fps.den);
@@ -305,14 +343,14 @@ impl Editor {
         let saved =
             edit::save(&path, &new).map_err(|e| format!("saving {}: {e}", path.display()))?;
         self.written = Some(saved.text.clone());
-        if let Step::Do(_) = step {
+        if way == Move::Do {
             self.undo.push(before);
             if self.undo.len() > HISTORY {
                 self.undo.remove(0);
             }
             self.redo.clear();
         } else {
-            self.shift(step, before);
+            self.shift(way, before);
         }
         Ok(Some(Edited {
             list: new,
@@ -325,14 +363,14 @@ impl Editor {
     }
 
     /// Moves an undo (or redo) step to the other stack, `before` being what it replaced.
-    fn shift(&mut self, step: Step, before: Snapshot) {
-        match step {
-            Step::Do(_) => {}
-            Step::Undo => {
+    fn shift(&mut self, way: Move, before: Snapshot) {
+        match way {
+            Move::Do => {}
+            Move::Undo => {
                 self.undo.pop();
                 self.redo.push(before);
             }
-            Step::Redo => {
+            Move::Redo => {
                 self.redo.pop();
                 self.undo.push(before);
             }

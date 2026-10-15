@@ -90,6 +90,14 @@
   const panelWidth = $derived(loaded && panelOpen ? Math.min(PANEL, windowWidth * 0.45) : 0);
   // A span per selected stretch (words can be several), for the lanes and timeline to draw.
   const spans = $derived(sel.seconds(selection, words, edit?.fps ?? null));
+  // The selected stretch's own word edges, which the lanes let be dragged. Read from plain numbers,
+  // so the player's state, sent many times a second, does not make them again.
+  const duration = $derived(player?.duration ?? 0);
+  // While transcribing: every word before this many seconds is in.
+  const through = $derived(
+    analysis?.listed && (steps.busy(analysis) || analysis.phase === "failed") ? (analysis.transcribed ?? null) : null,
+  );
+  const wordEdges = $derived(sel.wordEdges(selection, words, edit?.fps ?? null, duration, through));
   const speakers = $derived(edit?.speakers ?? []);
   // The layout from plain numbers: each is a derived value that only moves when it changes, so the
   // player's state (sent many times a second for the position) never lays the editor out again.
@@ -168,7 +176,6 @@
   // recording) until the user zooms.
   const DEFAULT_VIEW = 180;
   let view = $state.raw({ start: 0, len: DEFAULT_VIEW });
-  const duration = $derived(player?.duration ?? 0);
   function setView(start: number, len: number) {
     const d = duration || len;
     const l = Math.min(d, Math.max(5, len));
@@ -678,6 +685,7 @@
           thin={L.portrait}
           {wavesVersion}
           {spans}
+          {wordEdges}
           edges={!reviewing}
           onView={setView}
           onSelect={(s) => (selection = s)}
@@ -725,7 +733,7 @@
           listed={analysis?.listed ?? false}
           waiting={analysis?.phase === "waiting"}
           failed={analysis?.phase === "failed"}
-          through={analysis?.listed && (busy(analysis) || analysis.phase === "failed") ? (analysis.transcribed ?? null) : null}
+          {through}
           {player}
           {edit}
           {selection}

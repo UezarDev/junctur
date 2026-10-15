@@ -4,7 +4,7 @@ use tauri::State;
 
 use super::{blocking, App};
 use crate::cuts::EditState;
-use crate::editor::{Op, Step, TranscriptView};
+use crate::editor::{Op, Side, Step, TranscriptView};
 
 #[tauri::command]
 pub async fn edit_state(app: State<'_, App>) -> Result<EditState, String> {
@@ -57,6 +57,24 @@ pub async fn move_edge(
 ) -> Result<(), String> {
     let e = app.editable()?;
     e.move_edge(e.file(), (start, end, keep), from)
+}
+
+/// Moves a selected word's own start or end (`side` "start" or "end", its edge on the lanes) to
+/// frame `to`, its neighbour on its track trimmed if run into, as one undo step; no cut moves.
+#[tauri::command]
+pub async fn retime_word(
+    app: State<'_, App>,
+    word: usize,
+    side: String,
+    to: u64,
+) -> Result<(), String> {
+    let side = match side.as_str() {
+        "start" => Side::Start,
+        "end" => Side::End,
+        _ => return Err(format!("a word has no edge {side:?}")),
+    };
+    let e = app.editable()?;
+    e.retime_word(e.file(), word, side, to)
 }
 
 #[tauri::command]

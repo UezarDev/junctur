@@ -175,6 +175,10 @@ words and press Delete to cut them (K keeps), restore a folded cut, or nudge a r
 above the timeline (shift-drag on the timeline selects a stretch). Boundaries snap into the pauses the way
 `junctur cut` places them, every edit is saved to `edit.junctur` at once, Ctrl+Z / Ctrl+Y undo and redo,
 and a list the app did not write itself is first kept as `edit.junctur.bak` (then `.bak2`, ...).
+A word Whisper timed badly can be put right on the track lanes: select it (or a run of words) and drag
+the blue span's start or end to where the word really starts or ends (Alt grabs the word's edge over a
+cut's edge beside it); the word's neighbour on its track is trimmed if run into, no cut moves, and the
+new time is a `time` line, one undo step, used by the transcript, the captions and the SRT.
 Double-click a misheard word, or point at it and press F2, to fix its spelling (F2 with no word under
 the pointer opens Fix text for the words selected): the fix is a `fix` line in `edit.junctur`, shown in the
 transcript, the caption preview and the SRT, and the spelling joins the word list (below). Every other
