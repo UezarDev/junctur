@@ -32,7 +32,7 @@
     onLooksRight?: (() => void) | null;
     /** The Fix text field is open (the panel opens it on a double-click). */
     retyping?: boolean;
-    /** What a fix did besides itself: the word list's new entries, the other places fixed. */
+    /** What a fix did besides itself: the word list's new entries. */
     onFixed: (r: api.Fixed) => void;
     /** The Correct button. */
     onCorrect: () => Promise<void>;
@@ -92,8 +92,9 @@
   $effect(() => {
     const at = one ? `${one.first}-${one.last}` : null;
     if (!retyping) {
-      openFor = null;
-      openRun = null;
+      // Closed from outside (the header's Fixes, the selection gone): saved as any leaving is.
+      // Escape and a save on its way have let go of `openRun` already, so they save nothing here.
+      untrack(leave);
     } else if (openFor == null && at) {
       openFor = at;
       openRun = one;
@@ -106,6 +107,9 @@
     }
   });
 
+  /** A failed save's message for a field already closed: what was typed, so it is not lost. */
+  const unsaved = (e: unknown, text: string) => `${String(e)} (not saved: "${text}")`;
+
   /** Saves what the open field holds for its own stretch, if it changed, and forgets the field. */
   function leave() {
     const run = openRun;
@@ -113,7 +117,7 @@
     openFor = null;
     if (!run || !openEnds || draft.trim() === shown.trim()) return;
     const text = draft;
-    api.fixWords(run.first, run.last, openEnds, text).then(onFixed, (e) => onError(String(e)));
+    api.fixWords(run.first, run.last, openEnds, text).then(onFixed, (e) => onError(unsaved(e, text)));
   }
   onDestroy(leave);
 
@@ -126,15 +130,20 @@
       return;
     }
     saving = true;
+    const text = draft;
     // Taken before the wait, so a blur or a new selection meanwhile does not save it a second time
     // through `leave`; given back if the save fails, so leaving can still save what was typed.
     openRun = null;
     try {
-      onFixed(await api.fixWords(run.first, run.last, ends, draft));
+      onFixed(await api.fixWords(run.first, run.last, ends, text));
       retyping = false;
     } catch (e) {
-      if (retyping) openRun = run;
-      onError(String(e));
+      // The field still open on these words keeps the text. Closed meanwhile (another selection):
+      // the text would be gone, so the message carries it.
+      if (retyping && openFor === `${run.first}-${run.last}`) {
+        openRun = run;
+        onError(String(e));
+      } else onError(unsaved(e, text));
     } finally {
       saving = false;
     }
@@ -301,7 +310,7 @@
           correcting = false;
         }
       }}
-      title="Fix every word heard the same way as one you fixed, hear the speakers again, then transcribe the whole recording again with your word list (your cuts and edits stay)"
+      title="Hear the speakers again, then transcribe the whole recording again with your word list (your cuts and edits stay; your fixes move onto the new words)"
       >{correcting ? "Correcting…" : "Correct"}</button
     >
   </div>

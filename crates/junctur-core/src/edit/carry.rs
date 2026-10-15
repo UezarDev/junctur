@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::fixes::{self, check_fix, check_span, Fix, Fixed, Fixes};
-use super::spread::{by_track, covered, likeness, likes, read, same, words_of, Heard, Text};
+use super::heard::{by_track, covered, likeness, likes, read, same, words_of, Heard, Text};
 use super::times::{self, set_time, to_ms, Retime};
 use crate::transcribe::Word;
 
@@ -164,8 +164,8 @@ fn carry_word(
     };
     let h = &heard[i];
     let kept = as_heard(c);
-    // As a spread writes it: a fix that kept the punctuation it was heard with
-    // takes the new word's own ("Vayne," onto a "Bane." heard now).
+    // A fix that kept the punctuation it was heard with takes the new word's own ("Vayne," onto
+    // a "Bane." heard now).
     let text = if kept {
         // As heard now, which a fix may not always hold (a word over `MAX_FIX`).
         match check_fix(h.text) {
@@ -241,8 +241,8 @@ fn carry_span(
         &heard[*inside.last().expect("not empty")],
     );
     let through = (inside.len() > 1).then_some(b.at);
-    // A sentence now heard as one word is not made a one-word fix of several words: a
-    // spread would put that sentence on every word heard like it. Set aside.
+    // A sentence now heard as one word is not made a one-word fix of several words: the user's
+    // sentence is better redone over the words as heard now. Set aside.
     if through.is_none() && (text.split_whitespace().count() > 1 || check_fix(&text).is_err()) {
         return Landed::Gone;
     }
@@ -436,7 +436,7 @@ fn again(c: &Carried, on: &[usize], heard: &[Heard], taken: &[bool]) -> Option<V
         })
 }
 
-/// A fix of the heard text itself ([`keep_heard`](super::keep_heard)): the words are right as heard.
+/// A fix of the heard text itself (Looks right): the words are right as heard.
 fn as_heard(c: &Carried) -> bool {
     check_span(&c.heard.join(" ")).ok() == check_span(&c.fix.text).ok()
 }

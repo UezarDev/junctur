@@ -4,24 +4,27 @@
   // there by a field that saved what nobody typed and by 5aa's spread to every word heard alike).
   // Grouped by what they say, the biggest group first, since a wrong fix comes as one text on many
   // places; a group opens to its places, each with its time, what was heard there and a jump. The
-  // ticked places or groups the filter shows go back to what was heard in one save (kept as heard,
-  // as Undo those does, so Correct's spread does not bring them back). Chosen over an undo of recent
-  // fixes: fixes are no undo steps (5h), and the wrong ones here were made far apart, between good
-  // ones.
+  // ticked places or groups the filter shows are taken out of the list in one save, their words read
+  // as heard. Chosen over an undo of recent fixes: fixes are no undo steps (5h), and the wrong ones
+  // here were made far apart, between good ones.
   //
-  // Fixes of the heard text (Undo those, a removal, Looks right) are not listed: their words read as
-  // heard already. Read again whenever the list's fixes change.
+  // Fixes of the heard text (Looks right) are not listed: their words read as heard already. Read
+  // again whenever the list's fixes or the transcript's words change (a Correct run's words coming
+  // back move the places a jump goes to).
   import { SvelteSet } from "svelte/reactivity";
   import * as api from "./api";
-  import { stamp } from "./transcript";
+  import { stamp, type Words } from "./transcript";
 
   let {
     edit,
+    words,
     onJump,
     onClose,
     onError,
   }: {
     edit: api.EditState | null;
+    /** The panel's words: read again when they change, since the places are their indices. */
+    words: Words;
     /** Goes to words `first..=last`: selects them and plays from there. */
     onJump: (first: number, last: number) => void;
     onClose: () => void;
@@ -42,6 +45,7 @@
 
   $effect(() => {
     void edit?.fixesKey;
+    void words;
     let gone = false;
     api.fixesList().then(
       (l) => {

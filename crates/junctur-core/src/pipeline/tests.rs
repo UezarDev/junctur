@@ -740,10 +740,10 @@ fn transcript_of(words: &[(f64, &str)]) -> Transcript {
 }
 
 #[test]
-fn a_retranscription_carries_the_fixes_onto_the_new_words_and_spreads_them() {
+fn a_retranscription_carries_the_fixes_onto_the_new_words_and_gives_them_to_no_other() {
     // The Correct button's re-transcription. At its end the fixes, read against the
-    // transcript it replaces, are moved onto the new words and spread to the words heard
-    // alike, and the mark that asked for it goes.
+    // transcript it replaces, are moved onto the new words, and the mark that asked for it
+    // goes. A word heard like a fixed one is left as heard (5ah: no spread).
     let (d, p) = scratch_project("carry");
     let fix = |start: f64, text: &str| edit::Fix {
         track: 0,
@@ -786,8 +786,8 @@ fn a_retranscription_carries_the_fixes_onto_the_new_words_and_spreads_them() {
     std::fs::write(&partial, "{}").unwrap();
     assert!(!hear_again(&p, &plain, &mut log).unwrap());
     std::fs::remove_file(&partial).unwrap();
-    // While it ran, the user kept the "Bane." at 3 as heard ("Undo those" on a spread): it
-    // stays so, carried like any fix, and no spread reaches it.
+    // While it ran, the user kept the "Bane." at 3 as heard (Looks right): it stays so, carried
+    // like any fix.
     e.fixes.push(fix(3.0, "Bane."));
     std::fs::write(p.edit_path(), e.to_text()).unwrap();
     // The new transcript: "Bane," a little later, "Mel" now "and", a third "Bane" at 7. It is
@@ -821,11 +821,12 @@ fn a_retranscription_carries_the_fixes_onto_the_new_words_and_spreads_them() {
     forget_fixes_set_aside(&p, &[]).unwrap();
     e = p.edit().unwrap();
     let shown: Vec<(f64, &str)> = e.fixes.iter().map(|f| (f.start, f.text.as_str())).collect();
-    assert_eq!(shown, [(1.1, "Vayne,"), (3.0, "Bane."), (7.0, "Vayne")]);
+    // The "bane" at 7, new, heard like the fixed "Bane,": not fixed.
+    assert_eq!(shown, [(1.1, "Vayne,"), (3.0, "Bane.")]);
     let said = lines.borrow().clone();
     assert!(
-        said.iter().any(|l| l
-            == "fixed words: 2 kept on their words, 0 no longer needed, 1 set aside; 1 more place(s) fixed"),
+        said.iter()
+            .any(|l| l == "fixed words: 2 kept on their words, 0 no longer needed, 1 set aside"),
         "{said:?}"
     );
     assert!(said
@@ -976,7 +977,7 @@ fn a_retranscription_carries_word_times_and_survives_being_stopped_or_asked_agai
     assert!(lines.borrow().iter().any(|l| l
         == "fixed word set aside: \"Hola,\" (heard \"hola\") at 0:00:06 is on a track with no words this time"));
     assert!(lines.borrow().iter().any(|l| l
-        == "fixed words: 1 kept on their words, 0 no longer needed, 1 set aside; 0 more place(s) fixed; word times: 1 kept on their words, 0 no longer needed, 1 set aside"),
+        == "fixed words: 1 kept on their words, 0 no longer needed, 1 set aside; word times: 1 kept on their words, 0 no longer needed, 1 set aside"),
         "{:?}", lines.borrow());
     // A run adds one more after the panel listed the first: "seen" forgets only that first.
     let more = SetAside {

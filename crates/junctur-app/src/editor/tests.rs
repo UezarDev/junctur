@@ -421,9 +421,10 @@ fn a_fixed_word_is_saved_at_once_and_outlives_an_undo() {
 }
 
 #[test]
-fn a_fix_lands_on_every_word_heard_alike_and_those_can_be_taken_back() {
+fn a_fix_changes_only_the_word_it_is_made_on() {
+    // 5ah: no spread. A word fix, or a span over a run, leaves the words heard alike as heard.
     use super::Words;
-    let d = scratch("editor", "spread");
+    let d = scratch("editor", "own-word");
     let path = d.join("edit.junctur");
     let mut e = Editor::default();
     e.reset(Some(path.clone()));
@@ -434,42 +435,41 @@ fn a_fix_lands_on_every_word_heard_alike_and_those_can_be_taken_back() {
         p: 1.0,
         p_min: None,
     };
-    e.words = Some(Arc::new(Words::from_tracked(vec![
+    let words = Arc::new(Words::from_tracked(vec![
         (0, w(2.0, "Bane")),
         (1, w(3.0, "bane,")),
         (0, w(4.0, "Bane")),
         (0, w(5.0, "the")),
-    ])));
-    let words = e.words.as_ref().unwrap().list.clone();
+        (0, w(6.0, "Bane")),
+        (0, w(6.3, "the")),
+    ]));
+    e.words = Some(words.clone());
     let l0 = list(vec![r(1.0, 30.0)]);
-    let edited = e
-        .fix_word(&l0, 0, &words[0], 0, "Vayne")
+    let l1 = e
+        .fix_word(&l0, 0, &words.list[0], 0, "Vayne")
         .unwrap()
-        .expect("a change");
-    let l1 = edited.list;
-    assert_eq!(
-        l1.fixes.iter().map(|f| f.text.as_str()).collect::<Vec<_>>(),
-        ["Vayne", "Vayne,", "Vayne"]
-    );
-    assert_eq!(edited.others.len(), 2);
+        .expect("a change")
+        .list;
+    let fixed = |l: &EditList| -> Vec<(f64, String)> {
+        l.fixes.iter().map(|f| (f.start, f.text.clone())).collect()
+    };
+    assert_eq!(fixed(&l1), [(2.0, "Vayne".to_string())]);
     assert_eq!(reread(&path), l1, "one save");
     assert!(!e.can_undo(), "not an undo step");
-    assert_eq!(edited.heard, ["bane,", "Bane"]);
-    // Correct's first step finds nothing more to spread.
-    let (none, s) = e.spread_all(&l1).unwrap();
-    assert!(none.is_none() && s.added.is_empty());
-    // The note's Undo: the two others say what was heard again, the one typed stays.
-    let (l2, n) = e.keep_heard(&l1, &edited.others, &edited.heard).unwrap();
-    let l2 = l2.expect("a change").list;
-    assert_eq!(n, 2);
+    // A span over "Bane the" at 6: its own words only, not "Bane" at 4 and "the" at 5.
+    let run = words
+        .retyped(4, 5, "Vayne then", &l1.speakers, &[])
+        .unwrap();
+    let l2 = e
+        .fix_words(&l1, &run, "Vayne then")
+        .unwrap()
+        .expect("a change")
+        .list;
     assert_eq!(
-        l2.fixes.iter().map(|f| f.text.as_str()).collect::<Vec<_>>(),
-        ["Vayne", "bane,", "Bane"]
+        fixed(&l2),
+        [(2.0, "Vayne".to_string()), (6.0, "Vayne then".to_string())]
     );
     assert_eq!(reread(&path), l2);
-    // And it sticks: Correct's first step does not give them the fix again.
-    let (none, s) = e.spread_all(&l2).unwrap();
-    assert!(none.is_none() && s.added.is_empty());
     let _ = std::fs::remove_dir_all(&d);
 }
 
