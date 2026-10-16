@@ -53,6 +53,16 @@ fn parses_steps_in_time_order() {
             (6.0, Action::LikeKeep)
         ]
     );
+    assert_eq!(
+        parse_steps("1:ask=cut the silences;2:askkeys=quita silencios;3:askpreview;4:askaccept")
+            .unwrap(),
+        vec![
+            (1.0, Action::Ask("cut the silences".into(), true)),
+            (2.0, Action::Ask("quita silencios".into(), false)),
+            (3.0, Action::AskPreview),
+            (4.0, Action::AskAccept)
+        ]
+    );
     let s = parse_steps("1:cutw=3-5;2:keepf=30-60;3:undo;4:redo").unwrap();
     assert_eq!(
         s.iter().map(|x| x.1.clone()).collect::<Vec<_>>(),

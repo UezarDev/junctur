@@ -2,6 +2,7 @@
 //! commands with a handful of flags do not justify a parser dependency.
 
 mod args;
+mod ask;
 mod commands;
 mod flags;
 mod judge;
@@ -20,6 +21,8 @@ const USAGE: &str = "usage:
                          [--no-speakers] [--labels] [--keep <prompt>]
                          [--model auto|large-v3-turbo|large-v3|large-v3-q5_0] [cut flags]
   junctur judge <file> [--prompt <prompt>] [--project <dir>] [--cache-dir <dir>]
+  junctur ask <file> --prompt <text> [--from <s>] [--to <s>] [--recipe <json>] [--no-model]
+                    [--model 1.7b|4b] [--cpu] [--json <out.json>] [--project <dir>] [--cache-dir <dir>]
   junctur like <file> --at <s>[,<s>...] [--not <s>[,...]] [--len <s>] [--track <n>]
                      [--threshold <x>] [--json <out.json>] [--project <dir>] [--cache-dir <dir>]
   junctur status <file> [--project <dir>] [--cache-dir <dir>]
@@ -54,6 +57,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         Some("analyze") => project::analyze(a),
         Some("judge") => judge::judge(a),
         Some("like") => like::like(a),
+        Some("ask") => ask::ask(a),
         Some("status") => project::status(a),
         Some("cut") => project::cut(a),
         Some("export") => project::export(a),

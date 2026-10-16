@@ -47,6 +47,7 @@ fn defaults_are_not_written_and_the_rest_round_trips() {
         flag_below: 25,
         labels: Default::default(),
         keep: Default::default(),
+        cut_up_front: false,
     };
     let c = to_config(&s).unwrap();
     assert_eq!(c.whisper_model, Some(ModelPref::LargeV3));
@@ -67,6 +68,7 @@ fn a_recordings_remembered_choice_for_clips_in_resolve_never_becomes_a_default()
         flag_below: config::FLAG_BELOW,
         labels: Default::default(),
         keep: Default::default(),
+        cut_up_front: false,
     };
     let saved = to_config(&s).unwrap().captions.unwrap();
     assert!(saved.on);
@@ -91,6 +93,7 @@ fn the_word_list_is_saved_trimmed_without_blanks_or_repeats() {
         flag_below: config::FLAG_BELOW,
         labels: Default::default(),
         keep: Default::default(),
+        cut_up_front: false,
     };
     assert_eq!(
         to_config(&s).unwrap().words,
@@ -113,6 +116,7 @@ fn a_bad_model_or_out_of_limits_captions_are_refused() {
         flag_below: config::FLAG_BELOW,
         labels: Default::default(),
         keep: Default::default(),
+        cut_up_front: false,
     };
     assert!(to_config(&s).is_err());
     let s = Settings {
@@ -125,6 +129,7 @@ fn a_bad_model_or_out_of_limits_captions_are_refused() {
         flag_below: config::FLAG_BELOW,
         labels: Default::default(),
         keep: Default::default(),
+        cut_up_front: false,
     };
     assert!(to_config(&s).unwrap_err().contains("caption defaults"));
 }
@@ -211,4 +216,17 @@ fn smart_keep_settings_round_trip_off_by_default() {
         ..plain
     };
     assert_eq!(to_config(&blank).unwrap(), Config::default());
+}
+
+#[test]
+fn the_cut_up_front_is_off_unless_ticked() {
+    let plain = from_config(&Config::default());
+    assert!(!plain.cut_up_front);
+    let on = Settings {
+        cut_up_front: true,
+        ..plain
+    };
+    let c = to_config(&on).unwrap();
+    assert_eq!(c.cut_up_front, Some(true));
+    assert!(from_config(&c).cut_up_front);
 }

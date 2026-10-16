@@ -179,6 +179,8 @@ pub struct EditState {
     pub captions: edit::Captions,
     /// The list has caption settings of its own; without, it follows the defaults.
     pub captions_own: bool,
+    /// Kept ranges other than the list's play: a preview of edits not accepted yet (7c).
+    pub preview: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -246,6 +248,7 @@ impl EditState {
                 .map_or_else(String::new, |l| fixes_key(&l.fixes, &l.times)),
             captions: own.clone().unwrap_or_else(|| defaults.clone()),
             captions_own: own.is_some(),
+            preview: false,
         }
     }
 }

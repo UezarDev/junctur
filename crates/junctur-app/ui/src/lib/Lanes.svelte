@@ -13,6 +13,7 @@
   import * as sg from "./suggestions";
   import * as mo from "./moments";
   import * as lk from "./like";
+  import * as ak from "./ask";
   import { clock, timecode, toFrame, toSeconds } from "./time";
   import * as tr from "./tracks";
 
@@ -36,6 +37,9 @@
     likeRow = 0,
     like = null,
     onLike,
+    askRow = 0,
+    asked = null,
+    onAsk,
     head,
     thin,
     wavesVersion,
@@ -77,6 +81,12 @@
     like?: api.LikeView | null;
     /** A match clicked on the lane. */
     onLike?: (m: api.LikeMatch) => void;
+    /** The Ask lane's height; 0 when there is none. */
+    askRow?: number;
+    /** The typed requests (7c), their waiting ghosts drawn on the Ask lane. */
+    asked?: api.AskView | null;
+    /** A ghost clicked on the lane. */
+    onAsk?: (p: ak.Placed) => void;
     head: number;
     /** Portrait's thin lanes: no second line in the headers. */
     thin: boolean;
@@ -104,7 +114,8 @@
   const duration = $derived(player?.duration ?? 0);
   const end = $derived(view.start + view.len);
   // What the lanes need: below the height left they scroll (headers and bodies together).
-  const content = $derived(RULER + speakersRow + labelsRow + keepRow + momentsRow + likeRow + tracks.length * row);
+  const content = $derived(RULER + speakersRow + labelsRow + keepRow + momentsRow + likeRow + askRow + tracks.length * row);
+  const ghosts = $derived(askRow > 0 ? ak.waiting(asked) : []);
   const likeShown = $derived(likeRow > 0 ? lk.shown(like) : []);
   const marked = $derived(momentsRow > 0 ? mo.shown(moments) : []);
   const pieces = $derived(labelsRow > 0 ? (labels?.pieces ?? []) : []);
@@ -164,6 +175,15 @@
     const y = clientY - r.top - RULER - speakersRow - labelsRow - keepRow - momentsRow;
     if (y < 0 || y >= likeRow) return null;
     return lk.matchAt(likeShown, timeAt(clientX), (3 * view.len) / width);
+  }
+  // The ghost under the pointer on the Ask lane.
+  let hoverGhost = $state.raw<ak.Placed | null>(null);
+  function ghostAt(clientX: number, clientY: number): ak.Placed | null {
+    if (askRow <= 0 || !ghosts.length || width <= 0) return null;
+    const r = body.getBoundingClientRect();
+    const y = clientY - r.top - RULER - speakersRow - labelsRow - keepRow - momentsRow - likeRow;
+    if (y < 0 || y >= askRow) return null;
+    return ak.ghostAt(ghosts, timeAt(clientX));
   }
   // A menu for an item that has since gone (answered, judged again) would act on nothing.
   $effect(() => {
@@ -339,6 +359,14 @@
       ctx.fillRect(0, y - 1, width, 1);
     }
 
+    // Ask lane: the ghosts of every request still waiting for an answer.
+    if (askRow > 0) {
+      if (asked) ak.paint(ctx, asked, x, y, askRow, width, { start: view.start, end });
+      y += askRow;
+      ctx.fillStyle = line;
+      ctx.fillRect(0, y - 1, width, 1);
+    }
+
     // Track lanes: each waveform mirrored about the lane's middle, in the track's colour, dimmer
     // when it is not heard.
     const cols = peaks?.columns ?? 0;
@@ -437,6 +465,8 @@
     void likeRow;
     void likeShown;
     void like;
+    void askRow;
+    void asked;
     paint();
   });
 
@@ -648,6 +678,12 @@
       onLike(lm);
       return;
     }
+    const gh = ghostAt(e.clientX, e.clientY);
+    if (gh && onAsk) {
+      picked = null;
+      onAsk(gh);
+      return;
+    }
     picked = null;
     body.setPointerCapture(e.pointerId);
     const g = edgeAt(e.clientX, e.clientY, e.altKey);
@@ -676,6 +712,8 @@
       if (m !== hoverMoment) hoverMoment = m;
       const lm = likeAt(e.clientX, e.clientY);
       if (lm !== hoverLike) hoverLike = lm;
+      const gh = ghostAt(e.clientX, e.clientY);
+      if (gh !== hoverGhost) hoverGhost = gh;
       return;
     }
     if (Math.abs(e.clientX - down.x) > CLICK) down.moved = true;
@@ -795,6 +833,15 @@
         <span class="nm">Like this</span>
       </div>
     {/if}
+    {#if askRow > 0}
+      <div
+        class="h labels"
+        style:height="{askRow}px"
+        title="Ask: what your typed requests would cut (red) or keep (green), waiting for you to accept them in the Ask tab. Click one to play from just before it."
+      >
+        <span class="nm">Ask</span>
+      </div>
+    {/if}
     {#each tracks as t (t.index)}
       <div class="h track" style:height="{row}px" title={tr.title(t)}>
         <span class="dot" style:background={tr.colour(t, speakers)}></span>
@@ -826,6 +873,7 @@
       hoverItem = null;
       hoverMoment = null;
       hoverLike = null;
+      hoverGhost = null;
     }}
     title={hoverPiece
       ? describe(hoverPiece)
@@ -835,7 +883,9 @@
           ? mo.describe(hoverMoment)
           : hoverLike
             ? lk.describe(hoverLike)
-            : undefined}
+            : hoverGhost
+              ? ak.describe(hoverGhost)
+              : undefined}
     onwheel={wheel}
     class:grabbing={!!grab}
     role="slider"

@@ -78,6 +78,9 @@ struct Ctl {
     /// The editor's undo/redo state and last notice, copied here so the edit state can be sent
     /// under this lock.
     status: EditorStatus,
+    /// Kept ranges played in place of the list's while skipping (7c's ghosts, accepted only in
+    /// play): gone when the list changes or another recording opens.
+    preview: Option<Arc<cuts::Timeline>>,
 }
 
 /// Whether only the kept ranges play: the user's toggle, or a review holding it off.
@@ -101,9 +104,24 @@ impl Skipping {
 
 impl Ctl {
     fn wanted(&self) -> Form {
-        match (&self.edit.timeline, self.skipping.on()) {
-            (Some(t), true) => Form::Cuts(t.clone()),
+        match (&self.preview, &self.edit.timeline, self.skipping.on()) {
+            (Some(p), _, true) => Form::Cuts(p.clone()),
+            (None, Some(t), true) => Form::Cuts(t.clone()),
             _ => Form::Source,
+        }
+    }
+
+    /// The edit state the page draws, saying whether a preview plays.
+    fn edit_state(&self, defaults: &Captions) -> EditState {
+        EditState {
+            preview: self.preview.is_some() && self.skipping.on(),
+            ..EditState::new(
+                &self.edit,
+                self.skipping.on(),
+                self.fps,
+                &self.status,
+                defaults,
+            )
         }
     }
 }
@@ -225,6 +243,7 @@ impl Player {
                 requested: Form::Source,
                 watch: None,
                 status: EditorStatus::default(),
+                preview: None,
             }),
         });
         Ok(Self {
@@ -281,6 +300,7 @@ impl Player {
         c.edit = read.unwrap_or_default();
         c.edit_path = edit_path.clone();
         c.status = EditorStatus::default();
+        c.preview = None;
         c.watch = edit_path.zip(baseline).map(|(p, base)| {
             let core = Arc::downgrade(&self.core);
             watch::Watch::start(p, base, move || {
@@ -449,10 +469,7 @@ impl Core {
 
     fn emit_edit(&self, c: &Ctl) {
         let defaults = lock(&self.caption_defaults).clone();
-        let _ = self.app.emit(
-            EDIT_EVENT,
-            EditState::new(&c.edit, c.skipping.on(), c.fps, &c.status, &defaults),
-        );
+        let _ = self.app.emit(EDIT_EVENT, c.edit_state(&defaults));
     }
 }
 

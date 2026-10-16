@@ -17,7 +17,8 @@ export function momentAt(moments: Moment[], t: number): Moment | null {
 
 /** What hovering one says. */
 export function describe(m: Moment): string {
-  const how = m.source === "voice" ? `Said ${m.label}` : m.source === "like" ? "Like this" : `Hotkey: ${m.label}`;
+  const how =
+    m.source === "voice" ? `Said ${m.label}` : m.source === "like" ? "Like this" : m.source === "ask" ? m.label : `Hotkey: ${m.label}`;
   const state = m.state === "accepted" ? "Accepted: kept." : "Waiting: accept or reject it in the Moments panel.";
   return `${how} at ${clock(m.at)}\n${state}\n${clock(m.start)} to ${clock(m.end)}. Click to jump to it.`;
 }

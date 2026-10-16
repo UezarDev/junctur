@@ -2,6 +2,7 @@
 //! speakers, [`edit`], [`labels`], [`transcribe`], [`keep`]), each cached and resumable; [`export`] and [`render`] turn
 //! the edit list into an FCPXML timeline or a video.
 
+pub mod ask;
 pub mod cache;
 pub mod config;
 pub mod diarize;
@@ -14,11 +15,13 @@ pub mod hidden;
 pub mod keep;
 pub mod labels;
 pub mod like;
+pub mod llm;
 pub mod models;
 pub mod moments;
 pub mod output;
 pub mod paths;
 pub mod pipeline;
+pub mod recipe;
 pub mod render;
 pub mod resolve;
 pub mod rollcall;

@@ -23,6 +23,8 @@ export const KEEP_ROW = 18;
 export const MOMENTS_ROW = 18;
 /** The Like this lane: the matches of a "find all like this" search (7b), once there is one. */
 export const LIKE_ROW = 18;
+/** The Ask lane: the ghosts of typed requests (7c), once something was asked. */
+export const ASK_ROW = 18;
 const VIDEO_MIN = 120;
 /** What a portrait side area needs to be worth drawing. */
 const STRIP = 58;
@@ -51,6 +53,7 @@ export interface Layout {
   keepRow: number;
   momentsRow: number;
   likeRow: number;
+  askRow: number;
   head: number;
   /** Portrait's side areas beside the picture: mixer strips, large avatars; null when too narrow. */
   strips: Rect | null;
@@ -76,6 +79,8 @@ export interface Input {
   moments?: boolean;
   /** The recording has a like-this search or examples (a Like this lane). */
   like?: boolean;
+  /** The recording has requests asked of it (an Ask lane). */
+  ask?: boolean;
 }
 
 const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x));
@@ -95,8 +100,10 @@ export function layout(i: Input): Layout {
   const keepRow = i.keep ? KEEP_ROW : 0;
   const momentsRow = i.moments ? MOMENTS_ROW : 0;
   const likeRow = i.like ? LIKE_ROW : 0;
-  const anyLanes = tracks > 0 || speakersRow > 0 || labelsRow > 0 || keepRow > 0 || momentsRow > 0 || likeRow > 0;
-  const fixed = anyLanes ? RULER + speakersRow + labelsRow + keepRow + momentsRow + likeRow : 0;
+  const askRow = i.ask ? ASK_ROW : 0;
+  const anyLanes =
+    tracks > 0 || speakersRow > 0 || labelsRow > 0 || keepRow > 0 || momentsRow > 0 || likeRow > 0 || askRow > 0;
+  const fixed = anyLanes ? RULER + speakersRow + labelsRow + keepRow + momentsRow + likeRow + askRow : 0;
   const avail = Math.max(0, i.height - BAR);
   let videoH: number;
   let row: number;
@@ -142,6 +149,7 @@ export function layout(i: Input): Layout {
     keepRow,
     momentsRow,
     likeRow,
+    askRow,
     head: clamp(column * 0.24, 130, portrait ? 180 : 200),
     strips,
     avatars,

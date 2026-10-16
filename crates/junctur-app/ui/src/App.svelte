@@ -23,6 +23,7 @@
   import ReanalyseDialog from "./lib/ReanalyseDialog.svelte";
   import MomentsPanel from "./lib/MomentsPanel.svelte";
   import LikePanel from "./lib/LikePanel.svelte";
+  import AskPanel from "./lib/AskPanel.svelte";
   import * as tr from "./lib/tracks";
   import RollCall from "./lib/RollCall.svelte";
   import { floatAt, layout, REVIEW, TITLE, TOOLS } from "./lib/layout";
@@ -52,6 +53,11 @@
   let like = $state.raw<api.LikeView | null>(null);
   let likeFocus = $state<number | null>(null);
   let likeSearching = $state(false);
+  // The open recording's typed requests (the Ask tab and lane, 7c); the ghost last clicked on the
+  // lane, and whether a request is being read.
+  let asked = $state.raw<api.AskView | null>(null);
+  let askFocus = $state<{ step: number; index: number } | null>(null);
+  let asking = $state(false);
   // The speaker roll call over the editor (7a); it opens by itself once per recording.
   let rollCallOpen = $state(false);
   let rollCallAsked = "";
@@ -94,7 +100,7 @@
   let panelOpen = $state(true);
   // Which side panel shows. The transcript stays mounted while hidden: laying out a 30 h
   // transcript again on every switch would cost a noticeable moment.
-  let tab = $state<"transcript" | "captions" | "properties" | "moments" | "like">("transcript");
+  let tab = $state<"transcript" | "captions" | "properties" | "moments" | "like" | "ask">("transcript");
   // The talking overlay: off by default, a viewer's preference kept in this page's storage.
   const OVERLAY_KEY = "junctur.talkingOverlay";
   let overlay = $state(readOverlay());
@@ -133,6 +139,7 @@
   const hasKeep = $derived(!!keep?.judgedPrompt);
   const hasMoments = $derived((moments?.moments ?? []).some((m) => m.state !== "rejected"));
   const hasLike = $derived(!!like && (like.examples.length > 0 || like.matches.length > 0));
+  const hasAsk = $derived(!!asked && asked.steps.length > 0);
   const likeTracks = $derived((mixer?.tracks ?? []).map((t) => ({ index: t.index, name: tr.name(t, player?.audioTracks ?? []) })));
   const L = $derived(
     layout({
@@ -146,6 +153,7 @@
       keep: hasKeep,
       moments: hasMoments,
       like: hasLike,
+      ask: hasAsk,
     }),
   );
   // The layout's shares are of the window below the title bar; mpv's are of the whole window, the
@@ -391,6 +399,8 @@
     momentFocus = null;
     like = null;
     likeFocus = null;
+    asked = null;
+    askFocus = null;
     analysis = o.analysis;
     // Progress sent while the open was on its way was dropped (no `opened` yet to match it):
     // read where the run is now. A run that already ended needs nothing more, as the
@@ -406,6 +416,7 @@
     void loadKeep();
     void loadMoments();
     void loadLike();
+    void loadAsk();
     const w = await api.wavesState();
     if (stale()) return;
     if (w && w.file === o.file) {
@@ -613,6 +624,76 @@
     void likePlay(m);
   }
 
+  // The typed requests of the open recording; the latest ask's answer only.
+  let askSeq = 0;
+  async function loadAsk() {
+    const o = opened;
+    const n = ++askSeq;
+    if (!o) {
+      asked = null;
+      return;
+    }
+    try {
+      const v = await api.askView(o.file);
+      if (n !== askSeq || opened?.file !== o.file) return;
+      asked = v;
+    } catch (e) {
+      void api.uiLog(`the requests could not be read: ${e}`);
+      failure = `The Ask tab's requests could not be read: ${e}`;
+    }
+  }
+  async function askRun(f: (file: string) => Promise<api.AskView>) {
+    const o = opened;
+    if (!o) return;
+    askSeq++;
+    try {
+      const v = await f(o.file);
+      if (opened?.file === o.file) asked = v;
+    } catch (e) {
+      failure = String(e);
+      void loadAsk();
+    }
+  }
+  async function askRequest(request: string, range: [number, number] | null, model: api.AskSize | null) {
+    asking = true;
+    try {
+      await askRun((file) => api.askRequest(file, request, range, model));
+      // A preview playing shows the new ghosts too.
+      if (edit?.preview) await askPreview(true);
+      const s = asked?.steps[asked.steps.length - 1];
+      if (s)
+        void api.uiLog(
+          `ask: "${s.request}" read by ${s.reading.reader} in ${s.reading.answerS ?? "?"} s: ${s.described || s.error} (${s.ghosts.length} ghosts)`,
+        );
+    } finally {
+      asking = false;
+    }
+  }
+  const askRerun = (id: number, recipe: api.Recipe) =>
+    askRun((file) => api.askRerun(file, id, recipe)).then(() => (edit?.preview ? askPreview(true) : undefined));
+  const askAnswer = (answer: api.AskAnswer, id: number, which?: number[], applied?: number) =>
+    askRun(() => api.askAnswer(answer, id, which, applied)).then(() => void loadMoments());
+  async function askPreview(on: boolean) {
+    try {
+      await api.askPreview(on);
+    } catch (e) {
+      failure = String(e);
+    }
+  }
+  async function askPlay(at: number) {
+    try {
+      await api.playFrom(at);
+    } catch (e) {
+      failure = String(e);
+    }
+  }
+  function askClicked(p: { step: api.AskStep; index: number; ghost: api.AskGhost }) {
+    askFocus = { step: p.step.id, index: p.index };
+    tab = "ask";
+    if (!panelOpen) togglePanel();
+    void askPlay(Math.max(0, p.ghost.start - 1.5));
+  }
+
   // The roll call opens by itself once, the first time a recording's list is editable with speakers
   // in it, unless it was shown for that recording before.
   $effect(() => {
@@ -674,6 +755,7 @@
     if (busy(was) && !busy(p)) void loadKeep();
     if (busy(was) && !busy(p)) void loadMoments();
     if (busy(was) && !busy(p)) void loadLike();
+    if (busy(was) && !busy(p)) void loadAsk();
     if (busy(was) && !busy(p)) {
       // The run ended: what the panel said was out of date was its business; the transcript may
       // be new (the edit list comes in through the watch). One that grew piece by piece is the
@@ -781,6 +863,7 @@
     keep = null;
     moments = null;
     like = null;
+    asked = null;
     rollCallOpen = false;
     words = null;
     selection = null;
@@ -1027,6 +1110,9 @@
           likeRow={L.likeRow}
           {like}
           onLike={likeClicked}
+          askRow={L.askRow}
+          {asked}
+          onAsk={askClicked}
           head={L.head}
           thin={L.portrait}
           {wavesVersion}
@@ -1074,6 +1160,9 @@
           >Moments{moments?.moments.some((m) => m.state === "suggested") ? ` (${moments.moments.filter((m) => m.state === "suggested").length})` : ""}</button
         >
         <button role="tab" aria-selected={tab === "like"} class:on={tab === "like"} onclick={() => (tab = "like")}>Like this</button>
+        <button role="tab" aria-selected={tab === "ask"} class:on={tab === "ask"} onclick={() => (tab = "ask")}
+          >Ask{asked?.steps.some((s) => s.ghosts.length) ? " •" : ""}</button
+        >
       </div>
       <div class="pane" style:display={tab === "transcript" ? "block" : "none"}>
         <TranscriptPanel
@@ -1105,6 +1194,22 @@
             onAnswer={momentAnswer}
             onJump={(m) => void jumpTo(m)}
             onRollCall={() => (rollCallOpen = true)}
+          />
+        </div>
+      {:else if tab === "ask"}
+        <div class="pane">
+          <AskPanel
+            view={asked}
+            editable={!!edit?.editable}
+            {spans}
+            previewing={!!edit?.preview}
+            {asking}
+            focus={askFocus}
+            onAsk={askRequest}
+            onRerun={askRerun}
+            onAnswer={askAnswer}
+            onPreview={askPreview}
+            onPlay={(t) => void askPlay(t)}
           />
         </div>
       {:else if tab === "like"}

@@ -162,6 +162,24 @@
       </Section>
 
       <Section
+        title="Cuts"
+        info="Prototype: a recording opens with everything kept, and you ask for each edit in the Ask tab (select a part, type what to cut). Tick this to have the silences cut when a recording is analysed, as before."
+      >
+        <Field
+          label="Cut the silences when analysing"
+          info="Applies to recordings analysed from now on; one already analysed keeps its edit list."
+        >
+          {#snippet children(id)}
+            <input
+              {id}
+              type="checkbox"
+              bind:checked={() => draft?.cutUpFront ?? false, (v) => draft && (draft.cutUpFront = v)}
+            />
+          {/snippet}
+        </Field>
+      </Section>
+
+      <Section
         title="Smart keep"
         info="Talk stays as the cut leaves it; a silent stretch with a moment busier than the recording usually is (its game audio, or the fight labels) is suggested as a keep, whole, more or fewer as the kind of video you describe asks (Properties, Smart keep). Nothing is applied until you accept, and nothing is downloaded."
       >

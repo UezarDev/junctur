@@ -36,6 +36,10 @@ pub struct Config {
     /// Smart keep ([`keep`]): off, no prompt used yet, unless set.
     #[serde(default, skip_serializing_if = "is_default")]
     pub keep: keep::Settings,
+    /// Whether an analysed recording opens with the automatic cut made (the silences cut). Off unless
+    /// set, on the prototype branch: it opens with everything kept, and each edit is asked for (7c).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cut_up_front: Option<bool>,
 }
 
 fn is_default<T: Default + PartialEq>(s: &T) -> bool {
@@ -185,6 +189,7 @@ pub fn analysis_options(
     let cfg = load();
     let labels = cfg.as_ref().map(|c| c.labels.clone()).unwrap_or_default();
     let keep = cfg.as_ref().map(|c| c.keep.clone()).unwrap_or_default();
+    let whole = !cfg.as_ref().is_ok_and(|c| c.cut_up_front == Some(true));
     let (model, words) = if no_transcript {
         (ModelPref::Auto, Vec::new())
     } else {
@@ -200,6 +205,7 @@ pub fn analysis_options(
         },
         no_transcript,
         no_speakers,
+        whole,
         voices: if no_speakers {
             Vec::new()
         } else {

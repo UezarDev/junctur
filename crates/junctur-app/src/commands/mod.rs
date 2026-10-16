@@ -2,6 +2,7 @@
 //! `async` because an mpv command blocks the main thread; whole-recording work goes to
 //! [`blocking`].
 
+mod ask;
 mod captions;
 mod edit;
 mod keep;
@@ -14,6 +15,7 @@ mod speakers;
 mod words;
 
 // One module per part of the page; every command is still `commands::<name>` for the handler list.
+pub use ask::*;
 pub use captions::*;
 pub use edit::*;
 pub use keep::*;

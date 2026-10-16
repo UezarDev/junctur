@@ -52,6 +52,20 @@ pub fn known(command: &str) -> Vec<&'static str> {
             false,
             &["--at", "--not", "--len", "--track", "--threshold", "--json"],
         ),
+        "ask" => (
+            true,
+            false,
+            &[
+                "--prompt",
+                "--from",
+                "--to",
+                "--recipe",
+                "--no-model",
+                "--model",
+                "--cpu",
+                "--json",
+            ],
+        ),
         "status" => (true, false, &[]),
         "cut" => (true, true, &[]),
         "export" => (true, false, &["--fcpxml", "--srt"]),
@@ -115,8 +129,8 @@ mod tests {
     #[test]
     fn usage_shows_every_flag_a_command_takes_and_no_other() {
         for command in [
-            "tracks", "separate", "analyze", "judge", "like", "status", "cut", "export", "render",
-            "voices",
+            "tracks", "separate", "analyze", "judge", "like", "ask", "status", "cut", "export",
+            "render", "voices",
         ] {
             let mut takes: BTreeSet<String> =
                 known(command).into_iter().map(String::from).collect();
@@ -130,8 +144,8 @@ mod tests {
     #[test]
     fn every_switch_is_a_flag_some_command_takes() {
         let all: BTreeSet<&str> = [
-            "tracks", "separate", "analyze", "judge", "like", "status", "cut", "export", "render",
-            "voices",
+            "tracks", "separate", "analyze", "judge", "like", "ask", "status", "cut", "export",
+            "render", "voices",
         ]
         .into_iter()
         .flat_map(known)

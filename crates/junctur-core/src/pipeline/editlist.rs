@@ -177,7 +177,10 @@ pub fn cut(
     transcript: Option<&Transcript>,
     settings: &CutSettings,
 ) -> Result<EditList> {
-    write_draft(p, draft(p, report, speech, speakers, transcript, settings))
+    write_draft(
+        p,
+        draft(p, report, speech, speakers, transcript, settings, false),
+    )
 }
 
 /// Writes a re-cut, backing up the list it replaces when that is the user's: decided again from the
@@ -220,7 +223,9 @@ impl Draft {
     }
 }
 
-/// What [`cut`] would write, and whether it would back up what is there.
+/// What [`cut`] would write, and whether it would back up what is there. `whole` keeps the whole
+/// recording instead of the automatic cut (7c's "no cuts up front", [`super::PipelineOptions::whole`]);
+/// either way a list Junctur made by the other rule is still its own, not the user's.
 pub(super) fn draft(
     p: &Project,
     report: &TrackReport,
@@ -228,6 +233,7 @@ pub(super) fn draft(
     speakers: Option<&Found>,
     transcript: Option<&Transcript>,
     settings: &CutSettings,
+    whole: bool,
 ) -> Draft {
     let env = speech::load_envelope(&p.envelope_path()).unwrap_or_default();
     let regions = speech.all_regions();
@@ -245,17 +251,26 @@ pub(super) fn draft(
     // None stays None: a list that followed the user's defaults still does.
     let captions = parsed.and_then(|e| e.captions);
     let speakers = speakers_for(speakers, previous.as_ref());
-    let make = |settings: &CutSettings, starts: &[f64]| EditList {
+    let all = [edit::Range {
+        start: 0.0,
+        end: report.duration,
+    }];
+    let make_as = |settings: &CutSettings, starts: &[f64], whole: bool| EditList {
         source: p.file.clone(),
         duration: report.duration,
         settings: *settings,
-        keep: edit::keep_ranges(&regions, &env, report.duration, settings),
+        keep: if whole && report.duration > 0.0 {
+            all.to_vec()
+        } else {
+            edit::keep_ranges(&regions, &env, report.duration, settings)
+        },
         speakers: speakers.clone(),
         captions: captions.clone(),
         fixes: fixes.clone(),
         times: times.clone(),
         windows: edit::windows(&regions, starts, report.duration, settings.window),
     };
+    let make = |settings: &CutSettings, starts: &[f64]| make_as(settings, starts, whole);
     let list = make(settings, &starts);
     // The finished transcript's word starts, read only when a comparison needs them (a 30 h
     // transcript is tens of MB).
@@ -275,8 +290,9 @@ pub(super) fn draft(
                 });
                 [&starts[..], &[], &done[..]]
                     .into_iter()
-                    .map(|w| {
-                        let mut e = make(s, w);
+                    .flat_map(|w| [(w, false), (w, true)])
+                    .map(|(w, whole)| {
+                        let mut e = make_as(s, w, whole);
                         if !had_speakers {
                             e.speakers = Speakers::default();
                         }
@@ -312,6 +328,7 @@ pub fn hand_edited(p: &Project) -> Result<bool> {
         speakers.as_ref(),
         transcript.as_ref(),
         &list.settings,
+        false,
     );
     Ok(d.users)
 }

@@ -150,6 +150,10 @@ pub struct PipelineOptions {
     pub words: Vec<String>,
     pub languages: Languages,
     pub cut: CutSettings,
+    /// A new list keeps the whole recording instead of the automatic cut: 7c's "no cuts up front",
+    /// where the user asks for each edit ([`crate::ask`]). The config file's `cut_up_front` turns
+    /// the automatic cut back on ([`crate::config::analysis_options`]).
+    pub whole: bool,
     /// Redo every stage instead of reusing results.
     pub force: bool,
     /// Stop after speech detection (no Whisper).
@@ -395,7 +399,15 @@ pub fn prepare(
         }
     };
     let edit = jobs.stage(&p.dir, StageName::Edit, log, |log| {
-        let d = draft(p, &report, &speech, speakers.as_ref(), None, &opts.cut);
+        let d = draft(
+            p,
+            &report,
+            &speech,
+            speakers.as_ref(),
+            None,
+            &opts.cut,
+            opts.whole,
+        );
         let how = Rewrite {
             keep: opts.keep_list,
             within: opts.within,

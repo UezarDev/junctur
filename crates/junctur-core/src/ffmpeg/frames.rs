@@ -156,6 +156,41 @@ fn pass(file: &Path, size: u32, hw: bool, more: &mut dyn FnMut(f64, &[u8]) -> bo
     Ok(())
 }
 
+/// Tiny grey frames of `file`'s first video stream from `start` for `len` seconds, `rate` a second,
+/// `w` by `h` bytes each, in order: `more(pixels)`, which returns false to stop. For telling a
+/// still picture from a moving one (7c), so decoded on the CPU, which reads 10 minutes of 1080p in
+/// about 18 s here, faster than NVDEC's download of every frame.
+pub fn gray(
+    file: &Path,
+    start: f64,
+    len: f64,
+    rate: u32,
+    (w, h): (u32, u32),
+    more: &mut dyn FnMut(&[u8]) -> bool,
+) -> Result<()> {
+    let filter = format!("fps={rate},scale={w}:{h}:flags=area,format=gray");
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-v", "error", "-nostdin", "-ss"])
+        .arg(format!("{:.3}", start.max(0.0)))
+        .args(["-t", &format!("{len:.3}"), "-i"])
+        .arg(file)
+        .args(["-map", "0:v:0", "-an", "-sn", "-dn", "-vf", &filter])
+        .args(["-f", "rawvideo", "-pix_fmt", "gray", "-"]);
+    let mut p = super::Process::spawn(&mut cmd, Stdio::null(), Stdio::piped())?;
+    let mut out = p.child.stdout.take().expect("piped stdout");
+    let mut frame = vec![0u8; w as usize * h as usize];
+    loop {
+        if !read_whole(&mut out, &mut frame)? {
+            break;
+        }
+        if !more(&frame) {
+            return Ok(());
+        }
+    }
+    drop(out);
+    p.wait("ffmpeg")
+}
+
 /// Fills `buf` from `r`: true when whole, false at the end of the stream before any byte; a frame
 /// cut short is an error.
 fn read_whole(r: &mut impl Read, buf: &mut [u8]) -> Result<bool> {

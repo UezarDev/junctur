@@ -73,6 +73,8 @@ export interface EditState {
   captions: Captions;
   /** The list has its own caption settings; without, it follows the defaults. */
   captionsOwn: boolean;
+  /** Ghosts not accepted yet play in place of the list's kept ranges (the Ask tab's preview, 7c). */
+  preview: boolean;
 }
 
 export interface Speaker {
@@ -264,6 +266,8 @@ export interface Settings {
   labels: LabelSettings;
   /** Smart keep (junctur-core keep::Settings): off by default; the prompt last set on a recording. */
   keep: { on: boolean; last?: string | null };
+  /** A recording opens with the automatic cut made; off on the prototype (7c): everything kept. */
+  cutUpFront: boolean;
 }
 
 /** A kind of video the labels know; its built-in list. */
@@ -371,7 +375,7 @@ export interface Moment {
   end: number;
   /** The phrases said in it, cut when it is accepted. */
   cuts: [number, number][];
-  source: "voice" | "hotkey" | "like";
+  source: "voice" | "hotkey" | "like" | "ask";
   label: string;
   state: "suggested" | "accepted" | "rejected";
 }
@@ -456,6 +460,81 @@ export interface LikeView extends LikeSettings {
 
 export type LikeAct = "keepAround" | "cutEach" | "mark" | "clip";
 export type LikeAnswer = "accept" | "discard" | "undo" | "takeBack";
+
+/** An edit a typed request would make, waiting for Accept (junctur-core ask::Ghost; 7c). */
+export interface AskGhost {
+  start: number;
+  end: number;
+  /** Keeps what is cut there now; else cuts what is kept. */
+  keep: boolean;
+}
+
+/** Who read a request (junctur-core llm::Reading). */
+export interface AskReading {
+  /** "qwen3-1.7b", "keywords" or "edited". */
+  reader: string;
+  /** Why the model did not read it, when the keywords did. */
+  fallback?: string;
+  answers?: string[];
+  loadS?: number;
+  answerS?: number;
+  device?: "cpu" | "cuda";
+}
+
+/** A recipe as JSON (junctur-core recipe): an action and a condition over the menu's tools. */
+export interface Recipe {
+  action: "cut_where" | "keep_where" | "keep_around" | "cut_around" | "mark" | "clip_each";
+  when: unknown;
+  min_seconds?: number;
+  before?: number;
+  after?: number;
+}
+
+/** One request and what came of it (junctur-core ask::Step). */
+export interface AskStep {
+  id: number;
+  request: string;
+  range: [number, number] | null;
+  recipe: Recipe | null;
+  described: string;
+  reading: AskReading;
+  error?: string;
+  found: number;
+  ghosts: AskGhost[];
+  marks?: number[];
+  clips?: [number, number][];
+  sent: boolean;
+  applied: { id: number; ghosts: AskGhost[] }[];
+  rejected: number;
+  seconds: number;
+  notes?: string[];
+}
+
+/** A recording's requests (src/ask.rs; 7c). */
+export interface AskView {
+  steps: AskStep[];
+  duration: number;
+  speakers: string[];
+  /** Sounds marked in the Like this tab, what "like this" looks for. */
+  examples: number;
+  /** The small reader and the bigger one. */
+  models: AskModel[];
+}
+
+/** Which reader reads a request: Qwen3 1.7B, Qwen3 4B, or none (the keywords). */
+export type AskSize = "small" | "large";
+
+export interface AskModel {
+  size: AskSize;
+  name: string;
+  /** In the cache: a request does not download it first. */
+  downloaded: boolean;
+  /** Open now: a request does not load it first. */
+  loaded: boolean;
+  megabytes: number;
+}
+
+export type AskAnswer = "accept" | "reject" | "undo";
 
 /** One speaker's card in the roll call (src/rollcall.rs; 7a). */
 export interface RollCard {
@@ -894,6 +973,18 @@ export const likeAct = (path: string, act: LikeAct) => invoke<LikeView>("like_ac
 /** Accepts or discards the proposal, undoes an accepted one or takes a sent batch back. */
 export const likeAnswer = (answer: LikeAnswer, id?: number) =>
   invoke<LikeView>("like_answer", { answer, id: id ?? null });
+/** The requests asked of `path`. */
+export const askView = (path: string) => invoke<AskView>("ask_view", { path });
+/** Reads `request` and runs it over `range` of `path` (the whole recording without one). */
+export const askRequest = (path: string, request: string, range: [number, number] | null, model: AskSize | null) =>
+  invoke<AskView>("ask_request", { path, request, range, model });
+/** Step `id` asked again with `recipe`. */
+export const askRerun = (path: string, id: number, recipe: Recipe) => invoke<AskView>("ask_rerun", { path, id, recipe });
+/** Accepts, rejects or undoes step `id`'s ghosts (those at `which`, or all; `applied` for an undo). */
+export const askAnswer = (answer: AskAnswer, id: number, which?: number[], applied?: number) =>
+  invoke<AskView>("ask_answer", { answer, id, which: which ?? null, applied: applied ?? null });
+/** Plays the waiting ghosts as if accepted, or the list again. */
+export const askPreview = (on: boolean) => invoke<void>("ask_preview", { on });
 /** The speaker roll call of `path`. */
 export const rollCall = (path: string) => invoke<RollCallView>("roll_call", { path });
 /** Marks `path`'s roll call shown: it does not open by itself again. */

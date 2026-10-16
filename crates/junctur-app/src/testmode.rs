@@ -10,7 +10,9 @@
 //! `solo|unsolo=<n>` (tracks from 1), `menu=<id>`, `speed=<x>`, `loop=<a>-<b>`, `unloop`, `reload`,
 //! `keepall` (smart keep's Accept all), `momentsall` (the Moments tab's Accept all), `like=<s>`
 //! (the Like this tab: a click example at `s` seconds, searched), `likekeep` (its keep-around
-//! proposed and accepted).
+//! proposed and accepted), `ask=<request>` and `askkeys=<request>` (the Ask tab over the whole
+//! recording, read by the model or by the keywords), `askpreview` (its ghosts played), `askaccept`
+//! (the last request's ghosts accepted).
 //! Point `JUNCTUR_VOICES`, `JUNCTUR_RECENT`, `JUNCTUR_CACHE_DIR`, `JUNCTUR_CONFIG` and
 //! `JUNCTUR_KEEP_PAIRS` at scratch places, or the steps change the user's own files.
 
@@ -96,6 +98,10 @@ enum Action {
     Like(f64),
     /// Keep around every shown match, proposed and accepted.
     LikeKeep,
+    /// A request over the whole recording; whether the (small) model reads it.
+    Ask(String, bool),
+    AskPreview,
+    AskAccept,
 }
 
 /// The frontend's log lines (`ui_log`), kept for the report.
@@ -195,6 +201,12 @@ fn parse_steps(s: &str) -> Result<Vec<(f64, Action)>, String> {
             None if action == "momentsall" => Action::MomentsAll,
             Some(("like", v)) => Action::Like(v.trim().parse().map_err(|_| bad())?),
             None if action == "likekeep" => Action::LikeKeep,
+            Some(("ask", v)) if !v.trim().is_empty() => Action::Ask(v.trim().to_string(), true),
+            Some(("askkeys", v)) if !v.trim().is_empty() => {
+                Action::Ask(v.trim().to_string(), false)
+            }
+            None if action == "askpreview" => Action::AskPreview,
+            None if action == "askaccept" => Action::AskAccept,
             _ => return Err(bad()),
         };
         steps.push((at, action));
@@ -314,6 +326,53 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
                 )?;
                 let answer = crate::like::Answer::Accept;
                 crate::like::answer(e, e.file(), None, answer, None).map(|_| ())
+            })
+        }
+        Action::Ask(request, model) => {
+            let file = with_player(app, |p| p.file())?.ok_or("no file is open")?;
+            let size = model.then_some(junctur_core::llm::Size::Small);
+            let v = crate::ask::request(std::path::Path::new(&file), None, request, None, size)?;
+            let s = v.ask.steps.last().ok_or("no step")?;
+            eprintln!(
+                "junctur-app test: ask: {:?} read by {} ({:?}, load {:?} s, answer {:?} s): {} | {} ghosts, {} marks, {} clips in {} s; error {:?}; notes {:?}",
+                s.request,
+                s.reading.reader,
+                s.reading.fallback,
+                s.reading.load_s,
+                s.reading.answer_s,
+                s.described,
+                s.ghosts.len(),
+                s.marks.len(),
+                s.clips.len(),
+                s.seconds,
+                s.error,
+                s.notes
+            );
+            return Ok(());
+        }
+        Action::AskPreview => {
+            let core = with_player(app, |p| p.core())?;
+            let file = core.file();
+            crate::ask::set_preview(&core, file.as_deref(), None, true)?;
+            eprintln!(
+                "junctur-app test: ask preview: {}",
+                core.edit_state().preview
+            );
+            return Ok(());
+        }
+        Action::AskAccept => {
+            return edit(&|e| {
+                let file = e.file().ok_or("no file is open")?;
+                let v = crate::ask::view(std::path::Path::new(file), None)?;
+                let id = v.ask.steps.last().ok_or("nothing was asked")?.id;
+                let answer = crate::ask::Answer::Accept;
+                let v = crate::ask::answer(e, e.file(), None, answer, id, None, None)?;
+                eprintln!(
+                    "junctur-app test: ask accepted: {} edits, preview {}",
+                    v.ask.steps.last().map_or(0, |s| s.accepted()),
+                    e.edit_state().preview
+                );
+                Ok(())
             })
         }
         Action::Rename(id, name) => return edit(&|e| e.rename_speaker(e.file(), *id, name)),

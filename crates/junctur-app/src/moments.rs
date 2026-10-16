@@ -1,8 +1,8 @@
 //! Moments in the app (phase 7a, a prototype): what the Moments panel and lane show of a recording's
 //! voice and hotkey markers ([`junctur_core::moments`]) and of the like-this matches sent to it
 //! (7b), and the user's Accept, Reject and Undo turned into edits of the list in play. A module
-//! because the view gathers from five files (the transcript, the markers file, the like file, the
-//! edit list and the answers) and the answers edit through the player.
+//! because the view gathers from six files (the transcript, the markers file, the like and ask
+//! files, the edit list and the answers) and the answers edit through the player.
 
 use std::path::{Path, PathBuf};
 
@@ -95,6 +95,10 @@ fn gather(p: &Project) -> Result<(Vec<Moment>, moments::Answers, MomentsView), S
     // Matches sent from the Like this tab (7b); a like file that does not read sends none.
     if let Ok(l) = junctur_core::like::load(&p.dir) {
         markers.extend(l.markers());
+    }
+    // And what a typed request marked or clipped, once accepted (7c).
+    if let Ok(a) = junctur_core::ask::load(&p.dir) {
+        markers.extend(a.markers());
     }
     let answers = moments::load_answers(&p.dir).map_err(|e| e.to_string())?;
     Ok((moments::moments(markers, duration), answers, v))

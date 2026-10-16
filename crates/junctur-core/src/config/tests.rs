@@ -120,6 +120,7 @@ fn saves_what_it_reads_with_canonical_names() {
             on: true,
             last: Some("League highlights".into()),
         },
+        cut_up_front: Some(true),
     };
     save_to(&path, &c).unwrap();
     assert_eq!(load_from(&path, true).unwrap(), c);

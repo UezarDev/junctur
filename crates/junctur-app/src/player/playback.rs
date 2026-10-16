@@ -3,8 +3,12 @@
 
 use std::collections::VecDeque;
 
+use std::sync::Arc;
+
+use junctur_core::edit::Range;
+
 use super::{same_form, Core, Ctl, Skipping};
-use crate::cuts::{edl, Form, Load};
+use crate::cuts::{edl, Form, Load, Timeline};
 use crate::lock::lock;
 use crate::mpv::Mpv;
 
@@ -105,6 +109,37 @@ impl Core {
             return Err("Skip cuts stays off while reviewing".into());
         }
         c.skipping = Skipping::Toggle(on);
+        let want = c.wanted();
+        let r = if c.file.is_some() && !same_form(&want, &c.requested) {
+            self.reload(&mut c, want)
+        } else {
+            Ok(())
+        };
+        self.emit_edit(&c);
+        r
+    }
+
+    /// Plays `keep` (source seconds, sorted) in place of the list's kept ranges, skipping on, until
+    /// `None`, an edit of the list or another recording: how 7c's ghosts are scrubbed before they
+    /// are accepted. Refused in review, and when it keeps nothing.
+    pub fn set_preview(&self, keep: Option<&[Range]>) -> Result<(), String> {
+        let mut c = lock(&self.ctl);
+        if c.skipping.reviewing() {
+            return Err("reviewing: end the review to preview".into());
+        }
+        c.preview = match keep {
+            None => None,
+            Some(keep) => {
+                let list = c.edit.list.clone().ok_or("no edit list to preview")?;
+                let fps = c.fps.ok_or("the frame rate is not known")?;
+                let t = Timeline::new(keep, list.duration, fps);
+                if t.is_empty() {
+                    return Err("the preview keeps nothing".into());
+                }
+                c.skipping = Skipping::Toggle(true);
+                Some(Arc::new(t))
+            }
+        };
         let want = c.wanted();
         let r = if c.file.is_some() && !same_form(&want, &c.requested) {
             self.reload(&mut c, want)

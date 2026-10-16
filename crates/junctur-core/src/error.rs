@@ -32,6 +32,8 @@ pub enum Error {
     Config(String),
     /// A "find all like this" search that cannot run: no example, a silent one, a silent track (7b).
     Like(String),
+    /// A request that did not read as a recipe, or a recipe a tool cannot answer here (7c).
+    Recipe(String),
     Io(std::io::Error),
     Json(serde_json::Error),
 }
@@ -52,7 +54,7 @@ impl fmt::Display for Error {
             Error::Edit(msg) => write!(f, "{msg}"),
             Error::Render(msg) => write!(f, "render: {msg}"),
             Error::Output(msg) => write!(f, "{msg}"),
-            Error::Config(msg) | Error::Like(msg) => write!(f, "{msg}"),
+            Error::Config(msg) | Error::Like(msg) | Error::Recipe(msg) => write!(f, "{msg}"),
             Error::Io(e) => write!(f, "{e}"),
             Error::Json(e) => write!(f, "{e}"),
         }

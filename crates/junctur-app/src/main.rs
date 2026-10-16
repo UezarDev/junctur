@@ -5,6 +5,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod analysis;
+mod ask;
 mod commands;
 mod cuts;
 mod editor;
@@ -125,6 +126,11 @@ fn main() {
             commands::like_search,
             commands::like_act,
             commands::like_answer,
+            commands::ask_view,
+            commands::ask_request,
+            commands::ask_rerun,
+            commands::ask_answer,
+            commands::ask_preview,
             commands::roll_call,
             commands::roll_call_seen,
             commands::roll_call_assign,

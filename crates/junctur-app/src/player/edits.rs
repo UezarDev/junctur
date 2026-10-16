@@ -128,6 +128,8 @@ impl Core {
         };
         let mut result = Ok(());
         if !same {
+            // A preview was of the list as it was.
+            c.preview = None;
             lock(&self.state).set_reference(c.edit.timeline.clone());
             self.emit_state();
             let want = c.wanted();
@@ -324,6 +326,6 @@ impl Core {
     pub fn edit_state(&self) -> EditState {
         let c = lock(&self.ctl);
         let defaults = lock(&self.caption_defaults).clone();
-        EditState::new(&c.edit, c.skipping.on(), c.fps, &c.status, &defaults)
+        c.edit_state(&defaults)
     }
 }

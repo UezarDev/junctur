@@ -14,6 +14,7 @@ pub const SWITCHES: &[&str] = &[
     "--labels",
     "--full",
     "--rehear",
+    "--no-model",
 ];
 
 pub struct Args {

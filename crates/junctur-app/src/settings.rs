@@ -82,6 +82,10 @@ pub struct Settings {
     /// Smart keep: off by default; `last` is the prompt last set on a recording (kept as it is).
     #[serde(default)]
     pub keep: keep::Settings,
+    /// An analysed recording opens with the automatic cut made; off on the prototype branch, where
+    /// it opens with everything kept and each edit is asked for (7c).
+    #[serde(default)]
+    pub cut_up_front: bool,
 }
 
 fn flag_below() -> u8 {
@@ -148,6 +152,7 @@ fn from_config(c: &Config) -> Settings {
         flag_below: c.flag_below(),
         labels: c.labels.clone(),
         keep: c.keep.clone(),
+        cut_up_front: c.cut_up_front == Some(true),
     }
 }
 
@@ -188,6 +193,7 @@ fn to_config(s: &Settings) -> Result<Config, String> {
                 .map(String::from),
             ..s.keep.clone()
         },
+        cut_up_front: s.cut_up_front.then_some(true),
     })
 }
 

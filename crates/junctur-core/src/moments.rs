@@ -49,6 +49,8 @@ pub enum Source {
     Hotkey,
     /// A match of "find all like this" sent to the list (7b).
     Like,
+    /// An event a typed request marked or clipped (7c).
+    Ask,
 }
 
 /// One marker: when it was set and, for a phrase, the seconds the phrase is said in (cut once the
@@ -260,7 +262,7 @@ pub fn moments(mut markers: Vec<Marker>, duration: f64) -> Vec<Moment> {
         let label = match (m.source, m.text.is_empty()) {
             (Source::Voice, _) => format!("\u{201c}{}\u{201d}", m.text),
             (Source::Hotkey, true) => "Hotkey marker".into(),
-            (Source::Hotkey, false) | (Source::Like, _) => m.text.clone(),
+            (Source::Hotkey, false) | (Source::Like | Source::Ask, _) => m.text.clone(),
         };
         out.push(Moment {
             at: ms(at),

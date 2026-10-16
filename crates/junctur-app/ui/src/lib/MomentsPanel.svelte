@@ -82,7 +82,7 @@
           <span class="what">
             <span class="label">{m.label}</span>
             <span class="sub"
-              >{m.source === "voice" ? "said" : m.source === "like" ? "like this" : "hotkey"} at {clock(m.at)} · {Math.round(m.end - m.start)} s{m.state === "accepted"
+              >{m.source === "voice" ? "said" : m.source === "like" ? "like this" : m.source === "ask" ? "asked" : "hotkey"} at {clock(m.at)} · {Math.round(m.end - m.start)} s{m.state === "accepted"
                 ? " · kept"
                 : m.state === "rejected"
                   ? " · rejected"

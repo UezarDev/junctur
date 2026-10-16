@@ -153,6 +153,50 @@ pub const LAYA_TOKENIZER: Model = Model {
     license: "Apache-2.0",
 };
 
+/// Qwen3 1.7B (Apache-2.0, Alibaba), the small text model that reads a typed request as a recipe
+/// ([`crate::llm`], 7c). onnx-community's 4-bit export with fp16 activations and key/value cache:
+/// one 1.43 GB file, no external data, the smallest of its exports (the int8 is 1.74 GB, fp16 3.45
+/// GB). Its ops (MatMulNBits, GroupQueryAttention) are ONNX Runtime contrib ops, on CUDA and CPU.
+pub const QWEN3_1_7B: Model = Model {
+    file: "qwen3_1_7b_q4f16.onnx",
+    url: "https://huggingface.co/onnx-community/Qwen3-1.7B-ONNX/resolve/3231b522c6e703b2f9b3cd8ea27426a1289a02f2/onnx/model_q4f16.onnx",
+    sha256: "fb85b44defdf43ace50c7a4937127e889b9f8a0483eb87a6c4151a815c5da3b5",
+    license: "Apache-2.0",
+};
+
+/// Its vocabulary, from the same commit.
+pub const QWEN3_1_7B_TOKENIZER: Model = Model {
+    file: "qwen3_1_7b_tokenizer.json",
+    url: "https://huggingface.co/onnx-community/Qwen3-1.7B-ONNX/resolve/3231b522c6e703b2f9b3cd8ea27426a1289a02f2/tokenizer.json",
+    sha256: "e7a95fce95bf5b0946d0ddb3f9d7caa030b7e850bbe92b0edb26bcf563e9f3d5",
+    license: "Apache-2.0",
+};
+
+/// Qwen3 4B Instruct 2507 (Apache-2.0, Alibaba), the bigger reader, opted into when the small one
+/// misreads (7c): onnx-community's 4-bit export with fp16 activations, 2.89 GB in three files whose
+/// names the graph holds, so they keep them, in a folder of their own. A non-thinking model. Its
+/// vocabulary is the 1.7B one's, byte for byte, so [`QWEN3_1_7B_TOKENIZER`] serves both.
+pub const QWEN3_4B: Model = Model {
+    file: "qwen3_4b_instruct_2507/model_q4f16.onnx",
+    url: "https://huggingface.co/onnx-community/Qwen3-4B-Instruct-2507-ONNX/resolve/2bdfea4417ee390519508a6bc7dfbc36f3572981/onnx/model_q4f16.onnx",
+    sha256: "6e603b4d2324fa94a1c1fc927d1f985da78413afcffa27b02b008d909eccc4a8",
+    license: "Apache-2.0",
+};
+
+pub const QWEN3_4B_DATA: Model = Model {
+    file: "qwen3_4b_instruct_2507/model_q4f16.onnx_data",
+    url: "https://huggingface.co/onnx-community/Qwen3-4B-Instruct-2507-ONNX/resolve/2bdfea4417ee390519508a6bc7dfbc36f3572981/onnx/model_q4f16.onnx_data",
+    sha256: "d2b17463255a120a6d4e88c60e24bb6be6607ab6e34dd89b62234879bfd6ce0d",
+    license: "Apache-2.0",
+};
+
+pub const QWEN3_4B_DATA_1: Model = Model {
+    file: "qwen3_4b_instruct_2507/model_q4f16.onnx_data_1",
+    url: "https://huggingface.co/onnx-community/Qwen3-4B-Instruct-2507-ONNX/resolve/2bdfea4417ee390519508a6bc7dfbc36f3572981/onnx/model_q4f16.onnx_data_1",
+    sha256: "6c0d3b7ee94fa08c2dc766dfa4c5b790e492077701847b40fa001f648f3ebded",
+    license: "Apache-2.0",
+};
+
 /// Every pin above, for the tests that hold them all to one rule (a test checks none is missing).
 pub const ALL: &[&Model] = &[
     &SILERO_VAD,
@@ -170,6 +214,11 @@ pub const ALL: &[&Model] = &[
     &SIGLIP_TOKENIZER,
     &LAYA_MODEL,
     &LAYA_TOKENIZER,
+    &QWEN3_1_7B,
+    &QWEN3_1_7B_TOKENIZER,
+    &QWEN3_4B,
+    &QWEN3_4B_DATA,
+    &QWEN3_4B_DATA_1,
 ];
 
 pub fn dir(cache_dir: &Path) -> PathBuf {
@@ -201,7 +250,8 @@ pub fn ensure_or_stop(model: &Model, cache_dir: &Path, stop: &AtomicBool) -> Res
     if stop.load(Ordering::Relaxed) {
         return Err(Error::Cancelled);
     }
-    std::fs::create_dir_all(&dir)?;
+    // A model of several files keeps them in a folder of its own ([`QWEN3_4B`]).
+    std::fs::create_dir_all(path.parent().unwrap_or(&dir))?;
     let part = dir.join(format!("{}.part", model.file));
     eprintln!("junctur: downloading {} ...", model.file);
     // System curl (Windows 10+ ships it), like ffmpeg: an external program rather than a TLS stack.

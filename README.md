@@ -57,6 +57,8 @@ junctur analyze <file> [--project <dir>] [--cpu] [--force] [--no-transcript] [--
 junctur judge <file> [--prompt <prompt>] [--project <dir>]
 junctur like <file> --at <s>[,<s>...] [--not <s>[,...]] [--len <s>] [--track <n>]
                    [--threshold <x>] [--json <out.json>] [--project <dir>]   # prototype, 7b
+junctur ask <file> --prompt <text> [--from <s>] [--to <s>] [--recipe <json>] [--no-model]
+                  [--model 1.7b|4b] [--cpu] [--json <out.json>] [--project <dir>]   # prototype, 7c
 junctur status <file> [--project <dir>]
 junctur cut <file> [--project <dir>] [cut flags]
 junctur export <file> [--fcpxml <out.fcpxml>] [--srt <out.srt>] [--project <dir>]
@@ -298,6 +300,24 @@ On the `prototype/directions-1-2-3` branch only, to try out; not a promise of th
   hours, kept as `like.<track>.mel` in the project folder, about 40 MB for two hours); later ones take
   a fraction of a second. Examples, matches and what you did are kept in the project's `like.json`.
   `junctur like <file> --at <seconds>` does the same search from the command line.
+- **Ask, scrub, accept.** A recording now opens with everything kept: no silences are cut up front
+  (Settings, Cuts, "Cut the silences when analysing" brings the old cut back for recordings analysed
+  after). Select a part on the lanes (or nothing, for the whole recording), and in the **Ask** tab type
+  what to do with it: "remove parts with silence and no movement", "keep only 1/4 second each time I
+  break an ore", "cut everything Ana says about food", "quita las partes donde nadie habla". A small
+  text model on your GPU (Qwen3 1.7B, a 1.4 GB download the first time; Qwen3 4B, 2.9 GB, reads better
+  and is a choice in the tab) reads the request as a short recipe from a fixed menu of tools: nobody
+  talks, the picture is still, a speaker talks, a phrase is said, a sound like the one you marked in
+  Like this, what the picture shows (SigLIP; rough), combined with and / or / not. The tab shows the
+  recipe in plain words with its numbers to change ("Cut where: nobody talks AND the picture is still,
+  longer than 1 s"); without the model (or when it misreads twice) a keyword reader in English and
+  Spanish reads it, and the tab says which did. What the recipe would change waits as ghosts on the Ask
+  lane (red cuts, green keeps): **Preview the ghosts** plays the edit as it would be, ✓ / ✗ take or
+  turn down one, **Accept all** makes them one undo step and **Undo** puts back what the list had.
+  Marks and clips go to the Moments tab. Every request stays in the tab's history (the project's
+  `ask.json`), so the next one stacks on what you accepted. The model never sees the video and never
+  cuts anything itself: a wrong reading only shows as wrong ghosts. `junctur ask <file> --prompt "..."`
+  prints the reading, the recipe and the ghosts from the command line.
 
 ## Models
 
@@ -312,6 +332,7 @@ Downloaded on first use into `<cache>/models/`, checked against pinned SHA-256 d
 | SigLIP 2 base 224 px (onnx-community's export) | labels for the silent parts | Apache-2.0 |
 | Laya multilingual (Convai Innovations; our fp16 ONNX export, tokenizer from Convai) | phase 3b's smart keep, no longer called | Apache-2.0 |
 | Whisper large-v3-turbo, large-v3 f16 or 5-bit large-v3, ggml (whisper.cpp) | transcription | MIT |
+| Qwen3 1.7B, or Qwen3 4B Instruct 2507 (onnx-community's 4-bit exports) | reading a typed request (prototype, 7c) | Apache-2.0 |
 
 ## Whisper models
 
