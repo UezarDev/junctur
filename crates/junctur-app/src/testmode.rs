@@ -8,7 +8,9 @@
 //! `rename=<id>:<name>`, `color=<id>:#RRGGBB`, `captions=on|off`, `preview=on|off`, `srt=<path>`,
 //! `enroll=<a>-<b>:<name>`, `forget=<name>`, `reanalyse`, `reanalyse_fresh`, `mute|unmute=<n>`,
 //! `solo|unsolo=<n>` (tracks from 1), `menu=<id>`, `speed=<x>`, `loop=<a>-<b>`, `unloop`, `reload`,
-//! `keepall` (smart keep's Accept all), `momentsall` (the Moments tab's Accept all).
+//! `keepall` (smart keep's Accept all), `momentsall` (the Moments tab's Accept all), `like=<s>`
+//! (the Like this tab: a click example at `s` seconds, searched), `likekeep` (its keep-around
+//! proposed and accepted).
 //! Point `JUNCTUR_VOICES`, `JUNCTUR_RECENT`, `JUNCTUR_CACHE_DIR`, `JUNCTUR_CONFIG` and
 //! `JUNCTUR_KEEP_PAIRS` at scratch places, or the steps change the user's own files.
 
@@ -90,6 +92,10 @@ enum Action {
     /// Every waiting smart-keep suggestion accepted.
     KeepAll,
     MomentsAll,
+    /// A like-this search from a click example at these seconds.
+    Like(f64),
+    /// Keep around every shown match, proposed and accepted.
+    LikeKeep,
 }
 
 /// The frontend's log lines (`ui_log`), kept for the report.
@@ -187,6 +193,8 @@ fn parse_steps(s: &str) -> Result<Vec<(f64, Action)>, String> {
             None if action == "reload" => Action::Reload,
             None if action == "keepall" => Action::KeepAll,
             None if action == "momentsall" => Action::MomentsAll,
+            Some(("like", v)) => Action::Like(v.trim().parse().map_err(|_| bad())?),
+            None if action == "likekeep" => Action::LikeKeep,
             _ => return Err(bad()),
         };
         steps.push((at, action));
@@ -270,6 +278,42 @@ fn run(app: &AppHandle, a: &Action) -> Result<(), String> {
             return edit(&|e| {
                 let all = crate::moments::Action::AcceptAll;
                 crate::moments::answer(e, e.file(), None, all, None)
+            })
+        }
+        Action::Like(at) => {
+            let file = with_player(app, |p| p.file())?.ok_or("no file is open")?;
+            let path = std::path::Path::new(&file);
+            let v = crate::like::view(path, None)?;
+            let settings = crate::like::Settings {
+                track: v.like.track,
+                examples: vec![junctur_core::like::Example::click(*at, true)],
+                range: None,
+                threshold: v.like.threshold,
+                before: v.like.before,
+                after: v.like.after,
+                confirmed: Vec::new(),
+            };
+            crate::like::set(path, None, settings)?;
+            let v = crate::like::search(path, None)?;
+            eprintln!(
+                "junctur-app test: like: {} matches, {} shown, track {}, {:?}",
+                v.like.matches.len(),
+                v.like.shown().len(),
+                v.effective_track + 1,
+                v.like.searched
+            );
+            return Ok(());
+        }
+        Action::LikeKeep => {
+            return edit(&|e| {
+                let file = e.file().ok_or("no file is open")?;
+                crate::like::act(
+                    std::path::Path::new(file),
+                    None,
+                    crate::like::Act::KeepAround,
+                )?;
+                let answer = crate::like::Answer::Accept;
+                crate::like::answer(e, e.file(), None, answer, None).map(|_| ())
             })
         }
         Action::Rename(id, name) => return edit(&|e| e.rename_speaker(e.file(), *id, name)),

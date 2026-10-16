@@ -1,4 +1,5 @@
-//! Pure signal measurements on decoded samples: loudness, sameness, and "is this the sum of those".
+//! Pure signal measurements on decoded samples: loudness, sameness, "is this the sum of those", and
+//! the mel filters spectral features are read through.
 //!
 //! Kept apart from the ffmpeg and report code so every threshold here is unit-tested on synthetic
 //! buffers, with no decoding involved.
@@ -142,6 +143,48 @@ fn solve(mut m: Vec<Vec<f64>>) -> Option<Vec<f64>> {
         }
     }
     Some((0..k).map(|i| m[i][k] / m[i][i]).collect())
+}
+
+/// Hz on Kaldi's mel scale.
+fn mel(f: f32) -> f32 {
+    1127.0 * (1.0 + f / 700.0).ln()
+}
+
+/// Triangular mel filters from `low` Hz to Nyquist over an `n_fft` power spectrum at `rate`: per
+/// filter, its first FFT bin and its weights from there. The speakers' features (`diarize::fbank`)
+/// and "find all like this" (`like::mel`) take different bands over the same scale.
+pub(crate) fn mel_banks(bins: usize, n_fft: usize, rate: f32, low: f32) -> Vec<(usize, Vec<f32>)> {
+    let (lo, hi) = (mel(low), mel(rate / 2.0));
+    let delta = (hi - lo) / (bins + 1) as f32;
+    let fft_bins = n_fft / 2;
+    (0..bins)
+        .map(|b| {
+            let (l, c, r) = (
+                lo + b as f32 * delta,
+                lo + (b + 1) as f32 * delta,
+                lo + (b + 2) as f32 * delta,
+            );
+            let mut first = None;
+            let mut w = Vec::new();
+            for k in 0..fft_bins {
+                let m = mel(k as f32 * rate / n_fft as f32);
+                let v = if m > l && m < c {
+                    (m - l) / (c - l)
+                } else if m >= c && m < r {
+                    (r - m) / (r - c)
+                } else {
+                    0.0
+                };
+                if v > 0.0 {
+                    first.get_or_insert(k);
+                    w.push(v);
+                } else if first.is_some() {
+                    break;
+                }
+            }
+            (first.unwrap_or(0), w)
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -30,6 +30,8 @@ pub enum Error {
     Output(String),
     /// The user's config file is broken, or named and missing ([`crate::config`]).
     Config(String),
+    /// A "find all like this" search that cannot run: no example, a silent one, a silent track (7b).
+    Like(String),
     Io(std::io::Error),
     Json(serde_json::Error),
 }
@@ -50,7 +52,7 @@ impl fmt::Display for Error {
             Error::Edit(msg) => write!(f, "{msg}"),
             Error::Render(msg) => write!(f, "render: {msg}"),
             Error::Output(msg) => write!(f, "{msg}"),
-            Error::Config(msg) => write!(f, "{msg}"),
+            Error::Config(msg) | Error::Like(msg) => write!(f, "{msg}"),
             Error::Io(e) => write!(f, "{e}"),
             Error::Json(e) => write!(f, "{e}"),
         }

@@ -106,6 +106,7 @@ fn marker(at: f64, source: Source, text: &str) -> Marker {
         at,
         source,
         cut: (source == Source::Voice).then_some((at, at + 0.6)),
+        span: None,
         text: text.into(),
     }
 }

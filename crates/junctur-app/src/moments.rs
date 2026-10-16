@@ -1,7 +1,8 @@
 //! Moments in the app (phase 7a, a prototype): what the Moments panel and lane show of a recording's
-//! voice and hotkey markers ([`junctur_core::moments`]), and the user's Accept, Reject and Undo turned
-//! into edits of the list in play. A module because the view gathers from four files (the transcript,
-//! the markers file, the edit list and the answers) and the answers edit through the player.
+//! voice and hotkey markers ([`junctur_core::moments`]) and of the like-this matches sent to it
+//! (7b), and the user's Accept, Reject and Undo turned into edits of the list in play. A module
+//! because the view gathers from five files (the transcript, the markers file, the like file, the
+//! edit list and the answers) and the answers edit through the player.
 
 use std::path::{Path, PathBuf};
 
@@ -91,6 +92,10 @@ fn gather(p: &Project) -> Result<(Vec<Moment>, moments::Answers, MomentsView), S
             Err(e) => v.markers_error = Some(e.to_string()),
         }
     }
+    // Matches sent from the Like this tab (7b); a like file that does not read sends none.
+    if let Ok(l) = junctur_core::like::load(&p.dir) {
+        markers.extend(l.markers());
+    }
     let answers = moments::load_answers(&p.dir).map_err(|e| e.to_string())?;
     Ok((moments::moments(markers, duration), answers, v))
 }
@@ -176,22 +181,29 @@ pub fn answer(
             moments::accept(&waiting, &all, now, &mut answers)
         }
     };
-    if !edits.is_empty() {
-        let state = core.edit_state();
-        let fps = state.fps.ok_or("the frame rate is not known")?;
-        let total = state.total_frames;
-        let frames: Vec<(u64, u64, bool)> = edits
-            .iter()
-            .map(|&(a, b, keep)| {
-                let a = frames_floor(a, fps.num, fps.den).min(total);
-                let b = frames_ceil(b, fps.num, fps.den).min(total);
-                (a, b, keep)
-            })
-            .filter(|(a, b, _)| b > a)
-            .collect();
-        core.edit_frames_all(file, &frames)?;
-    }
+    apply(core, file, &edits)?;
     moments::save_answers(&p.dir, &answers).map_err(|e| e.to_string())
+}
+
+/// Makes `edits` (source seconds `start, end, keep`, in order) to the list in play as one undo
+/// step, on the frame grid; nothing for none. Shared with 7b's like-this edits.
+pub fn apply(core: &Core, file: Option<&str>, edits: &[(f64, f64, bool)]) -> Result<(), String> {
+    if edits.is_empty() {
+        return Ok(());
+    }
+    let state = core.edit_state();
+    let fps = state.fps.ok_or("the frame rate is not known")?;
+    let total = state.total_frames;
+    let frames: Vec<(u64, u64, bool)> = edits
+        .iter()
+        .map(|&(a, b, keep)| {
+            let a = frames_floor(a, fps.num, fps.den).min(total);
+            let b = frames_ceil(b, fps.num, fps.den).min(total);
+            (a, b, keep)
+        })
+        .filter(|(a, b, _)| b > a)
+        .collect();
+    core.edit_frames_all(file, &frames)
 }
 
 #[cfg(test)]

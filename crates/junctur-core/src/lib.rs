@@ -13,6 +13,7 @@ pub mod hash;
 pub mod hidden;
 pub mod keep;
 pub mod labels;
+pub mod like;
 pub mod models;
 pub mod moments;
 pub mod output;

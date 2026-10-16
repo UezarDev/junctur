@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::edit::Range;
+use crate::edit::{kept_in, Range};
 use crate::text::folded;
 use crate::transcribe::Word;
 use crate::Result;
@@ -47,6 +47,8 @@ pub const MARKERS: &str = "markers.txt";
 pub enum Source {
     Voice,
     Hotkey,
+    /// A match of "find all like this" sent to the list (7b).
+    Like,
 }
 
 /// One marker: when it was set and, for a phrase, the seconds the phrase is said in (cut once the
@@ -58,6 +60,9 @@ pub struct Marker {
     pub cut: Option<(f64, f64)>,
     /// What the phrase was heard as, or the text after a timestamp.
     pub text: String,
+    /// The clip's own seconds, when the marker brings them (7b's "clip each"): such a moment is that
+    /// span, never merged, instead of the half minute before it.
+    pub span: Option<(f64, f64)>,
 }
 
 /// A proposed clip.
@@ -118,6 +123,7 @@ pub fn voice_markers(words: &[(usize, &Word)]) -> Vec<Marker> {
                 source: Source::Voice,
                 cut: Some((ms(first.start), ms(last.end.max(first.start)))),
                 text,
+                span: None,
             });
             k += p.len();
         }
@@ -178,6 +184,7 @@ pub fn hotkey_markers(text: &str) -> (Vec<Marker>, usize) {
                 text: rest
                     .trim_matches(|c: char| c.is_whitespace() || c == ',')
                     .into(),
+                span: None,
             }),
             None => bad += 1,
         }
@@ -217,11 +224,27 @@ fn seconds(s: &str) -> Option<f64> {
 
 /// The moments of `markers` in a recording `duration` long: each a clip of [`BEFORE_S`] up to its
 /// marker, markers closer than [`MERGE_S`] one moment (its clip up to the last of them, every phrase
-/// cut), in time order. A marker at 0 s, with nothing before it, makes none.
+/// cut), in time order. A marker at 0 s, with nothing before it, makes none. A marker with its own
+/// [`Marker::span`] is that span, named by its start.
 pub fn moments(mut markers: Vec<Marker>, duration: f64) -> Vec<Moment> {
     markers.sort_by(|a, b| a.at.total_cmp(&b.at));
     let mut out: Vec<Moment> = Vec::new();
+    let mut spans: Vec<Moment> = Vec::new();
     for m in markers {
+        if let Some((a, b)) = m.span {
+            let (a, b) = (a.max(0.0), b.min(duration.max(0.0)));
+            if b - a > 0.0 {
+                spans.push(Moment {
+                    at: ms(a),
+                    start: ms(a),
+                    end: ms(b),
+                    cuts: Vec::new(),
+                    source: m.source,
+                    label: m.text.clone(),
+                });
+            }
+            continue;
+        }
         let at = m.at.clamp(0.0, duration.max(0.0));
         let cuts: Vec<(f64, f64)> = m.cut.into_iter().collect();
         // A moment's end is its latest marker.
@@ -237,7 +260,7 @@ pub fn moments(mut markers: Vec<Marker>, duration: f64) -> Vec<Moment> {
         let label = match (m.source, m.text.is_empty()) {
             (Source::Voice, _) => format!("\u{201c}{}\u{201d}", m.text),
             (Source::Hotkey, true) => "Hotkey marker".into(),
-            (Source::Hotkey, false) => m.text.clone(),
+            (Source::Hotkey, false) | (Source::Like, _) => m.text.clone(),
         };
         out.push(Moment {
             at: ms(at),
@@ -248,6 +271,8 @@ pub fn moments(mut markers: Vec<Marker>, duration: f64) -> Vec<Moment> {
             label,
         });
     }
+    out.extend(spans);
+    out.sort_by(|a, b| a.start.total_cmp(&b.start));
     out
 }
 
@@ -322,15 +347,7 @@ pub fn accept(
     let mut edits = Vec::new();
     for m in take {
         let (a, b) = m.hull();
-        let from = now.partition_point(|r| r.end <= a);
-        let before = now[from..]
-            .iter()
-            .take_while(|r| r.start < b)
-            .map(|r| Range {
-                start: r.start.max(a),
-                end: r.end.min(b),
-            })
-            .collect();
+        let before = kept_in(now, a, b);
         answers.set(Answer {
             at: m.at,
             how: How::Accepted,

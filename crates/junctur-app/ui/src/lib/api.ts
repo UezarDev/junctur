@@ -371,7 +371,7 @@ export interface Moment {
   end: number;
   /** The phrases said in it, cut when it is accepted. */
   cuts: [number, number][];
-  source: "voice" | "hotkey";
+  source: "voice" | "hotkey" | "like";
   label: string;
   state: "suggested" | "accepted" | "rejected";
 }
@@ -389,6 +389,73 @@ export interface MomentsView {
 }
 
 export type MomentAction = "accept" | "reject" | "undo" | "acceptAll";
+
+/** A marked example to find more of (junctur-core like::Example; 7b): `point` is the click, or a
+ * dragged span's start, and where each match's point falls. */
+export interface LikeExample {
+  start: number;
+  end: number;
+  point: number;
+  /** false: a "not this". */
+  positive: boolean;
+}
+
+/** A moment that sounds like the examples. */
+export interface LikeMatch {
+  start: number;
+  end: number;
+  point: number;
+  score: number;
+}
+
+export type LikeKind = "keepAround" | "cutEach";
+
+export interface LikeProposal {
+  kind: LikeKind;
+  range: [number, number];
+  spans: [number, number][];
+  matches: number;
+}
+
+export interface LikeApplied extends LikeProposal {
+  id: number;
+}
+
+export interface LikeSent {
+  id: number;
+  kind: "mark" | "clip";
+  points: number[];
+}
+
+/** What the page owns of a search, saved as it changes. */
+export interface LikeSettings {
+  track: number | null;
+  examples: LikeExample[];
+  range: [number, number] | null;
+  threshold: number;
+  before: number;
+  after: number;
+  confirmed: number[];
+}
+
+/** A recording's like-this search (src/like.rs; 7b). */
+export interface LikeView extends LikeSettings {
+  matches: LikeMatch[];
+  searched: { track: number; range: [number, number] | null; examples: number; seconds: number; built: boolean; capped: boolean } | null;
+  proposal: LikeProposal | null;
+  applied: LikeApplied[];
+  sent: LikeSent[];
+  /** The track a search reads now (the pick, else the game track). */
+  effectiveTrack: number;
+  gameTrack: number | null;
+  tracks: number;
+  duration: number;
+  /** Tracks whose sound was read before: a search on them starts at once. */
+  ready: number[];
+}
+
+export type LikeAct = "keepAround" | "cutEach" | "mark" | "clip";
+export type LikeAnswer = "accept" | "discard" | "undo" | "takeBack";
 
 /** One speaker's card in the roll call (src/rollcall.rs; 7a). */
 export interface RollCard {
@@ -816,6 +883,17 @@ export const momentsView = (path: string) => invoke<MomentsView>("moments_view",
 /** Accepts, rejects or undoes the moment marked at `at`, or accepts every waiting one. */
 export const momentAnswer = (action: MomentAction, at?: number) =>
   invoke<void>("moment_answer", { action, at: at ?? null });
+/** The like-this search of `path`. */
+export const likeView = (path: string) => invoke<LikeView>("like_view", { path });
+/** Saves the page's examples and settings for `path`. */
+export const likeSet = (path: string, settings: LikeSettings) => invoke<LikeView>("like_set", { path, settings });
+/** Searches `path` with its saved examples. */
+export const likeSearch = (path: string) => invoke<LikeView>("like_search", { path });
+/** Proposes an edit over every shown match, or sends them to the Moments list. */
+export const likeAct = (path: string, act: LikeAct) => invoke<LikeView>("like_act", { path, act });
+/** Accepts or discards the proposal, undoes an accepted one or takes a sent batch back. */
+export const likeAnswer = (answer: LikeAnswer, id?: number) =>
+  invoke<LikeView>("like_answer", { answer, id: id ?? null });
 /** The speaker roll call of `path`. */
 export const rollCall = (path: string) => invoke<RollCallView>("roll_call", { path });
 /** Marks `path`'s roll call shown: it does not open by itself again. */

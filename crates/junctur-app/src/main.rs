@@ -9,6 +9,7 @@ mod commands;
 mod cuts;
 mod editor;
 mod lane;
+mod like;
 mod lock;
 mod mixer;
 mod moments;
@@ -119,6 +120,11 @@ fn main() {
             commands::keep_answer,
             commands::moments_view,
             commands::moment_answer,
+            commands::like_view,
+            commands::like_set,
+            commands::like_search,
+            commands::like_act,
+            commands::like_answer,
             commands::roll_call,
             commands::roll_call_seen,
             commands::roll_call_assign,

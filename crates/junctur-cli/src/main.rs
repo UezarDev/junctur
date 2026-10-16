@@ -5,6 +5,7 @@ mod args;
 mod commands;
 mod flags;
 mod judge;
+mod like;
 mod project;
 mod voices;
 
@@ -19,6 +20,8 @@ const USAGE: &str = "usage:
                          [--no-speakers] [--labels] [--keep <prompt>]
                          [--model auto|large-v3-turbo|large-v3|large-v3-q5_0] [cut flags]
   junctur judge <file> [--prompt <prompt>] [--project <dir>] [--cache-dir <dir>]
+  junctur like <file> --at <s>[,<s>...] [--not <s>[,...]] [--len <s>] [--track <n>]
+                     [--threshold <x>] [--json <out.json>] [--project <dir>] [--cache-dir <dir>]
   junctur status <file> [--project <dir>] [--cache-dir <dir>]
   junctur cut <file> [--project <dir>] [--cache-dir <dir>] [cut flags]
   junctur export <file> [--fcpxml <out.fcpxml>] [--srt <out.srt>] [--project <dir>]
@@ -50,6 +53,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         Some("separate") => commands::separate(a),
         Some("analyze") => project::analyze(a),
         Some("judge") => judge::judge(a),
+        Some("like") => like::like(a),
         Some("status") => project::status(a),
         Some("cut") => project::cut(a),
         Some("export") => project::export(a),

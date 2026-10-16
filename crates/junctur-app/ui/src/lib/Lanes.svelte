@@ -12,6 +12,7 @@
   import { clampEdge, dragged, edgeNear, type Edge } from "./nudge";
   import * as sg from "./suggestions";
   import * as mo from "./moments";
+  import * as lk from "./like";
   import { clock, timecode, toFrame, toSeconds } from "./time";
   import * as tr from "./tracks";
 
@@ -32,6 +33,9 @@
     momentsRow = 0,
     moments = [],
     onMoment,
+    likeRow = 0,
+    like = null,
+    onLike,
     head,
     thin,
     wavesVersion,
@@ -67,6 +71,12 @@
     moments?: api.Moment[];
     /** A moment clicked on the lane. */
     onMoment?: (m: api.Moment) => void;
+    /** The Like this lane's height; 0 when there is none. */
+    likeRow?: number;
+    /** The like-this search (7b), its matches drawn on the Like this lane. */
+    like?: api.LikeView | null;
+    /** A match clicked on the lane. */
+    onLike?: (m: api.LikeMatch) => void;
     head: number;
     /** Portrait's thin lanes: no second line in the headers. */
     thin: boolean;
@@ -94,7 +104,8 @@
   const duration = $derived(player?.duration ?? 0);
   const end = $derived(view.start + view.len);
   // What the lanes need: below the height left they scroll (headers and bodies together).
-  const content = $derived(RULER + speakersRow + labelsRow + keepRow + momentsRow + tracks.length * row);
+  const content = $derived(RULER + speakersRow + labelsRow + keepRow + momentsRow + likeRow + tracks.length * row);
+  const likeShown = $derived(likeRow > 0 ? lk.shown(like) : []);
   const marked = $derived(momentsRow > 0 ? mo.shown(moments) : []);
   const pieces = $derived(labelsRow > 0 ? (labels?.pieces ?? []) : []);
 
@@ -144,6 +155,15 @@
     const y = clientY - r.top - RULER - speakersRow - labelsRow - keepRow;
     if (y < 0 || y >= momentsRow) return null;
     return mo.momentAt(marked, timeAt(clientX));
+  }
+  // The like-this match under the pointer on its lane: within 3 px, since a match is a thin mark.
+  let hoverLike = $state.raw<api.LikeMatch | null>(null);
+  function likeAt(clientX: number, clientY: number): api.LikeMatch | null {
+    if (likeRow <= 0 || !likeShown.length || width <= 0) return null;
+    const r = body.getBoundingClientRect();
+    const y = clientY - r.top - RULER - speakersRow - labelsRow - keepRow - momentsRow;
+    if (y < 0 || y >= likeRow) return null;
+    return lk.matchAt(likeShown, timeAt(clientX), (3 * view.len) / width);
   }
   // A menu for an item that has since gone (answered, judged again) would act on nothing.
   $effect(() => {
@@ -311,6 +331,14 @@
       ctx.fillRect(0, y - 1, width, 1);
     }
 
+    // Like this lane: every match of the last search the slider shows.
+    if (likeRow > 0 && like) {
+      lk.paint(ctx, like, likeShown, x, y, likeRow, width, { start: view.start, end });
+      y += likeRow;
+      ctx.fillStyle = line;
+      ctx.fillRect(0, y - 1, width, 1);
+    }
+
     // Track lanes: each waveform mirrored about the lane's middle, in the track's colour, dimmer
     // when it is not heard.
     const cols = peaks?.columns ?? 0;
@@ -406,6 +434,9 @@
     void keepItems;
     void momentsRow;
     void marked;
+    void likeRow;
+    void likeShown;
+    void like;
     paint();
   });
 
@@ -611,6 +642,12 @@
       onMoment(m);
       return;
     }
+    const lm = likeAt(e.clientX, e.clientY);
+    if (lm && onLike) {
+      picked = null;
+      onLike(lm);
+      return;
+    }
     picked = null;
     body.setPointerCapture(e.pointerId);
     const g = edgeAt(e.clientX, e.clientY, e.altKey);
@@ -637,6 +674,8 @@
       if (it !== hoverItem) hoverItem = it;
       const m = momentAt(e.clientX, e.clientY);
       if (m !== hoverMoment) hoverMoment = m;
+      const lm = likeAt(e.clientX, e.clientY);
+      if (lm !== hoverLike) hoverLike = lm;
       return;
     }
     if (Math.abs(e.clientX - down.x) > CLICK) down.moved = true;
@@ -747,6 +786,15 @@
         <span class="nm">Moments</span>
       </div>
     {/if}
+    {#if likeRow > 0}
+      <div
+        class="h labels"
+        style:height="{likeRow}px"
+        title="Find all like this: every moment that sounds like your examples (outlined), brighter the closer it sounds. Click one to hear it; tick, reject or act on them in the Like this tab."
+      >
+        <span class="nm">Like this</span>
+      </div>
+    {/if}
     {#each tracks as t (t.index)}
       <div class="h track" style:height="{row}px" title={tr.title(t)}>
         <span class="dot" style:background={tr.colour(t, speakers)}></span>
@@ -777,6 +825,7 @@
       hoverPiece = null;
       hoverItem = null;
       hoverMoment = null;
+      hoverLike = null;
     }}
     title={hoverPiece
       ? describe(hoverPiece)
@@ -784,7 +833,9 @@
         ? sg.describe(hoverItem)
         : hoverMoment
           ? mo.describe(hoverMoment)
-          : undefined}
+          : hoverLike
+            ? lk.describe(hoverLike)
+            : undefined}
     onwheel={wheel}
     class:grabbing={!!grab}
     role="slider"

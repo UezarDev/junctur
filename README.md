@@ -55,6 +55,8 @@ junctur analyze <file> [--project <dir>] [--cpu] [--force] [--no-transcript] [--
                        [--labels] [--keep <prompt>] [--model auto|large-v3-turbo|large-v3|large-v3-q5_0]
                        [cut flags]
 junctur judge <file> [--prompt <prompt>] [--project <dir>]
+junctur like <file> --at <s>[,<s>...] [--not <s>[,...]] [--len <s>] [--track <n>]
+                   [--threshold <x>] [--json <out.json>] [--project <dir>]   # prototype, 7b
 junctur status <file> [--project <dir>]
 junctur cut <file> [--project <dir>] [cut flags]
 junctur export <file> [--fcpxml <out.fcpxml>] [--srt <out.srt>] [--project <dir>]
@@ -282,6 +284,20 @@ On the `prototype/directions-1-2-3` branch only, to try out; not a promise of th
   near): play one and pick who it is, or a new person. Done renames everywhere; it opens again from the
   Moments tab's Roll call button. Who-is-this answers edit the list's turns, so hearing the speakers
   again or remembering a voice afterwards relabels over them.
+- **Find all like this.** Point at a sound instead of describing it. In the **Like this** tab, add an
+  example: the selection on the lanes (up to 3 s) or half a second at the playhead; then **Find all like
+  this**. Junctur compares how the sound moves across 64 frequency bands every 10 ms with every moment of
+  one track (the game track by default, else the mix; a picker to choose), whatever its loudness, and a
+  Like this lane shows the matches, brighter the closer they sound. The **How similar** slider filters
+  them live; click one to hear it, ✓ keeps it shown, ✗ makes it a "not this" and searches again. Then do
+  one thing with all of them: **Keep around each, cut the rest** (by default 0.1 s before and 0.15 s
+  after each, the rest of the searched range cut), **Cut each**, **Mark each** or **Clip each** (sent to
+  the Moments tab as moments to accept). Keeps and cuts are proposals: nothing changes until you
+  Accept, and Undo puts back what the list had. "Only in the selection" searches a longer selection
+  instead of the whole recording. The first search on a track reads its sound (a few seconds for two
+  hours, kept as `like.<track>.mel` in the project folder, about 40 MB for two hours); later ones take
+  a fraction of a second. Examples, matches and what you did are kept in the project's `like.json`.
+  `junctur like <file> --at <seconds>` does the same search from the command line.
 
 ## Models
 

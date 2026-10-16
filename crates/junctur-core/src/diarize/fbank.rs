@@ -8,6 +8,8 @@ use std::sync::Arc;
 use rustfft::num_complex::Complex32;
 use rustfft::{Fft, FftPlanner};
 
+use crate::signal::mel_banks;
+
 pub const BINS: usize = 80;
 const RATE: f32 = 16_000.0;
 const WIN: usize = 400;
@@ -19,10 +21,6 @@ pub struct Fbank {
     /// Per mel bin: first FFT bin and its weights.
     banks: Vec<(usize, Vec<f32>)>,
     fft: Arc<dyn Fft<f32>>,
-}
-
-fn mel(f: f32) -> f32 {
-    1127.0 * (1.0 + f / 700.0).ln()
 }
 
 impl Default for Fbank {
@@ -39,37 +37,7 @@ impl Fbank {
                 h.powf(0.85)
             })
             .collect();
-        let (lo, hi) = (mel(20.0), mel(RATE / 2.0));
-        let delta = (hi - lo) / (BINS + 1) as f32;
-        let fft_bins = N_FFT / 2;
-        let banks = (0..BINS)
-            .map(|b| {
-                let (l, c, r) = (
-                    lo + b as f32 * delta,
-                    lo + (b + 1) as f32 * delta,
-                    lo + (b + 2) as f32 * delta,
-                );
-                let mut first = None;
-                let mut w = Vec::new();
-                for k in 0..fft_bins {
-                    let m = mel(k as f32 * RATE / N_FFT as f32);
-                    let v = if m > l && m < c {
-                        (m - l) / (c - l)
-                    } else if m >= c && m < r {
-                        (r - m) / (r - c)
-                    } else {
-                        0.0
-                    };
-                    if v > 0.0 {
-                        first.get_or_insert(k);
-                        w.push(v);
-                    } else if first.is_some() {
-                        break;
-                    }
-                }
-                (first.unwrap_or(0), w)
-            })
-            .collect();
+        let banks = mel_banks(BINS, N_FFT, RATE, 20.0);
         Self {
             window,
             banks,

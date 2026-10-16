@@ -46,8 +46,12 @@ fn parses_steps_in_time_order() {
         vec![(3.0, Action::KeepAll)]
     );
     assert_eq!(
-        parse_steps("4:momentsall").unwrap(),
-        vec![(4.0, Action::MomentsAll)]
+        parse_steps("4:momentsall;5:like=12.5;6:likekeep").unwrap(),
+        vec![
+            (4.0, Action::MomentsAll),
+            (5.0, Action::Like(12.5)),
+            (6.0, Action::LikeKeep)
+        ]
     );
     let s = parse_steps("1:cutw=3-5;2:keepf=30-60;3:undo;4:redo").unwrap();
     assert_eq!(

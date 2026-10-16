@@ -22,6 +22,8 @@
   import SettingsDialog from "./lib/SettingsDialog.svelte";
   import ReanalyseDialog from "./lib/ReanalyseDialog.svelte";
   import MomentsPanel from "./lib/MomentsPanel.svelte";
+  import LikePanel from "./lib/LikePanel.svelte";
+  import * as tr from "./lib/tracks";
   import RollCall from "./lib/RollCall.svelte";
   import { floatAt, layout, REVIEW, TITLE, TOOLS } from "./lib/layout";
   import type { MenuId } from "./lib/menus";
@@ -45,6 +47,11 @@
   // The open recording's marked moments (the Moments tab and lane, 7a); the one last clicked on the lane.
   let moments = $state.raw<api.MomentsView | null>(null);
   let momentFocus = $state<number | null>(null);
+  // The open recording's "find all like this" search (the Like this tab and lane, 7b); the match
+  // last clicked on the lane, and whether a search is running.
+  let like = $state.raw<api.LikeView | null>(null);
+  let likeFocus = $state<number | null>(null);
+  let likeSearching = $state(false);
   // The speaker roll call over the editor (7a); it opens by itself once per recording.
   let rollCallOpen = $state(false);
   let rollCallAsked = "";
@@ -87,7 +94,7 @@
   let panelOpen = $state(true);
   // Which side panel shows. The transcript stays mounted while hidden: laying out a 30 h
   // transcript again on every switch would cost a noticeable moment.
-  let tab = $state<"transcript" | "captions" | "properties" | "moments">("transcript");
+  let tab = $state<"transcript" | "captions" | "properties" | "moments" | "like">("transcript");
   // The talking overlay: off by default, a viewer's preference kept in this page's storage.
   const OVERLAY_KEY = "junctur.talkingOverlay";
   let overlay = $state(readOverlay());
@@ -125,6 +132,8 @@
   const hasLabels = $derived((labels?.pieces.length ?? 0) > 0);
   const hasKeep = $derived(!!keep?.judgedPrompt);
   const hasMoments = $derived((moments?.moments ?? []).some((m) => m.state !== "rejected"));
+  const hasLike = $derived(!!like && (like.examples.length > 0 || like.matches.length > 0));
+  const likeTracks = $derived((mixer?.tracks ?? []).map((t) => ({ index: t.index, name: tr.name(t, player?.audioTracks ?? []) })));
   const L = $derived(
     layout({
       width: windowWidth,
@@ -136,6 +145,7 @@
       labels: hasLabels,
       keep: hasKeep,
       moments: hasMoments,
+      like: hasLike,
     }),
   );
   // The layout's shares are of the window below the title bar; mpv's are of the whole window, the
@@ -379,6 +389,8 @@
     // The last recording's moments would answer for this one's until its own are read.
     moments = null;
     momentFocus = null;
+    like = null;
+    likeFocus = null;
     analysis = o.analysis;
     // Progress sent while the open was on its way was dropped (no `opened` yet to match it):
     // read where the run is now. A run that already ended needs nothing more, as the
@@ -393,6 +405,7 @@
     void loadLabels();
     void loadKeep();
     void loadMoments();
+    void loadLike();
     const w = await api.wavesState();
     if (stale()) return;
     if (w && w.file === o.file) {
@@ -510,6 +523,96 @@
     if (!panelOpen) togglePanel();
     void jumpTo(m);
   }
+  // The like-this search of the open recording; the latest ask's answer only.
+  let likeAsk = 0;
+  async function loadLike() {
+    const o = opened;
+    const ask = ++likeAsk;
+    if (!o) {
+      like = null;
+      return;
+    }
+    try {
+      const v = await api.likeView(o.file);
+      if (ask !== likeAsk || opened?.file !== o.file) return;
+      like = v;
+    } catch (e) {
+      void api.uiLog(`like this could not be read: ${e}`);
+      failure = `The Like this search could not be read: ${e}`;
+    }
+  }
+  // The page's settings show at once (the lane and slider move live) and are saved once they
+  // settle; a search, act or answer saves what is waiting first.
+  let likeSave: { file: string; s: api.LikeSettings } | null = null;
+  let likeTimer = 0;
+  function likeSettings(s: api.LikeSettings) {
+    const o = opened;
+    if (!o || !like) return;
+    likeAsk++;
+    // Another track or range: the matches are another search's (the engine drops them too).
+    const other = s.track !== like.track || JSON.stringify(s.range) !== JSON.stringify(like.range);
+    const gone = other ? { matches: [], searched: null, proposal: null } : {};
+    like = { ...like, ...s, ...gone, effectiveTrack: s.track ?? like.gameTrack ?? 0 };
+    likeSave = { file: o.file, s };
+    clearTimeout(likeTimer);
+    likeTimer = window.setTimeout(() => void flushLike(), 400);
+  }
+  async function flushLike() {
+    clearTimeout(likeTimer);
+    const w = likeSave;
+    likeSave = null;
+    if (!w) return;
+    try {
+      const v = await api.likeSet(w.file, w.s);
+      // Only when nothing newer is waiting: the page's own copy is ahead.
+      if (!likeSave && opened?.file === w.file) like = v;
+    } catch (e) {
+      failure = String(e);
+    }
+  }
+  async function likeRun(f: (file: string) => Promise<api.LikeView>) {
+    const o = opened;
+    if (!o) return;
+    await flushLike();
+    likeAsk++;
+    try {
+      const v = await f(o.file);
+      if (opened?.file !== o.file) return;
+      // Settings changed while it ran are the page's newest: they stay over the answer's (their
+      // own timer saves them).
+      const w = likeSave;
+      like = w ? { ...v, ...w.s, effectiveTrack: w.s.track ?? v.gameTrack ?? 0 } : v;
+    } catch (e) {
+      failure = String(e);
+    }
+  }
+  async function likeSearch() {
+    likeSearching = true;
+    try {
+      await likeRun((file) => api.likeSearch(file));
+      if (like) void api.uiLog(`like this: ${like.matches.length} found in ${like.searched?.seconds ?? "?"} s`);
+    } finally {
+      likeSearching = false;
+    }
+  }
+  const likeAct = (act: api.LikeAct) => likeRun((file) => api.likeAct(file, act)).then(() => void loadMoments());
+  const likeAnswer = (answer: api.LikeAnswer, id?: number) =>
+    likeRun(() => api.likeAnswer(answer, id)).then(() => void loadMoments());
+  // Plays a match or an example with a little either side.
+  async function likePlay(span: { start: number; end: number }) {
+    try {
+      await api.playBetween(Math.max(0, span.start - 0.75), span.end + 0.75);
+    } catch (e) {
+      failure = String(e);
+    }
+  }
+  function likeClicked(m: api.LikeMatch) {
+    likeFocus = m.point;
+    tab = "like";
+    if (!panelOpen) togglePanel();
+    void likePlay(m);
+  }
+
   // The roll call opens by itself once, the first time a recording's list is editable with speakers
   // in it, unless it was shown for that recording before.
   $effect(() => {
@@ -570,6 +673,7 @@
     // The run judged at its end (smart keep on, or a prompt): the suggestions are new.
     if (busy(was) && !busy(p)) void loadKeep();
     if (busy(was) && !busy(p)) void loadMoments();
+    if (busy(was) && !busy(p)) void loadLike();
     if (busy(was) && !busy(p)) {
       // The run ended: what the panel said was out of date was its business; the transcript may
       // be new (the edit list comes in through the watch). One that grew piece by piece is the
@@ -676,6 +780,7 @@
     labels = null;
     keep = null;
     moments = null;
+    like = null;
     rollCallOpen = false;
     words = null;
     selection = null;
@@ -919,6 +1024,9 @@
           momentsRow={L.momentsRow}
           moments={moments?.moments ?? []}
           onMoment={momentClicked}
+          likeRow={L.likeRow}
+          {like}
+          onLike={likeClicked}
           head={L.head}
           thin={L.portrait}
           {wavesVersion}
@@ -965,6 +1073,7 @@
         <button role="tab" aria-selected={tab === "moments"} class:on={tab === "moments"} onclick={() => (tab = "moments")}
           >Moments{moments?.moments.some((m) => m.state === "suggested") ? ` (${moments.moments.filter((m) => m.state === "suggested").length})` : ""}</button
         >
+        <button role="tab" aria-selected={tab === "like"} class:on={tab === "like"} onclick={() => (tab = "like")}>Like this</button>
       </div>
       <div class="pane" style:display={tab === "transcript" ? "block" : "none"}>
         <TranscriptPanel
@@ -996,6 +1105,23 @@
             onAnswer={momentAnswer}
             onJump={(m) => void jumpTo(m)}
             onRollCall={() => (rollCallOpen = true)}
+          />
+        </div>
+      {:else if tab === "like"}
+        <div class="pane">
+          <LikePanel
+            view={like}
+            editable={!!edit?.editable}
+            {spans}
+            playhead={() => player?.position ?? null}
+            tracks={likeTracks}
+            focus={likeFocus}
+            searching={likeSearching}
+            onSettings={likeSettings}
+            onSearch={likeSearch}
+            onAct={likeAct}
+            onAnswer={likeAnswer}
+            onPlay={(s) => void likePlay(s)}
           />
         </div>
       {:else if tab === "captions"}

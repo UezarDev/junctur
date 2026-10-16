@@ -44,6 +44,20 @@ pub fn keep_span(keep: &[Range], a: f64, b: f64, join: f64) -> Vec<Range> {
     normalize(out, join)
 }
 
+/// What sorted `keep` keeps of `[a, b]`, clipped to it: what an accepted suggestion stores so its
+/// undo puts back exactly that (7a's moments, 7b's like-this edits).
+pub fn kept_in(keep: &[Range], a: f64, b: f64) -> Vec<Range> {
+    let from = keep.partition_point(|r| r.end <= a);
+    keep[from..]
+        .iter()
+        .take_while(|r| r.start < b)
+        .map(|r| Range {
+            start: r.start.max(a),
+            end: r.end.min(b),
+        })
+        .collect()
+}
+
 /// `keep` with what it keeps inside `[a, b]` replaced by what `fresh` keeps there (a re-cut of only
 /// that stretch): `keep` outside it as it was, `fresh` clipped to it.
 pub fn replace_span(keep: &[Range], fresh: &[Range], a: f64, b: f64) -> Vec<Range> {
