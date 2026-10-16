@@ -69,6 +69,53 @@ impl Core {
         Ok(line)
     }
 
+    /// Remembers `name`'s voice from source seconds `stretches` (the roll call's "Remember this
+    /// voice", 7a) and labels the speakers again; returns a line for the user.
+    pub fn enroll_stretches(
+        &self,
+        file: Option<&str>,
+        stretches: &[(f64, f64)],
+        name: &str,
+    ) -> Result<String, String> {
+        let file = file.ok_or("no recording is open")?;
+        if stretches.is_empty() {
+            return Err("this speaker has no stretch only they talk in".into());
+        }
+        let (found, line) = voices::enroll(file, name, stretches)?;
+        self.respeak(Some(file), &found)?;
+        Ok(line)
+    }
+
+    /// Gives source seconds `a..b` to speaker `id`, or to a new speaker called `new` (the roll call's
+    /// "who is this", 7a), and saves; like a rename, not an undo step.
+    pub fn assign_stretch(
+        &self,
+        file: Option<&str>,
+        (a, b): (f64, f64),
+        id: Option<u32>,
+        new: Option<&str>,
+    ) -> Result<(), String> {
+        self.change(file, |ed, list, _| {
+            let mut s = list.speakers.clone();
+            let id = match (id, new) {
+                (_, Some(name)) => {
+                    let name = junctur_core::edit::check_name(name)?;
+                    let same = s.names.iter().find(|n| n.name.eq_ignore_ascii_case(name));
+                    match same {
+                        Some(n) => n.id,
+                        None => s.add(name),
+                    }
+                }
+                (Some(id), None) => id,
+                (None, None) => return Err("say who it is".into()),
+            };
+            if !s.assign(a, b, id) {
+                return Err(format!("there is no speaker {id}, or the stretch is empty"));
+            }
+            ed.respeak(list, s)
+        })
+    }
+
     /// Hears the open recording's speakers again from the audio, cut at the seconds pinned to
     /// people. Slow. The speakers go into the list in play only if it is still the heard
     /// recording's (else its list on disk), the re-hearing guard held so no enrollment slips in.

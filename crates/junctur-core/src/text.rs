@@ -35,6 +35,31 @@ pub fn split_bare(s: &str) -> (&str, &str, &str) {
     (&s[..a], &s[a..b], &s[b..])
 }
 
+/// `s` lowercase, its accents folded (ñ kept), anything not a letter or digit a space, one space
+/// between words and one at either end, so a phrase is matched as whole words: how smart keep's
+/// prompt and the moment markers' phrases are read.
+pub fn folded(s: &str) -> String {
+    let mut out = String::from(" ");
+    for c in s.chars().flat_map(char::to_lowercase) {
+        let c = match c {
+            'á' | 'à' | 'ä' | 'â' => 'a',
+            'é' | 'è' | 'ë' | 'ê' => 'e',
+            'í' | 'ì' | 'ï' | 'î' => 'i',
+            'ó' | 'ò' | 'ö' | 'ô' => 'o',
+            'ú' | 'ù' | 'ü' | 'û' => 'u',
+            c if c.is_alphanumeric() => c,
+            _ => ' ',
+        };
+        if c != ' ' || !out.ends_with(' ') {
+            out.push(c);
+        }
+    }
+    if !out.ends_with(' ') {
+        out.push(' ');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

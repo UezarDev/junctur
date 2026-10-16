@@ -183,6 +183,55 @@ impl Speakers {
             .map(|n| n.color.as_str())
     }
 
+    /// Gives `a..b` to speaker `id`: everyone else's turns there are cut out, `id`'s own are joined
+    /// into it (the roll call's "who is this", 7a). False when there is no such speaker or the span is
+    /// empty.
+    pub fn assign(&mut self, a: f64, b: f64, id: u32) -> bool {
+        // To the millisecond, as the file writes turns ([`Speakers::found`]).
+        let (a, b) = ((a * 1000.0).round() / 1000.0, (b * 1000.0).round() / 1000.0);
+        if b <= a || !self.names.iter().any(|n| n.id == id) {
+            return false;
+        }
+        let mut turns = Vec::with_capacity(self.turns.len() + 2);
+        let (mut lo, mut hi) = (a, b);
+        for t in &self.turns {
+            if t.end <= a || t.start >= b {
+                turns.push(*t);
+            } else if t.speaker == id {
+                (lo, hi) = (lo.min(t.start), hi.max(t.end));
+            } else {
+                if t.start < a {
+                    turns.push(Turn { end: a, ..*t });
+                }
+                if t.end > b {
+                    turns.push(Turn { start: b, ..*t });
+                }
+            }
+        }
+        turns.push(Turn {
+            start: lo,
+            end: hi,
+            speaker: id,
+        });
+        turns.sort_by(|x, y| x.start.total_cmp(&y.start));
+        self.turns = turns;
+        true
+    }
+
+    /// A new speaker called `name` (already checked by the caller), with the next id and a palette
+    /// colour nobody has; returns the id.
+    pub fn add(&mut self, name: &str) -> u32 {
+        let id = self.names.iter().map(|n| n.id).max().unwrap_or(0) + 1;
+        let used: Vec<String> = self.names.iter().map(|n| n.color.clone()).collect();
+        self.names.push(SpeakerName {
+            id,
+            name: name.trim().to_string(),
+            track: None,
+            color: free_color(id, &used),
+        });
+        id
+    }
+
     /// The words' labeller: build once, then ask per word ([`Labeller::of_word`]).
     pub fn labeller(&self) -> Labeller<'_> {
         let mut reach: Vec<(f64, usize)> = Vec::with_capacity(self.turns.len());

@@ -45,6 +45,10 @@ fn parses_steps_in_time_order() {
         parse_steps("3:keepall").unwrap(),
         vec![(3.0, Action::KeepAll)]
     );
+    assert_eq!(
+        parse_steps("4:momentsall").unwrap(),
+        vec![(4.0, Action::MomentsAll)]
+    );
     let s = parse_steps("1:cutw=3-5;2:keepf=30-60;3:undo;4:redo").unwrap();
     assert_eq!(
         s.iter().map(|x| x.1.clone()).collect::<Vec<_>>(),

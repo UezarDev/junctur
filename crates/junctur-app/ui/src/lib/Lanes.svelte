@@ -11,6 +11,7 @@
   import type { Talk } from "./talking";
   import { clampEdge, dragged, edgeNear, type Edge } from "./nudge";
   import * as sg from "./suggestions";
+  import * as mo from "./moments";
   import { clock, timecode, toFrame, toSeconds } from "./time";
   import * as tr from "./tracks";
 
@@ -28,6 +29,9 @@
     keepRow = 0,
     keepItems = [],
     onKeep,
+    momentsRow = 0,
+    moments = [],
+    onMoment,
     head,
     thin,
     wavesVersion,
@@ -57,6 +61,12 @@
     keepItems?: api.KeepItem[];
     /** A suggestion accepted, dismissed or undone from the lane. */
     onKeep?: (action: api.KeepAction, item: api.KeepItem) => void;
+    /** The Moments lane's height; 0 when there is none. */
+    momentsRow?: number;
+    /** The streamer's marked moments (7a), drawn on the Moments lane. */
+    moments?: api.Moment[];
+    /** A moment clicked on the lane. */
+    onMoment?: (m: api.Moment) => void;
     head: number;
     /** Portrait's thin lanes: no second line in the headers. */
     thin: boolean;
@@ -84,7 +94,8 @@
   const duration = $derived(player?.duration ?? 0);
   const end = $derived(view.start + view.len);
   // What the lanes need: below the height left they scroll (headers and bodies together).
-  const content = $derived(RULER + speakersRow + labelsRow + keepRow + tracks.length * row);
+  const content = $derived(RULER + speakersRow + labelsRow + keepRow + momentsRow + tracks.length * row);
+  const marked = $derived(momentsRow > 0 ? mo.shown(moments) : []);
   const pieces = $derived(labelsRow > 0 ? (labels?.pieces ?? []) : []);
 
   /** What hovering a labelled piece says: its likeliest label and share, and how busy it sounds. */
@@ -124,6 +135,15 @@
     const y = clientY - r.top - RULER - speakersRow - labelsRow;
     if (y < 0 || y >= keepRow) return null;
     return sg.itemAt(keepItems, timeAt(clientX));
+  }
+  // The moment under the pointer on the Moments lane, for the body's tooltip.
+  let hoverMoment = $state.raw<api.Moment | null>(null);
+  function momentAt(clientX: number, clientY: number): api.Moment | null {
+    if (momentsRow <= 0 || !marked.length) return null;
+    const r = body.getBoundingClientRect();
+    const y = clientY - r.top - RULER - speakersRow - labelsRow - keepRow;
+    if (y < 0 || y >= momentsRow) return null;
+    return mo.momentAt(marked, timeAt(clientX));
   }
   // A menu for an item that has since gone (answered, judged again) would act on nothing.
   $effect(() => {
@@ -283,6 +303,14 @@
       ctx.fillRect(0, y - 1, width, 1);
     }
 
+    // Moments lane: the half minute before each marker the streamer set.
+    if (momentsRow > 0) {
+      mo.paint(ctx, marked, x, y, momentsRow, width, { start: view.start, end });
+      y += momentsRow;
+      ctx.fillStyle = line;
+      ctx.fillRect(0, y - 1, width, 1);
+    }
+
     // Track lanes: each waveform mirrored about the lane's middle, in the track's colour, dimmer
     // when it is not heard.
     const cols = peaks?.columns ?? 0;
@@ -376,6 +404,8 @@
     void pieces;
     void keepRow;
     void keepItems;
+    void momentsRow;
+    void marked;
     paint();
   });
 
@@ -575,6 +605,12 @@
       picked = { item: it, px: Math.min(Math.max(0, e.clientX - r.left), Math.max(0, width - 170)) };
       return;
     }
+    const m = momentAt(e.clientX, e.clientY);
+    if (m && onMoment) {
+      picked = null;
+      onMoment(m);
+      return;
+    }
     picked = null;
     body.setPointerCapture(e.pointerId);
     const g = edgeAt(e.clientX, e.clientY, e.altKey);
@@ -599,6 +635,8 @@
       if (p !== hoverPiece) hoverPiece = p;
       const it = itemAt(e.clientX, e.clientY);
       if (it !== hoverItem) hoverItem = it;
+      const m = momentAt(e.clientX, e.clientY);
+      if (m !== hoverMoment) hoverMoment = m;
       return;
     }
     if (Math.abs(e.clientX - down.x) > CLICK) down.moved = true;
@@ -700,6 +738,15 @@
         <span class="nm">Suggestions</span>
       </div>
     {/if}
+    {#if momentsRow > 0}
+      <div
+        class="h labels"
+        style:height="{momentsRow}px"
+        title="Moments you marked while playing: a phrase like &quot;clip that&quot; or &quot;marca eso&quot;, or a line of a markers file. Each is the half minute before the marker. Click one to jump to it; accept or reject it in the Moments panel."
+      >
+        <span class="nm">Moments</span>
+      </div>
+    {/if}
     {#each tracks as t (t.index)}
       <div class="h track" style:height="{row}px" title={tr.title(t)}>
         <span class="dot" style:background={tr.colour(t, speakers)}></span>
@@ -729,8 +776,15 @@
       if (!drag) hover = null;
       hoverPiece = null;
       hoverItem = null;
+      hoverMoment = null;
     }}
-    title={hoverPiece ? describe(hoverPiece) : hoverItem ? sg.describe(hoverItem) : undefined}
+    title={hoverPiece
+      ? describe(hoverPiece)
+      : hoverItem
+        ? sg.describe(hoverItem)
+        : hoverMoment
+          ? mo.describe(hoverMoment)
+          : undefined}
     onwheel={wheel}
     class:grabbing={!!grab}
     role="slider"

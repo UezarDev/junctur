@@ -18,6 +18,7 @@ use crate::edit::Window;
 use crate::labels::busy;
 use crate::labels::pieces::{self, Piece};
 use crate::labels::Labels;
+use crate::text::folded as fold;
 use crate::vad::Region;
 
 /// The judge's name in `keep.json` ([`Judged::model`]).
@@ -172,30 +173,6 @@ impl Strictness {
             }
         }
     }
-}
-
-/// `s` lowercase, its accents folded (ñ kept), anything not a letter or digit a space, one space
-/// between words and one at either end, so a phrase is matched as whole words.
-fn fold(s: &str) -> String {
-    let mut out = String::from(" ");
-    for c in s.chars().flat_map(char::to_lowercase) {
-        let c = match c {
-            'á' | 'à' | 'ä' | 'â' => 'a',
-            'é' | 'è' | 'ë' | 'ê' => 'e',
-            'í' | 'ì' | 'ï' | 'î' => 'i',
-            'ó' | 'ò' | 'ö' | 'ô' => 'o',
-            'ú' | 'ù' | 'ü' | 'û' => 'u',
-            c if c.is_alphanumeric() => c,
-            _ => ' ',
-        };
-        if c != ' ' || !out.ends_with(' ') {
-            out.push(c);
-        }
-    }
-    if !out.ends_with(' ') {
-        out.push(' ');
-    }
-    out
 }
 
 /// What the rules read about a recording.

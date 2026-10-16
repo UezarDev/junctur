@@ -262,6 +262,27 @@ JSON line and exits, for scripted launch checks; it is in dev builds, and in a r
 `--features test-hooks`. The libmpv test is ignored by default:
 `cargo test -p junctur-app -- --ignored`.
 
+### Prototype: moments and the speaker roll call
+
+On the `prototype/directions-1-2-3` branch only, to try out; not a promise of the product.
+
+- **Moments.** Say "clip that", "clip this", "clip it", "cut this", "cut that", "clipea eso",
+  "clipéalo", "marca eso", "márcalo" or "corta eso" while you play, and the transcript's word times
+  mark the moment; or keep a timestamp file, `<recording name>.markers.txt` beside the recording (or
+  `markers.txt` in its project folder), one time per line (`754.2`, `12:34`, `1:02:03.250`) with an
+  optional label after it, as a hotkey or tray app would write it. Each marker proposes the 30 s before
+  it as a clip. The **Moments** tab lists them (the editor opens on it when there are moments waiting):
+  the time jumps there and plays, **Accept** keeps the clip and cuts the phrase you said (one undo
+  step), **Reject** leaves the list alone, **Undo** puts an accepted one back. A Moments lane under the
+  tracks shows them too; click one to jump to it. Answers are kept in the project's `moments.json`.
+- **Speaker roll call.** The first time a recording opens with speakers, a full-window screen shows one
+  card per voice: play a few seconds of it (on its own track), type the name you use for them, and tick
+  "Remember this voice" to have them named in later recordings too. "Did we miss anyone?" lists the
+  stretches the speakers are least sure of (short turns between someone else, words nobody's turn is
+  near): play one and pick who it is, or a new person. Done renames everywhere; it opens again from the
+  Moments tab's Roll call button. Who-is-this answers edit the list's turns, so hearing the speakers
+  again or remembering a voice afterwards relabels over them.
+
 ## Models
 
 Downloaded on first use into `<cache>/models/`, checked against pinned SHA-256 digests, never committed:

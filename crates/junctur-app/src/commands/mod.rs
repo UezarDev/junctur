@@ -5,6 +5,7 @@
 mod captions;
 mod edit;
 mod keep;
+mod moments;
 mod playback;
 mod prefs;
 mod recording;
@@ -15,6 +16,7 @@ mod words;
 pub use captions::*;
 pub use edit::*;
 pub use keep::*;
+pub use moments::*;
 pub use playback::*;
 pub use prefs::*;
 pub use recording::*;

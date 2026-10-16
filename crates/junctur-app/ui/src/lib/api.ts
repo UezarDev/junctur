@@ -363,6 +363,67 @@ export interface KeepView {
 
 export type KeepAction = "acceptAll" | "accept" | "dismiss" | "undo";
 
+/** A moment the streamer marked, proposed as a clip (junctur-core moments::Moment, src/moments.rs; 7a). */
+export interface Moment {
+  /** The marker's second: names the moment. */
+  at: number;
+  start: number;
+  end: number;
+  /** The phrases said in it, cut when it is accepted. */
+  cuts: [number, number][];
+  source: "voice" | "hotkey";
+  label: string;
+  state: "suggested" | "accepted" | "rejected";
+}
+
+/** A recording's moments, and where its markers were read from. */
+export interface MomentsView {
+  moments: Moment[];
+  /** There are words to look for marker phrases in. */
+  heard: boolean;
+  markersFile: string | null;
+  markersBad: number;
+  markersError: string | null;
+  markersHint: string;
+  phrases: string[];
+}
+
+export type MomentAction = "accept" | "reject" | "undo" | "acceptAll";
+
+/** One speaker's card in the roll call (src/rollcall.rs; 7a). */
+export interface RollCard {
+  id: number;
+  name: string;
+  color: string;
+  /** Still "Speaker N": the name box starts empty. */
+  unnamed: boolean;
+  /** A remembered voice: a rename renames it in every recording. */
+  person: boolean;
+  sample: [number, number] | null;
+  /** The audio track (0-based) to play the sample on. */
+  track: number | null;
+  seconds: number;
+  /** What "Remember this voice" enrols: sent back as seconds, since enrolling renumbers ids. */
+  voice: [number, number][];
+}
+
+/** A stretch the roll call asks "who is this" about. */
+export interface Unsure {
+  start: number;
+  end: number;
+  speaker: number | null;
+  /** The track its words were heard on; null for an island (the voices' track). */
+  track: number | null;
+  why: "island" | "nobody";
+}
+
+export interface RollCallView {
+  cards: RollCard[];
+  unsure: Unsure[];
+  canRemember: boolean;
+  seen: boolean;
+}
+
 /** A voice Junctur remembers, used to name speakers in every recording. */
 export interface Voice {
   name: string;
@@ -749,6 +810,22 @@ export const keepJudge = (path: string, prompt: string) => invoke<KeepRun>("keep
 /** Accepts every suggestion, or accepts, dismisses or undoes the part `start` to `end`. */
 export const keepAnswer = (action: KeepAction, start?: number, end?: number) =>
   invoke<void>("keep_answer", { action, start: start ?? null, end: end ?? null });
+
+/** The moments of `path`: its voice and hotkey markers, each a proposed clip. */
+export const momentsView = (path: string) => invoke<MomentsView>("moments_view", { path });
+/** Accepts, rejects or undoes the moment marked at `at`, or accepts every waiting one. */
+export const momentAnswer = (action: MomentAction, at?: number) =>
+  invoke<void>("moment_answer", { action, at: at ?? null });
+/** The speaker roll call of `path`. */
+export const rollCall = (path: string) => invoke<RollCallView>("roll_call", { path });
+/** Marks `path`'s roll call shown: it does not open by itself again. */
+export const rollCallSeen = (path: string) => invoke<void>("roll_call_seen", { path });
+/** Gives `start..end` of the open recording to speaker `speaker`, or to a new one called `name`. */
+export const rollCallAssign = (start: number, end: number, speaker: number | null, name: string | null) =>
+  invoke<void>("roll_call_assign", { start, end, speaker, name });
+/** Remembers `name`'s voice from `stretches` (a card's `voice`); returns a line for the user. */
+export const rollCallRemember = (name: string, stretches: [number, number][]) =>
+  invoke<string>("roll_call_remember", { name, stretches });
 
 /** The silent parts' labels of `path`; null when it has none or its last run had them off. */
 export const labels = (path: string) => invoke<Labels | null>("labels", { path });

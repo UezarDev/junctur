@@ -11,10 +11,12 @@ mod editor;
 mod lane;
 mod lock;
 mod mixer;
+mod moments;
 mod mpv;
 mod player;
 mod project;
 mod recent;
+mod rollcall;
 mod settings;
 mod smartkeep;
 mod state;
@@ -115,6 +117,12 @@ fn main() {
             commands::keep_judge,
             commands::keep_prompt,
             commands::keep_answer,
+            commands::moments_view,
+            commands::moment_answer,
+            commands::roll_call,
+            commands::roll_call_seen,
+            commands::roll_call_assign,
+            commands::roll_call_remember,
             commands::recent_info,
             commands::thumbnail,
             commands::reveal,

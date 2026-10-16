@@ -21,6 +21,8 @@
   import TitleBar from "./lib/TitleBar.svelte";
   import SettingsDialog from "./lib/SettingsDialog.svelte";
   import ReanalyseDialog from "./lib/ReanalyseDialog.svelte";
+  import MomentsPanel from "./lib/MomentsPanel.svelte";
+  import RollCall from "./lib/RollCall.svelte";
   import { floatAt, layout, REVIEW, TITLE, TOOLS } from "./lib/layout";
   import type { MenuId } from "./lib/menus";
   import { Talk, same } from "./lib/talking";
@@ -40,6 +42,13 @@
   let labels = $state.raw<api.Labels | null>(null);
   // The open recording's smart keep: its prompt and suggested keeps (the Suggestions lane).
   let keep = $state.raw<api.KeepView | null>(null);
+  // The open recording's marked moments (the Moments tab and lane, 7a); the one last clicked on the lane.
+  let moments = $state.raw<api.MomentsView | null>(null);
+  let momentFocus = $state<number | null>(null);
+  // The speaker roll call over the editor (7a); it opens by itself once per recording.
+  let rollCallOpen = $state(false);
+  let rollCallAsked = "";
+  let momentsShownFor = "";
   // Review over only these clips (the uncertain suggestions), or over every clip when null.
   let reviewOnly = $state.raw<Clip[] | null>(null);
   let edit = $state.raw<api.EditState | null>(null);
@@ -78,7 +87,7 @@
   let panelOpen = $state(true);
   // Which side panel shows. The transcript stays mounted while hidden: laying out a 30 h
   // transcript again on every switch would cost a noticeable moment.
-  let tab = $state<"transcript" | "captions" | "properties">("transcript");
+  let tab = $state<"transcript" | "captions" | "properties" | "moments">("transcript");
   // The talking overlay: off by default, a viewer's preference kept in this page's storage.
   const OVERLAY_KEY = "junctur.talkingOverlay";
   let overlay = $state(readOverlay());
@@ -115,6 +124,7 @@
   const speakerCount = $derived(speakers.length);
   const hasLabels = $derived((labels?.pieces.length ?? 0) > 0);
   const hasKeep = $derived(!!keep?.judgedPrompt);
+  const hasMoments = $derived((moments?.moments ?? []).some((m) => m.state !== "rejected"));
   const L = $derived(
     layout({
       width: windowWidth,
@@ -125,6 +135,7 @@
       speakers: speakerCount,
       labels: hasLabels,
       keep: hasKeep,
+      moments: hasMoments,
     }),
   );
   // The layout's shares are of the window below the title bar; mpv's are of the whole window, the
@@ -365,6 +376,9 @@
   // its analysis as it is now, its waveforms, its transcript.
   async function attach(o: api.Opened, stale: () => boolean) {
     opened = o;
+    // The last recording's moments would answer for this one's until its own are read.
+    moments = null;
+    momentFocus = null;
     analysis = o.analysis;
     // Progress sent while the open was on its way was dropped (no `opened` yet to match it):
     // read where the run is now. A run that already ended needs nothing more, as the
@@ -378,6 +392,7 @@
     }
     void loadLabels();
     void loadKeep();
+    void loadMoments();
     const w = await api.wavesState();
     if (stale()) return;
     if (w && w.file === o.file) {
@@ -440,6 +455,80 @@
     clearTimeout(keepTimer);
     keepTimer = window.setTimeout(() => void loadKeep(), 500);
   });
+  // The moments of the open recording as its project has them now; the latest ask's answer only. The
+  // first time a recording shows waiting moments, the side panel opens on them (7a: the editor opens
+  // on a list of moments, not on a long timeline).
+  let momentsAsk = 0;
+  async function loadMoments() {
+    const o = opened;
+    const ask = ++momentsAsk;
+    if (!o) {
+      moments = null;
+      return;
+    }
+    try {
+      const m = await api.momentsView(o.file);
+      if (ask !== momentsAsk || opened?.file !== o.file) return;
+      moments = m;
+      void api.uiLog(`moments: ${m.moments.length}, ${m.moments.filter((x) => x.state === "suggested").length} waiting`);
+      if (momentsShownFor !== o.file && m.moments.some((x) => x.state === "suggested")) {
+        momentsShownFor = o.file;
+        tab = "moments";
+        if (!panelOpen) togglePanel();
+      }
+    } catch (e) {
+      void api.uiLog(`moments could not be read: ${e}`);
+    }
+  }
+  // Edits move what an answer may do, and words coming in may hold new phrases: read once they settle.
+  let momentsTimer = 0;
+  $effect(() => {
+    void edit;
+    void analysis?.transcribed;
+    clearTimeout(momentsTimer);
+    momentsTimer = window.setTimeout(() => void loadMoments(), 700);
+  });
+  async function momentAnswer(action: api.MomentAction, m: api.Moment | null) {
+    try {
+      await api.momentAnswer(action, m?.at);
+    } catch (e) {
+      failure = String(e);
+    }
+    void loadMoments();
+  }
+  // Jumps to a moment's start and plays it.
+  async function jumpTo(m: api.Moment) {
+    momentFocus = m.at;
+    try {
+      await api.playFrom(m.start);
+    } catch (e) {
+      failure = String(e);
+    }
+  }
+  function momentClicked(m: api.Moment) {
+    tab = "moments";
+    if (!panelOpen) togglePanel();
+    void jumpTo(m);
+  }
+  // The roll call opens by itself once, the first time a recording's list is editable with speakers
+  // in it, unless it was shown for that recording before.
+  $effect(() => {
+    const o = opened;
+    if (!o || !edit?.editable || !edit.speakers.length || rollCallOpen || reviewing) return;
+    if (rollCallAsked === o.file) return;
+    rollCallAsked = o.file;
+    api.rollCall(o.file).then(
+      (v) => {
+        if (!v.seen && v.cards.length && opened?.file === o.file) rollCallOpen = true;
+      },
+      (e) => void api.uiLog(`roll call could not be read: ${e}`),
+    );
+  });
+  function rollCallClosed(lines: string[]) {
+    rollCallOpen = false;
+    for (const l of lines) void api.uiLog(`roll call: ${l}`);
+  }
+
   async function keepAnswer(action: api.KeepAction, item: api.KeepItem) {
     try {
       await api.keepAnswer(action, item.start, item.end);
@@ -480,6 +569,7 @@
     if ((labelled(p) && !labelled(was)) || (busy(was) && !busy(p))) void loadLabels();
     // The run judged at its end (smart keep on, or a prompt): the suggestions are new.
     if (busy(was) && !busy(p)) void loadKeep();
+    if (busy(was) && !busy(p)) void loadMoments();
     if (busy(was) && !busy(p)) {
       // The run ended: what the panel said was out of date was its business; the transcript may
       // be new (the edit list comes in through the watch). One that grew piece by piece is the
@@ -585,6 +675,8 @@
     analysis = null;
     labels = null;
     keep = null;
+    moments = null;
+    rollCallOpen = false;
     words = null;
     selection = null;
     waves = null;
@@ -624,7 +716,7 @@
 
   function onKey(e: KeyboardEvent) {
     // A dialog has the keys while it is open (Escape closes it).
-    if (settingsOpen || correcting) return;
+    if (settingsOpen || correcting || rollCallOpen) return;
     // A field, a textarea or anything editable keeps every key, the title bar's shortcuts too:
     // Ctrl+W from an uncommitted number would close before saving, Backspace would cut the lanes.
     const t = e.target;
@@ -680,10 +772,10 @@
     else if (id === "panel") {
       if (player?.path) togglePanel();
     } else if (id === "talking") setOverlay(!overlay);
-    else if ((id === "transcript" || id === "captions" || id === "properties") && player?.path) {
+    else if ((id === "transcript" || id === "captions" || id === "properties" || id === "moments") && player?.path) {
       tab = id;
       if (!panelOpen) togglePanel();
-    }
+    } else if (id === "rollcall" && opened) rollCallOpen = true;
   }
 
   // Where the edit actions and review's bar go: the picture's bottom-right corner, risen above the
@@ -824,6 +916,9 @@
           keepRow={L.keepRow}
           keepItems={keep?.items ?? []}
           onKeep={keepAnswer}
+          momentsRow={L.momentsRow}
+          moments={moments?.moments ?? []}
+          onMoment={momentClicked}
           head={L.head}
           thin={L.portrait}
           {wavesVersion}
@@ -867,6 +962,9 @@
         <button role="tab" aria-selected={tab === "properties"} class:on={tab === "properties"} onclick={() => (tab = "properties")}
           >Properties</button
         >
+        <button role="tab" aria-selected={tab === "moments"} class:on={tab === "moments"} onclick={() => (tab = "moments")}
+          >Moments{moments?.moments.some((m) => m.state === "suggested") ? ` (${moments.moments.filter((m) => m.state === "suggested").length})` : ""}</button
+        >
       </div>
       <div class="pane" style:display={tab === "transcript" ? "block" : "none"}>
         <TranscriptPanel
@@ -889,7 +987,18 @@
           {correct}
         />
       </div>
-      {#if tab === "captions"}
+      {#if tab === "moments"}
+        <div class="pane">
+          <MomentsPanel
+            view={moments}
+            editable={!!edit?.editable}
+            focus={momentFocus}
+            onAnswer={momentAnswer}
+            onJump={(m) => void jumpTo(m)}
+            onRollCall={() => (rollCallOpen = true)}
+          />
+        </div>
+      {:else if tab === "captions"}
         <div class="pane">
           <CaptionsPanel {edit} source={player?.path ?? null} onError={(e) => (failure = e)} />
         </div>
@@ -918,6 +1027,9 @@
 
   {#if settingsOpen}
     <SettingsDialog onClose={() => (settingsOpen = false)} onSaved={settingsSaved} />
+  {/if}
+  {#if rollCallOpen && opened}
+    <RollCall file={opened.file} onClose={rollCallClosed} onError={(e) => (failure = e)} />
   {/if}
   {#if correcting}
     <ReanalyseDialog selection={reanalyseSpan} onRun={reanalyse} onClose={() => closeCorrect()} />

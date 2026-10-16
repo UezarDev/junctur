@@ -192,3 +192,41 @@ fn overlaps_match_spans_rebuilt_per_pair() {
     };
     assert_eq!(bits(&got), bits(&want));
 }
+
+#[test]
+fn a_stretch_given_to_someone_takes_it_from_the_others() {
+    let mut s = Speakers::new(
+        vec![
+            t(0.0, 4.0, 1),
+            t(4.5, 5.0, 2),
+            t(5.2, 9.0, 1),
+            t(10.0, 12.0, 2),
+        ],
+        &[None, None],
+        None,
+    );
+    // Speaker 1 split around the stretch, speaker 2's own turn there joined into it.
+    assert!(s.assign(3.0, 6.0, 2));
+    assert_eq!(
+        s.turns,
+        [
+            t(0.0, 3.0, 1),
+            t(3.0, 6.0, 2),
+            t(6.0, 9.0, 1),
+            t(10.0, 12.0, 2)
+        ]
+    );
+    assert!(!s.assign(3.0, 6.0, 9));
+    assert!(!s.assign(6.0, 6.0, 1));
+    // A new person: the next id, a colour nobody has.
+    let id = s.add(" Ana ");
+    assert_eq!(id, 3);
+    assert_eq!(s.name(3), Some("Ana"));
+    let colors: Vec<&str> = s.names.iter().map(|n| n.color.as_str()).collect();
+    assert!(!colors[..2].contains(&colors[2]));
+    assert!(s.assign(10.5, 11.0, 3));
+    assert_eq!(
+        s.turns[3..],
+        [t(10.0, 10.5, 2), t(10.5, 11.0, 3), t(11.0, 12.0, 2)]
+    );
+}

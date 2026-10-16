@@ -19,6 +19,8 @@ export const ROW_THIN = 26;
 export const LABELS_ROW = 18;
 /** The Suggestions lane: smart keep's suggested keeps, once it has run on the recording. */
 export const KEEP_ROW = 18;
+/** The Moments lane: the streamer's marked moments (7a), when the recording has any. */
+export const MOMENTS_ROW = 18;
 const VIDEO_MIN = 120;
 /** What a portrait side area needs to be worth drawing. */
 const STRIP = 58;
@@ -45,6 +47,7 @@ export interface Layout {
   speakersRow: number;
   labelsRow: number;
   keepRow: number;
+  momentsRow: number;
   head: number;
   /** Portrait's side areas beside the picture: mixer strips, large avatars; null when too narrow. */
   strips: Rect | null;
@@ -66,6 +69,8 @@ export interface Input {
   labels?: boolean;
   /** Smart keep has run on the recording (a Suggestions lane). */
   keep?: boolean;
+  /** The recording has marked moments (a Moments lane). */
+  moments?: boolean;
 }
 
 const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x));
@@ -83,8 +88,9 @@ export function layout(i: Input): Layout {
   const speakersRow = speakersHeight(i.speakers);
   const labelsRow = i.labels ? LABELS_ROW : 0;
   const keepRow = i.keep ? KEEP_ROW : 0;
-  const anyLanes = tracks > 0 || speakersRow > 0 || labelsRow > 0 || keepRow > 0;
-  const fixed = anyLanes ? RULER + speakersRow + labelsRow + keepRow : 0;
+  const momentsRow = i.moments ? MOMENTS_ROW : 0;
+  const anyLanes = tracks > 0 || speakersRow > 0 || labelsRow > 0 || keepRow > 0 || momentsRow > 0;
+  const fixed = anyLanes ? RULER + speakersRow + labelsRow + keepRow + momentsRow : 0;
   const avail = Math.max(0, i.height - BAR);
   let videoH: number;
   let row: number;
@@ -128,6 +134,7 @@ export function layout(i: Input): Layout {
     speakersRow,
     labelsRow,
     keepRow,
+    momentsRow,
     head: clamp(column * 0.24, 130, portrait ? 180 : 200),
     strips,
     avatars,
